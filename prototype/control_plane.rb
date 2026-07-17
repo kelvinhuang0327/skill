@@ -25,6 +25,114 @@ module ControlPlanePrototype
     "WORKER_TASK_TEMPLATE.md"
   ].freeze
 
+  COMPILED_ROLE_FILES = {
+    "handoff" => "compiled/HANDOFF_REPORTER.compiled.md",
+    "ceo" => "compiled/CEO_DECISION_REVIEW.compiled.md",
+    "cto" => "compiled/CTO_TECHNICAL_REVIEW.compiled.md",
+    "planner" => "compiled/PLANNER_COMPILER.compiled.md"
+  }.freeze
+
+  SHARED_CORE_SECTIONS = %w[
+    §1 §2 §3 §4 §5 §6 §7 §8 §9 §10 §12 §13 §14
+  ].freeze
+
+  SHARED_ROUTING_SECTIONS = %w[§0 §6].freeze
+
+  ROLE_RECIPES = {
+    "handoff" => {
+      title: "Conversation Handoff Reporter — VNext Candidate",
+      role_section: "R1",
+      routing_sections: [],
+      template_sections: []
+    },
+    "ceo" => {
+      title: "CEO Decision Reviewer — VNext Candidate",
+      role_section: "R3",
+      routing_sections: %w[§1 §3],
+      template_sections: []
+    },
+    "cto" => {
+      title: "CTO Technical Reviewer — VNext Candidate",
+      role_section: "R2",
+      routing_sections: %w[§1 §2 §3],
+      template_sections: []
+    },
+    "planner" => {
+      title: "Planner / Task Compiler — VNext Candidate",
+      role_section: "R4",
+      routing_sections: %w[§1 §2 §3 §4 §5 §7 §8 §9],
+      template_sections: %w[§R §T §P],
+      whole_sources: ["TASK_MANIFEST.schema.yaml"]
+    }
+  }.freeze
+
+  SEMANTIC_GUARD_SELECTORS = {
+    "handoff" => [
+      {
+        source: "ROLE_PROFILES.md",
+        section: "R1",
+        pattern: /簽發、填入或暗示 Owner authorization token/,
+        code: "E_ROLE_HANDOFF_AUTHORIZATION_FORBIDDEN"
+      },
+      {
+        source: "ROLE_PROFILES.md",
+        section: "R1",
+        pattern: /產生完整 Worker prompt/,
+        code: "E_ROLE_HANDOFF_WORKER_RENDER_FORBIDDEN"
+      }
+    ],
+    "ceo" => [
+      {
+        source: "ROLE_PROFILES.md",
+        section: "R3",
+        pattern: /實作、merge \/ push/,
+        code: "E_ROLE_CEO_IMPLEMENTATION_FORBIDDEN"
+      },
+      {
+        source: "ROLE_PROFILES.md",
+        section: "R3",
+        pattern: /產生完整 Worker prompt/,
+        code: "E_ROLE_CEO_MANIFEST_FORBIDDEN"
+      }
+    ],
+    "cto" => [
+      {
+        source: "AGENT_CORE.md",
+        section: "§7",
+        pattern: /Handoff Reporter \/ CTO \/ CEO \/ Reviewer/,
+        code: "E_ROLE_CTO_AUTHORIZATION_FORBIDDEN"
+      },
+      {
+        source: "ROLE_PROFILES.md",
+        section: "R2",
+        pattern: /產生完整 Worker prompt/,
+        code: "E_ROLE_CTO_PLANNER_DUTY_FORBIDDEN"
+      }
+    ],
+    "planner" => [
+      {
+        source: "ROLE_PROFILES.md",
+        section: "R4",
+        pattern: /填入真實 token/,
+        code: "E_ROLE_PLANNER_FABRICATED_OWNER_TOKEN"
+      }
+    ],
+    "*" => [
+      {
+        source: "AGENT_CORE.md",
+        section: "§2",
+        pattern: /歷史測試結果只能作為背景/,
+        code: "E_STALE_HISTORICAL_PASS"
+      },
+      {
+        source: "AGENT_CORE.md",
+        section: "§13",
+        pattern: /Memory、handoff.*不得覆蓋 live evidence/,
+        code: "E_MEMORY_LIVE_EVIDENCE_SUBSTITUTION"
+      }
+    ]
+  }.freeze
+
   ENUMS = {
     "task.type" => %w[feature bugfix test docs metadata merge pr_fix analysis maintenance entry_check],
     "task.risk_class" => %w[LOW MEDIUM HIGH],
@@ -127,6 +235,33 @@ module ControlPlanePrototype
           "errors" => schema_errors
         },
         "lint" => results.map(&:to_h)
+      }
+    end
+  end
+
+  SemanticError = Struct.new(:code, :message, keyword_init: true) do
+    def to_h
+      { "code" => code, "message" => message }
+    end
+  end
+
+  class SemanticReport
+    attr_reader :role, :errors
+
+    def initialize(role:, errors:)
+      @role = role
+      @errors = errors
+    end
+
+    def success?
+      errors.empty?
+    end
+
+    def to_h
+      {
+        "status" => success? ? "PASS" : "FAIL",
+        "role" => role,
+        "errors" => errors.map(&:to_h)
       }
     end
   end
@@ -260,60 +395,126 @@ module ControlPlanePrototype
 
     def render_compiled_role(role)
       role_key = role.to_s.downcase
-      recipes = {
-        "handoff" => {
-          title: "Conversation Handoff Reporter — Mechanically Compiled Prototype",
-          role_section: "R1",
-          core_sections: %w[§1 §2 §3 §7 §8 §10 §12 §13 §14],
-          routing_sections: %w[§0],
-          template_sections: %w[§C]
-        },
-        "planner" => {
-          title: "Planner / Task Compiler — Mechanically Compiled Prototype",
-          role_section: "R4",
-          core_sections: %w[§1 §2 §3 §4 §5 §6 §7 §8 §9 §10 §11 §12 §13 §14],
-          routing_sections: %w[§0 §1 §2 §4 §5 §6 §7 §8 §9],
-          template_sections: %w[§R §T §P §C],
-          whole_sources: ["TASK_MANIFEST.schema.yaml"]
-        }
-      }
-      recipe = recipes[role_key]
-      raise ArgumentError, "role must be handoff or planner" unless recipe
+      recipe = ROLE_RECIPES[role_key]
+      raise ArgumentError, "role must be one of: #{ROLE_RECIPES.keys.join(', ')}" unless recipe
 
-      sources = DURABLE_SOURCE_FILES.each_with_object({}) do |name, memo|
-        memo[name] = File.read(root.join(name), encoding: "UTF-8")
-      end
-      digest_lines = DURABLE_SOURCE_FILES.map do |name|
-        "<!-- durable_source_sha256: #{name}=#{Digest::SHA256.hexdigest(sources.fetch(name))} -->"
-      end
+      source_bytes = load_durable_source_bytes
+      sources = source_bytes.transform_values { |raw| raw.dup.force_encoding(Encoding::UTF_8) }
+      identities = source_identities_for(source_bytes)
 
       sections = []
-      recipe.fetch(:core_sections).each do |key|
-        sections << source_section("AGENT_CORE.md", extract_level_two_section(sources.fetch("AGENT_CORE.md"), key))
+      SHARED_CORE_SECTIONS.each do |key|
+        sections << source_section("AGENT_CORE.md", key, extract_level_two_section(sources.fetch("AGENT_CORE.md"), key))
       end
-      sections << source_section("ROLE_PROFILES.md", extract_level_two_section(sources.fetch("ROLE_PROFILES.md"), recipe.fetch(:role_section)))
+      sections << source_section(
+        "ROLE_PROFILES.md",
+        recipe.fetch(:role_section),
+        extract_level_two_section(sources.fetch("ROLE_PROFILES.md"), recipe.fetch(:role_section))
+      )
+      SHARED_ROUTING_SECTIONS.each do |key|
+        sections << source_section(
+          "ROUTING_AND_LIFECYCLE.md",
+          key,
+          extract_level_two_section(sources.fetch("ROUTING_AND_LIFECYCLE.md"), key)
+        )
+      end
       recipe.fetch(:routing_sections).each do |key|
-        sections << source_section("ROUTING_AND_LIFECYCLE.md", extract_level_two_section(sources.fetch("ROUTING_AND_LIFECYCLE.md"), key))
+        sections << source_section(
+          "ROUTING_AND_LIFECYCLE.md",
+          key,
+          extract_level_two_section(sources.fetch("ROUTING_AND_LIFECYCLE.md"), key)
+        )
       end
       recipe.fetch(:template_sections).each do |key|
-        sections << source_section("WORKER_TASK_TEMPLATE.md", extract_level_two_section(sources.fetch("WORKER_TASK_TEMPLATE.md"), key))
+        sections << source_section(
+          "WORKER_TASK_TEMPLATE.md",
+          key,
+          extract_level_two_section(sources.fetch("WORKER_TASK_TEMPLATE.md"), key)
+        )
       end
       Array(recipe[:whole_sources]).each do |source|
-        sections << source_section(source, sources.fetch(source).strip)
+        fenced = "```yaml\n#{sources.fetch(source).strip}\n```"
+        sections << source_section(source, "WHOLE_FILE", fenced)
       end
 
       header = [
+        "<!-- GENERATED_BUILD_OUTPUT -->",
+        "<!-- DRAFT_FOR_OWNER_REVIEW -->",
+        "<!-- DO_NOT_EDIT: generated from the five durable control-plane sources -->",
         "<!-- compiled_from: control_plane #{control_plane_version} -->",
-        "<!-- generated_by: prototype/control_plane.rb render-role #{role_key} -->",
-        "<!-- status: DRAFT_FOR_OWNER_REVIEW — PROTOTYPE ONLY; NOT ACTIVATED -->",
-        *digest_lines,
+        "<!-- control_plane_version: #{control_plane_version} -->",
+        "<!-- schema_version: #{schema_version} -->",
+        "<!-- durable_source_fingerprint: #{durable_fingerprint_for(source_bytes)} -->",
+        "<!-- generated_by: prototype/control_plane.rb compile-role #{role_key} -->",
+        *identities.map do |identity|
+          "<!-- source_file_identity: #{identity.fetch('name')} bytes=#{identity.fetch('bytes')} sha256=#{identity.fetch('sha256')} -->"
+        end,
         "",
         "# #{recipe.fetch(:title)}",
         "",
-        "This output is a deterministic extraction of authoritative durable sections; it contains no project memory.",
+        "This is an inactive VNext candidate. Every rule block below is copied from an identified durable source; this artifact contains no project memory and grants no authorization.",
         ""
       ].join("\n")
       normalize_output(header + sections.join("\n\n"))
+    end
+
+    def durable_source_fingerprint
+      durable_fingerprint_for(load_durable_source_bytes)
+    end
+
+    def durable_source_identities
+      source_identities_for(load_durable_source_bytes)
+    end
+
+    def validate_compiled_role(role, raw)
+      role_key = role.to_s.downcase
+      recipe = ROLE_RECIPES[role_key]
+      raise ArgumentError, "role must be one of: #{ROLE_RECIPES.keys.join(', ')}" unless recipe
+
+      ensure_utf8!(raw, "compiled role input")
+      actual = raw.dup.force_encoding(Encoding::UTF_8)
+      expected = render_compiled_role(role_key)
+      return SemanticReport.new(role: role_key, errors: []) if byte_equal?(actual, expected)
+
+      selectors = SEMANTIC_GUARD_SELECTORS.fetch(role_key) + SEMANTIC_GUARD_SELECTORS.fetch("*")
+      guard_errors = selectors.each_with_object([]) do |guard, memo|
+        expected_block = compiled_source_section(expected, guard.fetch(:source), guard.fetch(:section))
+        expected_line = expected_block&.lines&.find { |line| line.match?(guard.fetch(:pattern)) }
+        raise ArgumentError, "semantic selector no longer matches its authoritative source" unless expected_line
+
+        actual_block = compiled_source_section(actual, guard.fetch(:source), guard.fetch(:section))
+        next if actual_block&.include?(expected_line)
+
+        memo << SemanticError.new(
+          code: guard.fetch(:code),
+          message: "required semantic guard is missing from #{guard.fetch(:source)} #{guard.fetch(:section)}"
+        )
+      end
+      return SemanticReport.new(role: role_key, errors: guard_errors) unless guard_errors.empty?
+
+      comparisons = [
+        [["AGENT_CORE.md", "§1"], "E_SHARED_EVIDENCE_DIVERGENCE"],
+        [["AGENT_CORE.md", "§2"], "E_SHARED_EVIDENCE_DIVERGENCE"],
+        [["AGENT_CORE.md", "§6"], "E_SHARED_RISK_DIVERGENCE"],
+        [["AGENT_CORE.md", "§7"], "E_SHARED_AUTHORIZATION_DIVERGENCE"],
+        [["AGENT_CORE.md", "§13"], "E_SHARED_PRECEDENCE_DIVERGENCE"],
+        [["AGENT_CORE.md", "§14"], "E_SHARED_MEMORY_DIVERGENCE"],
+        [["ROUTING_AND_LIFECYCLE.md", "§6"], "E_SHARED_LIFECYCLE_DIVERGENCE"],
+        [["ROLE_PROFILES.md", recipe.fetch(:role_section)], "E_ROLE_PROFILE_DIVERGENCE"]
+      ]
+      errors = comparisons.each_with_object([]) do |((source, section), code), memo|
+        next if compiled_source_section(actual, source, section) == compiled_source_section(expected, source, section)
+        next if memo.any? { |error| error.code == code }
+
+        memo << SemanticError.new(code: code, message: "#{source} #{section} differs from the authoritative compiled bytes")
+      end
+      if errors.empty?
+        errors << SemanticError.new(
+          code: "E_GENERATED_OUTPUT_MISMATCH",
+          message: "compiled bytes differ from a fresh deterministic build"
+        )
+      end
+      SemanticReport.new(role: role_key, errors: errors)
     end
 
     private
@@ -1014,8 +1215,47 @@ module ControlPlanePrototype
       lines[start...finish].join.strip
     end
 
-    def source_section(source, content)
-      "<!-- BEGIN SOURCE: #{source} -->\n#{content}\n<!-- END SOURCE: #{source} -->"
+    def load_durable_source_bytes
+      DURABLE_SOURCE_FILES.each_with_object({}) do |name, memo|
+        raw = File.binread(root.join(name))
+        ensure_utf8!(raw, name)
+        memo[name] = raw
+      end
+    end
+
+    def durable_fingerprint_for(sources)
+      digest = Digest::SHA256.new
+      DURABLE_SOURCE_FILES.each do |name|
+        raw = sources.fetch(name).b
+        digest.update([name.bytesize].pack("N"))
+        digest.update(name.b)
+        digest.update([raw.bytesize].pack("Q>"))
+        digest.update(raw)
+      end
+      digest.hexdigest
+    end
+
+    def source_identities_for(sources)
+      DURABLE_SOURCE_FILES.map do |name|
+        raw = sources.fetch(name).b
+        {
+          "name" => name,
+          "bytes" => raw.bytesize,
+          "sha256" => Digest::SHA256.hexdigest(raw)
+        }
+      end
+    end
+
+    def source_section(source, section, content)
+      start_marker = "<!-- BEGIN SOURCE: #{source} SECTION: #{section} -->"
+      end_marker = "<!-- END SOURCE: #{source} SECTION: #{section} -->"
+      "#{start_marker}\n#{content}\n#{end_marker}"
+    end
+
+    def compiled_source_section(text, source, section)
+      start_marker = Regexp.escape("<!-- BEGIN SOURCE: #{source} SECTION: #{section} -->")
+      end_marker = Regexp.escape("<!-- END SOURCE: #{source} SECTION: #{section} -->")
+      text.match(/#{start_marker}\n(.*?)\n#{end_marker}/m)&.[](1)
     end
 
     def safe_join(root_path, relative)
@@ -1094,7 +1334,8 @@ module ControlPlanePrototype
       when "render-worker" then render_worker_command
       when "render-active-task" then render_active_task_command
       when "check-active-task" then check_active_task_command
-      when "render-role" then render_role_command
+      when "compile-role", "render-role" then compile_role_command
+      when "validate-role" then validate_role_command
       when "manifest-sha" then manifest_sha_command
       else
         @stderr.puts usage
@@ -1198,11 +1439,20 @@ module ControlPlanePrototype
       report.success? ? 0 : 1
     end
 
-    def render_role_command
+    def compile_role_command
       role = required_argument!("ROLE")
       ensure_no_extra_arguments!
       @stdout.write @toolchain.render_compiled_role(role)
       0
+    end
+
+    def validate_role_command
+      role = required_argument!("ROLE")
+      path = required_argument!("COMPILED_ROLE")
+      ensure_no_extra_arguments!
+      report = @toolchain.validate_compiled_role(role, File.binread(Pathname.new(path).expand_path))
+      @stdout.puts JSON.pretty_generate(report.to_h)
+      report.success? ? 0 : 1
     end
 
     def manifest_sha_command
@@ -1250,7 +1500,9 @@ module ControlPlanePrototype
           ruby prototype/control_plane.rb render-worker MANIFEST --project-root ROOT [--profile PATH] [--source-label LABEL] [--seen-task-id ID]
           ruby prototype/control_plane.rb render-active-task MANIFEST --project-root ROOT [--profile PATH] [--source-label LABEL] [--seen-task-id ID]
           ruby prototype/control_plane.rb check-active-task MANIFEST VIEW --project-root ROOT [--profile PATH] [--source-label LABEL] [--seen-task-id ID]
-          ruby prototype/control_plane.rb render-role handoff|planner
+          ruby prototype/control_plane.rb compile-role handoff|ceo|cto|planner
+          ruby prototype/control_plane.rb validate-role handoff|ceo|cto|planner COMPILED_ROLE
+          ruby prototype/control_plane.rb render-role handoff|ceo|cto|planner  # compatibility alias
           ruby prototype/control_plane.rb manifest-sha MANIFEST
 
         All commands are read-only. Rendered artifacts go to stdout; this prototype never writes a repo, project, DB, remote, or runtime target.
