@@ -32,105 +32,140 @@ module ControlPlanePrototype
     "planner" => "compiled/PLANNER_COMPILER.compiled.md"
   }.freeze
 
-  SHARED_CORE_SECTIONS = %w[
-    §1 §2 §3 §4 §5 §6 §7 §8 §9 §10 §12 §13 §14
-  ].freeze
+  ROLE_SIZE_LIMITS = {
+    "handoff" => 8_872,
+    "ceo" => 12_509,
+    "cto" => 10_530,
+    "planner" => 21_919
+  }.freeze
 
-  SHARED_ROUTING_SECTIONS = %w[§0 §6].freeze
+  AGGREGATE_ROLE_SIZE_LIMIT = 53_830
+  PREFERRED_AGGREGATE_ROLE_SIZE = 50_000
+
+  CAPSULE_SOURCES = {
+    "EVIDENCE_MIN" => ["AGENT_CORE.md §1/§2"],
+    "PRECEDENCE_MIN" => ["AGENT_CORE.md §13"],
+    "ATTACHMENT_MIN" => ["AGENT_CORE.md §12"],
+    "MEMORY_READ_MIN" => ["AGENT_CORE.md §14"],
+    "AUTH_ESCALATION_MIN" => ["AGENT_CORE.md §6/§7"],
+    "ROUTING_DECISION_MIN" => ["ROUTING_AND_LIFECYCLE.md §0/§1"],
+    "WORKTREE_COMPILER" => ["ROUTING_AND_LIFECYCLE.md §4-§9"],
+    "MANIFEST_COMPILER" => ["TASK_MANIFEST.schema.yaml"],
+    "WORKER_COMPILER" => ["WORKER_TASK_TEMPLATE.md §R/§T/§P"],
+    "REVIEW_BOUNDARY_MIN" => ["AGENT_CORE.md §8"]
+  }.freeze
 
   ROLE_RECIPES = {
     "handoff" => {
       title: "Conversation Handoff Reporter — VNext Candidate",
       role_section: "R1",
-      routing_sections: [],
-      template_sections: []
+      capsules: %w[EVIDENCE_MIN PRECEDENCE_MIN MEMORY_READ_MIN REVIEW_BOUNDARY_MIN]
     },
     "ceo" => {
       title: "CEO Decision Reviewer — VNext Candidate",
       role_section: "R3",
-      routing_sections: %w[§1 §3],
-      template_sections: []
+      capsules: %w[EVIDENCE_MIN PRECEDENCE_MIN AUTH_ESCALATION_MIN MEMORY_READ_MIN]
     },
     "cto" => {
       title: "CTO Technical Reviewer — VNext Candidate",
       role_section: "R2",
-      routing_sections: %w[§1 §2 §3],
-      template_sections: []
+      capsules: %w[EVIDENCE_MIN PRECEDENCE_MIN ATTACHMENT_MIN MEMORY_READ_MIN AUTH_ESCALATION_MIN]
     },
     "planner" => {
       title: "Planner / Task Compiler — VNext Candidate",
       role_section: "R4",
-      routing_sections: %w[§1 §2 §3 §4 §5 §7 §8 §9],
-      template_sections: %w[§R §T §P],
-      whole_sources: ["TASK_MANIFEST.schema.yaml"]
+      capsules: %w[
+        EVIDENCE_MIN PRECEDENCE_MIN ATTACHMENT_MIN MEMORY_READ_MIN AUTH_ESCALATION_MIN
+        ROUTING_DECISION_MIN WORKTREE_COMPILER MANIFEST_COMPILER WORKER_COMPILER
+      ]
     }
   }.freeze
 
   SEMANTIC_GUARD_SELECTORS = {
     "handoff" => [
       {
-        source: "ROLE_PROFILES.md",
-        section: "R1",
+        capsule: "ROLE_CONTRACT",
         pattern: /簽發、填入或暗示 Owner authorization token/,
         code: "E_ROLE_HANDOFF_AUTHORIZATION_FORBIDDEN"
       },
       {
-        source: "ROLE_PROFILES.md",
-        section: "R1",
+        capsule: "ROLE_CONTRACT",
         pattern: /產生完整 Worker prompt/,
         code: "E_ROLE_HANDOFF_WORKER_RENDER_FORBIDDEN"
       }
     ],
     "ceo" => [
       {
-        source: "ROLE_PROFILES.md",
-        section: "R3",
+        capsule: "ROLE_CONTRACT",
         pattern: /實作、merge \/ push/,
         code: "E_ROLE_CEO_IMPLEMENTATION_FORBIDDEN"
       },
       {
-        source: "ROLE_PROFILES.md",
-        section: "R3",
+        capsule: "ROLE_CONTRACT",
         pattern: /產生完整 Worker prompt/,
         code: "E_ROLE_CEO_MANIFEST_FORBIDDEN"
       }
     ],
     "cto" => [
       {
-        source: "AGENT_CORE.md",
-        section: "§7",
+        capsule: "AUTH_ESCALATION_MIN",
         pattern: /Handoff Reporter \/ CTO \/ CEO \/ Reviewer/,
         code: "E_ROLE_CTO_AUTHORIZATION_FORBIDDEN"
       },
       {
-        source: "ROLE_PROFILES.md",
-        section: "R2",
+        capsule: "ROLE_CONTRACT",
         pattern: /產生完整 Worker prompt/,
         code: "E_ROLE_CTO_PLANNER_DUTY_FORBIDDEN"
       }
     ],
     "planner" => [
       {
-        source: "ROLE_PROFILES.md",
-        section: "R4",
+        capsule: "ROLE_CONTRACT",
         pattern: /填入真實 token/,
         code: "E_ROLE_PLANNER_FABRICATED_OWNER_TOKEN"
       }
     ],
     "*" => [
       {
-        source: "AGENT_CORE.md",
-        section: "§2",
+        capsule: "EVIDENCE_MIN",
         pattern: /歷史測試結果只能作為背景/,
         code: "E_STALE_HISTORICAL_PASS"
       },
       {
-        source: "AGENT_CORE.md",
-        section: "§13",
+        capsule: "PRECEDENCE_MIN",
         pattern: /Memory、handoff.*不得覆蓋 live evidence/,
         code: "E_MEMORY_LIVE_EVIDENCE_SUBSTITUTION"
+      },
+      {
+        capsule: "AUTH_ESCALATION_MIN",
+        pattern: /^\*\*LOW\*\*/,
+        code: "E_SHARED_RISK_DIVERGENCE"
+      },
+      {
+        capsule: "AUTH_ESCALATION_MIN",
+        pattern: /真實 token 只能由 \*\*Owner\*\* 填入/,
+        code: "E_OWNER_TOKEN_RESTRICTION_MISSING"
+      },
+      {
+        capsule: "MEMORY_READ_MIN",
+        pattern: /MEMORY_LOG 不能證明 current branch/,
+        code: "E_SHARED_MEMORY_DIVERGENCE"
       }
     ]
+  }.freeze
+
+  CAPSULE_ERROR_CODES = {
+    "ROLE_CONTRACT" => "E_ROLE_PROFILE_DIVERGENCE",
+    "EVIDENCE_MIN" => "E_SHARED_EVIDENCE_DIVERGENCE",
+    "PRECEDENCE_MIN" => "E_SHARED_PRECEDENCE_DIVERGENCE",
+    "ATTACHMENT_MIN" => "E_ATTACHMENT_CAPSULE_DIVERGENCE",
+    "MEMORY_READ_MIN" => "E_SHARED_MEMORY_DIVERGENCE",
+    "AUTH_ESCALATION_MIN" => "E_SHARED_AUTHORIZATION_DIVERGENCE",
+    "ROUTING_DECISION_MIN" => "E_ROUTING_CAPSULE_DIVERGENCE",
+    "WORKTREE_COMPILER" => "E_SHARED_LIFECYCLE_DIVERGENCE",
+    "MANIFEST_COMPILER" => "E_MANIFEST_COMPILER_DIVERGENCE",
+    "WORKER_COMPILER" => "E_WORKER_COMPILER_DIVERGENCE",
+    "REVIEW_BOUNDARY_MIN" => "E_REVIEW_BOUNDARY_DIVERGENCE"
   }.freeze
 
   ENUMS = {
@@ -402,39 +437,11 @@ module ControlPlanePrototype
       sources = source_bytes.transform_values { |raw| raw.dup.force_encoding(Encoding::UTF_8) }
       identities = source_identities_for(source_bytes)
 
-      sections = []
-      SHARED_CORE_SECTIONS.each do |key|
-        sections << source_section("AGENT_CORE.md", key, extract_level_two_section(sources.fetch("AGENT_CORE.md"), key))
-      end
-      sections << source_section(
-        "ROLE_PROFILES.md",
-        recipe.fetch(:role_section),
-        extract_level_two_section(sources.fetch("ROLE_PROFILES.md"), recipe.fetch(:role_section))
-      )
-      SHARED_ROUTING_SECTIONS.each do |key|
-        sections << source_section(
-          "ROUTING_AND_LIFECYCLE.md",
-          key,
-          extract_level_two_section(sources.fetch("ROUTING_AND_LIFECYCLE.md"), key)
-        )
-      end
-      recipe.fetch(:routing_sections).each do |key|
-        sections << source_section(
-          "ROUTING_AND_LIFECYCLE.md",
-          key,
-          extract_level_two_section(sources.fetch("ROUTING_AND_LIFECYCLE.md"), key)
-        )
-      end
-      recipe.fetch(:template_sections).each do |key|
-        sections << source_section(
-          "WORKER_TASK_TEMPLATE.md",
-          key,
-          extract_level_two_section(sources.fetch("WORKER_TASK_TEMPLATE.md"), key)
-        )
-      end
-      Array(recipe[:whole_sources]).each do |source|
-        fenced = "```yaml\n#{sources.fetch(source).strip}\n```"
-        sections << source_section(source, "WHOLE_FILE", fenced)
+      role_section = extract_level_two_section(sources.fetch("ROLE_PROFILES.md"), recipe.fetch(:role_section))
+      role_contract = compact_role_contract(role_key, role_section)
+      sections = [capsule_section("ROLE_CONTRACT", role_contract)]
+      recipe.fetch(:capsules).each do |capsule|
+        sections << capsule_section(capsule, render_capsule(capsule, sources))
       end
 
       header = [
@@ -452,7 +459,7 @@ module ControlPlanePrototype
         "",
         "# #{recipe.fetch(:title)}",
         "",
-        "This is an inactive VNext candidate. Every rule block below is copied from an identified durable source; this artifact contains no project memory and grants no authorization.",
+        "Inactive lean candidate. Capsules are selected/compacted from the identified durable sources; this artifact contains no project memory and grants no authorization.",
         ""
       ].join("\n")
       normalize_output(header + sections.join("\n\n"))
@@ -466,6 +473,27 @@ module ControlPlanePrototype
       source_identities_for(load_durable_source_bytes)
     end
 
+    def compiled_role_size_report
+      roles = COMPILED_ROLE_FILES.keys.to_h do |role|
+        bytes = render_compiled_role(role).bytesize
+        maximum = ROLE_SIZE_LIMITS.fetch(role)
+        [role, { "bytes" => bytes, "hard_maximum" => maximum, "hard_gate" => bytes <= maximum ? "PASS" : "FAIL" }]
+      end
+      aggregate = roles.values.sum { |entry| entry.fetch("bytes") }
+      hard_pass = aggregate <= AGGREGATE_ROLE_SIZE_LIMIT && roles.values.all? { |entry| entry.fetch("hard_gate") == "PASS" }
+      {
+        "status" => hard_pass ? "PASS" : "FAIL",
+        "roles" => roles,
+        "aggregate" => {
+          "bytes" => aggregate,
+          "hard_maximum" => AGGREGATE_ROLE_SIZE_LIMIT,
+          "hard_gate" => aggregate <= AGGREGATE_ROLE_SIZE_LIMIT ? "PASS" : "FAIL",
+          "preferred_target" => PREFERRED_AGGREGATE_ROLE_SIZE,
+          "preferred_target_status" => aggregate <= PREFERRED_AGGREGATE_ROLE_SIZE ? "PASS" : "MISS"
+        }
+      }
+    end
+
     def validate_compiled_role(role, raw)
       role_key = role.to_s.downcase
       recipe = ROLE_RECIPES[role_key]
@@ -476,37 +504,63 @@ module ControlPlanePrototype
       expected = render_compiled_role(role_key)
       return SemanticReport.new(role: role_key, errors: []) if byte_equal?(actual, expected)
 
+      if actual.bytesize > ROLE_SIZE_LIMITS.fetch(role_key)
+        return SemanticReport.new(
+          role: role_key,
+          errors: [SemanticError.new(code: "E_ROLE_BYTE_BUDGET_EXCEEDED", message: "#{actual.bytesize} bytes exceeds #{ROLE_SIZE_LIMITS.fetch(role_key)}")]
+        )
+      end
+
+      if role_key != "planner" && actual.match?(/^## WORKER_COMPILER$/)
+        return SemanticReport.new(
+          role: role_key,
+          errors: [SemanticError.new(code: "E_ROLE_WORKER_COMPILER_FORBIDDEN", message: "only Planner may contain WORKER_COMPILER")]
+        )
+      end
+
+      duplicate_guards = {
+        "EVIDENCE_MIN" => /\| `\[Confirmed\]` \|/,
+        "PRECEDENCE_MIN" => /不得覆蓋 live evidence/,
+        "MEMORY_READ_MIN" => /MEMORY_LOG 不能證明 current branch/,
+        "AUTH_ESCALATION_MIN" => /真實 token 只能由 \*\*Owner\*\* 填入/,
+        "WORKTREE_COMPILER" => /\*\*I1\*\* 無 STANDALONE 授權/
+      }
+      duplicated_line = duplicate_guards.any? do |capsule, pattern|
+        line = compiled_capsule(expected, capsule)&.lines&.find { |candidate| candidate.match?(pattern) }&.strip
+        line && actual.scan(line).length > expected.scan(line).length
+      end
+      if duplicated_line
+        return SemanticReport.new(
+          role: role_key,
+          errors: [SemanticError.new(code: "E_HARDCODED_SHARED_CORE_DUPLICATE", message: "Shared Core text appears outside its canonical capsule")]
+        )
+      end
+
       selectors = SEMANTIC_GUARD_SELECTORS.fetch(role_key) + SEMANTIC_GUARD_SELECTORS.fetch("*")
       guard_errors = selectors.each_with_object([]) do |guard, memo|
-        expected_block = compiled_source_section(expected, guard.fetch(:source), guard.fetch(:section))
+        expected_block = compiled_capsule(expected, guard.fetch(:capsule))
+        next unless expected_block
+
         expected_line = expected_block&.lines&.find { |line| line.match?(guard.fetch(:pattern)) }
         raise ArgumentError, "semantic selector no longer matches its authoritative source" unless expected_line
 
-        actual_block = compiled_source_section(actual, guard.fetch(:source), guard.fetch(:section))
+        actual_block = compiled_capsule(actual, guard.fetch(:capsule))
         next if actual_block&.include?(expected_line)
 
         memo << SemanticError.new(
           code: guard.fetch(:code),
-          message: "required semantic guard is missing from #{guard.fetch(:source)} #{guard.fetch(:section)}"
+          message: "required semantic guard is missing from #{guard.fetch(:capsule)}"
         )
       end
       return SemanticReport.new(role: role_key, errors: guard_errors) unless guard_errors.empty?
 
-      comparisons = [
-        [["AGENT_CORE.md", "§1"], "E_SHARED_EVIDENCE_DIVERGENCE"],
-        [["AGENT_CORE.md", "§2"], "E_SHARED_EVIDENCE_DIVERGENCE"],
-        [["AGENT_CORE.md", "§6"], "E_SHARED_RISK_DIVERGENCE"],
-        [["AGENT_CORE.md", "§7"], "E_SHARED_AUTHORIZATION_DIVERGENCE"],
-        [["AGENT_CORE.md", "§13"], "E_SHARED_PRECEDENCE_DIVERGENCE"],
-        [["AGENT_CORE.md", "§14"], "E_SHARED_MEMORY_DIVERGENCE"],
-        [["ROUTING_AND_LIFECYCLE.md", "§6"], "E_SHARED_LIFECYCLE_DIVERGENCE"],
-        [["ROLE_PROFILES.md", recipe.fetch(:role_section)], "E_ROLE_PROFILE_DIVERGENCE"]
-      ]
-      errors = comparisons.each_with_object([]) do |((source, section), code), memo|
-        next if compiled_source_section(actual, source, section) == compiled_source_section(expected, source, section)
+      comparisons = ["ROLE_CONTRACT", *recipe.fetch(:capsules)]
+      errors = comparisons.each_with_object([]) do |capsule, memo|
+        code = CAPSULE_ERROR_CODES.fetch(capsule)
+        next if compiled_capsule(actual, capsule) == compiled_capsule(expected, capsule)
         next if memo.any? { |error| error.code == code }
 
-        memo << SemanticError.new(code: code, message: "#{source} #{section} differs from the authoritative compiled bytes")
+        memo << SemanticError.new(code: code, message: "#{capsule} differs from the authoritative compiled bytes")
       end
       if errors.empty?
         errors << SemanticError.new(
@@ -1215,6 +1269,256 @@ module ControlPlanePrototype
       lines[start...finish].join.strip
     end
 
+    def render_capsule(name, sources)
+      core = sources.fetch("AGENT_CORE.md")
+      routing = sources.fetch("ROUTING_AND_LIFECYCLE.md")
+      manifest = sources.fetch("TASK_MANIFEST.schema.yaml")
+      template = sources.fetch("WORKER_TASK_TEMPLATE.md")
+
+      case name
+      when "EVIDENCE_MIN"
+        [
+          section_body(extract_level_two_section(core, "§1")),
+          section_body(extract_level_two_section(core, "§2"))
+        ].join("\n\n")
+      when "PRECEDENCE_MIN"
+        compact_precedence_capsule(core)
+      when "MEMORY_READ_MIN"
+        numbered_rules(extract_level_two_section(core, "§14"), 1, 2, 3, 11)
+      when "AUTH_ESCALATION_MIN"
+        compact_authorization_capsule(core)
+      when "ATTACHMENT_MIN"
+        compact_attachment_capsule(core)
+      when "REVIEW_BOUNDARY_MIN"
+        numbered_rules(extract_level_two_section(core, "§8"), 1, 2, 3, 5)
+      when "ROUTING_DECISION_MIN"
+        compact_routing_capsule(routing)
+      when "WORKTREE_COMPILER"
+        compact_worktree_capsule(routing)
+      when "MANIFEST_COMPILER"
+        compact_manifest_capsule(manifest)
+      when "WORKER_COMPILER"
+        compact_worker_capsule(template)
+      else
+        raise ArgumentError, "unknown capsule: #{name}"
+      end
+    end
+
+    def compact_role_contract(role, section)
+      return section_body(section) unless role == "planner"
+
+      body = section_body(section)
+      purpose = body.lines.find { |line| line.start_with?("**Purpose**:") }
+      input = body.lines.find { |line| line.start_with?("1. 收斂輸入") }
+      allowed = extract_line_range(body, /^\*\*Allowed\*\*:/, /^\*\*Forbidden\*\*:/)
+      forbidden = extract_line_range(body, /^\*\*Forbidden\*\*:/, /^\*\*Required outputs\*\*:/)
+      required = body.lines.find { |line| line.start_with?("**Required outputs**:") }
+      final = body.lines.find { |line| line.start_with?("**Final**:") }
+      [purpose, "**Required input normalization**:", input, allowed, forbidden, required, final].compact.join("\n\n")
+    end
+
+    def compact_authorization_capsule(core)
+      risk = section_body(extract_level_two_section(core, "§6"))
+      risk_lines = risk.lines.select do |line|
+        line.include?("`risk_class`") || line.match?(/^\*\*(?:LOW|MEDIUM|HIGH)\*\*/)
+      end
+      high_start = risk.lines.index { |line| line.start_with?("**HIGH**") }
+      high_stop = risk.lines.index { |line| line.start_with?("**邊界判例**") }
+      high_triggers = risk.lines[(high_start + 1)...high_stop].reject do |line|
+        line.strip.empty? || line.include?("其他不可逆外部行為")
+      end.map { |line| line.sub(/^- /, "").strip }.join(";")
+      authorization = section_body(extract_level_two_section(core, "§7"))
+      table = markdown_table(authorization, /^\| risk_class \|/)
+      token_ownership = extract_line_range(authorization, /^\*\*Token ownership\*\*:/, /^\*\*LOW read-only 白名單\*\*/)
+      [risk_lines.join.strip, "HIGH:#{high_triggers}", table, token_ownership].join("\n\n")
+    end
+
+    def compact_attachment_capsule(core)
+      attachment = section_body(extract_level_two_section(core, "§12"))
+      prefix = attachment.lines.take_while { |line| !line.match?(/^1\./) }.join.strip
+      selected = numbered_rules("## §12\n#{attachment}", 2)
+      [prefix, selected].join("\n\n")
+    end
+
+    def compact_precedence_capsule(core)
+      precedence = section_body(extract_level_two_section(core, "§13"))
+      policy_heading = precedence.lines.find { |line| line.start_with?("**Policy precedence**") }
+      policy_rules = precedence.lines.select { |line| line.match?(/^[1-5]\. /) }.first(5)
+      fact_heading = precedence.lines.find { |line| line.start_with?("**Fact precedence**") }
+      fact_start = precedence.lines.index(fact_heading)
+      fact_rules = fact_start ? precedence.lines[(fact_start + 1)..-1].select { |line| line.match?(/^[1-4]\. /) }.first(4) : []
+      boundaries = precedence.lines.select { |line| line.include?("不得覆蓋 live evidence") || line.include?("只可**縮小** scope") }
+      [policy_heading, *policy_rules, fact_heading, *fact_rules, *boundaries].compact.join.strip
+    end
+
+    def compact_routing_capsule(routing)
+      attachment_states = section_body(extract_level_two_section(routing, "§0"))
+      state_table = markdown_table_columns(attachment_states, /^\| 狀態 \|/, 0, 2)
+      decision_body = section_body(extract_level_two_section(routing, "§1"))
+      decision_intro = decision_body.lines.find { |line| line.start_with?("判定順序:") }
+      decision_table = markdown_table(decision_body, /^\| 觸發群 \|/)
+      decision_paths = first_fenced_block(decision_body)
+      decision_binding = decision_body.lines.find { |line| line.start_with?("機械對映:") }
+      decision = [decision_intro, decision_table, decision_paths, decision_binding].compact.join("\n\n")
+      [state_table, decision].join("\n\n")
+    end
+
+    def compact_worktree_capsule(routing)
+      modes = section_body(extract_level_two_section(routing, "§4"))
+      modes = modes.lines.reject do |line|
+        line.include?("CI RED / pending:") || line.include?("不得因 PR OPEN 而無限期保留資料匣")
+      end.join.strip
+      lifecycle = section_body(extract_level_two_section(routing, "§5"))
+      lifecycle_summary = first_fenced_block(lifecycle)
+      cleanup = section_body(extract_level_two_section(routing, "§7")).lines.first
+      pr_open = section_body(extract_level_two_section(routing, "§8")).lines.first
+      override = section_body(extract_level_two_section(routing, "§9")).lines.find { |line| line.include?("Planner 不得自行推定 override") }
+      [
+        modes,
+        lifecycle_summary,
+        section_body(extract_level_two_section(routing, "§6")),
+        cleanup,
+        pr_open,
+        override
+      ].compact.join("\n\n")
+    end
+
+    def compact_manifest_capsule(manifest)
+      parsed = parse_yaml(manifest, "TASK_MANIFEST.schema.yaml")
+      rules = compact_manifest_lint_rules(manifest)
+      raise ArgumentError, "manifest capsule must contain L1-L22" unless rules.length == 22
+
+      [
+        "Manifest shape (derived; values governed by schema/lint):",
+        compact_schema_shape(parsed),
+        "",
+        "Lint L1-L22 (compacted from TASK_MANIFEST.schema.yaml):",
+        rules.join("\n")
+      ].join("\n")
+    end
+
+    def compact_worker_capsule(template)
+      render_rules = compact_named_rules(extract_level_two_section(template, "§R"), /\AR(?:[1-4]|6|8|9|10)\z/)
+      worker_template = extract_level_two_section(template, "§T")
+      authorization = extract_line_range(worker_template, /^### §T-AUTH/, /^### §T-BODY/)
+      worker_body = worker_template.split(/^### §T-BODY.*$\n?/, 2).fetch(1)
+      section_names = worker_body.lines.each_with_object([]) do |line, memo|
+        stripped = line.strip
+        if stripped.match?(/\A(?:\[Executable Worker Task|Project \/ Repo|Core Rules|Project Attachment|Phase 0A|Phase 0B|Worktree Rules|Goal\z|Allowed Writes|Protected|Forbidden\z|Memory Write|Steps\z|Verification|Success Criteria|Stop Conditions|Handoff Output|Post-Merge Branch Cleanup Gate|=== 附錄)/)
+          compact = stripped.sub(/\A\[Executable Worker Task.*\z/, "Executable Worker Task")
+          compact = compact.sub(/\(.*/, "").sub(/ —.*/, "").sub(/===.*/, "Manifest appendix")
+          memo << compact
+        end
+      end
+      projection = compact_projection_contract(extract_level_two_section(template, "§P"))
+      [
+        render_rules.join("\n"),
+        authorization,
+        "Worker task section order (derived from §T-BODY): #{section_names.join(' / ')}",
+        projection
+      ].join("\n\n")
+    end
+
+    def compact_projection_contract(section)
+      body = section_body(section)
+      p1 = body.lines.find { |line| line.start_with?("- **P1 ") }
+      p2 = body.lines.find { |line| line.start_with?("- **P2 ") }
+      view = first_fenced_block(body)
+      p3 = body.lines.find { |line| line.start_with?("- **P3 ") }
+      [p1, p2, view, p3].compact.map(&:strip).join("\n\n")
+    end
+
+    def section_body(section)
+      section.lines.drop(1).join.strip
+    end
+
+    def numbered_rules(section, *numbers)
+      wanted = numbers.map(&:to_s)
+      section.lines.select { |line| line.match?(/\A(?:#{wanted.join('|')})\./) }.join.strip
+    end
+
+    def markdown_table(text, header_pattern)
+      lines = text.lines
+      start = lines.index { |line| line.match?(header_pattern) }
+      raise ArgumentError, "table header not found: #{header_pattern.inspect}" unless start
+
+      finish = ((start + 1)...lines.length).find { |index| lines[index].strip.empty? || !lines[index].start_with?("|") } || lines.length
+      lines[start...finish].join.strip
+    end
+
+    def markdown_table_columns(text, header_pattern, *indexes)
+      table = markdown_table(text, header_pattern)
+      rows = table.lines.map { |line| line.split("|", -1)[1...-1].map(&:strip) }
+      selected = rows.map { |row| indexes.map { |index| row.fetch(index) } }
+      selected[1] = indexes.map { "---" } if selected.length > 1
+      selected.map { |row| "| #{row.join(' | ')} |" }.join("\n")
+    end
+
+    def extract_line_range(text, start_pattern, stop_pattern)
+      lines = text.lines
+      start = lines.index { |line| line.match?(start_pattern) }
+      raise ArgumentError, "range start not found: #{start_pattern.inspect}" unless start
+
+      finish = ((start + 1)...lines.length).find { |index| lines[index].match?(stop_pattern) } || lines.length
+      lines[start...finish].join.strip
+    end
+
+    def first_fenced_block(text)
+      lines = text.lines
+      start = lines.index { |line| line.start_with?("```") }
+      raise ArgumentError, "fenced block not found" unless start
+
+      finish = ((start + 1)...lines.length).find { |index| lines[index].start_with?("```") }
+      raise ArgumentError, "unterminated fenced block" unless finish
+
+      lines[start..finish].join.strip
+    end
+
+    def compact_manifest_lint_rules(manifest)
+      tail = manifest.split(/# Manifest Lint Rules/, 2).fetch(1)
+      rules = []
+      current = nil
+      tail.lines.each do |line|
+        content = line.sub(/^# ?/, "").strip
+        if content.match?(/\AL\d+\s/)
+          rules << current if current
+          current = String.new("- #{content}")
+        elsif current && !content.empty? && !content.start_with?("─")
+          current << " #{content}"
+        end
+      end
+      rules << current if current
+      rules
+    end
+
+    def compact_schema_shape(value)
+      case value
+      when Hash
+        "{" + value.map { |key, child| "#{key}#{compact_schema_shape(child)}" }.join(",") + "}"
+      when Array
+        value.empty? ? "[]" : "[#{compact_schema_shape(value.first)}]"
+      else
+        ""
+      end
+    end
+
+    def compact_named_rules(section, allowed_ids)
+      rules = []
+      current = nil
+      section_body(section).lines.each do |line|
+        if (match = line.match(/^- \*\*([A-Z]\d+)\*\*(.*)$/))
+          rules << current if current
+          current = if match[1].match?(allowed_ids)
+                      String.new("- #{match[1]}#{match[2]}".strip)
+                    end
+        elsif current && !line.strip.empty? && line.strip != "---" && !line.start_with?("### ")
+          current << " #{line.strip.sub(/^- /, '')}"
+        end
+      end
+      rules << current if current
+      rules
+    end
+
     def load_durable_source_bytes
       DURABLE_SOURCE_FILES.each_with_object({}) do |name, memo|
         raw = File.binread(root.join(name))
@@ -1246,16 +1550,18 @@ module ControlPlanePrototype
       end
     end
 
-    def source_section(source, section, content)
-      start_marker = "<!-- BEGIN SOURCE: #{source} SECTION: #{section} -->"
-      end_marker = "<!-- END SOURCE: #{source} SECTION: #{section} -->"
-      "#{start_marker}\n#{content}\n#{end_marker}"
+    def capsule_section(name, content)
+      "## #{name}\n\n#{content.strip}"
     end
 
-    def compiled_source_section(text, source, section)
-      start_marker = Regexp.escape("<!-- BEGIN SOURCE: #{source} SECTION: #{section} -->")
-      end_marker = Regexp.escape("<!-- END SOURCE: #{source} SECTION: #{section} -->")
-      text.match(/#{start_marker}\n(.*?)\n#{end_marker}/m)&.[](1)
+    def compiled_capsule(text, name)
+      heading = /^## #{Regexp.escape(name)}\s*$\n/
+      match = text.match(heading)
+      return nil unless match
+
+      start = match.end(0)
+      finish = text.index(/^## /, start) || text.length
+      text[start...finish].strip
     end
 
     def safe_join(root_path, relative)
@@ -1336,6 +1642,7 @@ module ControlPlanePrototype
       when "check-active-task" then check_active_task_command
       when "compile-role", "render-role" then compile_role_command
       when "validate-role" then validate_role_command
+      when "role-size-report" then role_size_report_command
       when "manifest-sha" then manifest_sha_command
       else
         @stderr.puts usage
@@ -1455,6 +1762,13 @@ module ControlPlanePrototype
       report.success? ? 0 : 1
     end
 
+    def role_size_report_command
+      ensure_no_extra_arguments!
+      report = @toolchain.compiled_role_size_report
+      @stdout.puts JSON.pretty_generate(report)
+      report.fetch("status") == "PASS" ? 0 : 1
+    end
+
     def manifest_sha_command
       manifest = required_argument!("MANIFEST")
       ensure_no_extra_arguments!
@@ -1502,6 +1816,7 @@ module ControlPlanePrototype
           ruby prototype/control_plane.rb check-active-task MANIFEST VIEW --project-root ROOT [--profile PATH] [--source-label LABEL] [--seen-task-id ID]
           ruby prototype/control_plane.rb compile-role handoff|ceo|cto|planner
           ruby prototype/control_plane.rb validate-role handoff|ceo|cto|planner COMPILED_ROLE
+          ruby prototype/control_plane.rb role-size-report
           ruby prototype/control_plane.rb render-role handoff|ceo|cto|planner  # compatibility alias
           ruby prototype/control_plane.rb manifest-sha MANIFEST
 

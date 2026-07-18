@@ -23,7 +23,18 @@ boundary: 四份 legacy prompt 維持 byte-identical;四份 compiled role prompt
 | `TASK_MANIFEST.schema.yaml` | manifest schema + lint L1–L22 |
 | `WORKER_TASK_TEMPLATE.md` | 渲染規則 R1–R10 / Worker prompt 模板 / active_task projection §P / compiled prompt build 規則 §C |
 
-**Build outputs(不計入 5 檔、不得手工維護)**:`compiled/HANDOFF_REPORTER.compiled.md`、`compiled/CEO_DECISION_REVIEW.compiled.md`、`compiled/CTO_TECHNICAL_REVIEW.compiled.md`、`compiled/PLANNER_COMPILER.compiled.md`、各 repo 的 `active_task.md` view、每次渲染出的 Worker prompt。四份 role prompt 是 inactive VNext owner-review candidates;不改變 ROLE_PROFILES 所述 execution plane,不代表 activation。
+**Build outputs(不計入 5 檔、不得手工維護)**:`compiled/HANDOFF_REPORTER.compiled.md`、`compiled/CEO_DECISION_REVIEW.compiled.md`、`compiled/CTO_TECHNICAL_REVIEW.compiled.md`、`compiled/PLANNER_COMPILER.compiled.md`、各 repo 的 `active_task.md` view、每次渲染出的 Worker prompt。四份 role prompt 是 inactive VNext owner-review candidates,不代表 activation。CEO / CTO 可使用其 compiled output 作 read-only web review;無 local repo access 時 evidence 為 `UNKNOWN / NOT_RUN`,不得宣稱 independent repo audit。
+
+**Lean compilation profiles**:capsule 是 compiler selection concept,不是第六個 durable source。每個 capsule 都由五檔既有來源的 identified section / schema 結構機械抽取或 compact;validation 逐 capsule 與 fresh build 比對。
+
+| Role | Selected capsules | Hard maximum |
+|---|---|---:|
+| Handoff | EVIDENCE_MIN / PRECEDENCE_MIN / MEMORY_READ_MIN / REVIEW_BOUNDARY_MIN | 8,872 bytes |
+| CEO | EVIDENCE_MIN / PRECEDENCE_MIN / AUTH_ESCALATION_MIN / MEMORY_READ_MIN | 12,509 bytes |
+| CTO | EVIDENCE_MIN / PRECEDENCE_MIN / ATTACHMENT_MIN / MEMORY_READ_MIN / AUTH_ESCALATION_MIN | 10,530 bytes |
+| Planner | 上述必要 shared capsules + ROUTING_DECISION_MIN / WORKTREE_COMPILER / MANIFEST_COMPILER / WORKER_COMPILER | 21,919 bytes |
+
+Aggregate hard maximum = 53,830 bytes;preferred target = 50,000 bytes。Planner 的 manifest capsule 只含 derived schema shape + compact L1–L22,不得嵌入 full YAML;Worker capsule 只含 render contract、authorization variants、section order 與 active-task projection,不得重複 full template 或 shared capsules。
 
 **Examples(示範,非規則)**:`examples/agent-profile.template.yaml`、`manifest-low.yaml`、`manifest-medium.yaml`、`manifest-high.yaml`。
 
@@ -379,7 +390,7 @@ The inventory below treats each labelled legacy responsibility or output section
 | T9 | Lifecycle 唯一性 | merge≠none 的 manifest → 渲染含 Post-Merge Gate 恰一次;無任何獨立 cleanup task 產生路徑 |
 | T10 | 角色滲漏 | CEO / CTO profile 與其輸出格式中 grep 不到 Worker prompt 模板結構 |
 | T11 | Projection | manifest → active_task view 確定性;手動竄改 view → DRIFT 被偵測且 manifest 勝出;view 欄位 ⊆ manifest |
-| T12 | Compiled 一致性 | compiled 四檔由五個 durable sources 機械生成、fresh bytes 相等、Shared Core blocks 相同、`compiled_from` / schema / fingerprint 一致 |
+| T12 | Compiled 一致性與長度 | compiled 四檔由五個 durable sources 機械生成、fresh bytes 相等、selected capsules 相同、`compiled_from` / schema / fingerprint 一致;每 role 與 aggregate hard gate 全 PASS,並回報 preferred target status |
 | T13 | Profile 禁止鍵 | agent-profile fixture 含禁止鍵(如重定義 authorization)→ 被忽略 + `[Risk]` finding |
 | T14 | 授權措辭 | SINGLE_PROMPT 渲染中不含「先單獨貼授權 / this spec is not authorization」;PENDING_OWNER_TOKEN fixture → Worker 語義為 WAITING_OWNER |
 | T15 | Project attachment discovery | `.ai`/profile/四必要檔存在→續行;缺失→ENTRY_CHECK 或 manifest 指定 STOP;不得直接實作 |
@@ -395,7 +406,7 @@ The inventory below treats each labelled legacy responsibility or output section
 
 ## 11. Risks / Open Items
 
-1. `[Risk]` 四份 compiled role prompts 仍是 inactive VNext candidates;ROLE_PROFILES 的 current execution plane 未改,Owner semantic review 前不得把 CEO / CTO candidate 當成 activated web entrypoint。
+1. `[Risk]` 四份 compiled role prompts 仍是 inactive VNext candidates;ROLE_PROFILES 只澄清 CEO / CTO 可作 read-only web review,不構成 replacement、pilot 或 activation。
 2. `[Unknown]` pilot repo 的四個 `.ai` files、agent-profile 與 version binding 未在本 compiler continuation 檢查;不得據此啟動 pilot。
 3. `[Risk]` compiler 以 durable section identifiers 做 exact extraction;authoritative heading rename 會 fail closed,必須同步更新 recipe 並重跑 fresh-byte verification。
 4. `[Risk]` web 端仍可能使用 legacy prompt;在兩 pilot + Owner 裁決前,這是刻意保留的 fallback,不是啟用缺陷。

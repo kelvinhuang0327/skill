@@ -21,13 +21,6 @@ class ControlPlanePrototypeTest < Minitest::Test
     "high" => ROOT.join("examples/manifest-high.yaml")
   }.freeze
 
-  ROLE_SECTIONS = {
-    "handoff" => "R1",
-    "ceo" => "R3",
-    "cto" => "R2",
-    "planner" => "R4"
-  }.freeze
-
   LEGACY_PROMPTS = {
     "handoff" => {
       path: ROOT.parent.join("[對話交接報告]— ChatGPT 對話總結.md"),
@@ -66,6 +59,16 @@ class ControlPlanePrototypeTest < Minitest::Test
     RETAINED_IN_ROLE MOVED_TO_SHARED_CORE MOVED_TO_ROUTING MOVED_TO_MANIFEST
     REMOVED_AS_DUPLICATE REMOVED_AS_ROLE_VIOLATION DEFERRED_FOR_COMPATIBILITY UNKNOWN
   ].freeze
+
+  EXPECTED_ROLE_CAPSULES = {
+    "handoff" => %w[EVIDENCE_MIN PRECEDENCE_MIN MEMORY_READ_MIN REVIEW_BOUNDARY_MIN],
+    "ceo" => %w[EVIDENCE_MIN PRECEDENCE_MIN AUTH_ESCALATION_MIN MEMORY_READ_MIN],
+    "cto" => %w[EVIDENCE_MIN PRECEDENCE_MIN ATTACHMENT_MIN MEMORY_READ_MIN AUTH_ESCALATION_MIN],
+    "planner" => %w[
+      EVIDENCE_MIN PRECEDENCE_MIN ATTACHMENT_MIN MEMORY_READ_MIN AUTH_ESCALATION_MIN
+      ROUTING_DECISION_MIN WORKTREE_COMPILER MANIFEST_COMPILER WORKER_COMPILER
+    ]
+  }.freeze
 
   def setup
     @toolchain = ControlPlanePrototype::Toolchain.new
@@ -292,9 +295,30 @@ class ControlPlanePrototypeTest < Minitest::Test
         marker = "source_file_identity: #{identity.fetch('name')} bytes=#{identity.fetch('bytes')} sha256=#{identity.fetch('sha256')}"
         assert_includes first, marker
       end
-      assert_includes first, "BEGIN SOURCE: ROLE_PROFILES.md SECTION: #{ROLE_SECTIONS.fetch(role)}"
+      assert_includes first, "## ROLE_CONTRACT"
+      assert_equal EXPECTED_ROLE_CAPSULES.fetch(role), ControlPlanePrototype::ROLE_RECIPES.fetch(role).fetch(:capsules)
       assert @toolchain.validate_compiled_role(role, first).success?
     end
+  end
+
+  def test_compiled_role_size_report_passes_every_hard_gate_and_reports_preferred_target
+    report = @toolchain.compiled_role_size_report
+    assert_equal "PASS", report.fetch("status")
+    report.fetch("roles").each do |role, entry|
+      assert_equal "PASS", entry.fetch("hard_gate"), role
+      assert_operator entry.fetch("bytes"), :<=, ControlPlanePrototype::ROLE_SIZE_LIMITS.fetch(role)
+      assert_operator entry.fetch("bytes"), :<, LEGACY_PROMPTS.fetch(role).fetch(:bytes)
+    end
+    aggregate = report.fetch("aggregate")
+    assert_operator aggregate.fetch("bytes"), :<=, ControlPlanePrototype::AGGREGATE_ROLE_SIZE_LIMIT
+    assert_equal "PASS", aggregate.fetch("hard_gate")
+    assert_equal "PASS", aggregate.fetch("preferred_target_status")
+
+    output = StringIO.new
+    error = StringIO.new
+    exit_code = ControlPlanePrototype::CLI.new(["role-size-report"], stdout: output, stderr: error).run
+    assert_equal 0, exit_code, error.string
+    assert_equal report, JSON.parse(output.string)
   end
 
   def test_role_renderer_needs_no_documentary_compiled_files_and_changes_with_durable_bytes
@@ -333,9 +357,9 @@ class ControlPlanePrototypeTest < Minitest::Test
     outputs = ControlPlanePrototype::COMPILED_ROLE_FILES.keys.to_h do |role|
       [role, @toolchain.render_compiled_role(role)]
     end
-    worker_template_marker = "BEGIN SOURCE: WORKER_TASK_TEMPLATE.md SECTION: §T"
-    manifest_marker = "BEGIN SOURCE: TASK_MANIFEST.schema.yaml SECTION: WHOLE_FILE"
-    lifecycle_mode_marker = "BEGIN SOURCE: ROUTING_AND_LIFECYCLE.md SECTION: §4"
+    worker_template_marker = "## WORKER_COMPILER"
+    manifest_marker = "## MANIFEST_COMPILER"
+    lifecycle_mode_marker = "## WORKTREE_COMPILER"
 
     %w[handoff ceo cto].each do |role|
       refute_includes outputs.fetch(role), worker_template_marker
@@ -360,23 +384,18 @@ class ControlPlanePrototypeTest < Minitest::Test
     outputs.each_value { |output| refute_match(/Owner Authorization:\s+AUTHORIZE_[A-Z0-9_]+/, output) }
   end
 
-  def test_all_roles_share_byte_identical_evidence_risk_authorization_precedence_memory_and_lifecycle_blocks
+  def test_role_selective_capsules_are_identical_when_shared_and_absent_when_unselected
     outputs = ControlPlanePrototype::COMPILED_ROLE_FILES.keys.to_h do |role|
       [role, @toolchain.render_compiled_role(role)]
     end
-    blocks = [
-      ["AGENT_CORE.md", "§1"],
-      ["AGENT_CORE.md", "§2"],
-      ["AGENT_CORE.md", "§6"],
-      ["AGENT_CORE.md", "§7"],
-      ["AGENT_CORE.md", "§13"],
-      ["AGENT_CORE.md", "§14"],
-      ["ROUTING_AND_LIFECYCLE.md", "§6"]
-    ]
-    blocks.each do |source, section|
-      values = outputs.transform_values { |raw| compiled_section(raw, source, section) }
-      refute values.value?(nil), "missing shared block #{source} #{section}: #{values.inspect}"
-      assert_equal 1, values.values.map(&:b).uniq.length, "shared block diverged: #{source} #{section}"
+    ControlPlanePrototype::CAPSULE_SOURCES.each_key do |capsule|
+      selected_roles = EXPECTED_ROLE_CAPSULES.select { |_role, capsules| capsules.include?(capsule) }.keys
+      values = selected_roles.to_h { |role| [role, compiled_capsule(outputs.fetch(role), capsule)] }
+      refute values.value?(nil), "missing selected capsule #{capsule}: #{values.inspect}"
+      assert_equal 1, values.values.map(&:b).uniq.length, "shared capsule diverged: #{capsule}"
+      (outputs.keys - selected_roles).each do |role|
+        assert_nil compiled_capsule(outputs.fetch(role), capsule), "#{role} unexpectedly contains #{capsule}"
+      end
     end
   end
 
@@ -390,8 +409,8 @@ class ControlPlanePrototypeTest < Minitest::Test
         before = repository_file_hashes
         role = entry.fetch("role")
         valid = @toolchain.render_compiled_role(role)
-        block = compiled_section(valid, entry.fetch("source"), entry.fetch("section"))
-        refute_nil block, "#{entry.fetch('name')} source block is missing"
+        block = compiled_capsule(valid, entry.fetch("capsule"))
+        refute_nil block, "#{entry.fetch('name')} capsule is missing"
         assert_includes block, entry.fetch("find"), "#{entry.fetch('name')} mutation target is missing"
         mutated_block = block.sub(entry.fetch("find"), entry.fetch("replace"))
         refute_equal block, mutated_block, "#{entry.fetch('name')} mutation did not change bytes"
@@ -413,6 +432,116 @@ class ControlPlanePrototypeTest < Minitest::Test
         assert_equal before, repository_file_hashes, "#{entry.fetch('name')} mutated a source file"
       end
     end
+  end
+
+  def test_eight_minification_negative_cases_fail_with_exact_codes_and_no_source_mutation
+    cases = load_yaml(FIXTURES.join("role_minification_negative_cases.yaml")).fetch("cases")
+    assert_equal 8, cases.length
+
+    Dir.mktmpdir("control-plane-minification-negative-") do |tmpdir|
+      cases.each do |entry|
+        before = repository_file_hashes
+        role = entry.fetch("role")
+        valid = @toolchain.render_compiled_role(role)
+        invalid = case entry.fetch("mutation")
+                  when "replace"
+                    block = compiled_capsule(valid, entry.fetch("capsule"))
+                    refute_nil block, "#{entry.fetch('name')} capsule is missing"
+                    assert_includes block, entry.fetch("find"), "#{entry.fetch('name')} target is missing"
+                    valid.sub(block, block.sub(entry.fetch("find"), entry.fetch("replace")))
+                  when "append"
+                    valid + "\n" + entry.fetch("content")
+                  when "pad_over_budget"
+                    padding = ControlPlanePrototype::ROLE_SIZE_LIMITS.fetch(role) - valid.bytesize + 1
+                    valid + ("x" * padding)
+                  when "duplicate_line"
+                    block = compiled_capsule(valid, entry.fetch("capsule"))
+                    line = block.lines.find { |candidate| candidate.include?(entry.fetch("find")) }
+                    refute_nil line, "#{entry.fetch('name')} duplicate source line is missing"
+                    valid + "\n" + line
+                  else
+                    flunk "unknown mutation #{entry.fetch('mutation')}"
+                  end
+
+        path = Pathname.new(tmpdir).join("#{entry.fetch('name')}.compiled.md")
+        File.binwrite(path, invalid)
+        output = StringIO.new
+        error = StringIO.new
+        exit_code = ControlPlanePrototype::CLI.new(
+          ["validate-role", role, path.to_s],
+          stdout: output,
+          stderr: error
+        ).run
+        assert_equal 1, exit_code, "#{entry.fetch('name')} must return non-zero: #{error.string}"
+        parsed = JSON.parse(output.string)
+        assert_equal "FAIL", parsed.fetch("status")
+        assert_equal [entry.fetch("expected_error")], parsed.fetch("errors").map { |item| item.fetch("code") }, entry.fetch("name")
+        assert_equal before, repository_file_hashes, "#{entry.fetch('name')} mutated a source file"
+      end
+    end
+  end
+
+  def test_lean_role_capabilities_remain_self_contained_without_forbidden_compiler_leakage
+    outputs = ControlPlanePrototype::COMPILED_ROLE_FILES.keys.to_h do |role|
+      [role, @toolchain.render_compiled_role(role)]
+    end
+
+    assert_includes outputs.fetch("handoff"), "report ≠ audit"
+    assert_includes outputs.fetch("handoff"), "Planner/Worker traceability"
+    assert_includes outputs.fetch("handoff"), "next-task intent"
+    assert_includes outputs.fetch("handoff"), "CANDIDATE — NOT WRITTEN"
+
+    assert_includes outputs.fetch("ceo"), "priority decision"
+    assert_includes outputs.fetch("ceo"), "approved / rejected direction"
+    assert_includes outputs.fetch("ceo"), "Owner-decision requirements"
+
+    assert_includes outputs.fetch("cto"), "Architecture / Correctness / Testability"
+    assert_includes outputs.fetch("cto"), "required tests"
+    assert_includes outputs.fetch("cto"), "technical escalation conditions"
+
+    planner = outputs.fetch("planner")
+    assert_includes planner, "唯一** manifest 作者"
+    assert_includes planner, "唯一** Worker prompt 渲染者"
+    assert_includes planner, "L1 "
+    assert_includes planner, "L22 "
+    assert_includes planner, "PENDING_OWNER_TOKEN"
+    assert_includes planner, "active_task_projection.enabled=true"
+    assert_includes planner, "Worker task section order"
+
+    %w[handoff ceo cto].each do |role|
+      refute_includes outputs.fetch(role), "## WORKTREE_COMPILER"
+      refute_includes outputs.fetch(role), "## MANIFEST_COMPILER"
+      refute_includes outputs.fetch(role), "## WORKER_COMPILER"
+    end
+    assert_operator outputs.fetch("handoff").lines.count { |line| line.start_with?("## ") }, :<=, 10
+    assert_operator outputs.fetch("ceo").lines.count { |line| line.start_with?("## ") }, :<=, 9
+    assert_operator outputs.fetch("cto").lines.count { |line| line.start_with?("## ") }, :<=, 10
+  end
+
+  def test_lean_outputs_exclude_history_acceptance_docs_full_schema_and_shared_rule_duplicates
+    ControlPlanePrototype::COMPILED_ROLE_FILES.each_key do |role|
+      raw = @toolchain.render_compiled_role(role)
+      refute_includes raw, "Two-Pilot Migration Plan"
+      refute_includes raw, "Acceptance Tests(prompt"
+      refute_includes raw, "BEGIN SOURCE: TASK_MANIFEST.schema.yaml SECTION: WHOLE_FILE"
+      refute_includes raw, "# TASK_MANIFEST.schema.yaml —"
+      confirmed_line = raw.lines.find { |line| line.include?("| `[Confirmed]` |") }
+      refute_nil confirmed_line
+      assert_equal 1, raw.scan(confirmed_line.strip).length, "#{role} duplicates EVIDENCE_MIN"
+    end
+  end
+
+  def test_ceo_and_cto_profiles_support_read_only_web_review_without_fabricated_repo_audit
+    profiles = File.read(ROOT.join("ROLE_PROFILES.md"), encoding: "UTF-8")
+    assert_includes profiles, "CEO / CTO 可作 read-only web review"
+    assert_includes profiles, "無 local repo access 即標 UNKNOWN / NOT_RUN"
+    assert_includes profiles, "不得宣稱 independent repo audit"
+
+    ceo = @toolchain.render_compiled_role("ceo")
+    cto = @toolchain.render_compiled_role("cto")
+    assert_includes ceo, "無 CLI 工具時,0A 標 `NOT_RUN`"
+    assert_includes cto, "read-only web review 不需 local CLI working tree"
+    assert_includes cto, "0A 標 `NOT_RUN`"
   end
 
   def test_legacy_prompt_identities_match_the_authorized_pre_task_baseline
@@ -469,6 +598,11 @@ class ControlPlanePrototypeTest < Minitest::Test
     exit_code = ControlPlanePrototype::CLI.new(["compile-role", "planner"], stdout: output, stderr: error).run
     assert_equal 0, exit_code, error.string
     refute_empty output.string
+    size_output = StringIO.new
+    size_error = StringIO.new
+    size_exit = ControlPlanePrototype::CLI.new(["role-size-report"], stdout: size_output, stderr: size_error).run
+    assert_equal 0, size_exit, size_error.string
+    assert_equal "PASS", JSON.parse(size_output.string).fetch("status")
     assert_equal before, repository_file_hashes
   end
 
@@ -532,10 +666,13 @@ class ControlPlanePrototypeTest < Minitest::Test
 
   private
 
-  def compiled_section(raw, source, section)
-    start_marker = Regexp.escape("<!-- BEGIN SOURCE: #{source} SECTION: #{section} -->")
-    end_marker = Regexp.escape("<!-- END SOURCE: #{source} SECTION: #{section} -->")
-    raw.match(/#{start_marker}\n(.*?)\n#{end_marker}/m)&.[](1)
+  def compiled_capsule(raw, name)
+    match = raw.match(/^## #{Regexp.escape(name)}\s*$\n/)
+    return nil unless match
+
+    start = match.end(0)
+    finish = raw.index(/^## /, start) || raw.length
+    raw[start...finish].strip
   end
 
   def load_yaml(path)

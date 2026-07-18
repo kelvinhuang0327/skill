@@ -1,96 +1,84 @@
 cases:
   - name: handoff_attempts_authorization
     role: handoff
-    source: ROLE_PROFILES.md
-    section: R1
+    capsule: ROLE_CONTRACT
     find: '- 簽發、填入或暗示 Owner authorization token'
     replace: '- 可簽發、填入或代轉 Owner authorization token'
     expected_error: E_ROLE_HANDOFF_AUTHORIZATION_FORBIDDEN
 
   - name: handoff_attempts_complete_worker_prompt
     role: handoff
-    source: ROLE_PROFILES.md
-    section: R1
+    capsule: ROLE_CONTRACT
     find: '- 產生完整 Worker prompt 或 task manifest'
     replace: '- 產生完整 Worker prompt 並建立 task manifest'
     expected_error: E_ROLE_HANDOFF_WORKER_RENDER_FORBIDDEN
 
   - name: ceo_attempts_implementation
     role: ceo
-    source: ROLE_PROFILES.md
-    section: R3
+    capsule: ROLE_CONTRACT
     find: '- 實作、merge / push、DB、deployment、registry、cleanup'
     replace: '- 實作並執行 merge / push、DB、deployment、registry、cleanup'
     expected_error: E_ROLE_CEO_IMPLEMENTATION_FORBIDDEN
 
   - name: ceo_attempts_manifest_compilation
     role: ceo
-    source: ROLE_PROFILES.md
-    section: R3
+    capsule: ROLE_CONTRACT
     find: '- 產生完整 Worker prompt 或 manifest'
     replace: '- 產生完整 Worker prompt 並編譯 manifest'
     expected_error: E_ROLE_CEO_MANIFEST_FORBIDDEN
 
   - name: cto_attempts_authorization
     role: cto
-    source: AGENT_CORE.md
-    section: §7
+    capsule: AUTH_ESCALATION_MIN
     find: '- Handoff Reporter / CTO / CEO / Reviewer 不得簽發、填入或代轉 token。'
     replace: '- CTO 可簽發、填入或代轉 Owner token。'
     expected_error: E_ROLE_CTO_AUTHORIZATION_FORBIDDEN
 
   - name: cto_attempts_planner_duties
     role: cto
-    source: ROLE_PROFILES.md
-    section: R2
+    capsule: ROLE_CONTRACT
     find: '- 產生完整 Worker prompt 或 manifest'
     replace: '- 產生完整 Worker prompt 並建立 final manifest'
     expected_error: E_ROLE_CTO_PLANNER_DUTY_FORBIDDEN
 
   - name: planner_fabricates_owner_token
     role: planner
-    source: ROLE_PROFILES.md
-    section: R4
+    capsule: ROLE_CONTRACT
     find: '- 填入真實 token(只能 `PENDING_OWNER_TOKEN` / `SEPARATE_MESSAGE_REQUIRED`)'
     replace: '- 填入真實 Owner token `AUTHORIZE_FABRICATED`'
     expected_error: E_ROLE_PLANNER_FABRICATED_OWNER_TOKEN
 
   - name: role_diverges_in_evidence_vocabulary
     role: ceo
-    source: AGENT_CORE.md
-    section: §1
+    capsule: EVIDENCE_MIN
     find: '| `[Confirmed]` | 本輪有直接證據:'
     replace: '| `[Verified]` | 本輪有直接證據:'
     expected_error: E_SHARED_EVIDENCE_DIVERGENCE
 
   - name: role_diverges_in_risk_classification
     role: cto
-    source: AGENT_CORE.md
-    section: §6
+    capsule: AUTH_ESCALATION_MIN
     find: '**LOW**(無 repo mutation、無 DB、無外部副作用):'
     replace: '**LOW_OR_HIGH**(無 repo mutation、無 DB、無外部副作用):'
     expected_error: E_SHARED_RISK_DIVERGENCE
 
   - name: role_diverges_in_lifecycle_semantics
-    role: handoff
-    source: ROUTING_AND_LIFECYCLE.md
-    section: §6
+    role: planner
+    capsule: WORKTREE_COMPILER
     find: '- **I1** 無 STANDALONE 授權,永不 force:'
     replace: '- **I1** 無 STANDALONE 授權也可 force:'
     expected_error: E_SHARED_LIFECYCLE_DIVERGENCE
 
   - name: historical_pass_is_treated_as_current
     role: planner
-    source: AGENT_CORE.md
-    section: §2
+    capsule: EVIDENCE_MIN
     find: '歷史測試結果只能作為背景,不能作為當輪驗證。'
     replace: '歷史測試結果可直接作為當輪 PASS。'
     expected_error: E_STALE_HISTORICAL_PASS
 
   - name: memory_is_treated_as_live_evidence
     role: ceo
-    source: AGENT_CORE.md
-    section: §13
+    capsule: PRECEDENCE_MIN
     find: 'Memory、handoff 或歷史 report **不得覆蓋 live evidence**。'
     replace: 'Memory、handoff 或歷史 report **可以覆蓋 live evidence**。'
     expected_error: E_MEMORY_LIVE_EVIDENCE_SUBSTITUTION

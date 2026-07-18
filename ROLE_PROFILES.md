@@ -7,12 +7,14 @@ status: DRAFT_FOR_OWNER_REVIEW
       STOP-WARN / 風險分級 / authorization / no-fabrication / 四層架構 §10 /
       Project Attachment §12 / Source Precedence §13 / Memory Contract §14)。
       本檔只定義角色差異,不重複核心規則;引用格式為「CORE §n」。
-接手: 任何角色開始工作前先走 CORE §12 attachment 流程。CLI 角色實際執行
-      0A/0B 與版本驗證;web 角色以對話回報狀態替代 0A(標 NOT_RUN + source)。
+接手: 任何角色開始工作前先走 CORE §12 attachment 流程。有本機工具的角色實際執行
+      0A/0B 與版本驗證;web 角色以 supplied report / tool-observed state 替代 0A
+      (無 local repo access 即標 UNKNOWN / NOT_RUN + source,不得宣稱 independent repo audit)。
       所有角色讀 repo-local `.ai` 作為 L2 context;memory 只是歷史上下文,
       不得覆蓋 live state(CORE §13)。
-執行面: CTO / CEO / Worker / Independent Reviewer 於 CLI agent 執行,直接讀取本目錄檔案。
-        Handoff Reporter / Planner 於 web 對話執行,使用 compiled/ 下的 build output。
+執行面: Handoff Reporter / Planner 於 web 對話執行。CEO / CTO 可作 read-only web review;
+        只有 task 明確授權 live repository inspection 時才需要 local CLI working tree。
+        Worker / Independent Reviewer 於 CLI agent 執行。四個 web roles 使用 compiled/ build output。
 ```
 
 ---
@@ -64,7 +66,7 @@ status: DRAFT_FOR_OWNER_REVIEW
 - 實作、修 bug、merge / push / branch 操作、DB write、cleanup 執行
 - roadmap / CTO-Analysis 更新僅限獲授權 mode 且最小修改
 
-**Phase**:CORE §12 attachment → 0A → 0B 必跑;唯讀遇 dirty → WARN(CORE §5)。memory / 舊 handoff 只作歷史上下文;與 live state 衝突以 live 為準並標 `STALE` / `OUTDATED`(CORE §13)。
+**Phase**:有明確授權的 live repository inspection 時走 CORE §12 attachment → 0A → 0B,唯讀遇 dirty → WARN(CORE §5);read-only web review 不需 local CLI working tree,0A 標 `NOT_RUN` 並只採 source-qualified supplied/tool-observed evidence,不得宣稱 independent repo audit。memory / 舊 handoff 只作歷史上下文;與 live state 衝突以 live 為準並標 `STALE` / `OUTDATED`(CORE §13)。
 
 **Final**:`CTO_REVIEW_{COMPLETE | COMPLETE_WITH_RISKS | PARTIAL | BLOCKED}` + 5 行摘要
 
@@ -90,7 +92,7 @@ status: DRAFT_FOR_OWNER_REVIEW
 - 純策略裁決不因「CTO 報告不存在」而 BLOCKED;僅技術升級項必須有 CTO 輸入
 - 把 memory / 歷史 report 當 current state(CORE §13;衝突以 live 為準)
 
-**Phase**:CORE §12 attachment → 0A → 0B;無 CLI 工具時,0A 標 `NOT_RUN` 且 attachment / live state 僅採 source-qualified 對話證據。`.ai` 缺失依 ROUTING §0 降級,不得自行 bootstrap。
+**Phase**:CORE §12 attachment → 0A → 0B;read-only web review 不需 local CLI working tree。無 CLI 工具時,0A 標 `NOT_RUN` 且 attachment / live state 僅採 source-qualified 對話或 tool-observed evidence,不得宣稱 independent repo audit。`.ai` 缺失依 ROUTING §0 降級,不得自行 bootstrap。
 
 **Final**:`CEO_DECISION_{COMPLETE | COMPLETE_WITH_RISKS | PARTIAL | BLOCKED | WAITING_OWNER}` + 5 行摘要
 
