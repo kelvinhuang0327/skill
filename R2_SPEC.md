@@ -29,12 +29,14 @@ boundary: 四份 legacy prompt 維持 byte-identical;四份 compiled role prompt
 
 | Role | Selected capsules | Hard maximum |
 |---|---|---:|
-| Handoff | EVIDENCE_MIN / PRECEDENCE_MIN / MEMORY_READ_MIN / REVIEW_BOUNDARY_MIN | 8,872 bytes |
+| Handoff | EVIDENCE_MIN / PRECEDENCE_MIN / MEMORY_READ_MIN / MEMORY_CANDIDATE_MIN / REVIEW_BOUNDARY_MIN | 8,872 bytes |
 | CEO | EVIDENCE_MIN / PRECEDENCE_MIN / AUTH_ESCALATION_MIN / MEMORY_READ_MIN | 12,509 bytes |
 | CTO | EVIDENCE_MIN / PRECEDENCE_MIN / ATTACHMENT_MIN / MEMORY_READ_MIN / AUTH_ESCALATION_MIN | 10,530 bytes |
 | Planner | 上述必要 shared capsules + ROUTING_DECISION_MIN / WORKTREE_COMPILER / MANIFEST_COMPILER / WORKER_COMPILER | 21,919 bytes |
 
 Aggregate hard maximum = 53,830 bytes;preferred target = 50,000 bytes。Planner 的 manifest capsule 只含 derived schema shape + compact L1–L22,不得嵌入 full YAML;Worker capsule 只含 render contract、authorization variants、section order 與 active-task projection,不得重複 full template 或 shared capsules。
+
+**Targeted semantic-repair guards**:`MEMORY_CANDIDATE_MIN` 機械抽取 AGENT_CORE §14 規則 7/9/10,不新增 durable source。`validate-role` 固定依 structural → hard size → shared vocabulary/fingerprint → role semantic → forbidden capability → deterministic/provenance 次序驗證;byte equality 只在最後作 provenance check,不得提前成功。穩定錯誤碼為 `ROLE_HANDOFF_MEMORY_CORE_V1_INCOMPLETE`、`ROLE_HANDOFF_MEMORY_WRITE_BOUNDARY_MISSING`、`ROLE_PLANNER_ACTIVE_TASK_P3_INCOMPLETE`、`ROLE_AUTH_METADATA_BOUNDARY_MISSING`、`ROLE_AUTH_EXECUTABLE_ACTIVATION_BOUNDARY_MISSING`、`ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE` 與 byte-equal regression 的 `ROLE_VALIDATOR_SEMANTIC_BYPASS`。
 
 **Examples(示範,非規則)**:`examples/agent-profile.template.yaml`、`manifest-low.yaml`、`manifest-medium.yaml`、`manifest-high.yaml`。
 

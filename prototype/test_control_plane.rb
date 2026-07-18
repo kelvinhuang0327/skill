@@ -61,7 +61,9 @@ class ControlPlanePrototypeTest < Minitest::Test
   ].freeze
 
   EXPECTED_ROLE_CAPSULES = {
-    "handoff" => %w[EVIDENCE_MIN PRECEDENCE_MIN MEMORY_READ_MIN REVIEW_BOUNDARY_MIN],
+    "handoff" => %w[
+      EVIDENCE_MIN PRECEDENCE_MIN MEMORY_READ_MIN MEMORY_CANDIDATE_MIN REVIEW_BOUNDARY_MIN
+    ],
     "ceo" => %w[EVIDENCE_MIN PRECEDENCE_MIN AUTH_ESCALATION_MIN MEMORY_READ_MIN],
     "cto" => %w[EVIDENCE_MIN PRECEDENCE_MIN ATTACHMENT_MIN MEMORY_READ_MIN AUTH_ESCALATION_MIN],
     "planner" => %w[
@@ -399,10 +401,136 @@ class ControlPlanePrototypeTest < Minitest::Test
     end
   end
 
-  def test_twelve_negative_role_semantic_fixtures_fail_with_exact_codes_and_no_source_mutation
+  def test_handoff_core_v1_candidate_memory_contract_is_self_contained_and_read_only
+    handoff = @toolchain.render_compiled_role("handoff")
+    %w[timestamp task_id source classification confirmed_facts unresolved_risks supersedes superseded_by].each do |field|
+      assert_includes handoff, "`#{field}`", field
+    end
+    assert_includes handoff, "`repo/head/PR binding`(如適用)"
+    assert_includes handoff, "CANDIDATE — NOT WRITTEN"
+    assert_includes handoff, "不得直接寫入"
+    assert_includes handoff, "寫入 MEMORY_LOG 或任何檔案"
+    assert_includes handoff, "| `[Unknown]` |"
+    assert_includes handoff, "不得補完"
+    assert_includes handoff, "append-only superseding entry"
+    assert_includes handoff, "不是 authorization source"
+    assert_includes handoff, "不能證明 current branch、PR、CI、DB 或 runtime 狀態"
+    assert_includes handoff, "跨專案隔離"
+  end
+
+  def test_planner_active_task_projection_p3_contract_is_complete_and_not_truncated
+    planner = @toolchain.render_compiled_role("planner")
+    expected_clauses = [
+      "manifest lint(schema L1–L22)必須全 PASS",
+      "active_task_projection.enabled=true",
+      "每次 manifest 建立 / 更新後重新投影",
+      "enabled=false` 時不得產生或更新 view",
+      "manifest,是該 task 的唯一 source of truth",
+      "manifest 嚴格子集",
+      "禁止出現 manifest 沒有的規則或授權",
+      "AUTO-GENERATED COMPATIBILITY VIEW — DO NOT EDIT",
+      "manifest_sha256: <hash>",
+      "Planner 每次編譯時;Independent Reviewer 於 review 時",
+      "自 manifest 重新投影 → 與現存 view 逐字 diff",
+      "以 manifest 為準",
+      "重寫 view 並記錄事件",
+      "視為被手動編輯 → `DRIFT`"
+    ]
+    expected_clauses.each { |clause| assert_includes planner, clause }
+    refute_equal "- **P3 Drift detection**:", planner.lines.last.to_s.strip
+  end
+
+  def test_authorization_capsule_has_exact_metadata_and_executable_boundary_cases_only_in_routing_roles
+    boundary_roles = %w[ceo cto planner]
+    expected_clauses = [
+      "metadata-only lifecycle / catalog 變更",
+      "OBSERVATION、REJECTED、RETIRED 等 non-executable metadata publication",
+      "不涉及 DB、production activation 或 external publication 的 registry / catalog 維護",
+      "metadata-only OBSERVATION catalog 變更 = **MEDIUM**,不是 HIGH",
+      "canonical DB write、migration、backfill",
+      "production deploy 或 release",
+      "production configuration activation",
+      "executable generation registry activation 或 ONLINE promotion",
+      "credentials、secrets、payments",
+      "external message、notification 或 data publication",
+      "真實金流、實單交易或真實下注",
+      "force delete、force remove",
+      "其他不可逆外部行為",
+      "只有加入 executable generation registry、ONLINE promotion 或 production activation,才屬 HIGH registry mutation"
+    ]
+    boundary_roles.each do |role|
+      output = @toolchain.render_compiled_role(role)
+      expected_clauses.each { |clause| assert_includes output, clause, "#{role}: #{clause}" }
+    end
+    refute_includes @toolchain.render_compiled_role("handoff"), "## AUTH_ESCALATION_MIN"
+  end
+
+  def test_cto_attachment_capsule_is_self_contained_and_fail_closed_for_web_review
+    cto = @toolchain.render_compiled_role("cto")
+    assert_includes cto, "1. **ATTACHMENT_DISCOVERY**"
+    ControlPlanePrototype::REQUIRED_CONTEXT_FILES.each { |path| assert_includes cto, path }
+    assert_includes cto, ".ai/agent-profile.yaml"
+    assert_includes cto, "`A_NO_ATTACHMENT`"
+    assert_includes cto, "ENTRY_CHECK / BOOTSTRAP_READINESS"
+    assert_includes cto, "Worktree NOT_APPLICABLE"
+    assert_includes cto, "不得進 routine implementation"
+    assert_includes cto, "不得自行補齊 `.ai`"
+    assert_includes cto, "A_VERSION_MISMATCH"
+    assert_includes cto, "A_SCHEMA_MISMATCH"
+    assert_includes cto, "A_CROSS_PROJECT"
+    assert_includes cto, "三者均 **STOP**"
+    assert_includes cto, "不得以其他版本或專案 attachment 充當"
+    assert_includes cto, "read-only web review 不需 local CLI working tree"
+    assert_includes cto, "0A 標 `NOT_RUN`"
+    assert_includes cto, "supplied/tool-observed evidence"
+    assert_includes cto, "不得宣稱 independent repo audit"
+  end
+
+  def test_byte_equal_output_still_runs_hard_size_guard
+    before = repository_file_hashes
+    valid = @toolchain.render_compiled_role("handoff")
+    padding = ControlPlanePrototype::ROLE_SIZE_LIMITS.fetch("handoff") - valid.bytesize + 1
+    invalid = valid + ("x" * padding)
+    exit_code, parsed, error = validate_with_byte_equal_expected("handoff", invalid)
+
+    assert_equal 1, exit_code, error
+    assert_equal "FAIL", parsed.fetch("status")
+    assert_equal ["E_ROLE_BYTE_BUDGET_EXCEEDED"], parsed.fetch("errors").map { |item| item.fetch("code") }
+    assert_equal before, repository_file_hashes
+  end
+
+  def test_byte_equal_output_still_runs_role_semantic_guards
+    before = repository_file_hashes
+    valid = @toolchain.render_compiled_role("handoff")
+    invalid = valid.sub("`confirmed_facts`", "`confirmed_items`")
+    refute_equal valid, invalid
+    exit_code, parsed, error = validate_with_byte_equal_expected("handoff", invalid)
+
+    assert_equal 1, exit_code, error
+    assert_equal "FAIL", parsed.fetch("status")
+    assert_equal ["ROLE_VALIDATOR_SEMANTIC_BYPASS"], parsed.fetch("errors").map { |item| item.fetch("code") }
+    assert_includes parsed.fetch("errors").first.fetch("message"), "ROLE_HANDOFF_MEMORY_CORE_V1_INCOMPLETE"
+    assert_equal before, repository_file_hashes
+  end
+
+  def test_provenance_equality_cannot_mask_a_role_defect
+    before = repository_file_hashes
+    valid = @toolchain.render_compiled_role("cto")
+    invalid = valid.sub("1. **ATTACHMENT_DISCOVERY**", "1. **ATTACHMENT_LOOKUP_OPTIONAL**")
+    refute_equal valid, invalid
+    exit_code, parsed, error = validate_with_byte_equal_expected("cto", invalid)
+
+    assert_equal 1, exit_code, error
+    assert_equal "FAIL", parsed.fetch("status")
+    assert_equal ["ROLE_VALIDATOR_SEMANTIC_BYPASS"], parsed.fetch("errors").map { |item| item.fetch("code") }
+    assert_includes parsed.fetch("errors").first.fetch("message"), "ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE"
+    assert_equal before, repository_file_hashes
+  end
+
+  def test_all_role_semantic_negative_fixtures_fail_with_exact_codes_and_no_source_mutation
     fixture = load_yaml(FIXTURES.join("role_semantic_negative_cases.yaml"))
     cases = fixture.fetch("cases")
-    assert_equal 12, cases.length
+    assert_equal 33, cases.length
 
     Dir.mktmpdir("control-plane-role-negative-") do |tmpdir|
       cases.each do |entry|
@@ -665,6 +793,29 @@ class ControlPlanePrototypeTest < Minitest::Test
   end
 
   private
+
+  def validate_with_byte_equal_expected(role, generated)
+    Dir.mktmpdir("control-plane-byte-equal-") do |tmpdir|
+      path = Pathname.new(tmpdir).join("#{role}.compiled.md")
+      File.binwrite(path, generated)
+      toolchain = ControlPlanePrototype::Toolchain.new
+      toolchain.define_singleton_method(:render_compiled_role) do |requested_role|
+        raise ArgumentError, "unexpected role #{requested_role}" unless requested_role.to_s == role
+
+        generated
+      end
+      output = StringIO.new
+      error = StringIO.new
+      cli = ControlPlanePrototype::CLI.new(
+        ["validate-role", role, path.to_s],
+        stdout: output,
+        stderr: error
+      )
+      cli.instance_variable_set(:@toolchain, toolchain)
+      exit_code = cli.run
+      [exit_code, JSON.parse(output.string), error.string]
+    end
+  end
 
   def compiled_capsule(raw, name)
     match = raw.match(/^## #{Regexp.escape(name)}\s*$\n/)

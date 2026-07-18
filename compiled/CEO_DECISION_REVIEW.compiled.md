@@ -80,16 +80,16 @@ Inactive lean candidate. Capsules are selected/compacted from the identified dur
 `risk_class` = 任務內所有動作的**最高**等級。Owner 可上調,任何角色不得下調。
 **LOW**(無 repo mutation、無 DB、無外部副作用):
 **MEDIUM**(一般工程動作):
+MEDIUM:metadata-only lifecycle / catalog 變更;OBSERVATION、REJECTED、RETIRED 等 non-executable metadata publication;不涉及 DB、production activation 或 external publication 的 registry / catalog 維護
 **HIGH**(不可逆、或改變正式執行資格):
-
-HIGH:canonical DB write、migration、backfill 或 generated rows;production deploy 或 release;production configuration activation;executable generation registry activation 或 ONLINE promotion;會改變正式執行資格的 registry publication;credentials、secrets、payments;external message、notification 或 data publication;真實金流、實單交易或真實下注;force delete、force remove;dirty worktree deletion;unmerged branch force deletion;broad workspace cleanup;沒有 quarantine / manifest / SHA-256 保障的不可逆刪除
-
+HIGH:canonical DB write、migration、backfill 或 generated rows;production deploy 或 release;production configuration activation;executable generation registry activation 或 ONLINE promotion;credentials、secrets、payments;external message、notification 或 data publication;真實金流、實單交易或真實下注;force delete、force remove;其他不可逆外部行為
+- metadata-only OBSERVATION catalog 變更 = **MEDIUM**,不是 HIGH。
+- 只有加入 executable generation registry、ONLINE promotion 或 production activation,才屬 HIGH registry mutation。
 | risk_class | authorization.class | 形式 |
 |---|---|---|
 | LOW | `NONE` | 無 token |
 | MEDIUM | `SINGLE_PROMPT` | token 與 task spec 同一則訊息 |
 | HIGH | `STANDALONE` | Owner 獨立授權訊息 + 分開的 spec,必述高風險原因 |
-
 **Token ownership**:
 
 - 真實 token 只能由 **Owner** 填入。

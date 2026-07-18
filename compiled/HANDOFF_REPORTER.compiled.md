@@ -85,6 +85,12 @@ Inactive lean candidate. Capsules are selected/compacted from the identified dur
 3. 未綁 current head 的 historical PASS 一律 `STALE`。
 11. Memory retrieval 必須有 budget:依 task_id、branch、PR、risk domain 或最近相關記錄選取(manifest `memory.read.selectors` + `max_entries`);**不得預設把整份 MEMORY_LOG 嵌入 Worker prompt**。跨專案隔離:A 專案的 memory 不得出現在 B 專案的任何 prompt。
 
+## MEMORY_CANDIDATE_MIN
+
+7. Handoff Reporter 只能提出 candidate memory entry(標 `CANDIDATE — NOT WRITTEN`),不得直接寫入。
+9. 每條至少包含:`timestamp`、`task_id`、`source`、`repo/head/PR binding`(如適用)、`classification`(`[Confirmed]` / `[Inferred]` / `[Risk]`)、`confirmed_facts`、`unresolved_risks`、`supersedes` / `superseded_by`。
+10. 新 memory 不得修改舊事實;修正一律用 append-only superseding entry(新條目 `supersedes: <舊 id>`;舊條目視為 `superseded_by` 標記)。
+
 ## REVIEW_BOUNDARY_MIN
 
 1. 不把計畫寫成已完成;不把 STOP / BLOCKED 寫成完成。
