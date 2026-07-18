@@ -50,4 +50,13 @@ The committed build targets are:
 ruby prototype/test_control_plane.rb
 ```
 
-The suite validates all three examples, exercises one named negative fixture for every L1–L22 rule, checks render refusal on lint failure, compiles all four roles twice, enforces individual and aggregate size gates, compares fresh bytes with every committed output, verifies selected-capsule identity and role boundaries, runs 33 exact-code role-semantic cases plus eight minification-specific cases, directly exercises size and semantic guards on byte-equal output, checks legacy prompt identities and 100% compatibility-mapping coverage, validates Markdown fence/heading structure, tampers with projection content and manifest SHA, and verifies stdout-only CLI execution leaves repository files unchanged. Test attachments, invalid roles, and views are created only in automatically removed temporary directories.
+Run the suite with both supported locale boundaries:
+
+```sh
+LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/test_control_plane.rb
+LC_ALL=C LANG=C ruby prototype/test_control_plane.rb
+```
+
+The harness treats subprocess output as UTF-8 bytes before inspecting it, so a restrictive `C` locale cannot relabel valid output as US-ASCII. Legacy prerequisites are checked collectively and fail closed: every missing path is reported together, while byte-count, line-count, and SHA-256 mismatches are independently rejected. Negative legacy cases use only automatically removed temporary fixtures; the authorized identity test always reads the four external legacy paths directly and never skips, substitutes, or synthesizes them.
+
+The suite validates all three examples, exercises one named negative fixture for every L1–L22 rule, checks render refusal on lint failure, compiles all four roles twice, enforces individual and aggregate size gates, compares fresh bytes with every committed output, verifies selected-capsule identity and role boundaries, runs 33 exact-code role-semantic cases plus eight minification-specific cases, directly exercises size and semantic guards on byte-equal output, checks legacy prompt identities and 100% compatibility-mapping coverage, validates Markdown fence/heading structure, tampers with projection content and manifest SHA, and verifies stdout-only CLI execution leaves repository files unchanged. Test attachments, invalid roles, views, and legacy negative cases are created only in automatically removed temporary directories.
