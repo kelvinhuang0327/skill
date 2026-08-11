@@ -1,0 +1,173 @@
+# TASK_MANIFEST.schema.yaml — 任務清單 schema 與 lint 規則
+# control_plane_version: 1.1.0-draft.1
+# status: DRAFT_FOR_OWNER_REVIEW
+# authority: 每個 task 恰有一份 manifest,是該 task 的唯一 source of truth(L3;Owner Decision 4)。
+#            active_task.md 只是由 manifest 投影的 compatibility view(WORKER_TASK_TEMPLATE §P);
+#            兩者不一致時以 manifest 為準。
+# 產生者: 僅 PLANNER_COMPILER(ROLE_PROFILES R4)。
+# 分層:  L1 Shared Control Plane / L2 repo-local .ai / L3 本 manifest / L4 live state(AGENT_CORE §10)。
+
+schema_version: 1
+
+control_plane:                    # L1 繫結(R2.1 新增)
+  version: "1.1.0-draft.1"        # 必須與 agent-profile 解析出的 Shared Core 版本相容
+  schema_version: 1
+  source_path: ""                 # shared control plane 目錄(例 <WORKSPACE>/prompt/control-plane-v1)
+
+project_attachment:               # L2 繫結(R2.1 新增;AGENT_CORE §12)
+  profile_path: ".ai/agent-profile.yaml"
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  missing_context_policy: "entry_check"   # enum: entry_check|stop(缺失時降級或停止;不得逕行實作)
+  profile_sha256_or_version: ""   # allowed:64-hex SHA-256|profile version string|UNKNOWN;Worker 於 handoff 記錄實際值,不得暗改 manifest
+
+task:
+  id: ""                          # 必填、唯一;例 P600G-T1
+  name: ""
+  type: ""                        # enum: feature|bugfix|test|docs|metadata|merge|pr_fix|analysis|maintenance|entry_check
+  risk_class: ""                  # enum: LOW|MEDIUM|HIGH(AGENT_CORE §6;Owner 可上調不可下調)
+  routing_path: ""                # enum: FAST|TECHNICAL|STRATEGIC(ROUTING §0/§1)
+  source_decision: ""             # CTO/CEO 輸出引用;FAST 可空
+  created_by: planner             # 固定值;其他角色不得產 manifest
+  created_at: ""                  # ISO 8601
+
+goal: ""                          # non-empty string;Worker prompt 的單一目標
+steps: []                         # non-empty ordered string list;每步不得超出 scope/policies
+success_criteria: []              # non-empty observable string list
+
+repo:
+  project_path: ""
+  base_branch: "main"
+  base_commit: ""                 # 未知填 UNKNOWN,不得杜撰
+  task_branch: ""                 # NOT_APPLICABLE 任務通常留空
+
+worktree:
+  mode: ""                        # enum: NOT_APPLICABLE|REUSABLE|EPHEMERAL(ROUTING §4)
+  reattach: false                 # true = 既有 PR fix / audit continuation(原 Mode D)
+  path: ""                        # exact path;mode=NOT_APPLICABLE 留空;禁止 fallback 路徑
+  pr_ref: ""                      # reattach=true 必填(PR number / URL)
+
+scope:
+  allowed_files: []               # exact 允許變更路徑;空 = read-only task
+  protected_paths: []             # 不變式路徑(審查時重算 hash)
+  forbidden_subsystems: []
+  pins:                           # invariant: hash 不得變;before_after: 記錄前後 hash
+    - path: ""
+      type: ""                    # enum: invariant|before_after
+
+policies:
+  db: "none"                      # enum: none|read_only|write_authorized(write_authorized 必為 HIGH)
+  runtime: "none"                 # enum: none|tmp_only|logs_allowed
+  external_side_effects: "none"   # enum: none|listed
+  external_list: []               # listed 時逐項列出,逐項套 CORE §6 分級
+  pr: "none"                      # enum: none|draft|ready
+  merge: "none"                   # enum: none|after_review|after_ci_and_review
+  cleanup: "standard_lifecycle"   # enum: standard_lifecycle|retain_with_reason|owner_override
+  cleanup_reason: ""              # retain/override 時必填
+
+tests:
+  - name: ""
+    cmd: ""
+    required: true
+    side_effects_allowed: ""      # enum: none|tmp_only|logs|db_sandbox(必填;CORE §9)
+
+memory:                           # R2.1 新增(AGENT_CORE §14;不另立 memory policy 文件)
+  read:
+    mode: "relevant"              # enum: none|relevant|bounded_recent
+    selectors: []                 # allowed prefixes:task_id:|branch:|pr:|risk_domain:|keyword:;只可選本專案 MEMORY_LOG
+    max_entries: 0                # mode≠none 時必 ≥1
+  write:
+    mode: "forbidden"             # enum: forbidden|allowed(Worker 預設不得寫;CORE §14 規則 4-5)
+    allowed_path: ""              # allowed 時必填;預設 .ai/ai-memory/MEMORY_LOG.md
+    purpose: ""                   # allowed 時必填
+    entry_schema: ""              # allowed 時必為 core_v1(CORE §14 規則 9-10)
+
+context:                          # R2.1 新增(AGENT_CORE §13)
+  live_state_required: true       # 固定 true:L4 live state 為最終事實來源
+  head_binding_required: true     # 固定 true:evidence 必綁 current head SHA
+  stale_evidence_policy: "mark_stale"   # enum: mark_stale|reject(未綁 head 的證據如何處置)
+
+authorization:
+  class: ""                       # enum: NONE|SINGLE_PROMPT|STANDALONE(CORE §7)
+  token: "PENDING_OWNER_TOKEN"    # NONE → NOT_REQUIRED;SINGLE_PROMPT → PENDING_OWNER_TOKEN(僅 Owner 可置換);
+                                  # STANDALONE → SEPARATE_MESSAGE_REQUIRED(token 永不嵌入 spec)
+  scope: ""                       # 必須等於 task.id
+  high_risk_reason: ""            # risk_class=HIGH 時必填且精確列出 HIGH 動作;LOW/MEDIUM 留空
+
+review:
+  required: true
+  mode: "fixed_head"              # 綁 PR head SHA
+  independent: true               # reviewer ≠ author(ROLE_PROFILES R6)
+
+evidence:
+  head_sha_binding: true          # 固定 true;未綁當前 head 的證據自動 STALE(CORE §2)
+  required:
+    - git_status_before_after
+    - changed_path_list
+    - test_output_with_head_sha
+
+active_task_projection:           # R2.1:取代 R2 的 compat.write_active_task_view
+  enabled: true                   # boolean;過渡期預設 true;false 時不得產生或更新 view
+  output_path: ""                 # 例 00-Plan/roadmap/active_task.md(repo 相對路徑)
+  manifest_sha256_required: true  # boolean;enabled=true 時固定 true,view banner 必含實際 manifest hash
+
+status:                           # 由各角色回填,不由 Planner 預填
+  worker_final: "NOT_RUN"         # WORKER_<STATUS> 或 NOT_RUN
+  review_verdict: "NOT_RUN"       # PASS|PASS_WITH_RISKS|FAIL|BLOCKED|NOT_RUN
+  lifecycle_state: "S0"           # ROUTING §5 狀態機
+
+# ─────────────────────────────────────────────────────────────
+# Manifest Lint Rules(Planner 渲染前必跑;任一 FAIL → 不得渲染 Worker prompt)
+#
+# L1  task.id 非空且唯一;authorization.scope == task.id;goal、steps、success_criteria 非空
+# L2  required 動作與 forbidden / policies 不矛盾:steps 與 tests 所需動作
+#     不得落在 forbidden_subsystems,也不得超出 policies
+#     (例:test 需寫 DB 但 policies.db=none → FAIL)
+# L3  每條 required=true 的 test 都有 side_effects_allowed
+# L4  type=invariant 的 pin.path ⊆ protected_paths 且 ∉ allowed_files
+#     (合法新增/修改的檔案用 before_after,不用 invariant)
+# L5  mode ∈ {REUSABLE, EPHEMERAL} → worktree.path 非空(exact);
+#     mode=NOT_APPLICABLE → path 空,且不建 task branch(除非任務明確需要)
+# L6  policies.merge ≠ none → review.required=true 且 review.independent=true
+# L7  authorization.class 與 risk_class 對映:LOW→NONE、MEDIUM→SINGLE_PROMPT、
+#     HIGH→STANDALONE;只允許向上覆寫(如 MEDIUM→STANDALONE),禁止向下;
+#     HIGH 時 authorization.high_risk_reason 非空且精確列出 HIGH 動作
+# L8  token 值域:NONE→NOT_REQUIRED;SINGLE_PROMPT→PENDING_OWNER_TOKEN 或 Owner 置換值;
+#     STANDALONE→SEPARATE_MESSAGE_REQUIRED。
+#     PENDING 狀態下 manifest 不得標示已授權;渲染出的 prompt 必含 WAITING_OWNER 語義
+# L9  policies.db=write_authorized、或 external_list 含 CORE §6 HIGH 項 → risk_class=HIGH
+# L10 allowed_files 為空 → read-only task:tests 只可 side_effects_allowed ∈ {none, tmp_only};
+#     policies.pr=none;policies.merge=none;memory.write.mode=forbidden
+# L11 policies.pr ∈ {draft, ready} → 隱含 push → risk_class ≥ MEDIUM
+# L12 cleanup=standard_lifecycle → 不得存在引用本 task 的獨立 cleanup 任務;
+#     cleanup ∈ {retain_with_reason, owner_override} → cleanup_reason 非空
+# L13 reattach=true → worktree.pr_ref 非空且 mode=EPHEMERAL
+# L14 risk_class=HIGH → routing_path=STRATEGIC
+#
+# ── R2.1 新增 ──
+# L15 project_attachment.profile_path 必須是本 repo `.ai/agent-profile.yaml`;
+#     required_context_files 必含四個 .ai 必要檔;profile_sha256_or_version 非空;
+#     profile 可解析且不得含 CORE §10 禁止鍵(發現禁止鍵 → 該鍵無效 + [Risk],T22)
+# L16 `.ai` 或 profile 缺失 → A_NO_ATTACHMENT → ENTRY_CHECK / BOOTSTRAP_READINESS;
+#     其他必要 context 缺失時 missing_context_policy ∈ {entry_check, stop} 並依值 routing;
+#     不得編譯 routine implementation
+# L17 control_plane.version / schema_version / source_path 必填;schema_version 與本 schema
+#     及 profile binding 相同;version 與 profile 相容;version mismatch → A_VERSION_MISMATCH;
+#     schema mismatch → A_SCHEMA_MISMATCH;兩者均 STOP
+# L18 memory.read.mode ∈ {none, relevant, bounded_recent};
+#     mode≠none → selectors 非空且 max_entries ≥ 1;
+#     每個 selector 必有允許 prefix 且 task-relevant;mode=none → selectors 空且 max_entries = 0
+# L19 memory.write.mode=allowed → allowed_path 非空、purpose 非空、entry_schema=core_v1、
+#     authorization.class ≠ NONE、risk_class ≥ MEDIUM
+#     (Planner 只能提案,生效依 task authorization;CORE §14 規則 8)
+# L20 memory.read.selectors 與 memory.write.allowed_path 只可指向本專案 repo-local
+#     `.ai/ai-memory/`;absolute path、`..` 或其他 repo reference → A_CROSS_PROJECT + FAIL
+# L21 context.live_state_required=true、context.head_binding_required=true、
+#     evidence.head_sha_binding=true(固定;false → FAIL);stale_evidence_policy ∈ {mark_stale, reject}
+# L22 active_task_projection.enabled=true → output_path 非空、manifest_sha256_required=true;
+#     generated view 必含實際 manifest SHA-256,缺失/不符/重新投影 diff → DRIFT + FAIL;
+#     enabled=false → output_path 空且 manifest_sha256_required=false,不得產生 view
+# ─────────────────────────────────────────────────────────────

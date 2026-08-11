@@ -1,0 +1,60 @@
+cases:
+  - name: required_evidence_rule_removed
+    role: handoff
+    mutation: replace
+    capsule: EVIDENCE_MIN
+    find: '| `[Confirmed]` | 本輪有直接證據:'
+    replace: '| `[Removed]` | 本輪有直接證據:'
+    expected_error: E_SHARED_EVIDENCE_DIVERGENCE
+
+  - name: owner_token_restriction_removed
+    role: ceo
+    mutation: replace
+    capsule: AUTH_ESCALATION_MIN
+    find: '- 真實 token 只能由 **Owner** 填入。'
+    replace: '- 真實 token 可由 reviewer 填入。'
+    expected_error: E_OWNER_TOKEN_RESTRICTION_MISSING
+
+  - name: stale_handling_omitted
+    role: planner
+    mutation: replace
+    capsule: EVIDENCE_MIN
+    find: '歷史測試結果只能作為背景,不能作為當輪驗證。'
+    replace: '歷史測試結果可直接作為當輪驗證。'
+    expected_error: E_STALE_HISTORICAL_PASS
+
+  - name: memory_boundary_omitted
+    role: ceo
+    mutation: replace
+    capsule: MEMORY_READ_MIN
+    find: 'MEMORY_LOG 不能證明 current branch、PR、CI、DB 或 runtime 狀態'
+    replace: 'MEMORY_LOG 可證明 current branch、PR、CI、DB 或 runtime 狀態'
+    expected_error: E_SHARED_MEMORY_DIVERGENCE
+
+  - name: non_planner_adds_worker_compiler
+    role: handoff
+    mutation: append
+    content: |
+      ## WORKER_COMPILER
+      Generate one complete Worker prompt and manifest.
+    expected_error: E_ROLE_WORKER_COMPILER_FORBIDDEN
+
+  - name: role_exceeds_byte_budget
+    role: handoff
+    mutation: pad_over_budget
+    expected_error: E_ROLE_BYTE_BUDGET_EXCEEDED
+
+  - name: capsule_content_diverges
+    role: cto
+    mutation: replace
+    capsule: ATTACHMENT_MIN
+    find: 'ATTACHMENT_DISCOVERY → CONTROL_PLANE_VERSION_RESOLUTION → PHASE_0A_LIVE_STATE'
+    replace: 'ATTACHMENT_DISCOVERY → SKIP_VERSION_RESOLUTION → PHASE_0A_LIVE_STATE'
+    expected_error: E_ATTACHMENT_CAPSULE_DIVERGENCE
+
+  - name: shared_core_is_duplicated_manually
+    role: ceo
+    mutation: duplicate_line
+    capsule: EVIDENCE_MIN
+    find: '| `[Confirmed]` | 本輪有直接證據:'
+    expected_error: E_HARDCODED_SHARED_CORE_DUPLICATE

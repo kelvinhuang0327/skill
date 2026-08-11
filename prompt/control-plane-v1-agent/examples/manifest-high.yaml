@@ -1,0 +1,131 @@
+# Example — HIGH / STANDALONE / STRATEGIC(exact executable-registry activation only)
+# status: DRAFT_FOR_OWNER_REVIEW
+# 非 durable file;本檔不是授權,也不嵌入 Owner token。
+schema_version: 1
+
+control_plane:
+  version: "1.1.0-draft.1"
+  schema_version: 1
+  source_path: <SHARED_CONTROL_PLANE_PATH>
+
+project_attachment:
+  profile_path: .ai/agent-profile.yaml
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  missing_context_policy: stop
+  profile_sha256_or_version: UNKNOWN
+
+task:
+  id: REG-ACT-1
+  name: promote-strategy-S042-to-executable-registry-online
+  type: maintenance
+  risk_class: HIGH
+  routing_path: STRATEGIC
+  source_decision: "CEO-Decision <DATE> §<n>;Owner standalone decision still required"
+  created_by: planner
+  created_at: "2026-07-17T00:00:00+08:00"
+
+goal: Promote only registry entry S042 from CANDIDATE to ONLINE after standalone authorization.
+steps:
+  - Resolve the attachment and verify the exact registry baseline at current HEAD.
+  - Change only entry S042 in registry/executable-generations.yaml.
+  - Run schema and focused activation tests, then follow the authorized review lifecycle.
+success_criteria:
+  - Only entry S042 changes and the registry before/after hashes are recorded.
+  - DB, data, deployment configuration, notifications, and memory remain unchanged.
+
+repo:
+  project_path: <REPO_PATH>
+  base_branch: main
+  base_commit: <ORIGIN_MAIN_AT_PLANNING>
+  task_branch: task/reg-act-1
+
+worktree:
+  mode: REUSABLE
+  reattach: false
+  path: <PROJECT_PARENT>/<PROJECT_NAME>-agent
+  pr_ref: ""
+
+scope:
+  allowed_files:
+    - registry/executable-generations.yaml
+  protected_paths:
+    - data/
+    - deploy/
+    - .ai/ai-memory/MEMORY_LOG.md
+  forbidden_subsystems: [DB, data-write, deployment, payments, external-notification, memory-write]
+  pins:
+    - {path: data/, type: invariant}
+    - {path: deploy/, type: invariant}
+    - {path: .ai/ai-memory/MEMORY_LOG.md, type: invariant}
+    - {path: registry/executable-generations.yaml, type: before_after}
+
+policies:
+  db: none
+  runtime: tmp_only
+  external_side_effects: listed
+  external_list:
+    - "promote registry entry S042 from CANDIDATE to ONLINE in registry/executable-generations.yaml"
+  pr: ready
+  merge: after_ci_and_review
+  cleanup: standard_lifecycle
+  cleanup_reason: ""
+
+tests:
+  - name: registry-schema-validation
+    cmd: "registry-validator --file registry/executable-generations.yaml"
+    required: true
+    side_effects_allowed: none
+  - name: focused-activation-unit
+    cmd: "pytest tests/test_registry_activation.py -k S042 -q"
+    required: true
+    side_effects_allowed: tmp_only
+
+memory:
+  read:
+    mode: relevant
+    selectors: ["task_id:REG-ACT-1", "branch:task/reg-act-1", "keyword:S042"]
+    max_entries: 5
+  write:
+    mode: forbidden
+    allowed_path: ""
+    purpose: ""
+    entry_schema: ""
+
+context:
+  live_state_required: true
+  head_binding_required: true
+  stale_evidence_policy: reject
+
+authorization:
+  class: STANDALONE
+  token: SEPARATE_MESSAGE_REQUIRED
+  scope: REG-ACT-1
+  high_risk_reason: "Executable registry entry S042 would gain ONLINE execution eligibility."
+
+review:
+  required: true
+  mode: fixed_head
+  independent: true
+
+evidence:
+  head_sha_binding: true
+  required:
+    - git_status_before_after
+    - changed_path_list
+    - test_output_with_head_sha
+    - registry_before_after_hash
+    - owner_standalone_authorization_reference
+
+active_task_projection:
+  enabled: true
+  output_path: 00-Plan/roadmap/active_task.md
+  manifest_sha256_required: true
+
+status:
+  worker_final: NOT_RUN
+  review_verdict: NOT_RUN
+  lifecycle_state: S0
