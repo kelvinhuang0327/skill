@@ -1,0 +1,56 @@
+- platform_name: codex
+  canonical_source_path: /Users/kelvin/VibeCoding-WorkSpace/skill/fable-method/platforms/codex/fable-method
+  live_installation_path: /Users/kelvin/.codex/skills/fable-method
+  import_status: imported
+  baseline_complete_hashes:
+    SKILL.md: 6f081e8f1232e813cccde01639a9a642a9ca9629e6ff08029f334637a51ec8b2
+    references/domains/TEMPLATE.md: dbb79ba625eb569dabbedf966eaab25a1d95f70808221e7e4371b2e3c8661892
+    references/domains/business-ops.md: 922f2597deaeca3346acd610a1fef1ea74520c4c033d25575ddeda24b95ff75e
+    references/domains/data-analysis.md: 3fb1116c8a1eb58c608d13f2e639c5b99207e136bc13820a2c3746b88019a7ac
+    references/domains/design-ux.md: 7a66cbc8e4833280d23a1c37ec1cec4b5662739c9f37dca54ce45f0947bfbcb3
+    references/domains/devops.md: 35972885538e5acd5eb330a4111c4ae8278a6eb6ff37fb0e453e18287c33707b
+    references/domains/finance.md: 0a989edd86e8f81575171693e709d7aca586139347245748d5def99e5db56fd7
+    references/domains/legal-compliance.md: 831569221ef8bdf8aff5e7051b40d24dfd0cfbc97d4c3f8872477b27386f1e02
+    references/domains/marketing.md: 69600e4ce29257bd6809296b9972db60704980114cdb88761aebc49696f7b02e
+    references/domains/research.md: d1b58fec37b9263faf69c012c540ffc4cb0f83e50dbd858a236e406ec985717f
+    references/examples.md: 38164477dc5de3b98fb7167e8683c6eb2241b7aa54d802aabbed4154f24f38b3
+    references/failure-modes.md: 61e2130f7af1a8db4a7e93ac1aa8bfc07aa408baf9fcea2e431a63338d2aada6
+    references/flowcharts.md: 10a7fa4661f403ac23438db33125dcac12276136008df673cc00eb2c18c6a55c
+
+- platform_name: claude
+  canonical_source_path: /Users/kelvin/VibeCoding-WorkSpace/skill/fable-method/platforms/claude/fable-method
+  live_installation_path: /Users/kelvin/.claude/skills/fable-method
+  import_status: imported
+  baseline_complete_hashes:
+    SKILL.md: 1e15a6a1b883a475970418a0e4b746c4bd9b11e301537cd0f442e18540d174bc
+    references/domains/TEMPLATE.md: ec7dbbed409f2e69a7be4ecdc9f0d0a051367a44fc86fd040a498918cad54f35
+    references/domains/business-ops.md: 922f2597deaeca3346acd610a1fef1ea74520c4c033d25575ddeda24b95ff75e
+    references/domains/data-analysis.md: 3fb1116c8a1eb58c608d13f2e639c5b99207e136bc13820a2c3746b88019a7ac
+    references/domains/design-ux.md: 7a66cbc8e4833280d23a1c37ec1cec4b5662739c9f37dca54ce45f0947bfbcb3
+    references/domains/devops.md: 35972885538e5acd5eb330a4111c4ae8278a6eb6ff37fb0e453e18287c33707b
+    references/domains/finance.md: 0a989edd86e8f81575171693e709d7aca586347245748d5def99e5db56fd7
+    references/domains/legal-compliance.md: 831569221ef8bdf8aff5e7051b40d24dfd0cfbc97d4c3f8872477b27386f1e02
+    references/domains/marketing.md: 69600e4ce29257bd6809296b9972db60704980114cdb88761aebc49696f7b02e
+    references/domains/research.md: d1b58fec37b9263faf69c012c540ffc4cb0f83e50dbd858a236e406ec985717f
+    references/examples.md: 38164477dc5de3b98fb7167e8683c6eb2241b7aa54d802aabbed4154f24f38b3
+    references/failure-modes.md: 61e2130f7af1a8db4a7e93ac1aa8bfc07aa408baf9fcea2e431a63338d2aada6
+    references/flowcharts.md: d64da846944daaa5c36a8432b6623b9aa2ed320596c7c359156747b180c0b397
+
+- platform_name: gemini
+  canonical_source_path: /Users/kelvin/VibeCoding-WorkSpace/skill/fable-method/platforms/gemini/fable-method
+  live_installation_path: /Users/kelvin/.gemini/config/plugins/fable-method-plugin/skills/fable-method
+  import_status: imported
+  baseline_complete_hashes:
+    SKILL.md: a23b796f90ec0c71d0265e753dbb2acb974d9c3b761b5b3379b2cf1144402103
+    references/domains/TEMPLATE.md: ec7dbbed409f2e69a7be4ecdc9f0d0a051367a44fc86fd040a498918cad54f35
+    references/domains/business-ops.md: 922f2597deaeca3346acd610a1fef1ea74520c4c033d25575ddeda24b95ff75e
+    references/domains/data-analysis.md: 3fb1116c8a1eb58c608d13f2e639c5b99207e136bc13820a2c3746b88019a7ac
+    references/domains/design-ux.md: 7a66cbc8e4833280d23a1c37ec1cec4b5662739c9f37dca54ce45f0947bfbcb3
+    references/domains/devops.md: 35972885538e5acd5eb330a4111c4ae8278a6eb6ff37fb0e453e18287c33707b
+    references/domains/finance.md: 0a989edd86e8f81575171693e709d7aca586347245748d5def99e5db56fd7
+    references/domains/legal-compliance.md: 831569221ef8bdf8aff5e7051b40d24dfd0cfbc97d4c3f8872477b27386f1e02
+    references/domains/marketing.md: 69600e4ce29257bd6809296b9972db60704980114cdb88761aebc49696f7b02e
+    references/domains/research.md: d1b58fec37b9263faf69c012c540ffc4cb0f83e50dbd858a236e406ec985717f
+    references/examples.md: 38164477dc5de3b98fb7167e8683c6eb2241b7aa54d802aabbed4154f24f38b3
+    references/failure-modes.md: 61e2130f7af1a8db4a7e93ac1aa8bfc07aa408baf9fcea2e431a63338d2aada6
+    references/flowcharts.md: 5207e98c8f1aca69434bf4796ec17a31f6421ca581a69d9617e12f66455f8b13
