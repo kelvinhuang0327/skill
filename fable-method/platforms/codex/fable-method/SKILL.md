@@ -215,6 +215,14 @@ directory and must not become a persistent project sibling. Report unexpected
 external paths and never automatically delete them. Do not modify, move, or
 delete any pre-existing sibling directory.
 
+Containment is task-relative to the current execution interval: compare only
+T0 and T1. A path absent at T0 is
+`HISTORICAL_EXTERNAL_ABSENCE_ACCEPTED_AS_CURRENT_BASELINE`; do not infer its
+history or recreate it. An unattributed sibling change is
+`EXTERNAL_WORKSPACE_CHANGE_OBSERVED`, report-only, and non-blocking; only direct
+task attribution or impact on the canonical repository or a required input can
+fail containment.
+
 ## Route once
 
 Use the Packet route when present. Otherwise choose exactly one:
