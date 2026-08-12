@@ -69,6 +69,11 @@ filesystem write/retained/deleted ledger.
 The Judge re-derives its verdict from the Packet, diff, and evidence. Do not
 pass internal reasoning or a persuasive summary as evidence.
 
+Final-tree identity is Worker-owned: the Planner supplies Judge mode/depth but
+must not predict or prefill final HEAD/tree values. The Worker records the
+observed final HEAD/tree after implementation, and the Judge evaluates exactly
+that identity read-only.
+
 ## Verdict and lifecycle boundaries
 
 `PASS` is observed evidence, not a synonym for Judge `VERIFIED`. `NOT RUN` is

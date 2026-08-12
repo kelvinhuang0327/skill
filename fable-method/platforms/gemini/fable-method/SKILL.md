@@ -86,6 +86,12 @@ verifying live repository state, its task class, route, scope, acceptance,
 deliverable format, and decisions are authoritative. Do not create a second
 plan, broaden scope, or re-litigate an approved architecture.
 
+The executable Packet itself is Worker authority. The Planner resolves the
+authority chain before handoff. The Worker may verify at most one pinned
+supporting locator named by the Packet, but must not rerun a generic
+multi-level authority search. Treat authority as unresolved only when the
+Packet is incomplete or the one locator is missing or contradictory.
+
 For `AUTHORITATIVE_PACKET_PARTIAL`, derive only the smallest
 machine-checkable acceptance already supported by repository behavior and mark
 each item `[Inferred]`; otherwise stop with
@@ -135,13 +141,27 @@ Before mutation, confirm only what can invalidate execution:
 - Packet-named paths, direct consumers, runtime/import/deploy chain, and tools;
 - Owner authorization, allowed/forbidden paths, and external side effects.
 
+The only preflight stop conditions are wrong repository, incompatible
+base/ref, overlapping dirty ownership, active concurrent mutation, missing
+required capability, or an explicit safety restriction. A compatible
+descendant, unrelated outside-scope dirty path, or harmless environment
+difference is evidence to report, not a stop.
+
 Never use the current working directory as implicit authority; an empty or
 dirty directory is not authority by itself. Preserve unrelated owner changes.
-Never stage or edit outside the declared scope. Never reset, restore, stash,
-clean, stage, commit, push, publish, deploy, change remotes, open or merge a
-PR, or touch credentials, sessions, or unrelated products unless the Packet
-explicitly authorizes that exact action. Do not inspect protected or opaque
-paths; use an opaque aggregate when the Packet requires preservation evidence.
+Never stage or edit outside the declared scope. The declared scope includes
+adjacent source, test, and configuration paths demonstrably required to satisfy
+the Packet's acceptance; report every such path. Planner Delta is required only
+for a new outcome, an unrelated subsystem, or materially expanded risk.
+Never reset, restore, stash, clean, or use force. A Packet must explicitly
+authorize a local commit. Push, publication, deployment, remote changes, PR
+creation or merge, destructive operations, credentials, secrets, production
+writes, migrations, external messages, and unrelated products require
+standalone Owner authorization. An executable Packet with Owner authorization
+authorizes reversible local edits within its stated goal and scope; ordinary
+local implementation is not blocked merely because no standalone high-risk
+authorization exists. Do not inspect protected or opaque paths; use an opaque
+aggregate when the Packet requires preservation evidence.
 
 Before a command that inspects content across multiple committed objects,
 freeze the exact refs/trees, inventory metadata first, classify every path as
@@ -269,6 +289,10 @@ tree changes, and then only as `DELTA`. A Judge that cannot reach its expected
 input state reports the mismatch and stops — that is a stale input contract,
 not evidence against the work, and it does not authorize a repeat run against
 the same inputs.
+
+Planner specifies Judge mode/depth only; it must not invent a future final
+HEAD/tree. After implementation, the Worker records the observed final
+HEAD/tree, and the Judge evaluates exactly that tree read-only.
 
 The handoff must contain the original Packet and forbidden actions,
 repository/branch/HEAD/tree and actual diff/status, scope and authorization,

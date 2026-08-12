@@ -19,7 +19,7 @@
 | 文件 | 主要角色 | 何時使用 | 何時省略 | 不得做 |
 |---|---|---|---|---|
 | Conversation Handoff v3.1 | 壓縮對話事實與授權／執行鏈 | 換對話、換模型、Worker STOP／BLOCKED、長對話需交接 | 同一對話短續作、極小 continuation | 不做 repo audit、不做架構裁決、不把 report 當獨立驗證 |
-| Planner v5.3.2 | 產生下一個單一、可執行 Worker Packet | 幾乎所有下一輪實作、CI、PR、merge、continuation | 已有 exact Packet 只需直接執行 | 不實作、不代替 Owner 做產品決策、不預設加重型 gate |
+| Planner v5.3.3 | 產生下一個單一、可執行 Worker Packet | 幾乎所有下一輪實作、CI、PR、merge、continuation | 已有 exact Packet 只需直接執行 | 不實作、不代替 Owner 做產品決策、不預設加重型 gate |
 | CTO v2.1 | 收斂技術邊界與 fix boundary | 不知道改哪一層、data flow 不明、語意衝突、scope 持續擴張 | 已知 bug、已知 CI 修正、已驗證 merge、單一路徑 delta | 不重做 Planner、不全面 audit、不把治理文件排 P0 |
 | CEO v2.1 | 產品方向與階段裁決 | 多個合理方向、是否進下一 phase、產品價值或風險政策未決 | 單純 bug、CI、merge、routine cleanup、小型 continuation | 不重做 CTO、不設計低階實作、不自動授權高風險動作 |
 
@@ -97,7 +97,7 @@ Worker / Handoff
 | 不知道應改哪一層或 scope 多大 | CTO |
 | 不知道是否值得做或先做哪個方向 | CEO |
 | 單一 bug／CI fail／PR fix | Planner；換對話才加 Handoff |
-| 只差一個 allowlist path | Planner Minimal Continuation Delta |
+| 需要 new outcome／unrelated subsystem／materially expanded risk | Planner Minimal Continuation Delta |
 | 跨 API／DB／frontend 且 boundary 不明 | CTO → Planner |
 | 兩個產品方向皆合理 | CEO；技術有疑問才先 CTO |
 | Production DB／deploy／不可逆操作 | CTO → CEO → Planner → standalone authorization |
@@ -106,7 +106,7 @@ Worker / Handoff
 
 # 4. Authority 與授權
 
-> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.3.2 的 Authority／Authorization 規則為準。
+> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.3.3 的 Authority／Authorization 規則為準。
 
 1. Live state 優先於舊 handoff。
 2. current working directory 不得自動成為 authority。
@@ -121,7 +121,7 @@ Worker / Handoff
 
 # 5. Gate 啟用原則
 
-> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.3.2 的 Gate／Runtime／Judge 規則及 CTO v2.1 的技術審查規則為準。
+> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.3.3 的 Gate／Runtime／Judge 規則及 CTO v2.1 的技術審查規則為準。
 
 ## 預設關閉
 
@@ -173,7 +173,7 @@ YES → Planner Minimal Continuation Delta
 日常 default：
 
 - `Personal_Web_Conversation_Handoff_Prompt_v3.1_Lean_Final.md`
-- `Personal_Planner_Handoff_Prompt_v5.3.2_Lean_Final.md`
+- `Personal_Planner_Handoff_Prompt_v5.3.3_Lean_Final.md`
 - `CTO_Technical_Review_Prompt_v2.1_Lean_Final.md`
 - `CEO_Decision_Review_Prompt_v2.1_Lean_Final.md`
 
