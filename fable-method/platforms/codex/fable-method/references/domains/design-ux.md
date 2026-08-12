@@ -1,39 +1,47 @@
 # Domain adapter: design and UX
 
-Applies when the deliverable is visual or interactive: UI components, pages, layouts, design reviews, brand surfaces, presentations. The loop is unchanged; these definitions replace the coding defaults.
+Applies when the deliverable is visual or interactive: UI components, pages,
+layouts, design reviews, brand surfaces, or presentations. The loop is
+unchanged; these definitions replace coding defaults.
 
 ## Minimum evidence set (binding, before any pixel)
 
-1. **The design system's own rules**: `brand.md`, design tokens (`globals.css` or equivalent), component library conventions. If none exists, say so before inventing one.
-2. **The existing surfaces**: what neighboring pages/components actually look like, opened and looked at, so new work belongs to the same family.
-3. **The interaction states**: what the surface must do on hover, focus, loading, error, empty, and overflow, not just its happy path.
+1. **Design-system rules**: `brand.md`, tokens, or component conventions; if
+   none exists, say so before inventing one.
+2. **Existing surfaces**: neighboring pages/components opened and viewed.
+3. **Interaction states**: hover, focus, loading, error, empty, and overflow,
+   not only the happy path.
 
 ## Evidence and primary sources
 
-The rendered artifact is the primary source; the code that produces it is a claim about it. Design intent lives in brand.md, tokens, and any referenced designs (Figma, screenshots), never in memory of "what looks good".
+The rendered artifact is primary; code is a claim about it. Intent lives in
+brand rules, tokens, and referenced designs, never aesthetic memory.
 
 ## Authority order
 
-Explicit user/client direction > brand.md and design tokens > the referenced design file > existing component conventions > your aesthetic preference. A request to "make it pop" does not override a token system; surface the conflict.
+Explicit user/client direction > brand.md and tokens > referenced design file >
+existing conventions > aesthetic preference. Surface conflicts.
 
 ## Verification by observation
 
-- The surface is actually rendered and looked at (screenshot or live), at more than one width if it is responsive. Unrendered UI work is unverified by definition.
-- Colors, spacing, radii, and type trace to tokens, not hardcoded values; violations are found by grepping for raw hex/px next to an existing token.
-- Accessibility is checked, not asserted: contrast ratios computed, focus visible, interactive elements labeled, keyboard path walked.
-- All states listed in the minimum evidence set exist and were seen, including error and empty.
+- Render and inspect the surface, at more than one width when responsive.
+- Trace colors, spacing, radii, and type to tokens; search for raw values.
+- Compute contrast, inspect focus, label controls, and walk the keyboard path.
+- See every required loading, error, empty, and overflow state.
 
 ## Fraud table (for fable-judge)
 
 | Fraud | Symptom |
 |---|---|
-| Unrendered "done" | "matches the design" with no screenshot or render performed |
-| Token betrayal | hardcoded hex/px/fonts beside an existing token system |
-| Asserted accessibility | "accessible" or "WCAG compliant" with no contrast/keyboard/label check shown |
-| Happy-path-only | error, empty, loading, and overflow states missing but unmentioned |
-| Off-family surfaces | new work visibly foreign to neighboring pages, unflagged |
-| Placeholder debris | lorem ipsum, stock dummy images, dead links left in "finished" work |
+| Unrendered “done” | “Matches the design” with no render or screenshot |
+| Token betrayal | Hardcoded colors, pixels, or fonts beside tokens |
+| Asserted accessibility | Accessibility claim without contrast or keyboard evidence |
+| Happy-path-only | Error, empty, loading, or overflow state is missing or silent |
+| Off-family surface | New work is visibly foreign to neighboring pages |
+| Placeholder debris | Lorem ipsum, dummy images, or dead links remain |
 
 ## Done, by example
 
-"The pricing page is done" means: rendered and reviewed at two widths, every value from tokens, contrast computed on new color pairs, all states present, and consistent with its sibling pages. Not: "the component compiles and looks fine."
+“The pricing page is done” means rendered and reviewed at two widths, token
+values used, contrast computed, all states present, and sibling consistency
+checked. Not: “it compiles and looks fine.”
