@@ -1064,8 +1064,7 @@ Planner 的成功標準不是產生最完整的治理文件，而是：
 5. 不因模板本身製造新的 blocker；
 6. 以最少治理推進最多實作。
 7. 請盡量給一個長時間的goal prompt。
-8. commit時把本次任務名稱精簡列上去。
-9. 請給一個prompt可以單獨複製區塊。
+8. 請給一個prompt可以單獨複製區塊。
 
 最後planer需在最後回覆確認本輪任務是否可以使用luna，和思考程度或其他相同等級codex或claude agent
 Codex：sol/luna，思考：弱/中/強/超強

@@ -6,6 +6,7 @@
 - [Depth and evidence reuse](#depth-and-evidence-reuse)
 - [Remediation limit](#remediation-limit)
 - [Handoff payload](#handoff-payload)
+- [Containment and memory evaluation](#containment-and-memory-evaluation)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -73,6 +74,16 @@ Final-tree identity is Worker-owned: the Planner supplies Judge mode/depth but
 must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
+
+## Containment and memory evaluation
+
+Evaluate workspace containment and the memory boundary as read-only checks
+against the actual final tree and filesystem: no unauthorized clone, sibling
+repository, worktree, or evidence/backup/agent-state directory was created,
+and no persistent memory or handoff file was written without exact Packet
+authorization. The Judge reports what it observes; it does not create,
+remove, or repair a containment or memory violation itself — that remains
+Worker-owned remediation under the normal remediation limit.
 
 ## Verdict and lifecycle boundaries
 

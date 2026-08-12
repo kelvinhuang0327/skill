@@ -77,6 +77,23 @@ are all resolved YES. Otherwise report CONTEXT_HANDOFF_INCOMPLETE and do only
 read-only state resolution. Never use compaction to clear a blocker, extend
 authorization, hide a failed attempt, or reopen a stopped mutation.
 
+## Memory boundary
+
+Any persistent agent memory (cross-session notes, prior handoffs, remembered
+project facts) is context only. It is never authority for repository state,
+Owner authorization, current HEAD/tree, test results, task completion, or
+deployment/publication status. Live repository, Git, and freshly executed
+verification override conflicting memory; when they conflict, do not update
+memory to match the stale claim.
+
+Read existing project memory only when the active Packet or contract
+identifies it as relevant. Do not create or modify `.ai/`, `MEMORY.md`,
+memory logs, persistent handoff summaries, or agent-state/checkpoint files
+unless the Packet authorizes the exact path and purpose. A finished report or
+ordinary task completion is not that authorization. Product-level memory
+settings for Claude, Codex, or Gemini are outside this Skill's authority and
+must not be changed.
+
 ## Authority and Packet fast path
 
 An `AUTHORITATIVE_PACKET_PRESENT` contains a Goal, Owner/authority, allowed
@@ -179,6 +196,25 @@ Non-Git source roots remain supported: do not run `git init`, create a nested
 repository, or turn a non-Git source root into a Git authority merely to make a
 check convenient. Keep `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence
 separate; labels do not turn inference into observation.
+
+## Workspace containment
+
+The canonical repository (or an explicitly named existing worktree) is the
+only persistent write root. Authorization to commit locally does not
+authorize creating a clone, a sibling repository, a new worktree, or a
+persistent evidence, backup, or agent-state directory — including any
+`*-agent`, `*-pNN`, `*-validation`, or `*-evidence` sibling. Never run `git
+worktree add`, `git clone`, or copy/rsync the repository outside the
+canonical root unless the Packet supplies `CREATE_EXTERNAL_WORKSPACE: YES`
+with an exact absolute path and a cleanup disposition.
+
+If a new worktree or external directory would seem to help but is not
+explicitly authorized, continue inside the canonical repository when safe;
+otherwise stop for exact-path authorization rather than creating it.
+Disposable intermediate output may use only a safely resolved OS temporary
+path and must not become a persistent project sibling. Report an unexpected
+external path without assuming who created it and without deleting it; never
+touch, move, or delete a pre-existing sibling directory as part of this work.
 
 ## Route once
 
