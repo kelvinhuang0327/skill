@@ -104,7 +104,8 @@ REQUIRED_DECISION:
 ```
 
 If a Packet contradicts a domain, schema, terminology, data, safety, or live
-repository invariant, do not choose silently:
+repository invariant, do not choose silently. Without an explicit
+Owner-approved override, choose neither side and stop:
 
 ```text
 PLANNER_PACKET_CONTRACT_CONFLICT
@@ -124,12 +125,6 @@ project from an empty directory, override explicit PURE_QA, or turn WORKTREE_MOD
 NOT_APPLICABLE into a repository blocker. Preserve the Packet's task class,
 route, acceptance, and stop conditions.
 
-Without an explicit Owner-approved override, choose neither side silently and
-stop. A Packet step containing MUST, REQUIRED, read completely, require, or
-STOP if is mandatory. If it cannot be executed, stop before further mutation
-with PACKET_REQUIRED_STEP_NOT_EXECUTED, naming the step, reason, impact, and
-required decision.
-
 ## Bounded preflight and write boundary
 
 Before mutation, confirm only what can invalidate execution:
@@ -140,36 +135,31 @@ Before mutation, confirm only what can invalidate execution:
 - Packet-named paths, direct consumers, runtime/import/deploy chain, and tools;
 - Owner authorization, allowed/forbidden paths, and external side effects.
 
-Never use the current working directory as implicit authority. Preserve
-unrelated owner changes. Never reset, restore, stash, clean, stage, commit,
-push, publish, deploy, or touch credentials unless the Packet explicitly
-authorizes that exact action. Do not inspect protected or opaque paths; use an
-opaque aggregate when the Packet requires preservation evidence.
+Never use the current working directory as implicit authority; an empty or
+dirty directory is not authority by itself. Preserve unrelated owner changes.
+Never stage or edit outside the declared scope. Never reset, restore, stash,
+clean, stage, commit, push, publish, deploy, change remotes, open or merge a
+PR, or touch credentials, sessions, or unrelated products unless the Packet
+explicitly authorizes that exact action. Do not inspect protected or opaque
+paths; use an opaque aggregate when the Packet requires preservation evidence.
 
-Freeze exact refs/trees before multi-object searches, inventory metadata first,
-and search only an exact safe path/blob allowlist. Start the in-memory
-filesystem ledger before the first write. It includes source edits, generated
-outputs, shell redirects, downloads, scratch files, deleted temporary files,
-checkout materialization, Git metadata, and harness metadata.
+Before a command that inspects content across multiple committed objects,
+freeze the exact refs/trees, inventory metadata first, classify every path as
+safe text, protected, Owner-protected, unknown, submodule, symlink, or special
+mode, and search only an exact safe path/blob allowlist. Unknown or protected
+content fails closed; never use a broad grep and filter afterward. Apply the
+Judge's object-search contract when this becomes a Judge handoff.
+
+Start the in-memory filesystem ledger before the first write. It includes
+source edits, generated outputs, shell redirects, downloads, scratch files,
+deleted temporary files, checkout materialization, Git metadata, and harness
+metadata. Do not create a handoff, report, log, or scratch file outside an
+explicitly allowlisted path.
 
 Non-Git source roots remain supported: do not run `git init`, create a nested
 repository, or turn a non-Git source root into a Git authority merely to make a
 check convenient. Keep `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence
 separate; labels do not turn inference into observation.
-
-Never stage or edit outside the declared scope. An empty or dirty directory is
-not authority by itself. Do not run git init, create a nested repository,
-change remotes, push, open or merge a PR, or touch credentials, sessions, or
-unrelated products unless the Packet explicitly authorizes that exact action.
-
-Before a command that may inspect content across multiple committed objects,
-freeze the exact refs/trees, inventory metadata first, classify every path as
-safe text, protected, Owner-protected, unknown, submodule, symlink, or special
-mode, and search only an exact safe path/blob allowlist. Unknown or protected
-content fails closed; never use a broad grep and filter afterward. Apply the
-dedicated Judge's object-search contract when this becomes a Judge handoff.
-Do not create a handoff, report, log, or scratch file outside an explicitly
-allowlisted path.
 
 ## Route once
 
@@ -181,28 +171,30 @@ Use the Packet route when present. Otherwise choose exactly one:
 - `STANDARD_JUDGED`: a Judge trigger applies and Loop is not eligible.
 - `LOOP_JUDGED`: every Loop capability and eligibility gate is `YES`.
 
-Judge triggers include security/authentication/authorization, finance/payment,
-database or production-data writes, shared-core or cross-runtime changes,
-real UI/browser/device validation, external side effects, acceptance failure or
-repair retry, explicit independent verification, or material unknown evidence.
+A Judge trigger requires both a listed category and material consequence: the
+change reaches an external consumer, a shared runtime, or production data, or
+is otherwise not cheaply reversible. The categories are
+security/authentication/authorization, finance/payment, database or
+production-data writes, shared-core or cross-runtime changes, real
+UI/browser/device validation, external side effects, explicit independent
+verification, or material unknown evidence. A single acceptance failure is not
+a trigger; a second retry whose cause is still unattributed is. Editing a
+prompt, template, or this Skill is not by itself a shared-core trigger.
+
 Loop requires a fixed scope, at least two genuinely independent cards with
 independent acceptance, isolated writes/state, usable subagent capability,
 main-Worker integration ownership, runnable integrated acceptance, and real
-parallel savings. Otherwise emit `LOOP_CAPABILITY_FAILED` or
-`LOOP_NOT_ELIGIBLE` and run serially. Never fan out automatically.
+parallel savings — no card sharing unfinished output, mutable DB, runtime, or
+overlapping write scope. Otherwise emit `LOOP_CAPABILITY_FAILED` or
+`LOOP_NOT_ELIGIBLE` and run serially. Never fan out automatically. The main
+Worker remains Integration Owner. Use fable-loop only for a valid bounded
+handoff; do not copy its workflow into this Skill.
 
-Pure QA and planning have no implementation route.
-
-Route changes require a new Owner instruction, an observed authority/scope
-conflict, or a verified missing capability. Report old route, new route,
-evidence, and impact every time; difficulty, file count, risk, or slow tests
-alone do not justify Loop or a silent route change.
-
-Loop is eligible only when no card shares unfinished output, mutable DB,
-runtime, or overlapping write scope, and parallel savings exceed handoff and
-integration cost. The main Worker remains Integration Owner.
-Use fable-loop only for a valid bounded handoff; do not copy its workflow into
-this Skill.
+Pure QA and planning have no implementation route. Route changes require a new
+Owner instruction, an observed authority/scope conflict, or a verified missing
+capability. Report old route, new route, evidence, and impact every time;
+difficulty, file count, risk, or slow tests alone do not justify Loop or a
+silent route change.
 
 ## Intent, authorization, and surgical execution
 
@@ -230,10 +222,9 @@ If the current user Packet explicitly authorizes the precise action, quote that
 authorization. Otherwise do not act; report
 `PENDING: <action> - awaiting your authorization`.
 
-A task framing such as “fix the code” is not a behavior spec. Before using any
-unopened API, path, config key, figure, or command, open its source or label the
-fact [Unknown] and unverified; never rely on recall. Use precise edits and
-never overwrite without looking first.
+A task framing such as “fix the code” is not a behavior spec. Never rely on
+recall: label an unverified fact `[Unknown]`. Use precise edits and never
+overwrite without looking first.
 
 A stop token is final for the current route: do not make further mutation until
 the named authority, capability, or decision changes.
@@ -257,8 +248,9 @@ burn attempts on identical retries.
 Verify by observation: the named done criterion actually ran or rendered, the
 surrounding build/test/lint or equivalent remains healthy, and required
 runtime or external evidence exists. `NOT RUN` is never `PASS`, and source
-inspection is not runtime evidence. When a defect is fixed, search the whole
-safe project for the exact wrong construct and report:
+inspection is not runtime evidence. When a fixed defect came from a construct
+that could plausibly recur elsewhere, search the safe project for it and
+report; skip the search for a one-off or locally scoped defect:
 
 ```text
 TWINS: searched <pattern> - found <N> other sites: <files or none>
@@ -270,6 +262,13 @@ fresh-context read-only Judge rather than duplicating Judge logic. Initial
 Judge depth is `BOUNDED` unless a named full trigger or explicit Owner
 requirement requires `FULL`; use `DELTA` only after the one permitted bounded
 remediation. The Worker never repairs inside the Judge.
+
+One Judge verdict per exact tree is terminal. When a tree already carries a
+`VERIFIED` verdict, do not open another Judge on it; re-judge only after the
+tree changes, and then only as `DELTA`. A Judge that cannot reach its expected
+input state reports the mismatch and stops — that is a stale input contract,
+not evidence against the work, and it does not authorize a repeat run against
+the same inputs.
 
 The handoff must contain the original Packet and forbidden actions,
 repository/branch/HEAD/tree and actual diff/status, scope and authorization,
@@ -294,7 +293,10 @@ post-merge checks, cleanup, and a clean/restored workspace. Local completion
 without publication is not a publication failure. Keep unauthorized work
 under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
 
-Always report these ledger partitions, using `NONE` only when truly empty:
+For `FAST` and `STANDARD` work, report the compact form in
+[reporting](references/reporting.md). Report the full ledger partitions below
+only for judged, publication-bound, or Tier-2 runtime work, using `NONE` only
+when truly empty:
 
 ```text
 FILES_WRITTEN_DURING_TASK:
@@ -390,7 +392,7 @@ without observing it. FULL_PR_LIFECYCLE_CLOSED: YES additionally requires a
 verified merge commit, target containment, required post-merge checks, cleanup,
 and a clean/restored workspace.
 
-Include:
+For judged or publication-bound work, also include:
 
 ```text
 LOCAL_FULL_SUITE_RUNS:
@@ -403,9 +405,7 @@ REUSED_EVIDENCE:
 INVALIDATED_EVIDENCE:
 ```
 
-Leave no task-created scratch debris. Distinguish `NOT RUN`, `BLOCKED`, and
-`UNKNOWN`; never claim deployment, publication, runtime success, equality, or
-cleanup without observing it.
+Leave no task-created scratch debris.
 
 ## Gemini integration
 

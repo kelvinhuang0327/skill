@@ -395,7 +395,17 @@ git push origin --delete <TASK_BRANCH>
 
 不要為 clean new task 要求大量 SHA、mtime、inode、process 或所有 worktree 盤點。
 
-若 live state 不符：
+只有以下情況才算 live state 不符：
+
+* wrong repository／ref；
+* base 與 Packet 不相容；
+* 與他人重疊的 dirty ownership；
+* 進行中的並行變更。
+
+良性前進不算不符——例如原本的 unstaged 變更已被 commit 吸收、或 managed scope 之外
+有無關的 owner 變更。確認 managed scope 內容一致後直接繼續，不要因此停止。
+
+真正不符時：
 
 * 不自行 repair；
 * 輸出一個 task-specific stop token；
@@ -814,6 +824,9 @@ Do not reset, stash, clean, rebase or force.
 If another path is required:
 <SCOPE_EXPANSION_STOP_TOKEN>
 
+Adjacent test/config paths needed to satisfy the stated acceptance do not
+require a stop; report them as changed paths.
+
 ## Forbidden
 
 <SHORT_LIST_OF_REAL_BOUNDARIES>
@@ -856,7 +869,9 @@ JUDGE_DEPTH:
 NOT_APPLICABLE | BOUNDED | FULL | DELTA
 
 JUDGE_INPUT_HEAD:
+<BOUND_BY_WORKER_AT_FINAL_TREE>
 JUDGE_INPUT_TREE:
+<BOUND_BY_WORKER_AT_FINAL_TREE>
 
 REMEDIATION_AUTHORIZED:
 YES | NO
