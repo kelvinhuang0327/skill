@@ -128,6 +128,19 @@ requirement. Owner authorization and platform or harness permission are
 different. A harness permission failure is unresolved and must not be bypassed
 with a weaker command or alternate lifecycle path.
 
+When an already-authorized action is blocked by an interactive permission gate, report:
+
+```text
+HARNESS_PERMISSION_BLOCKED
+OWNER_AUTHORIZATION: ALREADY_PRESENT
+AUTHORIZED_ACTION:
+BLOCKED_TOOL_OR_COMMAND:
+MUTATIONS_ALREADY_COMPLETED:
+MUTATIONS_NOT_COMPLETED:
+REQUIRED_USER_ACTION: approve the platform or harness permission prompt
+```
+
+
 Resolve Git actions independently:
 
 REMOTE_STATUS: NONE | CONFIGURED | UNKNOWN
