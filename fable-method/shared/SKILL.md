@@ -5,7 +5,7 @@ description: Primary Fable Worker discipline for classifying asks, resolving Pac
 
 # The Fable Method
 
-Use this file as the single shared Fable workflow for every platform package.
+Use this file as the single shared Fable workflow and controlling Worker contract for every platform package.
 It guides behavior; it does not mechanically enforce permissions.
 
 ```text
@@ -53,6 +53,30 @@ EVIDENCE:
 IMPACT_ON_ROUTE:
 ```
 
+## Context and continuity
+
+Never infer model identity, context capacity, current usage, or billing policy
+from the product name or maximum window. Resolve each independently and mark
+unavailable values UNKNOWN; do not make a cost-multiplier claim unless the
+active model, plan/policy, and threshold are all current and authoritative.
+
+When exact usage metadata is unavailable, report CURRENT_CONTEXT_PERCENT:
+UNKNOWN, CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC, and a qualitative pressure
+level. At a stable milestone, or before a new large phase or handoff, preserve
+only observable state: exact repository/branch/HEAD/tree/status, active
+processes and pending mutations, completed files/commits, verification and
+NOT RUN, failed attempts, current blocker, next single action, next milestone,
+and stop conditions. Do not write a checkpoint file unless a Packet explicitly
+supplies both HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE and an exact
+HANDOFF_OUTPUT_PATH; the default is TRANSCRIPT_ONLY.
+
+After compaction or resume, report CONTEXT_REHYDRATION_STATUS: PASS only when
+project, task, authority, repository, sandbox, modified-path ledger, observable
+history, milestone, blocker, next action, next milestone, and stop conditions
+are all resolved YES. Otherwise report CONTEXT_HANDOFF_INCOMPLETE and do only
+read-only state resolution. Never use compaction to clear a blocker, extend
+authorization, hide a failed attempt, or reopen a stopped mutation.
+
 ## Authority and Packet fast path
 
 An `AUTHORITATIVE_PACKET_PRESENT` contains a Goal, Owner/authority, allowed
@@ -90,6 +114,21 @@ IS_EXPLICIT_OVERRIDE: YES | NO
 REQUIRED_DECISION:
 ```
 
+For a complete Packet, use only bounded checks: repository identity and live
+branch/HEAD/worktree, Owner authorization, allowed/forbidden paths, named
+inputs and outputs, and Packet-versus-live conflicts. Then select the Packet's
+task class and route once. Do not request a new product brief, invent
+different requirements, rebuild the Planner's plan, bootstrap an unrelated
+project from an empty directory, override explicit PURE_QA, or turn WORKTREE_MODE:
+NOT_APPLICABLE into a repository blocker. Preserve the Packet's task class,
+route, acceptance, and stop conditions.
+
+Without an explicit Owner-approved override, choose neither side silently and
+stop. A Packet step containing MUST, REQUIRED, read completely, require, or
+STOP if is mandatory. If it cannot be executed, stop before further mutation
+with PACKET_REQUIRED_STEP_NOT_EXECUTED, naming the step, reason, impact, and
+required decision.
+
 ## Bounded preflight and write boundary
 
 Before mutation, confirm only what can invalidate execution:
@@ -117,6 +156,20 @@ repository, or turn a non-Git source root into a Git authority merely to make a
 check convenient. Keep `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence
 separate; labels do not turn inference into observation.
 
+Never stage or edit outside the declared scope. An empty or dirty directory is
+not authority by itself. Do not run git init, create a nested repository,
+change remotes, push, open or merge a PR, or touch credentials, sessions, or
+unrelated products unless the Packet explicitly authorizes that exact action.
+
+Before a command that may inspect content across multiple committed objects,
+freeze the exact refs/trees, inventory metadata first, classify every path as
+safe text, protected, Owner-protected, unknown, submodule, symlink, or special
+mode, and search only an exact safe path/blob allowlist. Unknown or protected
+content fails closed; never use a broad grep and filter afterward. Apply the
+dedicated Judge's object-search contract when this becomes a Judge handoff.
+Do not create a handoff, report, log, or scratch file outside an explicitly
+allowlisted path.
+
 ## Route once
 
 Use the Packet route when present. Otherwise choose exactly one:
@@ -136,6 +189,19 @@ independent acceptance, isolated writes/state, usable subagent capability,
 main-Worker integration ownership, runnable integrated acceptance, and real
 parallel savings. Otherwise emit `LOOP_CAPABILITY_FAILED` or
 `LOOP_NOT_ELIGIBLE` and run serially. Never fan out automatically.
+
+Pure QA and planning have no implementation route.
+
+Route changes require a new Owner instruction, an observed authority/scope
+conflict, or a verified missing capability. Report old route, new route,
+evidence, and impact every time; difficulty, file count, risk, or slow tests
+alone do not justify Loop or a silent route change.
+
+Loop is eligible only when no card shares unfinished output, mutable DB,
+runtime, or overlapping write scope, and parallel savings exceed handoff and
+integration cost. The main Worker remains Integration Owner.
+Use fable-loop only for a valid bounded handoff; do not copy its workflow into
+this Skill.
 
 ## Intent, authorization, and surgical execution
 
@@ -162,6 +228,16 @@ AUTH: user said "<exact authorization words>"
 If the current user Packet explicitly authorizes the precise action, quote that
 authorization. Otherwise do not act; report
 `PENDING: <action> - awaiting your authorization`.
+
+A task framing such as “fix the code” is not a behavior spec. Before using any
+unopened API, path, config key, figure, or command, open its source or label the
+fact [Unknown] and unverified; never rely on recall. Use precise edits and
+never overwrite without looking first.
+
+A stop token is final for the current route: do not make further mutation until
+the named authority, capability, or decision changes.
+
+Documentation or task completion is not authorization.
 
 ## Execution failures and retries
 
@@ -292,6 +368,13 @@ behavior, and no searching. Otherwise use the full loop. For an implementation,
 continue with intent → smallest coherent change → acceptance → surrounding
 verification → handoff/report.
 
+State checkable assumptions and load the applicable domain adapter before Step
+2. The Fit gate routes reachable-source questions through the loop, researchable
+unknown techniques through bounded research first, pure inference to an
+explicitly low-confidence answer or one pointed question, and recurring
+specialized procedures to the installed skill-creator Skill. Name any such
+detour; never silently skip the loop.
+
 ## Final artifact gate
 
 Hostile-review the final report against the Packet and actual diff/status.
@@ -299,6 +382,13 @@ Every changed path must be authorized; every `PASS` needs a command,
 observation, or valid same-tree evidence; no claim may rest only on inference.
 Do not return a terminal success classification while a mandatory criterion is
 `NOT RUN`, unresolved, or contradicted.
+Add the required INTENT:, AUTH:, PENDING:, or TWINS: line when its condition
+applies. Lead with what happened, distinguish NOT RUN, BLOCKED, and UNKNOWN,
+and never claim deployment, publication, runtime success, equality, or cleanup
+without observing it. FULL_PR_LIFECYCLE_CLOSED: YES additionally requires a
+verified merge commit, target containment, required post-merge checks, cleanup,
+and a clean/restored workspace.
+
 Include:
 
 ```text
