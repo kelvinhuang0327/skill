@@ -276,14 +276,14 @@ OTHER_FILES:
 
 若CEO只是決定方向而scope未完整，交給Planner；不要由CEO寫過度細節的implementation Packet。
 
-本區塊是CEO的scope brief，不是授權。CEO可決定方向與scope，不可授予Git、DB、deployment或publication權限；授權一律來自Owner原話。
+若CEO改動既有Packet的goal、scope、acceptance、risk或permissions，該Packet即不再授權執行變更後的任務；必須取得新的Owner指示或Planner Packet。Owner直接重新授權即可，不強制繞Planner。
+
+本區塊是CEO的scope brief，不是授權。CEO可決定方向與scope，不可授予Git、DB、deployment或publication權限；授權一律來自Owner原話。本區塊不含執行呼叫；要執行時由Owner自行送出。
 
 ```text
 Owner Authorization: <VERBATIM_OWNER_WORDS_TRANSCRIBED | NONE>
-
-/fable-method
-
-MODE: WORKER_EXECUTION
+EXECUTION_REQUIRES_NEW_OWNER_MESSAGE: YES
+AUTHORIZATION_CARRIED_FORWARD: NO
 
 Role:
 <Worker | Planner | CTO>
