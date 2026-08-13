@@ -51,7 +51,7 @@ publication/merge, post-merge verification, workspace and branch cleanup, and
 no unresolved blocker. For a local uncommitted Worker handoff, use:
 
 ```text
-PR_PUBLICATION_STATUS: NOT_AUTHORIZED
+PR_PUBLICATION_STATUS: NOT_APPLICABLE
 POSTMERGE_LIFECYCLE_STATUS: NOT_APPLICABLE
 BRANCH_CLEANUP_STATUS: NOT_APPLICABLE
 FULL_PR_LIFECYCLE_CLOSED: NO

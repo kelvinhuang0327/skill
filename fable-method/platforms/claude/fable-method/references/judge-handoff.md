@@ -14,11 +14,11 @@ verdict.
 
 ## When the Judge gate fires
 
-Use a fresh-context Judge for security/authentication/authorization,
-finance/payment, database schema or production data, shared-core or
-cross-runtime changes, real UI/browser/device validation, external effects,
-Loop execution, acceptance failure or repair retry, explicit independent
-verification, or material unknown/incomplete evidence.
+The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
+category and material consequence together. Do not restate or widen that list
+here. A single acceptance failure is not a trigger; a second retry whose cause
+is still unattributed is. `LOOP_JUDGED` is judged by route definition, not by
+category.
 
 `READ_ONLY_COMPLETION_REVIEW` goes directly to `fable-judge` and has no Worker
 route. A Worker with no fresh-context capability may self-check only, must mark
