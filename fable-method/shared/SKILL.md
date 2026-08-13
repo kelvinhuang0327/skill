@@ -77,6 +77,19 @@ are all resolved YES. Otherwise report CONTEXT_HANDOFF_INCOMPLETE and do only
 read-only state resolution. Never use compaction to clear a blocker, extend
 authorization, hide a failed attempt, or reopen a stopped mutation.
 
+## Memory boundary
+
+Memory is context only and never repository authority. It cannot establish
+authorization, HEAD/tree, test results, completion, deployment, or publication
+status. Live repository state, Git state, and freshly executed verification
+override conflicting memory. Read project memory only when the active contract
+or Packet identifies it as relevant. Do not create or modify `.ai/`,
+`MEMORY.md`, memory logs, persistent handoffs, checkpoints, or agent-state files
+unless the Packet authorizes the exact path and purpose; an ordinary final
+report never authorizes a persistent memory write. Product-level ChatGPT,
+Codex, Claude, or Gemini memory settings are outside Fable Method authority
+and must not be changed.
+
 ## Authority and Packet fast path
 
 An `AUTHORITATIVE_PACKET_PRESENT` contains a Goal, Owner/authority, allowed
@@ -180,6 +193,36 @@ repository, or turn a non-Git source root into a Git authority merely to make a
 check convenient. Keep `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence
 separate; labels do not turn inference into observation.
 
+## Workspace containment
+
+The canonical repository, or an explicitly named existing worktree, is the only
+persistent write root. `LOCAL_COMMIT_ONLY` does not authorize a clone, sibling
+repository, new worktree, evidence directory, backup directory, agent-state
+directory, or `*-agent`, `*-pNN`, `*-validation`, or `*-evidence` directory.
+Never run `git worktree add`, `git clone`, or copy/rsync the repository outside
+the canonical root unless the Packet contains all of:
+
+```text
+CREATE_EXTERNAL_WORKSPACE: YES
+EXACT_ABSOLUTE_PATH: <path>
+CLEANUP_DISPOSITION: <retain-or-remove>
+```
+
+If an external workspace appears useful but these fields are absent, continue
+inside the canonical repository when safe; otherwise stop for exact-path
+authorization. Disposable intermediate output may use only an OS temporary
+directory and must not become a persistent project sibling. Report unexpected
+external paths and never automatically delete them. Do not modify, move, or
+delete any pre-existing sibling directory.
+
+Containment is task-relative to the current execution interval: compare only
+T0 and T1. A path absent at T0 is
+`HISTORICAL_EXTERNAL_ABSENCE_ACCEPTED_AS_CURRENT_BASELINE`; do not infer its
+history or recreate it. An unattributed sibling change is
+`EXTERNAL_WORKSPACE_CHANGE_OBSERVED`, report-only, and non-blocking; only direct
+task attribution or impact on the canonical repository or a required input can
+fail containment.
+
 ## Route once
 
 Use the Packet route when present. Otherwise choose exactly one:
@@ -214,6 +257,25 @@ Owner instruction, an observed authority/scope conflict, or a verified missing
 capability. Report old route, new route, evidence, and impact every time;
 difficulty, file count, risk, or slow tests alone do not justify Loop or a
 silent route change.
+
+## Focused decision outcomes
+
+Apply these outcomes from the live contract:
+
+- Routine reversible local implementation: one bounded Phase 0, then `START`.
+- Necessary adjacent test/config path: `ALLOW_AND_REPORT`; no Planner Delta
+  unless the outcome, subsystem, or risk materially changes.
+- Compatible descendant with unrelated dirt: `START`; preserve that dirt.
+- Overlapping managed dirt or incompatible ancestry: `STOP_WITH_EVIDENCE`.
+- Push, production write, migration, destructive action, or secret handling:
+  `REQUIRE_STANDALONE_AUTHORIZATION`.
+- Judged work records actual final HEAD/tree; the Judge checks that exact pair.
+- Unjudged routine work: `DO_NOT_CREATE_OR_INVOKE_JUDGE`.
+- Memory conflict: `LIVE_EVIDENCE_WINS`; `DO_NOT_UPDATE_MEMORY`.
+- A useful sibling workspace: `DO_NOT_CREATE`; continue in the canonical repo
+  when safe, otherwise `STOP_FOR_EXACT_PATH_AUTHORIZATION`.
+- Missing exact external-workspace path or cleanup disposition:
+  `STOP_AS_INCOMPLETE_AUTHORIZATION`.
 
 ## Intent, authorization, and surgical execution
 
