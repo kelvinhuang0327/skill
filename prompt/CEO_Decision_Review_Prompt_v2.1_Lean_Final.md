@@ -198,6 +198,8 @@ WORKER | PLANNER | CTO | NONE
 - `DECISION_FILE_ONLY`：更新一份CEO decision；
 - `ACTIVE_TASK_ONLY`：更新一個active task。
 
+寫入模式只能由Owner原話加exact path授權；CEO mode標籤本身不構成授權。
+
 禁止：
 
 - 直接修改roadmap／CTO analysis；
@@ -274,8 +276,10 @@ OTHER_FILES:
 
 若CEO只是決定方向而scope未完整，交給Planner；不要由CEO寫過度細節的implementation Packet。
 
+本區塊是CEO的scope brief，不是授權。CEO可決定方向與scope，不可授予Git、DB、deployment或publication權限；授權一律來自Owner原話。
+
 ```text
-Owner Authorization: <TOKEN_OR_REMOVE_WHEN_NOT_REQUIRED>
+Owner Authorization: <VERBATIM_OWNER_WORDS_TRANSCRIBED | NONE>
 
 /fable-method
 
@@ -284,7 +288,7 @@ MODE: WORKER_EXECUTION
 Role:
 <Worker | Planner | CTO>
 
-[Executable Task — <ONE_TASK_NAME>]
+[Scoped Task — <ONE_TASK_NAME>]
 
 Decision Context:
 - Current Stage:
@@ -298,7 +302,7 @@ Authority:
 
 Execution Boundary:
 - Worktree Mode / Path:
-- Git Actions Authorized:
+- Git Actions Authorized: <NONE，除非Owner另行授權；CEO不得授予>
 - Allowed Reads / Writes:
 - Forbidden:
 
@@ -322,5 +326,5 @@ Stop Conditions:
 Handoff Output:
 -
 
-END OF AUTHORITATIVE TASK PACKET
+END OF CEO TASK BRIEF (NOT AN AUTHORIZATION)
 ```
