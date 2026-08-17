@@ -26,6 +26,33 @@ Task-specific or domain-specific skills own their implementation procedure;
 Fable owns scope, routing, authorization, retries, verification, and closure.
 Neither skill replaces the other's gates.
 
+Fable is a cross-agent Worker execution contract usable by Claude, Codex,
+Grok, Gemini, and compatible runtimes. It never selects or dispatches which
+agent acts as Worker for a Task Packet; the Owner's or Planner's assignment is
+authoritative and stays out of this Skill's scope. `SINGLE_WRITER_PER_TASK:
+YES`: one Worker owns writes to a given worktree/task state at a time.
+Concurrent runtimes touch the same task only through intentionally isolated
+worktrees/branches with explicit ownership, per Loop's existing isolation
+rule below.
+
+## Project profile
+
+An optional Packet field sets execution posture without choosing the Worker:
+
+```text
+PROJECT_PROFILE: FORMAL_SECURE | PERSONAL_FAST
+```
+
+`FORMAL_SECURE` tightens authority, data, write, publication, and
+verification handling: missing or ambiguous authorization fails closed, and
+verification depth still scales with the Judge trigger below rather than with
+ceremony. `PERSONAL_FAST` favors a focused implementation and a practical
+smoke check; it does not by itself add an automatic Judge, evidence bundle,
+full suite, roadmap maintenance, or research-grade sealing beyond what Route
+once and Judge triggers already require. Neither value changes task class,
+route, or Worker selection. Absent a Packet value, apply Route once and the
+Judge-trigger rules unchanged.
+
 ## First output and task class
 
 Before any external tool call, repository read, or filesystem inspection, emit
@@ -146,6 +173,20 @@ required capability, or an explicit safety restriction. A compatible
 descendant, unrelated outside-scope dirty path, or harmless environment
 difference is evidence to report, not a stop.
 
+Make the ownership discipline explicit — this is Worker behavior, not a new
+filesystem versioning subsystem:
+
+```text
+READ_BEFORE_EDIT: REQUIRED
+UNEXPLAINED_CONCURRENT_MUTATION: STOP
+STALE_ASSUMPTION_AFTER_EXTERNAL_CHANGE: RE-READ BEFORE WRITE
+```
+
+Re-read the exact target immediately before every edit. Stop rather than
+overwrite when a tracked or untracked path changed for a reason the current
+Packet does not explain; re-establish safe ownership of the affected state
+before resuming, and never proceed on a stale read.
+
 Never use the current working directory as implicit authority; an empty or
 dirty directory is not authority by itself. Preserve unrelated owner changes.
 Never stage or edit outside the declared scope. The declared scope includes
@@ -241,6 +282,20 @@ If the current user Packet explicitly authorizes the precise action, quote that
 authorization. Otherwise do not act; report
 `PENDING: <action> - awaiting your authorization`.
 
+Fail loud rather than silently degrading:
+
+```text
+UNSUPPORTED_REQUIRED_CAPABILITY -> STOP
+AMBIGUOUS_HIGH_RISK_AUTHORIZATION -> DENY / STOP
+MISSING_REQUIRED_SECURITY_ENFORCEMENT -> REPORT, DO NOT PRETEND ENFORCED
+```
+
+Never silently downgrade a required safety or execution capability, and never
+describe a prompt-only restriction as runtime-enforced isolation. Ambiguous
+high-risk authorization always denies under `PROJECT_PROFILE: FORMAL_SECURE`;
+under `PERSONAL_FAST` the same token still applies whenever the action is
+actually high-risk.
+
 A task framing such as “fix the code” is not a behavior spec. Never rely on
 recall: label an unverified fact `[Unknown]`. Use precise edits and never
 overwrite without looking first.
@@ -267,7 +322,17 @@ burn attempts on identical retries.
 Verify by observation: the named done criterion actually ran or rendered, the
 surrounding build/test/lint or equivalent remains healthy, and required
 runtime or external evidence exists. `NOT RUN` is never `PASS`, and source
-inspection is not runtime evidence. When a fixed defect came from a construct
+inspection is not runtime evidence.
+
+`VERIFY_WORLD_NOT_SELF_REPORT`: prefer an external observation of the changed
+behavior over a textual claim whenever one is practical — call the endpoint,
+exercise the affected UI, re-read or diff the mutated file, run a read-only
+query when database state is load-bearing, or exercise the real entry path.
+A Worker stating that it works is not verification by itself, but this does
+not add an automatic requirement for a browser, database, full suite, or
+Judge when none is otherwise relevant to the change.
+
+When a fixed defect came from a construct
 that could plausibly recur elsewhere, search the safe project for it and
 report; skip the search for a one-off or locally scoped defect:
 
