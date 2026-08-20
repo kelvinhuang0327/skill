@@ -163,6 +163,65 @@ Packet 指定 repository 中已確認存在的 focused acceptance、relevant reg
 lint/typecheck/build、git diff --check、changed-path review，以及需要時的
 exact-head CI。不要發明 command、fixture 或 final count。NOT RUN 永遠不是 PASS。
 
+### 5.5 Lifecycle closure bundle（僅限 Git/PR/worktree/artifact 收尾任務）
+
+只有當任務本身是 lifecycle cleanup 或 publication closure 時才使用；一般
+implementation task 不得加入這些欄位。以下是 task-specific contract 欄位，不是
+新的全域 enum，也不取代既有的 IMPLEMENTATION_LIFECYCLE_STATUS /
+PR_PUBLICATION_STATUS / POSTMERGE_LIFECYCLE_STATUS / BRANCH_CLEANUP_STATUS /
+FULL_PR_LIFECYCLE_CLOSED / CURRENT_TREE_TECHNICAL_VERDICT。
+
+適用時收斂成一個 exact bundle：
+
+~~~text
+CLOSURE_EVIDENCE_SOURCE: <existing evidence / prior task / exact refs>
+CLOSURE_EVIDENCE_REUSE: YES | NO
+EXACT_LOCAL_WORKTREE_TARGETS: <exact paths>
+EXACT_LOCAL_BRANCH_TARGETS: <exact refs + expected tips>
+EXACT_REMOTE_BRANCH_TARGETS: <exact refs + expected tips>
+EXACT_PR_ACTIONS: <exact PR + action>
+EXACT_ARTIFACT_ACTIONS: <exact paths + action>
+PRIMARY_ACTIONS: <exact semantic actions>
+AUTHORIZED_FALLBACKS: <exact fallback + preconditions>
+TERMINAL_DISPOSITION: <expected closed state per applicable surface>
+KNOWN_RESIDUALS_IF_NOT_AUTHORIZED: <exact remaining items>
+~~~
+
+一個 standalone Owner authorization 可以同時涵蓋 bundle 內多個 exact 動作，
+前提是每個 target、每個動作、每個 expected tip/identity 都已 pin 住，每個
+fallback 與其前置條件都已明寫，remote 動作也已明列，且授權不會因為之後發現
+新 target 而自動擴張。籠統的「cleanup authorized」不授權 force 或 remote
+mutation；未明列的 force 或 remote 動作仍需另一輪 standalone authorization。
+
+只有原始 authorization 已明確包含 fallback，且下列 gate 在執行當下仍全部成立，
+Worker 才能在 primary action 因預期的 Git 語義（如 ancestry/non-fast-forward）
+被拒絕後直接執行 fallback，不必開新的 Planner task 或再取得一次 Owner
+authorization：
+
+~~~text
+PRIMARY_ACTION: <e.g. normal local branch delete>
+AUTHORIZED_FALLBACK: <e.g. force local branch delete>
+FALLBACK_GATE:
+- lineage verdict unchanged (e.g. FULLY_SUPERSEDED)
+- exact target tip unchanged
+- successor integration still reachable
+- target not checked out / not in active use
+- no new commits since the evidence was produced
+- no dirty/untracked task-owned work on the target
+- refusal is attributable only to expected Git ancestry/semantics
+~~~
+
+未明確授權 fallback 時，primary action 的預期拒絕仍是
+`PENDING: <action> - awaiting your authorization`，不得自行升級。
+
+既有 lifecycle/lineage evidence（例如前一 task 已證明的 lineage 結論）在下列
+load-bearing identity 不變時可以重用，不必整份重跑：repository identity、
+target ref/tip、successor 可達性、相關 PR lifecycle state、target worktree
+ownership/status，以及既有 checksum（若存在）。任一項改變時只讓受影響的
+evidence 失效，並重做必要的 bounded preflight；經過的對話輪數本身不構成
+evidence 過期。這是 bounded-authority-check 原則在 lifecycle 情境下的延伸，
+不需要為此另建 evidence package 或 research-grade sealing。
+
 ## 6. Judge boundary
 
 不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立
@@ -187,6 +246,8 @@ Judge pending 時 integration、push、publish、merge 或 cleanup。
 
 以下模板只放 task-specific values；stable Worker procedure 由 /fable-method
 載入。不要把 canonical Worker safety、lifecycle、reporting prose 再貼入 Packet。
+若任務屬於 lifecycle/publication closure，在 Task-specific contract 後插入
+§5.5 的 Lifecycle closure bundle 欄位；一般任務不需要。
 
 ~~~text
 Owner Authorization: <EXACT_TOKEN_OR_REMOVE_FOR_READ_ONLY>

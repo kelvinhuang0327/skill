@@ -115,7 +115,9 @@ DRAFT_PR_AUTHORIZED: YES | NO
 MARK_READY_AUTHORIZED: YES | NO
 MERGE_AUTHORIZED: YES | NO
 LOCAL_INTEGRATION_AUTHORIZED: YES | NO
+LOCAL_WORKTREE_REMOVAL_AUTHORIZED: YES | NO
 LOCAL_BRANCH_DELETE_AUTHORIZED: YES | NO
+FORCE_FALLBACK_AUTHORIZED: YES | NO
 REMOTE_BRANCH_DELETE_AUTHORIZED: YES | NO
 ```
 
@@ -123,6 +125,46 @@ Default absent fields to `NO`. Completion does not imply commit; commit does
 not imply push; push does not imply PR, readiness, merge, or deletion. Report
 unauthorized actions as `PENDING` or `NOT APPLICABLE` and never classify the
 local implementation as failed solely because publication was not authorized.
+
+These tiers stay independently permissioned — local worktree removal, local
+branch normal deletion, an exact force fallback, remote branch deletion, and
+PR mutation are five separate permissions — but one standalone Owner
+authorization may list several of them together in one exact envelope when
+every target, action, expected tip/identity, and fallback precondition in it
+is named explicitly. An action or fallback the envelope does not name stays
+unauthorized, and a newly discovered target is never authorized merely
+because it resembles a named one:
+
+```text
+UNLISTED_ACTION: NOT AUTHORIZED
+UNLISTED_FALLBACK: NOT AUTHORIZED
+NEWLY_DISCOVERED_TARGET: NOT AUTHORIZED
+```
+
+`FORCE_FALLBACK_AUTHORIZED: YES` takes effect only for the exact fallback the
+Packet names, and only while every gate below still holds live: the lineage
+or lifecycle verdict it depended on is unchanged, the target's tip is
+unchanged, any successor integration remains reachable, the target is not
+checked out or otherwise in active use, no new commits or task-owned
+dirty/untracked state exist on it, and the primary action's refusal is
+attributable only to expected Git ancestry/semantics rather than an
+unexplained state change. If any gate fails, stop or skip that target instead
+of falling back; a generic cleanup authorization never substitutes for this.
+
+For a multi-target lifecycle bundle, default to skipping an unsafe or
+drifted target, recording the exact reason, and continuing the remaining
+independently authorized targets, unless the Packet declares the bundle
+atomic. Still stop the entire bundle for a wrong repository, authorization
+ambiguity, canonical authority instability, a shared destructive-scope
+mismatch, or evidence corruption that affects the whole bundle rather than
+one target.
+
+When the Packet marks prior lifecycle or lineage evidence reusable, apply the
+same bounded-check principle as any other pinned locator: verify the evidence
+source and the exact live target identities and gates it names, then act — do
+not rebuild the Planner's lineage analysis, run a generic authority search, or
+redo a full reconciliation. A contradiction invalidates only the affected
+evidence and stops or skips that target.
 
 ## Worktrees and mutation evidence
 
