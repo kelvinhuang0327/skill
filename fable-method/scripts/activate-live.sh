@@ -152,32 +152,107 @@ current_branch() {
   git -C "$REPOSITORY_ROOT" rev-parse --abbrev-ref HEAD
 }
 
-count_staged_and_dirty() {
-  STAGED_COUNT=0
-  TRACKED_DIRTY_COUNT=0
-  local status_output
-  status_output="$(git -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all)" \
-    || die 'unable to read repository status'
-  local line index worktree
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    index="${line:0:1}"
-    worktree="${line:1:1}"
-    [[ "$index" == '?' ]] && continue
-    [[ "$index" == ' ' ]] || STAGED_COUNT=$((STAGED_COUNT + 1))
-    [[ "$worktree" == ' ' ]] || TRACKED_DIRTY_COUNT=$((TRACKED_DIRTY_COUNT + 1))
-  done <<<"$status_output"
+path_in_fable_scope() {
+  local p="$1"
+  [[ "$p" == "fable-method" || "$p" == fable-method/* ]]
+}
+
+classify_one_status_entry() {
+  local xy="$1" path="$2" origpath="$3"
+  local x="${xy:0:1}" y="${xy:1:1}"
+  local in_scope=0
+  if path_in_fable_scope "$path"; then
+    in_scope=1
+  elif [[ -n "$origpath" ]] && path_in_fable_scope "$origpath"; then
+    in_scope=1
+  fi
+  if [[ "$in_scope" -eq 1 ]]; then
+    [[ "$x" == '.' ]] || FABLE_STAGED_COUNT=$((FABLE_STAGED_COUNT + 1))
+    [[ "$y" == '.' ]] || FABLE_TRACKED_DIRTY_COUNT=$((FABLE_TRACKED_DIRTY_COUNT + 1))
+  else
+    [[ "$x" == '.' ]] || UNRELATED_STAGED_COUNT=$((UNRELATED_STAGED_COUNT + 1))
+    [[ "$y" == '.' ]] || UNRELATED_TRACKED_DIRTY_COUNT=$((UNRELATED_TRACKED_DIRTY_COUNT + 1))
+  fi
+}
+
+# Classifies every changed path against fable-method/** using porcelain=v2 -z
+# so renamed paths and paths containing spaces parse unambiguously. A rename
+# crossing the fable-method/** boundary in either direction is scoped in, so
+# it always blocks rather than risking a false "unrelated" classification.
+classify_repository_dirty_state() {
+  FABLE_STAGED_COUNT=0
+  FABLE_TRACKED_DIRTY_COUNT=0
+  UNRELATED_STAGED_COUNT=0
+  UNRELATED_TRACKED_DIRTY_COUNT=0
+
+  local status_file
+  status_file="$(mktemp)" || die 'unable to read repository status'
+
+  if ! git -C "$REPOSITORY_ROOT" status --porcelain=v2 --untracked-files=all -z >"$status_file"; then
+    rm -f "$status_file"
+    die 'unable to read repository status'
+  fi
+
+  local -a records=()
+  local record
+  while IFS= read -r -d '' record; do
+    records+=("$record")
+  done <"$status_file"
+  rm -f "$status_file"
+
+  local i=0
+  local n=${#records[@]}
+  while (( i < n )); do
+    local rec="${records[$i]}"
+    if [[ -z "$rec" ]]; then
+      i=$((i + 1))
+      continue
+    fi
+    local rtype="${rec%% *}"
+    case "$rtype" in
+      '?'|'!')
+        i=$((i + 1))
+        ;;
+      1)
+        local t f2 f3 f4 f5 f6 f7 f8 path
+        read -r t f2 f3 f4 f5 f6 f7 f8 path <<<"$rec"
+        classify_one_status_entry "$f2" "$path" ""
+        i=$((i + 1))
+        ;;
+      2)
+        local t f2 f3 f4 f5 f6 f7 f8 f9 path origpath
+        read -r t f2 f3 f4 f5 f6 f7 f8 f9 path <<<"$rec"
+        (( i + 1 < n )) || die 'ACTIVATION_REPOSITORY_STATUS_UNRECOGNIZED: truncated rename record'
+        origpath="${records[$((i + 1))]}"
+        classify_one_status_entry "$f2" "$path" "$origpath"
+        i=$((i + 2))
+        ;;
+      u)
+        local t f2 f3 f4 f5 f6 f7 f8 f9 f10 path
+        read -r t f2 f3 f4 f5 f6 f7 f8 f9 f10 path <<<"$rec"
+        classify_one_status_entry "$f2" "$path" ""
+        i=$((i + 1))
+        ;;
+      *)
+        die "ACTIVATION_REPOSITORY_STATUS_UNRECOGNIZED: unexpected git status record: ${rec}"
+        ;;
+    esac
+  done
 }
 
 require_canonical_repository_state_for_activation() {
   local branch
   branch="$(current_branch)"
-  count_staged_and_dirty
-  if [[ "$branch" != 'master' || "$STAGED_COUNT" -ne 0 || "$TRACKED_DIRTY_COUNT" -ne 0 ]]; then
+  classify_repository_dirty_state
+  if [[ "$branch" != 'master' || "$FABLE_STAGED_COUNT" -ne 0 || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 ]]; then
     printf 'ACTIVATION_REPOSITORY_STATE_NOT_READY\n' >&2
     printf '  branch: %s (required: master)\n' "$branch" >&2
-    printf '  staged: %s (required: 0)\n' "$STAGED_COUNT" >&2
-    printf '  tracked_dirty: %s (required: 0)\n' "$TRACKED_DIRTY_COUNT" >&2
+    printf '  fable_staged: %s (required: 0)\n' "$FABLE_STAGED_COUNT" >&2
+    printf '  fable_tracked_dirty: %s (required: 0)\n' "$FABLE_TRACKED_DIRTY_COUNT" >&2
+    if [[ "$UNRELATED_STAGED_COUNT" -ne 0 || "$UNRELATED_TRACKED_DIRTY_COUNT" -ne 0 ]]; then
+      printf '  unrelated_staged: %s (not blocking)\n' "$UNRELATED_STAGED_COUNT" >&2
+      printf '  unrelated_tracked_dirty: %s (not blocking)\n' "$UNRELATED_TRACKED_DIRTY_COUNT" >&2
+    fi
     exit 2
   fi
 }
@@ -185,10 +260,11 @@ require_canonical_repository_state_for_activation() {
 report_canonical_repository_state_for_check() {
   local branch
   branch="$(current_branch)"
-  count_staged_and_dirty
-  if [[ "$branch" != 'master' || "$STAGED_COUNT" -ne 0 || "$TRACKED_DIRTY_COUNT" -ne 0 ]]; then
-    printf 'CANONICAL_REPOSITORY_STATE_NOTE: branch=%s staged=%s tracked_dirty=%s\n' \
-      "$branch" "$STAGED_COUNT" "$TRACKED_DIRTY_COUNT"
+  classify_repository_dirty_state
+  if [[ "$branch" != 'master' || "$FABLE_STAGED_COUNT" -ne 0 || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 \
+        || "$UNRELATED_STAGED_COUNT" -ne 0 || "$UNRELATED_TRACKED_DIRTY_COUNT" -ne 0 ]]; then
+    printf 'CANONICAL_REPOSITORY_STATE_NOTE: branch=%s fable_staged=%s fable_tracked_dirty=%s unrelated_staged=%s unrelated_tracked_dirty=%s\n' \
+      "$branch" "$FABLE_STAGED_COUNT" "$FABLE_TRACKED_DIRTY_COUNT" "$UNRELATED_STAGED_COUNT" "$UNRELATED_TRACKED_DIRTY_COUNT"
   fi
 }
 
