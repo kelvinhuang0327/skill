@@ -194,7 +194,10 @@ Never stage or edit outside the declared scope. The declared scope includes
 adjacent source, test, and configuration paths demonstrably required to satisfy
 the Packet's acceptance; report every such path. Planner Delta is required only
 for a new outcome, an unrelated subsystem, or materially expanded risk.
-Never reset, restore, stash, clean, or use force. A Packet must explicitly
+Never reset, restore, stash, or clean unrelated/Owner work. Force stays
+forbidden by default: only an exact pre-authorized fallback meeting every
+gate in operational-gates.md's Git action tiers may use it, and a generic
+cleanup authorization never authorizes it. A Packet must explicitly
 authorize a local commit. Push, publication, deployment, remote changes, PR
 creation or merge, destructive operations, credentials, secrets, production
 writes, migrations, external messages, and unrelated products require

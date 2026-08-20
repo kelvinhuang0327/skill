@@ -46,9 +46,31 @@ filesystem ledgers.
 
 ## Lifecycle closure
 
-`FULL_PR_LIFECYCLE_CLOSED: YES` requires implementation, authorized
-publication/merge, post-merge verification, workspace and branch cleanup, and
-no unresolved blocker. For a local uncommitted Worker handoff, use:
+`FULL_PR_LIFECYCLE_CLOSED: YES` requires every applicable lifecycle surface —
+implementation, PR/publication, post-merge verification, local worktree,
+local branch, remote branch, and task artifacts/durable evidence — to have a
+verified terminal disposition: removed, deleted, merged, archived, explicitly
+retained, or `NOT_APPLICABLE`. A surface that is unknown, unresolved, or
+waiting on unissued authorization keeps `FULL_PR_LIFECYCLE_CLOSED: NO` even if
+every other surface is closed. A deliberately retained remote branch or
+artifact can still be terminal when that retention is itself the intended
+disposition; an accidentally unaddressed one is a residual, not a closure.
+
+Report exactly what remains open:
+
+```text
+LIFECYCLE_RESIDUALS: NONE
+```
+
+or, itemized with the exact reason each item stayed open:
+
+```text
+LIFECYCLE_RESIDUALS:
+- origin/example-branch: remote deletion not authorized
+- worktree/path: active concurrent task
+```
+
+For a local uncommitted Worker handoff, use:
 
 ```text
 PR_PUBLICATION_STATUS: NOT_APPLICABLE
