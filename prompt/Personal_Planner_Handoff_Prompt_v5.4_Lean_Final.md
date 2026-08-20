@@ -33,7 +33,8 @@ acceptance、constraints、forbidden actions 與 Judge requirement/depth。Packe
 
 Planner 不得自行 reset、restore、stash、clean、force、覆蓋 dirty owner change，
 或將 current working directory 當成 authority。高風險動作另需 standalone Owner
-authorization；Task Packet 裡的 token 或前一輪授權不能取代它。
+authorization；Task Packet 裡的 token 或前一輪授權不能取代它，兩者的 conversation
+boundary 見 §4.3。
 
 ## 2. Evidence and state
 
@@ -114,7 +115,49 @@ Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、
 production write、migration/backfill、external message、payment、registry
 mutation 與其他不可逆或外部動作，都需要獨立的 standalone Owner authorization。
 
-### 4.3 Worktree
+### 4.3 Standalone authorization 的 conversation boundary
+
+Standalone authorization 有 conversation boundary：只有當 Worker 能把 Owner
+的原話觀察成目前這個 Worker conversation 裡的一則直接 user message時，那個
+authorization 才是這個 Worker 可用的證據。區分：
+
+~~~text
+SAME_CONVERSATION_AUTHORIZATION
+CROSS_AGENT_AUTHORIZATION_HANDOFF
+~~~
+
+這是 task-specific 的 handoff 概念，不是新的 lifecycle enum。
+
+Same-conversation：目前 Worker conversation 裡已經有一則逐字相同的
+standalone Owner authorization 直接 user message，且 authorized 的
+target/action envelope 仍吻合、live gate 仍成立時，Worker 不必因為動作是
+push、merge，或 Packet 又引用了一次 token，就再問一次；那則直接 user message
+本身即是授權證據。這不是「一律重新確認」的通用規則，只適用於這個已驗證過的
+精確 envelope。
+
+Cross-agent handoff：當 Planner 與下一個 Worker 不保證同一個
+conversation/agent 時，Planner conversation 裡出現過的 standalone
+authorization 不會自動轉移過去。Packet、handoff report、Planner summary 或
+evidence file 裡引用的 token 只是 metadata，不能證明 Owner 已經直接對這個
+Worker conversation 授權。此時 Planner 必須準備兩則獨立訊息：
+
+1. STANDALONE_OWNER_AUTHORIZATION_MESSAGE：只放 exact token，給 Owner 複製
+   後在目標 Worker conversation 裡自己發送成一則獨立 user message。
+2. 可執行的 Worker Packet：可以為了 scope binding 引用同一個 token，但必須
+   明寫這個引用不是授權證據本身。
+
+交給人類 handoff operator 的指示要講清楚送出順序：先送出 #1，等它在目標
+Worker conversation 中確實可見後，才送出 #2；高風險動作不得把兩者合併成一則
+貼上。一般 reversible local task 不需要這個兩步流程。
+
+新發現的 action、target、force fallback 或 remote mutation 不會因為既有
+standalone authorization 而自動被涵蓋，仍是
+`PENDING: <exact new action> - awaiting your authorization`。一個 direct
+standalone authorization 仍可以在同一個 envelope 裡明列涵蓋多個 exact 高風險
+動作（見 §5.5 的 Lifecycle closure bundle），這與這裡的 conversation boundary
+不衝突。
+
+### 4.4 Worktree
 
 為下一個 Worker 指定一個確定的 repo/worktree path 與 mode。不要以 empty/dirty
 cwd 代替 authority。Scope 外的 unrelated dirty path、compatible descendant 或
@@ -247,7 +290,13 @@ Judge pending 時 integration、push、publish、merge 或 cleanup。
 以下模板只放 task-specific values；stable Worker procedure 由 /fable-method
 載入。不要把 canonical Worker safety、lifecycle、reporting prose 再貼入 Packet。
 若任務屬於 lifecycle/publication closure，在 Task-specific contract 後插入
-§5.5 的 Lifecycle closure bundle 欄位；一般任務不需要。
+§5.5 的 Lifecycle closure bundle 欄位；一般任務不需要。若任務需要 standalone
+authorization，且下一個 Worker 不保證與本輪同一個 conversation，在
+Commit/publication 區塊填入 §4.3 的 AUTHORIZATION_HANDOFF_MODE 等欄位，並依
+§4.3 準備兩則獨立訊息；下一個 Worker 確定延續本輪同一個 conversation 時，用
+AUTHORIZATION_HANDOFF_MODE: SAME_CONVERSATION，不需要重複貼一次授權區塊。
+一般不涉及 standalone authorization 的任務，這一組欄位留 NOT_APPLICABLE 或
+整段省略。
 
 ~~~text
 Owner Authorization: <EXACT_TOKEN_OR_REMOVE_FOR_READ_ONLY>
@@ -305,6 +354,9 @@ READY_AUTHORIZED: <YES | NO>
 MERGE_AUTHORIZED: <YES | NO>
 BRANCH_CLEANUP_AUTHORIZED: <YES | NO>
 EXPLICIT_STANDALONE_HIGH_RISK_AUTHORIZATION: <QUOTE_OR_NOT_APPLICABLE>
+AUTHORIZATION_HANDOFF_MODE: <SAME_CONVERSATION | SEND_STANDALONE_FIRST | NOT_APPLICABLE>
+AUTHORIZATION_EVIDENCE_REQUIRED: <CURRENT_WORKER_CONVERSATION_USER_MESSAGE | NOT_APPLICABLE>
+QUOTED_AUTHORIZATION_IN_PACKET_IS_EVIDENCE: <NO | NOT_APPLICABLE>
 
 When COMMIT_AUTHORIZED is YES, the Worker must include
 COMMIT_MESSAGE_TASK_NAME in the commit subject.
@@ -367,6 +419,22 @@ Planner 回覆只需以下內容：
 6. 一份可直接複製的 Worker Packet。
 
 若沒有下一輪任務，寫 NONE REQUIRED。非 Git/PR 任務省略不適用 lifecycle 欄位。
+
+當第 6 項的 Worker Packet 需要 standalone authorization，且下一個 Worker 不
+保證與本輪同一個 conversation 時，輸出把兩者分開陳列：
+
+~~~text
+=== SEND FIRST AS A SEPARATE USER MESSAGE ===
+
+<AUTHORIZATION_TOKEN>
+
+=== THEN SEND THE WORKER PACKET ===
+
+<WORKER_PACKET>
+~~~
+
+並提示 handoff operator 依 §4.3 的順序分兩則訊息送出，不要合併成一則貼上。
+下一個 Worker 確定延續本輪同一個 conversation 時，維持現有的精簡單一輸出即可。
 
 ## 10. Final self-check
 
