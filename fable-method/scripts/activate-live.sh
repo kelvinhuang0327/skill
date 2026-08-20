@@ -155,6 +155,9 @@ current_branch() {
 count_staged_and_dirty() {
   STAGED_COUNT=0
   TRACKED_DIRTY_COUNT=0
+  local status_output
+  status_output="$(git -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all)" \
+    || die 'unable to read repository status'
   local line index worktree
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
@@ -163,7 +166,7 @@ count_staged_and_dirty() {
     [[ "$index" == '?' ]] && continue
     [[ "$index" == ' ' ]] || STAGED_COUNT=$((STAGED_COUNT + 1))
     [[ "$worktree" == ' ' ]] || TRACKED_DIRTY_COUNT=$((TRACKED_DIRTY_COUNT + 1))
-  done < <(git -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all)
+  done <<<"$status_output"
 }
 
 require_canonical_repository_state_for_activation() {
