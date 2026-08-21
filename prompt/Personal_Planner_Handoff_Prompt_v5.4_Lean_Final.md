@@ -417,6 +417,7 @@ Planner 回覆只需以下內容：
 5. 下一輪單一任務的 Goal、Repo/Base、Worktree、Allowed Writes、Required
    Verification、Judge、Publication、Stop Boundary；
 6. 一份可直接複製的 Worker Packet。
+7. 最後部分註明可用的強中弱模型和思考強度。
 
 若沒有下一輪任務，寫 NONE REQUIRED。非 Git/PR 任務省略不適用 lifecycle 欄位。
 
