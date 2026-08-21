@@ -27,21 +27,61 @@ Judge-gated task.
 
 ## Depth and evidence reuse
 
+This section is the canonical Judge-depth contract: the single normative source
+for `JUDGE_DEPTH` on every platform. A Planner, a Worker, and a platform Judge
+skill each derive depth from the triggers below and must not maintain a
+divergent list. It is distinct from the Judge trigger above, which decides only
+whether a Judge runs at all; firing that gate never by itself selects `FULL`.
+
 Choose exactly one depth:
 
 - `BOUNDED`: initial focused independent reproduction; default.
-- `FULL`: named security/authentication, database/production-data,
-  payment/irreversible, deployment, un-isolable shared-core, or missing,
-  invalid, or contradictory final-suite evidence.
+- `FULL`: at least one named trigger below fires.
 - `DELTA`: the one permitted remediation's finding, diff, tests, and impacted
   regression slice.
+
+Subject-matter triggers describe what the change touches:
+
+- security, authentication, or authorization code;
+- database migration or production-data write;
+- payment or another irreversible external side effect;
+- deployment or cutover;
+- shared-core change whose risk focused verification cannot isolate;
+- final-suite evidence missing when due, incomplete in command, exit status,
+  output summary, environment, or final-tree identity, internally
+  contradictory, or not reproducible;
+- the Planner or Owner explicitly asked for full independent reproduction.
+
+Workload-shape triggers describe what the acceptance criteria demand, and fire
+when the requested scope materially exercises:
+
+- crash-safety or kill-and-resume reproduction;
+- fault injection;
+- concurrency or race-condition execution;
+- transaction rollback or recovery validation;
+- durability, resumability, or idempotency after interrupted execution;
+- orphan-prevention validation;
+- security or authorization adversarial testing.
+
+The Planner authors acceptance criteria, so it observes a workload-shape
+trigger first and emits `JUDGE_DEPTH: FULL` at synthesis time rather than
+declaring `BOUNDED` and leaving the correction to the Worker or the Judge. An
+exhaustive review of all changed tests is a cost signal, not by itself a `FULL`
+trigger.
+
+A supplied depth never lowers a fired trigger. A Packet declaring `BOUNDED`
+while its acceptance fires a trigger above is a contract error: name the
+mislabel and verify at `FULL`. Never run a `FULL` workload under a `BOUNDED`
+label, and never drop items to make the label true. Escalation from outside is
+legitimate; silent de-escalation is not.
 
 Reuse evidence only when command, environment, HEAD, and tree are identical and
 the evidence was not invalidated. Run the complete local suite at most once per
 final tree. Under ordinary judged timing, run focused acceptance and the
 impacted regression slice before the initial bounded Judge; run the complete
 suite after the Judge or permitted remediation. A load-bearing edit after a
-full suite invalidates it.
+full suite invalidates it. `FULL` does not mean rerunning an already-valid
+same-final-tree full suite a second time.
 
 Before handoff, state:
 
@@ -49,6 +89,10 @@ Before handoff, state:
 JUDGE_DEPTH: BOUNDED | FULL | DELTA
 JUDGE_DEPTH_REASON:
 ```
+
+`JUDGE_DEPTH_REASON` names the actual trigger, evidence gap, or remediation
+state. "High quality", "complex task", "important", "many files", "safer", and
+"thorough" are adjectives, not triggers.
 
 ## Remediation limit
 

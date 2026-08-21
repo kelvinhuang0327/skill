@@ -277,9 +277,17 @@ REMEDIATION_AUTHORIZED: YES | NO
 MAX_REMEDIATION_CYCLES: 0 | 1
 ~~~
 
-初次 judged work 預設 FRESH_CONTEXT + BOUNDED；高風險、明確 Owner 要求或 final
-evidence 不足時才用 FULL。Planner 不得預測或預填 future final HEAD/tree。
-Worker 完成實作後記錄 actual final HEAD/tree，Judge 只評估那一組 exact identity。
+JUDGE_DEPTH 不由 Planner 自行猜測。以本輪 acceptance criteria 對照 /fable-method
+的 canonical Judge-depth contract（`references/judge-handoff.md` 的「Depth and
+evidence reuse」）逐項掃描：命中任一 subject-matter 或 workload-shape FULL
+trigger 就直接輸出 FULL，不得先填 BOUNDED 再等 Worker 或 Judge 駁回；未命中才用
+BOUNDED。Planner 不在此複製 trigger 清單，該 contract 是唯一 canonical source，
+清單更新時 Planner 自動跟隨。無論結果為 FULL 或 BOUNDED，都在 JUDGE_DEPTH_REASON
+具名實際 trigger 或說明未命中；形容詞不是 trigger。
+
+初次 judged work 預設 FRESH_CONTEXT。Planner 不得預測或預填 future final
+HEAD/tree。Worker 完成實作後記錄 actual final HEAD/tree，Judge 只評估那一組
+exact identity。
 
 一個 stage 只允許一個 authoritative Judge。REFUTED 後最多一次 bounded remediation；
 若 remediation 改變 source/test，原 verdict 失效，需以 DELTA re-Judge，且不得在
@@ -340,6 +348,7 @@ RUNTIME_OUTPUT_ALLOWLIST: <TRANSCRIPT_ONLY_OR_KNOWN_ROOTS>
 ## Judge
 JUDGE_MODE: <NOT_APPLICABLE | FRESH_CONTEXT>
 JUDGE_DEPTH: <NOT_APPLICABLE | BOUNDED | FULL | DELTA>
+JUDGE_DEPTH_REASON: <NAMED_TRIGGER_OR_NO_TRIGGER_MATCHED>
 JUDGE_INPUT_HEAD: WORKER_RECORDS_ACTUAL_FINAL_HEAD
 JUDGE_INPUT_TREE: WORKER_RECORDS_ACTUAL_FINAL_TREE
 REMEDIATION_AUTHORIZED: <YES | NO>
@@ -387,7 +396,10 @@ action override, stop and obtain the required Planner/Owner decision.
 
 Use a Delta only when the original task remains resolvable, the blocker is explicit,
 the change is limited to 1–3 exact paths or one small gate, and no new product,
-database, dependency, deployment or destructive meaning is introduced.
+database, dependency, deployment or destructive meaning is introduced. A
+governance-field correction on an unchanged implementation tree also qualifies:
+set UPDATED_ALLOWLIST and REQUIRED_CHECKS to NONE and name the corrected field
+in DELTA.
 
 ~~~text
 Owner Authorization: <EXACT_MINIMAL_SCOPE_TOKEN>
@@ -401,10 +413,24 @@ FROZEN_WORKTREE: <PATH>
 EXPECTED_HEAD: <HEAD>
 EXPECTED_TREE: <TREE>
 DELTA: <ONE_EXACT_CHANGE>
-UPDATED_ALLOWLIST: <PATHS>
-REQUIRED_CHECKS: <COMMANDS>
-JUDGE_CONTINUITY: <NOT_APPLICABLE_OR_DELTA_REJUDGE_REQUIRED>
+UPDATED_ALLOWLIST: <PATHS | NONE>
+REQUIRED_CHECKS: <COMMANDS | NONE>
+JUDGE_CONTINUITY: <NOT_APPLICABLE | INITIAL_JUDGE_PENDING_DEPTH_CORRECTION | DELTA_REJUDGE_REQUIRED>
 ~~~
+
+The three JUDGE_CONTINUITY values are mutually exclusive:
+
+- NOT_APPLICABLE: the task involves no Judge.
+- INITIAL_JUDGE_PENDING_DEPTH_CORRECTION: the authoritative initial Judge has
+  never run, the implementation tree is unchanged, and the Delta only
+  reconciles the Planner-declared depth with the canonical Judge-depth contract
+  named in §6. This is not a DELTA re-Judge; the initial Judge still runs on
+  that same tree at the corrected depth.
+- DELTA_REJUDGE_REQUIRED: the initial Judge returned REFUTED and the one
+  permitted bounded remediation is complete; re-Judge that finding as DELTA.
+
+A sealed implementation that hits only a single governance gate conflict takes a
+Delta, not a re-issued task contract.
 
 ## 9. Planner output
 
@@ -454,6 +480,7 @@ RUNTIME_POLICY_SELECTED: YES
 HIGH_RISK_ACTIONS_HAVE_STANDALONE_AUTH: YES
 PACKET_HAS_TASK_SPECIFIC_ACCEPTANCE: YES
 FUTURE_FINAL_HEAD_TREE_NOT_PREFILLED: YES
+JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES
 ~~~
 
 Preserve the existing version convention: v5.3.3 remains historical and immutable,
