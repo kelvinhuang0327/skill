@@ -265,6 +265,107 @@ evidence 失效，並重做必要的 bounded preflight；經過的對話輪數�
 evidence 過期。這是 bounded-authority-check 原則在 lifecycle 情境下的延伸，
 不需要為此另建 evidence package 或 research-grade sealing。
 
+### 5.6 Legacy code migration bundle（僅限從既有實作移植行為的任務）
+
+只有當本輪 Goal 是把既有 legacy／superseded implementation 的行為移植進 current
+architecture，且 correctness 由「與該實作行為一致」而非由 spec 定義時才使用；
+一般 refactor、新功能與 spec-driven 實作不得加入這些欄位。以下是 task-specific
+contract 欄位，不是新的全域 enum，也不取代 §5.1 的 generic Phase 0 stop 或 §5.4
+的 verification 規則。適用時 Packet 一律帶入
+`LEGACY_DONOR_AUTHORITY_MODE: CODE_FIRST_CONFLICT_TRIGGERED_PROVENANCE`，
+不依賴 Planner 每輪臨場想起。
+
+Authority 順序是 artifact first。可執行或可讀的 implementation 本身就是 donor
+authority。缺少 donor SHA-256、preservation-run identity、archive locator 或
+歷史 absolute path，單獨都不構成 blocker；那些是 conflict 發生時的 resolution
+evidence，不是實作前的通行證。只有出現兩份以上 materially different 的候選
+實作，或 target identity 無法由程式本身解析時，才 escalate 到 Git／commit／
+archive provenance；解析衝突時 runtime reachability 優先於 filename 與 mtime。
+
+UNIQUE 是主張，不是觀察。一次命中的字串搜尋不等於世界上只有一份實作；同一
+演算法常以別的名字存在，或 inline 在某個 handler 裡。Packet 必須要求 Worker
+留下一次可證偽的 discovery sweep：搜過的 roots、name patterns、symbol patterns、
+behavioral patterns，以及 registry／runtime wiring 的反查。沒有這份紀錄不得宣告
+UNIQUE。`DONOR_UNIQUENESS_UNVERIFIED` 表示 sweep 尚不足以支撐宣告，應繼續搜尋；
+只有在宣告的 sweep 範圍已用盡仍無法收斂時才成為 stop，且不得用來省略 sweep。
+
+執行不了的 donor 先嘗試 revival，再談 characterization。legacy runtime 壞掉時，
+先評估核心演算法能否在 bounded 工作量內從壞掉的 import／UI／IO 隔離出來單獨
+執行；可以就做 minimal donor revival（`DONOR_EXECUTION_STATUS: REVIVED`），
+取得真正的 execution parity。`OLD_NEW_PARITY: PASS` 只代表真正的 old/new
+execution parity；`CHARACTERIZATION_PASS` 是較弱證據——期望值來自 Worker 對
+原始碼的閱讀，驗的是「新實作符合我對舊程式的理解」，不是舊行為本身——只在
+確實隔離不出來時使用，且必須在 `CHARACTERIZATION_LIMITATION` 誠實標示 donor
+未被執行。兩者不得混稱。
+
+Frozen semantics 必須逐項列出，而不是說一句「行為不變」。Packet 明列的
+FROZEN_ALGORITHM_SEMANTICS 同時就是本輪的 algorithm contract：
+
+~~~text
+FROZEN_ALGORITHM_SEMANTICS:
+history window / scoring formula / weights / candidate construction /
+ranking / tie-break / fallback / output cardinality /
+determinism class / RNG source and seed semantics
+~~~
+
+infrastructure boundary 可以調整（file IO → repository port、global state →
+injected dependency、dict → domain model、CLI args → use-case input、legacy
+output → current domain object），參數與語義不可。其中最容易被以「架構改善」
+名義改掉的是 determinism：可以注入 RNG dependency，但 unseeded → seeded 改變的
+是該策略的 stochastic behavior contract，屬於 semantic change，須停下取得 Owner
+decision，不是 DI 改造。
+
+old/new behavioral parity 是本類任務的 primary correctness evidence，donor
+metadata 不是。但 parity fixtures 是本輪 deliverable 而非 Planner 預填值：§5.4
+禁止 Planner 發明 command、fixture 與 final count 在此仍然成立。Packet 指定
+既存的 test runner 與必須覆蓋的 parity case 類別（minimum-history boundary、
+一般 historical slice、tie condition、fallback condition、較長 history、edge
+numbers），expected value 一律由執行 donor 產生，或在 SOURCE_ONLY 時由已標示
+限制的 characterization 產生。
+
+適用時在 Packet 的 Task-specific contract 之後插入：
+
+~~~text
+LEGACY_DONOR_AUTHORITY_MODE: CODE_FIRST_CONFLICT_TRIGGERED_PROVENANCE
+DONOR_DISCOVERY_SWEEP: <roots | name | symbol | behavioral patterns | registry/runtime reverse lookup>
+DONOR_EXECUTION_STATUS: <EXECUTABLE | REVIVED | SOURCE_ONLY>
+DONOR_IDENTITY: <UNIQUE | SEMANTICALLY_EQUIVALENT_VARIANTS | RESOLVED_CONFLICT>
+FROZEN_ALGORITHM_SEMANTICS: <exact list>
+OLD_NEW_PARITY: <PASS | CHARACTERIZATION_PASS | REFUTED>
+CHARACTERIZATION_LIMITATION: <required only when DONOR_EXECUTION_STATUS is SOURCE_ONLY>
+
+TASK_SPECIFIC_DONOR_PROVENANCE_OVERRIDE:
+For this legacy-code migration task, any prior requirement that makes donor
+SHA-256, preservation-run identity, archive locator, or historical absolute
+path mandatory BEFORE code inspection or migration is superseded. Those
+metadata remain optional conflict-resolution evidence.
+This override does NOT supersede algorithm-semantic, data-safety, runtime-write,
+database, publication, or repository-ownership invariants.
+~~~
+
+override 必須維持這個有界寫法。寫成 supersedes any existing rule 會連同真正的
+safety invariant 一起蓋掉；完全不寫則可能讓既有 repo 的 donor-provenance 規則
+直接觸發 /fable-method 的 `PLANNER_PACKET_CONTRACT_CONFLICT`，任務停在起點。
+
+適用時 Packet 的 Stop conditions 併入下列 task-specific values，與 §7 模板的
+generic stop conditions 並存而非取代：
+
+~~~text
+DONOR_CODE_NOT_FOUND
+DONOR_UNIQUENESS_UNVERIFIED
+DONOR_IDENTITY_AMBIGUOUS
+MATERIAL_DONOR_VARIANT_CONFLICT
+CORE_ALGORITHM_INCOMPLETE
+PARITY_REFUTED
+SEMANTIC_CHANGE_REQUIRED
+OVERLAPPING_ACTIVE_WORK
+~~~
+
+Planner 不得再產出以缺少 donor SHA-256、舊 RUN directory、archive locator、
+preservation manifest、歷史報告或不同 absolute path 為由的 stop condition。
+discovery、reading、migration 與 parity 屬於同一輪任務，不拆成連續數輪的
+donor discovery／verification／authority 前置任務。
+
 ## 6. Judge boundary
 
 不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立
@@ -298,13 +399,15 @@ Judge pending 時 integration、push、publish、merge 或 cleanup。
 以下模板只放 task-specific values；stable Worker procedure 由 /fable-method
 載入。不要把 canonical Worker safety、lifecycle、reporting prose 再貼入 Packet。
 若任務屬於 lifecycle/publication closure，在 Task-specific contract 後插入
-§5.5 的 Lifecycle closure bundle 欄位；一般任務不需要。若任務需要 standalone
-authorization，且下一個 Worker 不保證與本輪同一個 conversation，在
-Commit/publication 區塊填入 §4.3 的 AUTHORIZATION_HANDOFF_MODE 等欄位，並依
-§4.3 準備兩則獨立訊息；下一個 Worker 確定延續本輪同一個 conversation 時，用
-AUTHORIZATION_HANDOFF_MODE: SAME_CONVERSATION，不需要重複貼一次授權區塊。
-一般不涉及 standalone authorization 的任務，這一組欄位留 NOT_APPLICABLE 或
-整段省略。
+§5.5 的 Lifecycle closure bundle 欄位；一般任務不需要。若任務是從既有實作
+移植行為的 legacy code migration，同樣在 Task-specific contract 後插入 §5.6
+的 bundle 欄位與 provenance override，並把 §5.6 的 stop values 併入下方
+Stop conditions。若任務需要 standalone authorization，且下一個 Worker 不保證與
+本輪同一個 conversation，在 Commit/publication 區塊填入 §4.3 的
+AUTHORIZATION_HANDOFF_MODE 等欄位，並依 §4.3 準備兩則獨立訊息；下一個 Worker
+確定延續本輪同一個 conversation 時，用 AUTHORIZATION_HANDOFF_MODE:
+SAME_CONVERSATION，不需要重複貼一次授權區塊。一般不涉及 standalone
+authorization 的任務，這一組欄位留 NOT_APPLICABLE 或整段省略。
 
 ~~~text
 Owner Authorization: <EXACT_TOKEN_OR_REMOVE_FOR_READ_ONLY>
@@ -481,6 +584,7 @@ HIGH_RISK_ACTIONS_HAVE_STANDALONE_AUTH: YES
 PACKET_HAS_TASK_SPECIFIC_ACCEPTANCE: YES
 FUTURE_FINAL_HEAD_TREE_NOT_PREFILLED: YES
 JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES
+LEGACY_MIGRATION_BUNDLE_APPLIED_IF_APPLICABLE: YES
 ~~~
 
 Preserve the existing version convention: v5.3.3 remains historical and immutable,
