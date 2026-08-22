@@ -84,7 +84,12 @@ Judge trigger 需同時有列明的風險類別與 material consequence，例如
 security/auth、finance/payment、database/production data、shared-core 或
 cross-runtime、real UI/browser/device、external effect、explicit independent
 verification 或 material unknown。單一 acceptance failure 本身不會自動升級
-Judge；第二次仍無法歸因的 retry 才是 trigger。
+Judge；第二或第三次 failed attempt 也不會自動升級。Judge escalation 取決於
+一個 `MATERIAL UNKNOWN`：只有在 bounded、evidence-progressing 的 root-cause
+analysis 已無法再解決該不確定性時才成立。Repeated attempts that continue to
+falsify hypotheses and reduce uncertainty are not themselves a Judge trigger；
+repeated blind retries 或 speculative patches 不是可接受的 RCA。既有 Judge
+的 risk/material-consequence model 維持不變。
 
 若 evidence、Owner instruction 或 capability 真的改變 route，報告 old route、
 new route、evidence 與 impact；不要因為工作很大、很慢或檔案很多而靜默升級。
@@ -174,6 +179,51 @@ Packet 只要求和任務直接相關的 bounded checks：
 - staged、tracked-dirty、untracked 與 task scope inventory；
 - 必要 command/dependency；
 - 必要的 named source、spec、API、config、runtime chain。
+
+ROOT-CAUSE-FIRST EXECUTION:
+
+A failed acceptance, regression, parity mismatch, unexpected runtime result, or
+implementation defect is not by itself a STOP condition.
+
+While the problem remains inside the authorized Goal, scope, runtime, dependency,
+safety and semantic envelope, the Worker should continue evidence-progressing
+root-cause analysis:
+
+1. isolate the first observable divergence;
+2. form a falsifiable hypothesis;
+3. inspect or execute the smallest directly relevant evidence;
+4. confirm or eliminate the hypothesis;
+5. when root cause is known and a semantics-preserving repair remains inside
+   authorized scope, implement that repair and verify it;
+6. continue only while each iteration materially reduces uncertainty.
+
+"Bounded" means bounded by:
+
+- authorized scope;
+- safety;
+- authority;
+- capability;
+- evidence relevance;
+- proportionality;
+
+NOT by an arbitrary retry / attempt count.
+
+The Worker must not report BLOCKED merely because N attempts have failed.
+
+Terminal escalation occurs only when one of these is true:
+
+- root cause cannot be resolved with directly available and proportionate
+  evidence/capability;
+- two or more materially plausible causes remain and available evidence cannot
+  discriminate them;
+- root cause is known, but every valid repair requires an Owner semantic decision;
+- repair requires a new dependency/subsystem or materially expanded scope/risk;
+- authorization, safety, repository ownership or capability boundary prevents
+  further work.
+
+Do not turn this into an unbounded-debugging rule: if the next proposed action
+cannot materially reduce uncertainty or test a specific falsifiable hypothesis,
+it is not evidence-progressing RCA.
 
 只在以下情況 STOP：
 
@@ -322,6 +372,35 @@ metadata 不是。但 parity fixtures 是本輪 deliverable 而非 Planner 預�
 一般 historical slice、tie condition、fallback condition、較長 history、edge
 numbers），expected value 一律由執行 donor 產生，或在 SOURCE_ONLY 時由已標示
 限制的 characterization 產生。
+
+Legacy parity stop semantics:
+
+`PARITY_REFUTED`:
+
+- an initial old/new mismatch is an investigation trigger, not automatically a
+  terminal STOP;
+- Worker first locates the first divergent intermediate;
+- Worker performs bounded evidence-progressing root-cause analysis;
+- if root cause is an implementation defect and a semantics-preserving repair is
+  inside authorized scope, Worker repairs it and reruns parity;
+- `PARITY_REFUTED` becomes terminal only when the required parity remains
+  unresolved after available proportionate RCA is exhausted, or when every valid
+  repair crosses another stop boundary.
+
+`SEMANTIC_CHANGE_REQUIRED`:
+
+- may be declared only after root cause is sufficiently established;
+- Worker must first rule out reasonable semantics-preserving repairs;
+- "old != new" by itself does NOT prove semantic ambiguity;
+- implementation mismatch, numerical mismatch, library difference or failed tests
+  are not automatically Owner semantic decisions;
+- only when the donor behavior is genuinely ambiguous/undefined, or faithfully
+  reproducing it requires an explicit semantic choice, should Worker stop for
+  Owner decision.
+
+This clarification preserves the frozen algorithm semantics list above,
+determinism/RNG rules, donor executable parity as primary correctness evidence,
+conflict-triggered provenance, and generic §5.1 safety stops.
 
 適用時在 Packet 的 Task-specific contract 之後插入：
 
