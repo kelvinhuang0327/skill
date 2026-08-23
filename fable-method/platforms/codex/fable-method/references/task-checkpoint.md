@@ -62,10 +62,16 @@ minimal load-bearing fields:
 - `task_id`: Unique identifier for the task matching the Packet.
 - `repository`: Absolute path to the canonical repository root.
 - `worktree`: Absolute path to the active worktree or working directory.
-- `authoritative_packet_ref`: Explicit locator for the authoritative task
-  packet (e.g. `prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md#task-id`,
-  a commit ref, or a task artifact path). `ORIGINAL_TASK_RULES_INHERITED: YES`
-  alone is insufficient without an explicit ref.
+- `authoritative_packet_ref`: Explicit, durable locator for the authoritative
+  task packet. Must be resolvable by any Worker in a fresh session without
+  access to originating chat history. Valid durable forms include:
+  - Repo-relative file path: e.g. `prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md#task-id`,
+    `.fable/packets/<task_id>.md`, or `memory/tasks/<task_id>.md`.
+  - Immutable Git-backed locator: `git:<commit_sha>:<path>` or `git:<ref>:<path>`.
+  - Path within repository or worktree.
+  Ephemeral session URIs (e.g. `conversation://...`, `session://...`, transcript
+  offsets) are invalid and fail closed. `ORIGINAL_TASK_RULES_INHERITED: YES`
+  alone is insufficient without an explicit locator.
 - `branch`: Current checked-out branch or detached state.
 - `current_head`: Git commit SHA corresponding to the recorded milestone, or
   `UNCOMMITTED`.
@@ -118,6 +124,9 @@ When a new Agent or session begins execution:
      verdict is `STOP_UNRESOLVED`.
    - *Worktree missing/unsafe*: If `checkpoint.worktree` does not exist or has
      unresolved ownership, verdict is `STOP_UNRESOLVED`.
+   - *Authoritative packet resolution*: If `checkpoint.authoritative_packet_ref`
+     is an ephemeral session URI (`conversation://...`) or cannot be resolved to
+     a readable file/git blob, verdict is `STOP_UNRESOLVED`.
    - *PR already merged / Terminal state*: If live PR is `MERGED` or checkpoint
      state is `COMPLETED`, verdict is `ALREADY_COMPLETED`.
    - *Next action already done*: If the recorded `next_action` was completed

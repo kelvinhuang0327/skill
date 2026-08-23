@@ -13,6 +13,11 @@ class TaskCheckpointTest < Minitest::Test
     @worktree_dir = File.join(@tmpdir, 'worktree')
     FileUtils.mkdir_p(@repo_dir)
     FileUtils.mkdir_p(@worktree_dir)
+    FileUtils.mkdir_p(File.join(@repo_dir, 'prompt'))
+    File.write(
+      File.join(@repo_dir, 'prompt', 'Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
+      "# Task 001 Authoritative Packet\nGoal: Resumable Checkpoints\n"
+    )
 
     @valid_attrs = {
       task_id: 'TEST_TASK_001',
@@ -342,5 +347,77 @@ class TaskCheckpointTest < Minitest::Test
     result = reconciler.reconcile
     assert_equal 'STOP_UNRESOLVED', result.verdict
     assert_match(/Worktree directory does not exist/i, result.reason)
+  end
+
+  # =========================================================================
+  # 10. Cross-Agent Authoritative Packet Resolution
+  # =========================================================================
+
+  def test_cross_agent_resolves_repo_relative_packet_file
+    # Proves a fresh Worker in a new session can resolve the authoritative packet
+    # directly from the repository filesystem without access to prior chat memory.
+    packet_path = File.join(@repo_dir, 'docs', 'packets', 'TASK-042.md')
+    FileUtils.mkdir_p(File.dirname(packet_path))
+    File.write(packet_path, "# Authoritative Worker Packet for Task 042\nRules: Standard\n")
+
+    cp = TaskCheckpoint.new(@valid_attrs.merge(
+      task_id: 'TASK-042',
+      authoritative_packet_ref: 'docs/packets/TASK-042.md'
+    ))
+
+    resolved = cp.resolve_authoritative_packet(@repo_dir)
+    assert_equal :resolved, resolved[:status]
+    assert_equal :file, resolved[:source]
+    assert_includes resolved[:content], 'Authoritative Worker Packet for Task 042'
+
+    # Reconciler should pass packet resolution guard and return CONTINUE
+    reconciler = TaskReconciler.new(cp, {
+      repository: @repo_dir,
+      worktree: @worktree_dir,
+      head: @valid_attrs[:current_head],
+      tree: @valid_attrs[:current_tree]
+    })
+    result = reconciler.reconcile
+    assert_equal 'CONTINUE', result.verdict
+  end
+
+  def test_cross_agent_rejects_ephemeral_conversation_uri
+    # Proves that ephemeral conversation URIs fail closed, preventing a new Agent
+    # from assuming authority based on unreachable chat history.
+    cp = TaskCheckpoint.new(@valid_attrs.merge(
+      authoritative_packet_ref: 'conversation://4625a5d9-70ff-433f-8c4f-ca8ed3194922'
+    ))
+
+    refute cp.valid?
+    assert_raises(TaskCheckpoint::ValidationError) { cp.validate! }
+
+    # Reconciliation also fails closed with STOP_UNRESOLVED
+    reconciler = TaskReconciler.new(cp, {
+      repository: @repo_dir,
+      worktree: @worktree_dir,
+      head: @valid_attrs[:current_head],
+      tree: @valid_attrs[:current_tree]
+    })
+    result = reconciler.reconcile
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/ephemeral session URI/i, result.reason)
+    assert_match(/cannot be resolved by a fresh Worker without chat memory/i, result.reason)
+  end
+
+  def test_cross_agent_fails_closed_on_missing_packet_file
+    # If the referenced packet file cannot be found in the repo/worktree, fail closed.
+    cp = TaskCheckpoint.new(@valid_attrs.merge(
+      authoritative_packet_ref: 'docs/missing_packet.md'
+    ))
+
+    reconciler = TaskReconciler.new(cp, {
+      repository: @repo_dir,
+      worktree: @worktree_dir,
+      head: @valid_attrs[:current_head],
+      tree: @valid_attrs[:current_tree]
+    })
+    result = reconciler.reconcile
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Durable packet file not found/i, result.reason)
   end
 end

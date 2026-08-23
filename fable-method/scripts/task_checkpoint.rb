@@ -82,6 +82,10 @@ class TaskCheckpoint
       errors << 'authoritative_packet_ref must specify an explicit locator/source, not just inheritance affirmation'
     end
 
+    if @authoritative_packet_ref.to_s.strip =~ %r{\A(conversation|session|chat)://}i
+      errors << 'authoritative_packet_ref must be a durable cross-agent locator (repo file path or git locator), not an ephemeral session URI'
+    end
+
     unless VALID_LIFECYCLE_STATES.include?(@task_lifecycle_state)
       errors << "invalid task_lifecycle_state: #{@task_lifecycle_state} (must be one of #{VALID_LIFECYCLE_STATES.join(', ')})"
     end
@@ -179,9 +183,54 @@ class TaskCheckpoint
     true
   end
 
+  def resolve_authoritative_packet(base_repo = nil)
+    locator = @authoritative_packet_ref.to_s.strip
+    raise ResolutionError, 'authoritative_packet_ref is empty' if locator.empty?
+
+    if locator == 'ORIGINAL_TASK_RULES_INHERITED: YES'
+      raise ResolutionError, 'authoritative_packet_ref is only an inheritance affirmation without an explicit locator'
+    end
+
+    if locator =~ %r{\A(conversation|session|chat)://}i
+      raise ResolutionError, "authoritative_packet_ref uses ephemeral session URI '#{locator}' which cannot be resolved by a fresh Worker without chat memory"
+    end
+
+    root = base_repo || @repository || Dir.pwd
+
+    # Handle git-backed locator: git:<ref>:<path>
+    if locator =~ /\Agit:([^:]+):(.+)\z/
+      git_ref = Regexp.last_match(1)
+      git_path = Regexp.last_match(2)
+      stdout, _stderr, status = Open3.capture3('git', 'show', "#{git_ref}:#{git_path}", chdir: root)
+      if status.success? && !stdout.empty?
+        return { status: :resolved, source: :git, locator: locator, content: stdout }
+      else
+        raise ResolutionError, "Git-backed packet locator '#{locator}' could not be resolved from Git object database"
+      end
+    end
+
+    # Handle file path (with optional #section-anchor)
+    clean_path = locator.split('#').first
+    target_path = File.expand_path(clean_path, root)
+
+    # Also check if it was relative to worktree
+    if !File.file?(target_path) && @worktree && File.directory?(@worktree)
+      worktree_target = File.expand_path(clean_path, @worktree)
+      target_path = worktree_target if File.file?(worktree_target)
+    end
+
+    if File.file?(target_path)
+      content = File.read(target_path, encoding: 'UTF-8')
+      return { status: :resolved, source: :file, path: target_path, content: content }
+    end
+
+    raise ResolutionError, "Durable packet file not found at '#{target_path}' (locator: '#{locator}')"
+  end
+
   class ValidationError < StandardError; end
   class LoadError < StandardError; end
   class ConcurrencyError < StandardError; end
+  class ResolutionError < StandardError; end
 end
 
 # TaskReconciler performs bounded reconciliation between a durable checkpoint
@@ -242,6 +291,19 @@ class TaskReconciler
         verdict: 'STOP_UNRESOLVED',
         reason: "Worktree directory does not exist or is not accessible: '#{live[:worktree]}'",
         recommended_action: 'Re-create worktree or verify checkout path',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    # Guard 2b: Authoritative Packet Resolution
+    begin
+      checkpoint.resolve_authoritative_packet(live[:repository])
+    rescue TaskCheckpoint::ResolutionError => e
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: "Authoritative packet ref cannot be resolved across sessions: #{e.message}",
+        recommended_action: 'Specify a durable repo-relative or git-backed authoritative packet locator',
         checkpoint: checkpoint,
         live_state: live
       )
