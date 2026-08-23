@@ -20,6 +20,7 @@ shared:
     - fable-method/shared/references/operational-gates.md
     - fable-method/shared/references/judge-handoff.md
     - fable-method/shared/references/reporting.md
+    - fable-method/shared/references/task-checkpoint.md
 
 platforms:
   - name: codex

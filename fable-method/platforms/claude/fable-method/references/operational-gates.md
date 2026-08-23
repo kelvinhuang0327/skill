@@ -258,3 +258,6 @@ Include exact repo/branch/HEAD/tree, worktree, dirty/staged paths, active
 processes, pending external mutations, next action/milestone, blockers,
 settled decisions, and unresolved Owner decisions. Continuation never expands
 authorization and never preserves private chain-of-thought.
+
+When persisting durable continuation state across sessions/models, use the
+contract and bounded live reconciliation algorithm in [task-checkpoint](task-checkpoint.md).
