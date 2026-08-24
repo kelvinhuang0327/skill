@@ -52,3 +52,14 @@ platforms:
     materialized_destination: fable-method/platforms/gemini/fable-method
     live_installation_path: /Users/kelvin/.gemini/skills/fable-method
     live_installation_role: deployment_metadata_only
+
+  - name: antigravity
+    frontmatter_source: fable-method/shared/platforms/antigravity/frontmatter.md
+    adapter_sources:
+      - fable-method/shared/platforms/antigravity/adapter.md
+    reference_overrides:
+      - source: fable-method/shared/platforms/antigravity/references/platform-antigravity.md
+        destination: references/platform-antigravity.md
+    materialized_destination: fable-method/platforms/antigravity
+    live_installation_path: /Users/kelvin/.gemini/config/plugins/fable-method
+    live_installation_role: deployment_metadata_only

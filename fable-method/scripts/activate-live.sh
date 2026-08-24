@@ -8,7 +8,7 @@ readonly EXPECTED_REPOSITORY_ROOT='/Users/kelvin/VibeCoding-WorkSpace/skill'
 readonly USER_HOME='/Users/kelvin'
 readonly MANIFEST="${FABLE_ROOT}/platforms.yaml"
 readonly SYNC_SCRIPT="${SCRIPT_DIR}/sync-platforms.sh"
-readonly PLATFORMS=(codex claude gemini)
+readonly PLATFORMS=(codex claude gemini antigravity)
 
 die() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -19,8 +19,8 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   activate-live.sh --help
-  activate-live.sh --check [--platform codex|claude|gemini]
-  activate-live.sh --activate --platform codex|claude|gemini
+  activate-live.sh --check [--platform codex|claude|gemini|antigravity]
+  activate-live.sh --activate --platform codex|claude|gemini|antigravity
 EOF
   exit 2
 }
@@ -50,8 +50,8 @@ environment-based authorization check of its own - passing the flag is the only
 gate it enforces. There is no --activate-all, --force, --overwrite, --yes, or
 --skip-check mode.
 
-Platforms: codex, claude, gemini. --check accepts zero or one --platform;
---activate requires exactly one.
+Platforms: codex, claude, gemini, antigravity. --check accepts zero or one
+--platform; --activate requires exactly one.
 EOF
 }
 
@@ -68,6 +68,7 @@ platform_materialized_rel() {
     codex) printf '%s\n' 'fable-method/platforms/codex/fable-method' ;;
     claude) printf '%s\n' 'fable-method/platforms/claude/fable-method' ;;
     gemini) printf '%s\n' 'fable-method/platforms/gemini/fable-method' ;;
+    antigravity) printf '%s\n' 'fable-method/platforms/antigravity' ;;
     *) die "unknown platform: $1" ;;
   esac
 }
@@ -77,6 +78,7 @@ platform_live_path() {
     codex) printf '%s\n' '/Users/kelvin/.codex/skills/fable-method' ;;
     claude) printf '%s\n' '/Users/kelvin/.claude/skills/fable-method' ;;
     gemini) printf '%s\n' '/Users/kelvin/.gemini/skills/fable-method' ;;
+    antigravity) printf '%s\n' '/Users/kelvin/.gemini/config/plugins/fable-method' ;;
     *) die "unknown platform: $1" ;;
   esac
 }
@@ -105,7 +107,7 @@ read_manifest_records() {
     raise "platforms must be an array" unless platforms.is_a?(Array)
     names = platforms.map { |p| p.fetch("name") }
     raise "duplicate platform name" unless names.uniq.length == names.length
-    raise "platforms must be exactly codex, claude, gemini" unless names.sort == %w[claude codex gemini]
+    raise "platforms must be exactly antigravity, codex, claude, gemini" unless names.sort == %w[antigravity claude codex gemini]
     platforms.each do |platform|
       name = platform.fetch("name")
       dest = platform.fetch("materialized_destination")

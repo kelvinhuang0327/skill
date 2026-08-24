@@ -50,13 +50,13 @@ manifest_records() {
     platforms = data.fetch("platforms")
     raise "platforms must be an array" unless platforms.is_a?(Array)
     names = platforms.map { |p| p.fetch("name") }.sort
-    raise "platforms must be exactly codex, claude, gemini" unless names == %w[claude codex gemini]
+    raise "platforms must be exactly antigravity, claude, codex, gemini" unless names == %w[antigravity claude codex gemini]
     platforms.each do |platform|
       name = platform.fetch("name")
-      raise "invalid platform name" unless %w[codex claude gemini].include?(name)
+      raise "invalid platform name" unless %w[antigravity codex claude gemini].include?(name)
       frontmatter = rel(platform.fetch("frontmatter_source"), "#{name}.frontmatter_source")
       destination = rel(platform.fetch("materialized_destination"), "#{name}.materialized_destination")
-      expected_destination = "fable-method/platforms/#{name}/fable-method"
+      expected_destination = name == "antigravity" ? "fable-method/platforms/antigravity" : "fable-method/platforms/#{name}/fable-method"
       raise "#{name} destination mismatch" unless destination == expected_destination
       live = platform.fetch("live_installation_path")
       raise "#{name} live installation path must be absolute metadata" unless live.is_a?(String) && live.start_with?("/")
@@ -230,9 +230,41 @@ shared_destination() {
   printf '%s\n' "${ref#fable-method/shared/}"
 }
 
+# Antigravity requires a plugin.json manifest at the destination root with
+# skill content nested under skills/<skill-name>/ (confirmed via `agy plugin
+# validate`); the other platforms consume a bare SKILL.md at the destination
+# root itself. This is the one seam where "destination" (the whole platform
+# materialization) and "skill root" (where SKILL.md/references land) differ.
+platform_skill_root() {
+  local platform="$1"
+  local destination="$2"
+  if [[ "$platform" == "antigravity" ]]; then
+    printf '%s/skills/fable-method\n' "$destination"
+  else
+    printf '%s\n' "$destination"
+  fi
+}
+
+platform_plugin_manifest_path() {
+  local platform="$1"
+  local destination="$2"
+  [[ "$platform" == "antigravity" ]] || return 1
+  printf '%s/plugin.json\n' "$destination"
+}
+
+render_plugin_manifest() {
+  printf '{"name": "fable-method"}\n'
+}
+
 is_expected_file() {
   local platform="$1"
   local rel="$2"
+  if [[ "$platform" == "antigravity" ]]; then
+    [[ "$rel" == "plugin.json" ]] && return 0
+    local skill_prefix="skills/fable-method/"
+    [[ "$rel" == "$skill_prefix"* ]] || return 1
+    rel="${rel#"$skill_prefix"}"
+  fi
   [[ "$rel" == "SKILL.md" ]] && return 0
   local ref
   while IFS= read -r ref; do
@@ -263,14 +295,23 @@ check_destination() {
     printf 'SYMLINK_DESTINATION: %s\n' "$platform"
     drift=1
   fi
-  if [[ ! -f "$destination/SKILL.md" ]] || ! cmp -s <(render_frontmatter_and_skill "$platform") "$destination/SKILL.md"; then
+  local manifest
+  if manifest="$(platform_plugin_manifest_path "$platform" "$destination")"; then
+    if [[ ! -f "$manifest" ]] || ! cmp -s <(render_plugin_manifest) "$manifest"; then
+      printf 'CHANGED: %s/plugin.json\n' "$platform"
+      drift=1
+    fi
+  fi
+  local skill_root
+  skill_root="$(platform_skill_root "$platform" "$destination")"
+  if [[ ! -f "$skill_root/SKILL.md" ]] || ! cmp -s <(render_frontmatter_and_skill "$platform") "$skill_root/SKILL.md"; then
     printf 'CHANGED: %s/SKILL.md\n' "$platform"
     drift=1
   fi
   local ref target source rel
   while IFS= read -r ref; do
     [[ -n "$ref" ]] || continue
-    target="$destination/$(shared_destination "$ref")"
+    target="$skill_root/$(shared_destination "$ref")"
     if [[ ! -f "$target" ]] || ! cmp -s "$(repo_path "$ref")" "$target"; then
       printf 'CHANGED: %s/%s\n' "$platform" "$(shared_destination "$ref")"
       drift=1
@@ -278,7 +319,7 @@ check_destination() {
   done < <(shared_refs)
   while IFS=$'\t' read -r source rel; do
     [[ -n "$source" ]] || continue
-    target="$destination/$rel"
+    target="$skill_root/$rel"
     if [[ ! -f "$target" ]] || ! cmp -s "$(repo_path "$source")" "$target"; then
       printf 'CHANGED: %s/%s\n' "$platform" "$rel"
       drift=1
@@ -340,19 +381,28 @@ write_materialization() {
   reject_materialization_symlink_components "$destination"
   mkdir -p "$destination"
   remove_unexpected_materialization "$platform" "$destination"
-  write_skill_if_changed "$platform" "$destination/SKILL.md"
+  local manifest
+  if manifest="$(platform_plugin_manifest_path "$platform" "$destination")"; then
+    if [[ ! -f "$manifest" ]] || ! cmp -s <(render_plugin_manifest) "$manifest"; then
+      render_plugin_manifest > "$manifest"
+    fi
+  fi
+  local skill_root
+  skill_root="$(platform_skill_root "$platform" "$destination")"
+  mkdir -p "$skill_root"
+  write_skill_if_changed "$platform" "$skill_root/SKILL.md"
   local ref target parent source rel
   while IFS= read -r ref; do
     [[ -n "$ref" ]] || continue
     rel="$(shared_destination "$ref")"
-    target="$destination/$rel"
+    target="$skill_root/$rel"
     parent="$(dirname "$target")"
     mkdir -p "$parent"
     write_if_changed "$(repo_path "$ref")" "$target"
   done < <(shared_refs)
   while IFS=$'\t' read -r source rel; do
     [[ -n "$source" ]] || continue
-    target="$destination/$rel"
+    target="$skill_root/$rel"
     parent="$(dirname "$target")"
     mkdir -p "$parent"
     write_if_changed "$(repo_path "$source")" "$target"
