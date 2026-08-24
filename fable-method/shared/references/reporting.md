@@ -4,6 +4,7 @@
 
 - [Compact Worker report](#compact-worker-report)
 - [Evidence labels](#evidence-labels)
+- [Platform consumer evidence view](#platform-consumer-evidence-view)
 - [Lifecycle closure](#lifecycle-closure)
 
 Use the compact form for ordinary `FAST`/`STANDARD` work. Use the full
@@ -43,6 +44,66 @@ OVERALL_TASK_CONTRACT_RESULT:
 
 Earlier failures, aborts, timeouts, and terminations remain in the attempt and
 filesystem ledgers.
+
+## Platform consumer evidence view
+
+A Consumer is a real downstream runtime/platform that consumes a Fable
+materialization — for this repository, at least Claude, Codex, and Gemini.
+"Platform verified" is ambiguous: it can mean anything from "files were
+copied" to "an agent ran the skill end-to-end." State exactly which of three
+distinct evidence layers a claim actually rests on:
+
+- **MATERIALIZATION** — does the expected canonical materialization exist at
+  the platform's live target and match the expected source identity? Typical
+  evidence: `sync-platforms.sh --check`, `activate-live.sh --check`, or an
+  equivalent deterministic content comparison. This does not prove the agent
+  loaded the skill.
+- **DISCOVERY** — did the actual target agent/runtime discover or expose the
+  skill to the model? Evidence must come from the target platform/runtime
+  itself (e.g. a platform-native skill listing, a model-visible skill
+  registry or prompt inspection, or another deterministic agent-side
+  discovery mechanism — derive the applicable mechanism from the actual
+  platform, do not treat any specific example as mandatory). A filesystem
+  match alone cannot produce `DISCOVERY: PASS`.
+- **EXECUTION** — did the actual target agent/runtime execute the skill
+  behavior successfully? Evidence requires a bounded behavior
+  execution/dogfood observed on the target platform (e.g. a fresh-session
+  checkpoint continuation, a harmless trigger proving loaded instructions
+  were followed, or existing equivalent execution evidence). Installation,
+  file presence, or discovery alone cannot produce `EXECUTION: PASS`.
+
+Each layer resolves to one of the same values used elsewhere in this
+document — `PASS`, `NOT RUN`, or `BLOCKED` — meaning direct evidence exists,
+that exact layer has not been tested, or it was required/attempted but a
+concrete blocker prevented establishing it. Never infer a `PASS` from a
+different layer or a different consumer. In particular:
+
+```text
+MATERIALIZATION: PASS  does NOT imply  DISCOVERY: PASS
+DISCOVERY: PASS        does NOT imply  EXECUTION: PASS
+```
+
+Report the three layers as one compact table:
+
+| Consumer | Materialization | Discovery | Execution | Evidence |
+|---|---|---|---|---|
+| Claude | PASS | PASS | PASS | <minimal refs> |
+| Codex | PASS | PASS | PASS | <minimal refs> |
+| Gemini | PASS | NOT RUN | NOT RUN | <minimal refs> |
+
+The row above is an example of shape only, not a canonical result — populate
+it from the evidence actually available to the current task. Keep the
+Evidence column compact and load-bearing (a command, a commit, a session
+observation); do not paste full logs. Do not add separate
+`AFFECTED_CONSUMERS` or `CONSUMER_STATE` fields once this table is present —
+one view owns this concern.
+
+This view is descriptive, not a release gate: an incomplete row (e.g.
+`MATERIALIZATION: PASS` with `DISCOVERY`/`EXECUTION: NOT RUN`) is a more
+accurate statement than an unqualified "verified," and is not by itself a
+task failure. Whether a given task's acceptance requires Discovery or
+Execution evidence remains task-specific, decided by that task's own
+acceptance criteria — not a universal consequence of using this view.
 
 ## Lifecycle closure
 
