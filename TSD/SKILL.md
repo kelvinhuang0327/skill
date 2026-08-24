@@ -551,23 +551,23 @@ The following principles were formalised after the PRJ-A TSD multi-round correct
 
 ### Reference Files (Mandatory)
 
-| Item | Path | Role |
+| Item | Locator / Binding | Role |
 |---|---|---|
 | **Template Source** | `assets/base_template.docx` | Word template clone base — REQUIRED for all TSD generation |
-| **Final Reference Output** | `Technical Specification - <REF_FINAL>` | PRJ-A regression baseline — behavior comparison only |
+| **Gate I reference artifact** | `<REF_FINAL>` | Operator-bound V7 regression baseline — behavior comparison only |
 
-**Full paths:**
+**Bindings (the concrete reference locator remains local input):**
 ```
 Template Source:
   `<OPERATOR_BASE_TEMPLATE_INPUT>`
 
-Final Reference Output:
-  `<REF_FINAL>`
+Gate I reference artifact:
+  `<REF_FINAL>` (symbolic token; bind to a concrete local artifact for each run)
 ```
 
 **Critical role distinction:**
 - `assets/base_template.docx` = clone base. New TSD MUST `Document(this_file)`. Never from blank.
-- `<REF_FINAL>` = regression baseline. Compare behavior; do NOT clone; do NOT copy PRJ-A-specific content to other projects.
+- `<REF_FINAL>` = symbolic binding for the exact operator-supplied local regression artifact. It is not a literal filename, Git-owned artifact, or bundled runtime asset. Gate I2 MUST NOT PASS until it is bound; compare behavior against the bound artifact, do NOT clone it, and do NOT copy PRJ-A-specific content to other projects.
 
 ### Principle 1 — Template Clone Only
 
@@ -847,12 +847,12 @@ See `TEMPLATE_RULES.md` for full detail.
 
 The Final Reference Output provides the behavior baseline for regression comparison.
 
-**Final Reference Output:**
+**Gate I reference artifact:**
 
 ```
-File: Technical Specification - <REF_FINAL>
-Path: `<REF_FINAL>`
-Role: PRJ-A Final Reference Output / Regression Baseline
+Binding token: `<REF_FINAL>`
+Concrete locator: operator-supplied local input for this run; not stored in Git
+Role: V7 Final Reference Output / Template-B Regression Baseline
 ```
 
 **Use for comparison of:**
@@ -868,8 +868,8 @@ Role: PRJ-A Final Reference Output / Regression Baseline
 - Output render without broken layout
 
 **STRICTLY FORBIDDEN:**
-- Using `<REF_FINAL>` as clone template source
-- `doc = Document("...<REF_FINAL>")` as TSD base
+- Using the artifact bound to `<REF_FINAL>` as clone template source
+- Treating `<REF_FINAL>` as a literal path or comparing the token to itself
 - Copying PRJ-A-specific content (project name, file paths, amounts) into unrelated TSD
 - Treating v7 final output as the canonical template
 

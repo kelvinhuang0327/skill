@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This document defines the two reference files used in TSD skillpack:
+This document defines the two reference roles used in TSD skillpack:
 1. The Word template source used for cloning
-2. The final reference output used for regression comparison
+2. The operator-bound final reference artifact used for regression comparison
 
 Created: 2026-05-11
 
@@ -51,17 +51,35 @@ assets/base_template.docx
 
 ## Final Reference Output
 
-**Path:**
+**Binding token:**
 
 ```
 `<REF_FINAL>`
 ```
 
-**Role:** Final PRJ-A reference output / regression baseline.
+`<REF_FINAL>` is a symbolic baseline binding, not a literal filename or path.
+It names the exact operator-supplied local reference artifact bound for Gate I
+regression comparison. The concrete locator is local run input and is
+intentionally not embedded in Git-owned source.
+
+**Role:** V7 Template-B final reference output / regression baseline, once
+bound by the operator for the run.
+
+**Binding requirements:**
+
+- Before Gate I runs, the operator MUST bind `<REF_FINAL>` to an actual local
+  reference artifact for that run.
+- The bound artifact is the baseline used by the existing Gate I regression
+  checks below; the token itself is not an executable artifact.
+- Do not hardcode the concrete local locator, commit the reference artifact, or
+  bundle it into the generated runtime tree.
+- If `<REF_FINAL>` is not bound to an actual artifact, Gate I2 MUST NOT be
+  reported PASS.
 
 **Usage:**
 
-- Compare final behavior between new TSD generations and this baseline
+- Compare final behavior between new TSD generations and the artifact bound to
+  `<REF_FINAL>`
 - Validate section 3 layout and writing style
 - Validate 3.x.2 `placement = appendix_only` behaviour (Template B baseline only)
 - Validate appendix list behavior
@@ -76,15 +94,24 @@ assets/base_template.docx
 
 ## Important Role Distinction
 
-| Attribute | Template Source | Final Reference Output |
+| Attribute | Template Source | Gate I Reference Artifact |
 |---|---|---|
-| File | assets/base_template.docx | <REF_FINAL> |
-| Role | Clone base | Regression baseline |
+| Binding | `assets/base_template.docx` | `<REF_FINAL>` |
+| Role | Clone base | Operator-bound V7 regression baseline |
+| Concrete locator | Operator-supplied local input | Operator-supplied local input; never hardcoded in Git |
 | Use `Document(this_file)` | **YES — REQUIRED** | **NO — FORBIDDEN** |
 | Copy content to new TSD | Structure only (section 4-11) | **NO — never copy PRJ-A-specific content** |
 | Contains project-specific content | No (generic template) | Yes (PRJ-A project) |
 
 ---
+
+## Gate I Binding and Execution
+
+Gate I2 is executable only when `<REF_FINAL>` has been bound to a concrete
+operator-supplied local artifact. The run must then evaluate the generated
+output against that bound artifact using the existing regression checks in this
+document. Comparing the token to itself, or treating the token as a resolvable
+artifact without a binding, is not a Gate I regression run.
 
 ## Reference Checks (Regression Behavior)
 
@@ -97,7 +124,8 @@ No Template C golden or reference shape is defined here. The absence of one does
 applying the Template C rules in `core/TEMPLATE_MODE_RULES.md` and
 `core/CHANGE_PROGRAM_CONTRACT.md`.
 
-When comparing a new Template B TSD against the Final Reference Output, verify:
+When comparing a new Template B TSD against the artifact bound to `<REF_FINAL>`,
+verify:
 
 | Check | Expected Behavior (based on PRJ-A v7 final; Template B baseline) |
 |---|---|
@@ -121,7 +149,8 @@ When comparing a new Template B TSD against the Final Reference Output, verify:
 
 ## Strictly Forbidden Operations
 
-1. `doc = Document("...<REF_FINAL>")` as TSD base
+1. Treating `<REF_FINAL>` as a literal filename/path or using the bound
+   reference artifact as the TSD clone base
 2. Copying PRJ-A-specific content (project name, file paths, FX/ECERT identifiers, amounts like "PRJ-A") into new TSD
 3. Treating the v7 final output as a template for future projects
 4. Using PRJ-A file path list as the default appendix content for another project

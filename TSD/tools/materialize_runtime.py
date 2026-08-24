@@ -30,6 +30,13 @@ RUNTIME_BASE_TEMPLATE = "assets/base_template.docx"
 SOURCE_CORE_PREFIX = "../../core/"
 RUNTIME_CORE_PREFIX = "./core/"
 REQUIRED_CORE = ("CHANGE_PROGRAM_CONTRACT.md", "TEMPLATE_MODE_RULES.md")
+MATERIALIZER_MANIFEST_HASH_ALGORITHM = (
+    "SHA-256 of UTF-8 canonical lines '<relative path>  <file SHA-256>', "
+    "sorted by relative path"
+)
+MATERIALIZER_MANIFEST_HASH_PURPOSE = (
+    "deterministic identity of the runtime tree produced by this materializer"
+)
 
 
 class FailClosed(Exception):
@@ -149,6 +156,8 @@ def materialize(source_root, base_template, out_dir):
     return {
         "manifest": manifest,
         "manifest_hash": manifest_hash,
+        "manifest_hash_algorithm": MATERIALIZER_MANIFEST_HASH_ALGORITHM,
+        "manifest_hash_purpose": MATERIALIZER_MANIFEST_HASH_PURPOSE,
         "base_template_input_sha256": input_sha,
         "materialized_base_template_sha256": output_sha,
         "core_files": core_files,
@@ -177,7 +186,11 @@ def main(argv=None):
     print("BASE_TEMPLATE_INPUT_SHA256: %s" % result["base_template_input_sha256"])
     print("MATERIALIZED_BASE_TEMPLATE_SHA256: %s"
           % result["materialized_base_template_sha256"])
-    print("RUNTIME_BUILD_MANIFEST_HASH: %s" % result["manifest_hash"])
+    print("MATERIALIZER_MANIFEST_HASH_ALGORITHM: %s"
+          % result["manifest_hash_algorithm"])
+    print("MATERIALIZER_MANIFEST_HASH_PURPOSE: %s"
+          % result["manifest_hash_purpose"])
+    print("MATERIALIZER_MANIFEST_HASH: %s" % result["manifest_hash"])
     print("FILES: %d" % len(result["manifest"]))
     for name, digest in result["manifest"]:
         print("  %s  %s" % (digest, name))

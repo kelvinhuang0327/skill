@@ -11,6 +11,8 @@ Run: python3 tools/test_materialize_runtime.py
 import shutil
 import sys
 import tempfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -83,6 +85,9 @@ def main():
               res["base_template_input_sha256"]
               == res["materialized_base_template_sha256"]
               == mr.sha256_bytes(FIXTURE_BYTES))
+        check("4b manifest hash algorithm and purpose are explicit",
+              res["manifest_hash_algorithm"] == mr.MATERIALIZER_MANIFEST_HASH_ALGORITHM
+              and res["manifest_hash_purpose"] == mr.MATERIALIZER_MANIFEST_HASH_PURPOSE)
 
         # 5. exactly one .docx in the runtime tree
         check("5  exactly one runtime .docx",
@@ -147,6 +152,23 @@ def main():
               a["manifest"] == b["manifest"]
               and a["manifest_hash"] == b["manifest_hash"]
               and a["base_template_input_sha256"] == b["base_template_input_sha256"])
+
+    # 7b. the CLI labels the materializer hash instead of conflating it with a
+    # separately computed live-tree hash.
+    with tempfile.TemporaryDirectory() as tmp:
+        rendered = StringIO()
+        template = fixture(tmp)
+        with redirect_stdout(rendered):
+            rc = mr.main(["--base-template", str(template),
+                          "--out", str(Path(tmp) / "cli-out")])
+        report = rendered.getvalue()
+        legacy_label = "RUNTIME_BUILD_" + "MANIFEST_HASH:"
+        check("7b CLI labels materializer hash algorithm and purpose",
+              rc == 0
+              and "MATERIALIZER_MANIFEST_HASH_ALGORITHM: " in report
+              and "MATERIALIZER_MANIFEST_HASH_PURPOSE: " in report
+              and "MATERIALIZER_MANIFEST_HASH: " in report
+              and legacy_label not in report)
 
     # 17. non-empty --out refuses to build over existing content
     with tempfile.TemporaryDirectory() as tmp:

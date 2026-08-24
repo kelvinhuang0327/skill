@@ -280,9 +280,9 @@ disclosed in the rationale — not that they are split into separate sections.
 | Check | Pass Condition |
 |---|---|
 | I1 — Template source is assets/base_template.docx | `Document(template_path)` clones `assets/base_template.docx`; NOT PRJ-A v7 | PASS/FAIL |
-| I2 — Final reference output is <REF_FINAL> | QA regression baseline is `<REF_FINAL>` | PASS/FAIL |
+| I2 — Gate I reference artifact (`<REF_FINAL>`) is bound | For this run, `<REF_FINAL>` is bound to a concrete operator-supplied local artifact; the generated output is evaluated against that bound artifact using the existing Gate I regression semantics. If unbound, I2 is NOT PASS. | PASS/FAIL |
 | I3 — New output uses template source as clone base | Generator code clones assets/base_template.docx; PRJ-A v7 is never used as `Document(path)` clone source | PASS/FAIL |
-| I4 — New output behavior matches final reference output rules | Style, diff color, hyperlinks, TOC, appendix pStyle verified against PRJ-A v7 regression checklist | PASS/FAIL |
+| I4 — New output behavior matches final reference output rules | Style, diff color, hyperlinks, TOC, appendix pStyle verified against the regression checklist for the artifact bound to `<REF_FINAL>` | PASS/FAIL |
 | I5 — No PRJ-A-specific content copied into unrelated TSD | PRJ-A project-specific sections/data not inserted into different project TSD | PASS/FAIL |
 
 **Reference Files:**
@@ -290,14 +290,16 @@ disclosed in the rationale — not that they are split into separate sections.
 | Role | File | Allowed Usage |
 |---|---|---|
 | Template Source | `assets/base_template.docx` | Clone via `Document(template_path)` ✅ |
-| Final Reference Output | `Technical Specification - <REF_FINAL>` | Regression comparison only ✅ / Clone FORBIDDEN ❌ |
+| Gate I reference artifact (`<REF_FINAL>`) | Operator-supplied local artifact bound for this run | Regression comparison only ✅ / Clone FORBIDDEN ❌ |
 
 **FAIL trigger:** Any I1–I5 check is FAIL.
+If `<REF_FINAL>` is not bound to an actual artifact, I2 is not PASS and Gate I
+cannot authorize delivery.
 
 **Verification method:**
 1. Search generator code for `Document(` call; confirm argument resolves to assets/base_template.docx path (FAIL if resolves to PRJ-A v7 path → I1, I3).
-2. Confirm QA baseline file reference is PRJ-A v7 (FAIL if wrong file → I2).
-3. Run behavioral regression: compare new output against PRJ-A v7 checklist (FAIL if diverges → I4).
+2. Confirm `<REF_FINAL>` is bound to an actual operator-supplied local artifact for this run; the token is not itself the artifact (I2 is NOT PASS when no binding exists).
+3. Run behavioral regression: compare new output against the artifact bound to `<REF_FINAL>` using the existing regression checklist (FAIL if the output diverges → I4).
 4. Scan new TSD appendix for PRJ-A project file paths (FAIL if found in non-PRJ-A TSD → I5).
 
 See `REFERENCE_OUTPUTS.md` for full role-distinction rules and regression check table.
