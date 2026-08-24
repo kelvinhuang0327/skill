@@ -13,6 +13,15 @@ CONTEXT_HIGH_WATER) in every report-facing output. This script does not
 persist raw transcript content anywhere; it only ever prints/writes
 aggregate numbers, byte counts, and category labels.
 
+CORRECTION (FABLE_REQUEST_LEVEL_MEASUREMENT_CORRECTION_R1): this script
+originally summed every usage-bearing assistant JSONL record as if it were
+one API request. FABLE_CACHE_MISS_DIAGNOSTIC_ATTRIBUTION_R1 proved a single
+API response with multiple content blocks (thinking/text/tool_use) is logged
+as multiple JSONL records sharing one requestId, each carrying an identical
+copy of that request's `usage`. All usage-derived sums below (everything
+except the byte-count categories, which are one-block-per-line and verified
+unaffected) are now computed once per unique requestId, not once per line.
+
 Usage:
     python3 measure.py --cutoff <ISO8601-UTC> \
         --exclude-session <this-measurement-session-id> \
@@ -105,10 +114,83 @@ def is_subagent_result(tur):
     )
 
 
+def build_deduplicated_main_usage(lines):
+    """Duplicate-record guard (required before any usage-derived metric).
+
+    Groups main-thread (non-sidechain), usage-bearing assistant JSONL
+    records by requestId. Verifies - does not assume - that usage is
+    identical across every member of a group. Returns:
+      representatives: one record per unique request, chronological order
+      guard: USAGE_RECORD_COUNT / UNIQUE_REQUEST_COUNT /
+        DUPLICATED_REQUEST_RECORD_COUNT / MISSING_REQUEST_ID_COUNT /
+        CONFLICTING_USAGE_WITHIN_REQUEST_COUNT
+
+    A record with no requestId is treated as its own singleton group (never
+    merged with another record) since there is no evidence it belongs to the
+    same request as anything else - the conservative default is to NOT
+    collapse events that cannot be proven identical.
+    """
+    order = []
+    groups = {}
+    missing_rid = 0
+    for d in lines:
+        if d.get("isSidechain"):
+            continue
+        m = d.get("message") or {}
+        if m.get("role") != "assistant":
+            continue
+        usage = m.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        rid = d.get("requestId")
+        if rid is None:
+            missing_rid += 1
+            key = ("__MISSING_REQUEST_ID__", id(d))
+        else:
+            key = rid
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(d)
+
+    conflicts = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        keyset = set()
+        for d in members:
+            u = d["message"]["usage"]
+            keyset.add((
+                u.get("input_tokens"),
+                u.get("cache_creation_input_tokens"),
+                u.get("cache_read_input_tokens"),
+                u.get("output_tokens"),
+            ))
+        if len(keyset) > 1:
+            conflicts += 1
+
+    usage_record_count = sum(len(m) for m in groups.values())
+    unique_request_count = len(groups)
+
+    representatives = []
+    for key in order:
+        members = sorted(groups[key], key=lambda d: parse_ts(d.get("timestamp")) or datetime.min)
+        representatives.append(members[0])
+
+    guard = {
+        "usage_record_count": usage_record_count,
+        "unique_request_count": unique_request_count,
+        "duplicated_request_record_count": usage_record_count - unique_request_count,
+        "missing_request_id_count": missing_rid,
+        "conflicting_usage_within_request_count": conflicts,
+    }
+    return representatives, guard
+
+
 class SessionAccum:
     def __init__(self, session_id):
         self.session_id = session_id
-        self.main_usage = []  # list of (timestamp, dict usage) main-thread only
+        self.main_usage = []  # list of (timestamp, dict usage) main-thread only, DEDUPLICATED (one per unique requestId)
         self.sidechain_record_count = 0
         self.subagent_spawns = []  # list of dicts: {name, prompt_bytes, return_bytes, internal_usage, internal_total_tokens, internal_tool_use_count, judge_like}
         self.tool_use_input_bytes = {}  # name -> bytes (main thread, excludes subagent prompt handled separately in D too - see note)
@@ -116,11 +198,12 @@ class SessionAccum:
         self.user_text_bytes = 0
         self.assistant_text_bytes = 0
         self.assistant_thinking_bytes = 0
-        self.judge_attributed_usage = []  # exact main-thread usage dicts tagged attributionSkill=='fable-judge'
+        self.judge_attributed_usage = []  # exact main-thread usage dicts tagged attributionSkill=='fable-judge', DEDUPLICATED
         self.first_main_usage_seen = None  # (cache_read, cache_creation) of first chronological main usage record
         self.thinking_tokens_exact_sum = 0
         self.thinking_tokens_field_present_count = 0
         self.thinking_tokens_field_absent_count = 0
+        self.request_identity_guard = None  # set from build_deduplicated_main_usage
 
 
 def main():
@@ -158,7 +241,9 @@ def main():
         acc = SessionAccum(sid)
 
         # Pass 1: build tool_use_id -> name map from MAIN-THREAD assistant messages,
-        # in file order (chronological within a session's own log).
+        # in file order (chronological within a session's own log). Content
+        # blocks are one-per-line (verified: never duplicated across a
+        # requestId's split lines), so this is unaffected by request dedup.
         tool_id_to_name = {}
         for d in lines:
             if d.get("isSidechain"):
@@ -172,7 +257,36 @@ def main():
                     if isinstance(b, dict) and b.get("type") == "tool_use":
                         tool_id_to_name[b.get("id")] = b.get("name")
 
-        # Pass 2: walk lines in order, accumulate all metrics.
+        # Pass 1b: duplicate-record guard + deduplicated main-thread usage
+        # (required before any usage-derived metric - see module docstring).
+        dedup_representatives, guard = build_deduplicated_main_usage(lines)
+        acc.request_identity_guard = guard
+        for d in dedup_representatives:
+            m = d["message"]
+            usage = m["usage"]
+            ts = parse_ts(d.get("timestamp"))
+            attr = d.get("attributionSkill")
+            acc.main_usage.append((ts, usage))
+            if acc.first_main_usage_seen is None:
+                acc.first_main_usage_seen = (
+                    usage.get("cache_read_input_tokens", 0) or 0,
+                    usage.get("cache_creation_input_tokens", 0) or 0,
+                )
+            if attr == "fable-judge":
+                acc.judge_attributed_usage.append(usage)
+            otd = usage.get("output_tokens_details")
+            if isinstance(otd, dict) and "thinking_tokens" in otd:
+                acc.thinking_tokens_exact_sum += otd.get("thinking_tokens") or 0
+                acc.thinking_tokens_field_present_count += 1
+            else:
+                acc.thinking_tokens_field_absent_count += 1
+
+        # Pass 2: walk ALL raw lines, accumulate byte-based content metrics only.
+        # Not usage-derived, so NOT subject to the request-dedup guard above -
+        # each content block (text/thinking/tool_use/tool_result) is logged on
+        # exactly one JSONL line even when a response spans several lines
+        # (verified: zero true content duplicates found across every
+        # multi-line requestId group in the authorized sample).
         for d in lines:
             is_side = bool(d.get("isSidechain"))
             if is_side:
@@ -181,25 +295,6 @@ def main():
 
             m = d.get("message") or {}
             role = m.get("role")
-            usage = m.get("usage")
-            ts = parse_ts(d.get("timestamp"))
-            attr = d.get("attributionSkill")
-
-            if role == "assistant" and isinstance(usage, dict):
-                acc.main_usage.append((ts, usage))
-                if acc.first_main_usage_seen is None:
-                    acc.first_main_usage_seen = (
-                        usage.get("cache_read_input_tokens", 0) or 0,
-                        usage.get("cache_creation_input_tokens", 0) or 0,
-                    )
-                if attr == "fable-judge":
-                    acc.judge_attributed_usage.append(usage)
-                otd = usage.get("output_tokens_details")
-                if isinstance(otd, dict) and "thinking_tokens" in otd:
-                    acc.thinking_tokens_exact_sum += otd.get("thinking_tokens") or 0
-                    acc.thinking_tokens_field_present_count += 1
-                else:
-                    acc.thinking_tokens_field_absent_count += 1
 
             content = m.get("content")
             if not isinstance(content, list):
@@ -307,6 +402,11 @@ def main():
     thinking_present_total = 0
     thinking_absent_total = 0
     novel_token_volume_total = 0
+    agg_usage_record_count = 0
+    agg_unique_request_count = 0
+    agg_duplicated_request_record_count = 0
+    agg_missing_request_id_count = 0
+    agg_conflicting_usage_count = 0
 
     for idx, acc in enumerate(top, start=1):
         label = f"S{idx}"
@@ -350,6 +450,8 @@ def main():
             "cache_read_tokens": cache_read,
             "output_tokens": output,
             "main_thread_call_count": len(acc.main_usage),
+            "main_thread_raw_line_count": acc.request_identity_guard["usage_record_count"],
+            "request_identity_guard": acc.request_identity_guard,
             "subagent_spawn_count": len(acc.subagent_spawns),
             "sidechain_record_count": acc.sidechain_record_count,
             "subagent_spawn_prompt_bytes": spawn_prompt_bytes,
@@ -379,6 +481,11 @@ def main():
         thinking_present_total += acc.thinking_tokens_field_present_count
         thinking_absent_total += acc.thinking_tokens_field_absent_count
         novel_token_volume_total += ntv
+        agg_usage_record_count += acc.request_identity_guard["usage_record_count"]
+        agg_unique_request_count += acc.request_identity_guard["unique_request_count"]
+        agg_duplicated_request_record_count += acc.request_identity_guard["duplicated_request_record_count"]
+        agg_missing_request_id_count += acc.request_identity_guard["missing_request_id_count"]
+        agg_conflicting_usage_count += acc.request_identity_guard["conflicting_usage_within_request_count"]
 
     report["aggregate_across_top_n"] = {
         "B_user_turns_bytes": agg_user_bytes,
@@ -405,6 +512,13 @@ def main():
             round(thinking_tokens_exact_total / novel_token_volume_total, 4)
             if novel_token_volume_total else None
         ),
+    }
+    report["request_identity_guard_across_top_n"] = {
+        "usage_record_count": agg_usage_record_count,
+        "unique_request_count": agg_unique_request_count,
+        "duplicated_request_record_count": agg_duplicated_request_record_count,
+        "missing_request_id_count": agg_missing_request_id_count,
+        "conflicting_usage_within_request_count": agg_conflicting_usage_count,
     }
 
     print(json.dumps(report, indent=2, ensure_ascii=False))

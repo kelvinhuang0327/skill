@@ -12,6 +12,21 @@ same frozen cutoff). Its real session id is never printed to stdout, written
 to any output file, or otherwise persisted by this script - only the label
 "S1" appears in any report-facing structure.
 
+CORRECTION (FABLE_REQUEST_LEVEL_MEASUREMENT_CORRECTION_R1): this script
+originally treated every usage-bearing assistant JSONL record as one model
+call ("turn"). FABLE_CACHE_MISS_DIAGNOSTIC_ATTRIBUTION_R1 proved a single API
+response with multiple content blocks (thinking/text/tool_use) is logged as
+multiple JSONL records sharing one requestId, each carrying an identical
+copy of that request's `usage`. Comparing "prior turn" usage between two such
+duplicate records (which are the same request, not consecutive requests)
+manufactured spurious near-zero reuse ratios - the exact shape of the "three
+repeated rebuild bursts" this script originally reported. `build_turns` is
+replaced by `build_deduplicated_turns_and_events`, which applies the same
+requestId duplicate-record guard proven in cache-miss-diagnostic-r1 before
+building the turn sequence; every downstream computation (reuse-state
+classification, burst detection, material-event selection, tool-result
+association, time-gap buckets) is unchanged and now runs on real requests.
+
 Usage:
     python3 measure_cache_churn.py --cutoff <ISO8601-UTC> \
         --exclude-session <this-measurement-session-id> \
@@ -159,17 +174,36 @@ def is_subagent_result(tur):
     return isinstance(tur, dict) and "agentId" in tur and "totalToolUseCount" in tur
 
 
-def build_turns(lines):
-    """Walk one session's lines in file order and produce:
-      turns: list of dicts, one per main-thread assistant usage-bearing call
+def build_deduplicated_turns_and_events(lines):
+    """Duplicate-record guard (required before any cache-reuse analysis),
+    then walk one session's lines in file order to produce:
+      turns: list of dicts, one per unique requestId (a real model call),
+        chronological order - same shape as the pre-correction per-line
+        "turn" dicts, so every downstream computation is unchanged.
       events_between: parallel list; events_between[i] = list of
         (tool_name, bytes, is_subagent) tool_result events that occurred
-        strictly between turn i-1 and turn i (events_between[0] = events
-        before the first turn).
+        strictly between request i-1 and request i (events_between[0] =
+        events before the first request). A multi-line request's own split
+        lines never contain a tool_result of their own (verified: a
+        tool_result can only follow a fully-emitted tool_use, so it cannot
+        interleave inside one response's own split lines); a bucket opens
+        only on a requestId's first occurrence.
+      guard: USAGE_RECORD_COUNT / UNIQUE_REQUEST_COUNT /
+        DUPLICATED_REQUEST_RECORD_COUNT / MISSING_REQUEST_ID_COUNT /
+        CONFLICTING_USAGE_WITHIN_REQUEST_COUNT / NONCONTIGUOUS_REQUESTID_GROUPS
+        (the last is a direct check of the interleaving assumption above,
+        not an assumption itself).
+
+    A record with no requestId is treated as its own singleton group (never
+    merged with another record), the same conservative default used in
+    analysis/token-attribution-r1/measure.py.
     """
     tool_id_to_name = {}
-    turns = []
-    events_between = [[]]  # bucket 0 = before first assistant turn
+    order = []
+    groups = {}
+    usage_line_positions = {}
+    events_between = [[]]  # bucket 0 = before first request
+    usage_line_index = -1
 
     for d in lines:
         if d.get("isSidechain"):
@@ -186,17 +220,16 @@ def build_turns(lines):
 
             usage = m.get("usage")
             if isinstance(usage, dict):
-                cd = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
-                turns.append({
-                    "timestamp": parse_ts(d.get("timestamp")),
-                    "model": m.get("model"),
-                    "attribution_skill": d.get("attributionSkill"),
-                    "usage": usage,
-                    "service_tier": usage.get("service_tier"),
-                    "ephemeral_1h_tokens": cd.get("ephemeral_1h_input_tokens"),
-                    "ephemeral_5m_tokens": cd.get("ephemeral_5m_input_tokens"),
-                })
-                events_between.append([])
+                usage_line_index += 1
+                rid = d.get("requestId")
+                key = rid if rid is not None else ("__MISSING_REQUEST_ID__", id(d))
+                if key not in groups:
+                    groups[key] = []
+                    order.append(key)
+                    events_between.append([])
+                    usage_line_positions[key] = []
+                groups[key].append(d)
+                usage_line_positions[key].append(usage_line_index)
                 continue  # this line's own content has no tool_result to log
 
         if isinstance(content, list):
@@ -216,10 +249,64 @@ def build_turns(lines):
                                  len((tur.get("stderr") or "").encode("utf-8"))
                 events_between[-1].append((name, nbytes, subagent))
 
-    # events_between has len(turns)+1 buckets; drop the trailing empty bucket
-    # (events after the last turn are not "between" two model calls).
-    events_between = events_between[:len(turns) + 1]
-    return turns, events_between
+    # events_between has len(order)+1 buckets; drop the trailing empty bucket
+    # (events after the last request are not "between" two model calls).
+    events_between = events_between[:len(order) + 1]
+
+    noncontiguous = 0
+    for key in order:
+        positions = usage_line_positions[key]
+        if positions[-1] - positions[0] != len(positions) - 1:
+            noncontiguous += 1
+
+    missing_rid = sum(1 for key in order if isinstance(key, tuple))
+
+    conflicts = 0
+    for key in order:
+        members = groups[key]
+        if len(members) < 2:
+            continue
+        keyset = set()
+        for d in members:
+            u = d["message"]["usage"]
+            keyset.add((
+                u.get("input_tokens"),
+                u.get("cache_creation_input_tokens"),
+                u.get("cache_read_input_tokens"),
+                u.get("output_tokens"),
+            ))
+        if len(keyset) > 1:
+            conflicts += 1
+
+    usage_record_count = sum(len(groups[k]) for k in order)
+    unique_request_count = len(order)
+
+    turns = []
+    for key in order:
+        members = sorted(groups[key], key=lambda d: parse_ts(d.get("timestamp")) or datetime.min)
+        rep = members[0]
+        m = rep["message"]
+        usage = m["usage"]
+        cd = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+        turns.append({
+            "timestamp": parse_ts(rep.get("timestamp")),
+            "model": m.get("model"),
+            "attribution_skill": rep.get("attributionSkill"),
+            "usage": usage,
+            "service_tier": usage.get("service_tier"),
+            "ephemeral_1h_tokens": cd.get("ephemeral_1h_input_tokens"),
+            "ephemeral_5m_tokens": cd.get("ephemeral_5m_input_tokens"),
+        })
+
+    guard = {
+        "usage_record_count": usage_record_count,
+        "unique_request_count": unique_request_count,
+        "duplicated_request_record_count": usage_record_count - unique_request_count,
+        "missing_request_id_count": missing_rid,
+        "conflicting_usage_within_request_count": conflicts,
+        "noncontiguous_requestId_groups": noncontiguous,
+    }
+    return turns, events_between, guard
 
 
 def classify_state(ratio):
@@ -249,7 +336,7 @@ def main():
         sys.exit(2)
     _target_path, target_chw, lines = found  # _target_path used only in-process, never emitted
 
-    turns, events_between = build_turns(lines)
+    turns, events_between, request_identity_guard = build_deduplicated_turns_and_events(lines)
     n = len(turns)
 
     per_turn = []
@@ -520,6 +607,8 @@ def main():
         "target_session_label": "S1",
         "target_context_high_water_tokens": target_chw,
         "main_thread_turn_count": n,
+        "main_thread_raw_line_count": request_identity_guard["usage_record_count"],
+        "request_identity_guard": request_identity_guard,
         "total_cache_creation_tokens": total_cache_creation,
         "cache_creation_share_by_reuse_state": {
             "NORMAL_REUSE_CANDIDATE": round(normal_share, 4),
