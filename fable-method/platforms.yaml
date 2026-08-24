@@ -60,6 +60,6 @@ platforms:
     reference_overrides:
       - source: fable-method/shared/platforms/antigravity/references/platform-antigravity.md
         destination: references/platform-antigravity.md
-    materialized_destination: fable-method/platforms/antigravity
-    live_installation_path: /Users/kelvin/.gemini/config/plugins/fable-method
+    materialized_destination: fable-method/platforms/antigravity/fable-method
+    live_installation_path: /Users/kelvin/.gemini/config/skills/fable-method
     live_installation_role: deployment_metadata_only

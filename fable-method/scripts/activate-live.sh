@@ -68,7 +68,7 @@ platform_materialized_rel() {
     codex) printf '%s\n' 'fable-method/platforms/codex/fable-method' ;;
     claude) printf '%s\n' 'fable-method/platforms/claude/fable-method' ;;
     gemini) printf '%s\n' 'fable-method/platforms/gemini/fable-method' ;;
-    antigravity) printf '%s\n' 'fable-method/platforms/antigravity' ;;
+    antigravity) printf '%s\n' 'fable-method/platforms/antigravity/fable-method' ;;
     *) die "unknown platform: $1" ;;
   esac
 }
@@ -78,7 +78,7 @@ platform_live_path() {
     codex) printf '%s\n' '/Users/kelvin/.codex/skills/fable-method' ;;
     claude) printf '%s\n' '/Users/kelvin/.claude/skills/fable-method' ;;
     gemini) printf '%s\n' '/Users/kelvin/.gemini/skills/fable-method' ;;
-    antigravity) printf '%s\n' '/Users/kelvin/.gemini/config/plugins/fable-method' ;;
+    antigravity) printf '%s\n' '/Users/kelvin/.gemini/config/skills/fable-method' ;;
     *) die "unknown platform: $1" ;;
   esac
 }
