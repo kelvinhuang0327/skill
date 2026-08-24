@@ -495,7 +495,14 @@ do_activate() {
     ABSENT)
       local parent
       parent="$(dirname "$live")"
-      [[ -d "$parent" && ! -L "$parent" ]] || die 'ACTIVATION_PARENT_NOT_READY'
+      if [[ -d "$parent" ]]; then
+        [[ ! -L "$parent" ]] || die 'ACTIVATION_PARENT_NOT_READY'
+      else
+        local grandparent
+        grandparent="$(dirname "$parent")"
+        [[ -d "$grandparent" && ! -L "$grandparent" ]] || die 'ACTIVATION_PARENT_NOT_READY'
+        mkdir "$parent"
+      fi
       mkdir "$live"
       rsync -a --delete "$canonical_abs"/ "$live"/
       result=ACTIVATED
