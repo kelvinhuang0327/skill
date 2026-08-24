@@ -51,59 +51,95 @@ A Consumer is a real downstream runtime/platform that consumes a Fable
 materialization — for this repository, at least Claude, Codex, and Gemini.
 "Platform verified" is ambiguous: it can mean anything from "files were
 copied" to "an agent ran the skill end-to-end." State exactly which of three
-distinct evidence layers a claim actually rests on:
+distinct evidence layers a claim actually rests on, and against which exact
+materialization identity (a commit or tree) — not merely "the repo" or "the
+platform" — since more than one identity is routinely in play at once.
 
-- **MATERIALIZATION** — does the expected canonical materialization exist at
-  the platform's live target and match the expected source identity? Typical
-  evidence: `sync-platforms.sh --check`, `activate-live.sh --check`, or an
-  equivalent deterministic content comparison. This does not prove the agent
-  loaded the skill.
+- **MATERIALIZATION** — does the target actually match the identity being
+  reported as current? Two distinct surfaces exist and evidence must say
+  which one was checked: *repo platform materialization* (is the
+  repo-committed platform copy under `fable-method/platforms/<name>/` in
+  sync with the shared source — `sync-platforms.sh --check`) and *live
+  consumer installation* (does the runtime's actual live install target
+  match a given identity — `activate-live.sh --check` or an equivalent
+  deterministic comparison). A check against either surface that finds an
+  exact match to the identity being reported as current is `PASS`. A check
+  that finds a real, known, but **not current** identity —
+  `EXACT_HISTORICAL_MATERIALIZATION` in `activate-live.sh` terms — is not
+  `PASS`; report it as:
+  ```text
+  MATERIALIZATION: NOT CURRENT @ <historical identity>
+  ```
+  This is not `NOT RUN` either: the target was actually inspected and a
+  concrete answer exists, it simply is not the identity being asked about.
+  Neither surface alone proves the agent loaded the skill.
 - **DISCOVERY** — did the actual target agent/runtime discover or expose the
-  skill to the model? Evidence must come from the target platform/runtime
-  itself (e.g. a platform-native skill listing, a model-visible skill
-  registry or prompt inspection, or another deterministic agent-side
-  discovery mechanism — derive the applicable mechanism from the actual
-  platform, do not treat any specific example as mandatory). A filesystem
-  match alone cannot produce `DISCOVERY: PASS`.
+  skill to the model, at a specific materialization identity? Evidence must
+  come from the target platform/runtime itself (e.g. a platform-native skill
+  listing, a model-visible skill registry or prompt inspection, or another
+  deterministic agent-side discovery mechanism — derive the applicable
+  mechanism from the actual platform, do not treat any specific example as
+  mandatory). A filesystem match alone cannot produce `DISCOVERY: PASS`.
 - **EXECUTION** — did the actual target agent/runtime execute the skill
-  behavior successfully? Evidence requires a bounded behavior
-  execution/dogfood observed on the target platform (e.g. a fresh-session
-  checkpoint continuation, a harmless trigger proving loaded instructions
-  were followed, or existing equivalent execution evidence). Installation,
-  file presence, or discovery alone cannot produce `EXECUTION: PASS`.
+  behavior successfully, at a specific materialization identity? Evidence
+  requires a bounded behavior execution/dogfood observed on the target
+  platform (e.g. a fresh-session checkpoint continuation, a harmless trigger
+  proving loaded instructions were followed, or existing equivalent
+  execution evidence). Installation, file presence, or discovery alone
+  cannot produce `EXECUTION: PASS`.
 
-Each layer resolves to one of the same values used elsewhere in this
-document — `PASS`, `NOT RUN`, or `BLOCKED` — meaning direct evidence exists,
-that exact layer has not been tested, or it was required/attempted but a
-concrete blocker prevented establishing it. Never infer a `PASS` from a
-different layer or a different consumer. In particular:
+Each layer resolves to `PASS`, `NOT RUN`, or `BLOCKED` — the same values used
+elsewhere in this document, meaning direct evidence exists (for the identity
+being reported), that exact layer has not been tested at all, or it was
+required/attempted but a concrete blocker prevented establishing it — plus,
+for MATERIALIZATION only, the `NOT CURRENT @ <identity>` outcome defined
+above. This is not a new global lifecycle enum, only a compact, view-local
+way to say "checked, and the answer is a specific non-current identity"
+without misusing `NOT RUN` for a check that actually ran. Never infer a
+`PASS` from a different layer, a different consumer, or a different
+materialization identity than the one actually tested:
 
 ```text
-MATERIALIZATION: PASS  does NOT imply  DISCOVERY: PASS
-DISCOVERY: PASS        does NOT imply  EXECUTION: PASS
+MATERIALIZATION: PASS @ X   does NOT imply   DISCOVERY: PASS @ X
+DISCOVERY: PASS @ X         does NOT imply   EXECUTION: PASS @ X
+(any evidence) @ X          does NOT imply   (same evidence) @ Y, for X != Y
 ```
 
-Report the three layers as one compact table:
+Cite the identity a `PASS` was observed against (e.g. `PASS @ ec654dd`)
+whenever more than one identity is in play, including in Discovery and
+Execution — a Discovery/Execution `PASS` observed against an older identity
+does not automatically carry forward to a newer canonical identity. Evidence
+from one identity may be reused for another only when the report explicitly
+states why the relevant behavior/content is unchanged between them (e.g.
+citing a diff showing no relevant change); do not assume this silently, do
+not build a general reuse mechanism for it, and prefer leaving the newer
+identity `NOT RUN` over an unjustified carry-forward.
+
+Report the three layers as one compact table (repo materialization and live
+installation share this same table — the Evidence column says which surface
+each cell is about):
 
 | Consumer | Materialization | Discovery | Execution | Evidence |
 |---|---|---|---|---|
 | Claude | PASS | PASS | PASS | <minimal refs> |
-| Codex | PASS | PASS | PASS | <minimal refs> |
-| Gemini | PASS | NOT RUN | NOT RUN | <minimal refs> |
+| Codex | NOT CURRENT @ \<commit\> | NOT RUN | NOT RUN | <minimal refs> |
+| Gemini | NOT CURRENT @ \<commit\> | NOT RUN | NOT RUN | <minimal refs> |
 
-The row above is an example of shape only, not a canonical result — populate
-it from the evidence actually available to the current task. Keep the
+The rows above are an example of shape only, not a canonical result —
+populate them from the evidence actually available to the current task, and
+name the identity whenever it is not unambiguously "current HEAD." Keep the
 Evidence column compact and load-bearing (a command, a commit, a session
 observation); do not paste full logs. Do not add separate
 `AFFECTED_CONSUMERS` or `CONSUMER_STATE` fields once this table is present —
-one view owns this concern.
+one view owns this concern, for either surface.
 
-This view is descriptive, not a release gate: an incomplete row (e.g.
-`MATERIALIZATION: PASS` with `DISCOVERY`/`EXECUTION: NOT RUN`) is a more
-accurate statement than an unqualified "verified," and is not by itself a
-task failure. Whether a given task's acceptance requires Discovery or
-Execution evidence remains task-specific, decided by that task's own
-acceptance criteria — not a universal consequence of using this view.
+This view is descriptive, not a release gate: an incomplete or
+not-current row (e.g. `MATERIALIZATION: NOT CURRENT @ ec654dd` with
+`DISCOVERY`/`EXECUTION: NOT RUN`) is a more accurate statement than an
+unqualified "verified," and is not by itself a task failure. Whether a given
+task's acceptance requires current materialization, Discovery, or Execution
+evidence remains task-specific, decided by that task's own acceptance
+criteria — not a universal consequence of using this view.
 
 ## Lifecycle closure
 
