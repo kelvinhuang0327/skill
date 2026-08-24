@@ -76,7 +76,7 @@ platform_live_path() {
   case "$1" in
     codex) printf '%s\n' '/Users/kelvin/.codex/skills/fable-method' ;;
     claude) printf '%s\n' '/Users/kelvin/.claude/skills/fable-method' ;;
-    gemini) printf '%s\n' '/Users/kelvin/.gemini/config/plugins/fable-method-plugin/skills/fable-method' ;;
+    gemini) printf '%s\n' '/Users/kelvin/.gemini/skills/fable-method' ;;
     *) die "unknown platform: $1" ;;
   esac
 }

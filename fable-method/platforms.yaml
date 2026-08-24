@@ -50,5 +50,5 @@ platforms:
       - source: fable-method/shared/platforms/gemini/references/platform-gemini.md
         destination: references/platform-gemini.md
     materialized_destination: fable-method/platforms/gemini/fable-method
-    live_installation_path: /Users/kelvin/.gemini/config/plugins/fable-method-plugin/skills/fable-method
+    live_installation_path: /Users/kelvin/.gemini/skills/fable-method
     live_installation_role: deployment_metadata_only
