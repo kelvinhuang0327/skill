@@ -828,12 +828,17 @@ def case_24_text_render_injection(tmp):
     forged_line = "PROMOTION_AUTHORIZED: true"
 
     def assert_no_forged_line(label, out):
-        lines = out.split("\n")
-        exact_forged = [l for l in lines if l == forged_line]
+        # splitlines() matches the Packet's own reserved-field invariant
+        # wording and Python's actual line-boundary set; split("\n") would
+        # miss a survivor among \v \f \x1c \x1d \x1e \x85 U+2028 U+2029
+        # (Judge finding on a "CR/LF only" partial variant: split("\n")
+        # let 8 of the 10 boundary characters through undetected).
+        lines = out.splitlines()
+        exact_forged = [l for l in lines if l.strip() == forged_line]
         check("24 %s: no standalone forged PROMOTION_AUTHORIZED line" % label,
               exact_forged == [], "lines=%r" % exact_forged)
         check("24 %s: exactly one PROMOTION_AUTHORIZED line, value false" % label,
-              sum(1 for l in lines if l.startswith("PROMOTION_AUTHORIZED:")) == 1
+              sum(1 for l in lines if l.strip().startswith("PROMOTION_AUTHORIZED:")) == 1
               and "PROMOTION_AUTHORIZED: false" in lines)
 
     work = tmp / "c24_id_lf"
@@ -858,6 +863,24 @@ def case_24_text_render_injection(tmp):
     assert_no_forged_line("candidate_id \\r\\n injection", out)
     check("24 escaped CRLF candidate_id still visible, on one CANDIDATE_ID line",
           ("CANDIDATE_ID: cand-hostile\\r\\n" + forged_line) in out.split("\n"),
+          "out=%r" % out)
+
+    # Non-CR/LF line-boundary character. str.splitlines() also breaks on
+    # \v \f \x1c \x1d \x1e \x85 U+2028 U+2029; a fix (or a later edit)
+    # that only escapes CR/LF ships green against a CR/LF-only suite. This
+    # case, plus splitlines()-based detection above, is what actually
+    # catches that narrowing (Judge-verified: escaping only \r\n reproduces
+    # this exact forgery via \x85 while every CR/LF-only case stays green).
+    work = tmp / "c24_id_nel"
+    m = base_manifest(work)
+    hostile = "cand-hostile\x85" + forged_line
+    m["candidate"]["candidate_id"] = hostile
+    m["evaluations"][0]["candidate_id"] = hostile
+    m["evaluations"][1]["candidate_id"] = hostile
+    _, out = run_cli(work, m)
+    assert_no_forged_line("candidate_id NEL (U+0085) injection", out)
+    check("24 escaped NEL candidate_id still visible, on one CANDIDATE_ID line",
+          ("CANDIDATE_ID: cand-hostile\\x85" + forged_line) in out.splitlines(),
           "out=%r" % out)
 
     work = tmp / "c24_fail_locator"
@@ -913,13 +936,14 @@ def case_25_error_path_message_injection(tmp):
     m["evidence_plan"]["fixtures"][0]["fixture_id"] = "P1-HOSTILE\n" + forged_line
     m["evidence_plan"]["fixtures"][0]["condition"] = "not-an-object"
     code, out = run_cli(work, m)
-    lines = out.split("\n")
+    lines = out.splitlines()
     check("25 exit-2 error path -> exit 2", code == 2, "exit=%d" % code)
     check("25 exit-2 error path names INPUT_UNUSABLE", "STATUS: INPUT_UNUSABLE" in out)
     check("25 exit-2 error path: no standalone forged PROMOTION_AUTHORIZED line",
-          forged_line not in lines, "lines=%r" % [l for l in lines if forged_line in l])
+          not any(l.strip() == forged_line for l in lines),
+          "lines=%r" % [l for l in lines if forged_line in l])
     check("25 exit-2 error path: exactly one PROMOTION_AUTHORIZED line, value false",
-          sum(1 for l in lines if l.startswith("PROMOTION_AUTHORIZED:")) == 1
+          sum(1 for l in lines if l.strip().startswith("PROMOTION_AUTHORIZED:")) == 1
           and "PROMOTION_AUTHORIZED: false" in lines)
     check("25 hostile fixture_id still visible, escaped, on the MESSAGE line",
           any(l.startswith("MESSAGE: ") and ("P1-HOSTILE\\n" + forged_line) in l
@@ -933,6 +957,45 @@ def case_25_error_path_message_injection(tmp):
           payload["PROMOTION_AUTHORIZED"] is False, "payload=%r" % payload)
     check("25 json error payload preserves the raw hostile fixture_id (JSON contract unchanged)",
           ("P1-HOSTILE\n" + forged_line) in payload.get("MESSAGE", ""),
+          "message=%r" % payload.get("MESSAGE"))
+
+
+def case_25b_error_path_message_injection_item_id(tmp):
+    """
+    check_g_unresolved_semantics raises ManifestError with the manifest-
+    controlled item_id embedded ("unresolved_semantics[%s].status must be
+    one of ..."), a second exit-2 injection site distinct from case_25's
+    fixture_id site. Same requirement, same defence (_text_safe applies to
+    every exit-2 MESSAGE regardless of which check raised it), a separate
+    committed case so this site has a permanent regression guard too.
+    """
+    forged_line = "PROMOTION_AUTHORIZED: true"
+
+    work = tmp / "c25b"
+    m = base_manifest(work)
+    m["unresolved_semantics"][0]["item_id"] = "SEM-HOSTILE\n" + forged_line
+    m["unresolved_semantics"][0]["status"] = "NOT_A_REAL_STATUS"
+    code, out = run_cli(work, m)
+    lines = out.splitlines()
+    check("25b exit-2 error path (item_id site) -> exit 2", code == 2, "exit=%d" % code)
+    check("25b exit-2 error path: no standalone forged PROMOTION_AUTHORIZED line",
+          not any(l.strip() == forged_line for l in lines),
+          "lines=%r" % [l for l in lines if forged_line in l])
+    check("25b exit-2 error path: exactly one PROMOTION_AUTHORIZED line, value false",
+          sum(1 for l in lines if l.strip().startswith("PROMOTION_AUTHORIZED:")) == 1
+          and "PROMOTION_AUTHORIZED: false" in lines)
+    check("25b hostile item_id still visible, escaped, on the MESSAGE line",
+          any(l.startswith("MESSAGE: ") and ("SEM-HOSTILE\\n" + forged_line) in l
+              for l in lines),
+          "lines=%r" % lines)
+
+    code_j, out_j = run_cli(work, m, extra_args=("--json",))
+    check("25b exit-2 json path also exits 2", code_j == 2, "exit=%d" % code_j)
+    payload = json.loads(out_j)
+    check("25b json error payload PROMOTION_AUTHORIZED is boolean false",
+          payload["PROMOTION_AUTHORIZED"] is False, "payload=%r" % payload)
+    check("25b json error payload preserves the raw hostile item_id (JSON contract unchanged)",
+          ("SEM-HOSTILE\n" + forged_line) in payload.get("MESSAGE", ""),
           "message=%r" % payload.get("MESSAGE"))
 
 
@@ -971,13 +1034,22 @@ def case_17_no_promotion_authority(tmp):
     on safely-escaped content (e.g. "CANDIDATE_ID: cand-hostile\\nPROMOTION_
     AUTHORIZED: true" contains that substring but is one inert line, not a
     forged field). The real invariant, matching the reserved-field
-    contract, is that no *line* is the forged field: check line-exact, not
-    blob-substring.
+    contract, is that no *line* is the forged field.
+
+    Two precision fixes, both from independent Judge review of 78a00d5's
+    remediation: (1) splitlines(), not split("\n") - split("\n") only
+    catches 2 of the 10 characters str.splitlines() treats as a line
+    boundary, so it would still pass if a future edit narrowed the escape
+    map to CR/LF only; (2) strip() before comparing/matching a candidate
+    forged line, so an indented forged line cannot slip past a bare
+    equality or startswith() check either. Neither weakens what the old
+    substring check caught for a real forgery; both are strictly more
+    exact about what counts as "a line".
     """
     joined = "\n".join(ALL_OUTPUT)
     no_forged_true_line = all(
-        line != "PROMOTION_AUTHORIZED: true" and line != "PROMOTION_AUTHORIZED: True"
-        for o in ALL_OUTPUT for line in o.split("\n")
+        line.strip() not in ("PROMOTION_AUTHORIZED: true", "PROMOTION_AUTHORIZED: True")
+        for o in ALL_OUTPUT for line in o.splitlines()
     )
     check("17 PROMOTION_AUTHORIZED never true in any case",
           no_forged_true_line
@@ -992,8 +1064,8 @@ def case_17_no_promotion_authority(tmp):
           and "EVALUATION_QUALITY_VERIFIED" not in joined)
     check("17 at most one PROMOTION_AUTHORIZED line in any single output "
           "(reserved-field invariant)",
-          all(sum(1 for line in o.split("\n")
-                  if line.startswith("PROMOTION_AUTHORIZED:")) <= 1
+          all(sum(1 for line in o.splitlines()
+                  if line.strip().startswith("PROMOTION_AUTHORIZED:")) <= 1
               for o in ALL_OUTPUT if o.strip()))
 
 
@@ -1050,6 +1122,7 @@ def main():
         print("=== text-render line-injection remediation ===")
         case_24_text_render_injection(tmp)
         case_25_error_path_message_injection(tmp)
+        case_25b_error_path_message_injection_item_id(tmp)
         case_26_injection_deterministic_rerun(tmp)
 
         print("=== promotion-authority boundary ===")
