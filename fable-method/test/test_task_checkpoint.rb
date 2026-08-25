@@ -83,6 +83,42 @@ class TaskCheckpointTest < Minitest::Test
     }.merge(extra)
   end
 
+  def test_sync_guard_rejects_fake_git_from_caller_path
+    source_fable_root = File.expand_path('..', __dir__)
+    copied_repository = File.join(@tmpdir, 'copied-repository')
+    fake_bin = File.join(@tmpdir, 'fake-bin')
+    FileUtils.mkdir_p(copied_repository)
+    FileUtils.mkdir_p(fake_bin)
+    FileUtils.cp_r(source_fable_root, copied_repository)
+
+    fake_git = File.join(fake_bin, 'git')
+    File.write(fake_git, <<~'SH')
+      #!/bin/sh
+      root=''
+      if [ "$1" = '-C' ]; then
+        root="$2"
+        shift 2
+      fi
+      [ "$1" = 'rev-parse' ] || exit 99
+      case "$2" in
+        --show-toplevel) printf '%s\n' "$root" ;;
+        --git-common-dir) printf '%s\n' '/Users/kelvin/VibeCoding-WorkSpace/skill/.git' ;;
+        *) exit 99 ;;
+      esac
+    SH
+    FileUtils.chmod(0o755, fake_git)
+
+    script = File.join(copied_repository, 'fable-method', 'scripts', 'sync-platforms.sh')
+    stdout, stderr, status = Open3.capture3(
+      { 'PATH' => "#{fake_bin}:#{ENV.fetch('PATH', '')}" },
+      '/bin/bash', script, '--check'
+    )
+
+    assert_equal 2, status.exitstatus, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert_match(/executing repository root is not a Git repository/, stderr)
+    refute_match(/NO_DRIFT/, stdout)
+  end
+
   # =========================================================================
   # 1. Serialization, Deserialization, Validation & Fail-Closed Tests
   # =========================================================================
@@ -520,6 +556,24 @@ class TaskCheckpointTest < Minitest::Test
     assert_equal({ task_id: 'TASK_B_002', authoritative_packet_ref: @task_b_packet_ref }, loaded.authorized_deferred_task)
   end
 
+  def test_defer_requires_explicit_deferred_checkpoint_inventory
+    cp = TaskCheckpoint.new(@valid_attrs)
+
+    error = assert_raises(ArgumentError) do
+      cp.defer_for_authorized_task!(
+        blocker: 'transient external service outage',
+        blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002',
+        next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true,
+        task_b_packet_authorized: true
+      )
+    end
+
+    assert_match(/existing_deferred_checkpoints/, error.message)
+    refute cp.deferred?
+  end
+
   def test_defer_rejects_ineligible_blocker_classes
     %w[SEMANTIC AUTHORIZATION SAFETY DATABASE_AUTHORITY PERMANENT].each do |blocker_class|
       cp = TaskCheckpoint.new(@valid_attrs)
@@ -530,7 +584,8 @@ class TaskCheckpointTest < Minitest::Test
           resume_after_task_id: 'TASK_B_002',
           next_authorized_task_packet_ref: @task_b_packet_ref,
           task_b_independent: true,
-          task_b_packet_authorized: true
+          task_b_packet_authorized: true,
+          existing_deferred_checkpoints: []
         )
       end
       assert_match(/TRANSIENT_ELIGIBLE/, error.message)
@@ -544,7 +599,8 @@ class TaskCheckpointTest < Minitest::Test
       cp.defer_for_authorized_task!(
         blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
         resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
-        task_b_independent: false, task_b_packet_authorized: true
+        task_b_independent: false, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: []
       )
     end
 
@@ -552,7 +608,8 @@ class TaskCheckpointTest < Minitest::Test
       cp.defer_for_authorized_task!(
         blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
         resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
-        task_b_independent: true, task_b_packet_authorized: false
+        task_b_independent: true, task_b_packet_authorized: false,
+        existing_deferred_checkpoints: []
       )
     end
 
@@ -560,7 +617,8 @@ class TaskCheckpointTest < Minitest::Test
       cp.defer_for_authorized_task!(
         blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
         resume_after_task_id: cp.task_id, next_authorized_task_packet_ref: @task_b_packet_ref,
-        task_b_independent: true, task_b_packet_authorized: true
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: []
       )
     end
 
@@ -569,7 +627,8 @@ class TaskCheckpointTest < Minitest::Test
       completed.defer_for_authorized_task!(
         blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
         resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
-        task_b_independent: true, task_b_packet_authorized: true
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: []
       )
     end
   end
@@ -580,7 +639,8 @@ class TaskCheckpointTest < Minitest::Test
       ephemeral.defer_for_authorized_task!(
         blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
         resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: 'conversation://task-b',
-        task_b_independent: true, task_b_packet_authorized: true
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: []
       )
     end
 
@@ -589,7 +649,8 @@ class TaskCheckpointTest < Minitest::Test
       missing.defer_for_authorized_task!(
         blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
         resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: 'prompt/missing-task-b.md',
-        task_b_independent: true, task_b_packet_authorized: true
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: []
       )
     end
   end
@@ -721,7 +782,8 @@ class TaskCheckpointTest < Minitest::Test
     task_b.defer_for_authorized_task!(
       blocker: 'Task B transient blocker', blocker_disposition: 'TRANSIENT_ELIGIBLE',
       resume_after_task_id: 'TASK_C_003', next_authorized_task_packet_ref: @task_b_packet_ref,
-      task_b_independent: true, task_b_packet_authorized: true
+      task_b_independent: true, task_b_packet_authorized: true,
+      existing_deferred_checkpoints: []
     )
 
     result = TaskReconciler.new(

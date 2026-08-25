@@ -155,7 +155,9 @@ deferred_recheck_count: 0 | 1
 `TaskCheckpoint#defer_for_authorized_task!` requires explicit confirmations for
 transient eligibility, Task B independence, and Packet authorization; resolves
 the Packet locator before changing Task A; and preserves the prior continuation
-action. Persist Task A with revision protection **before** executing Task B.
+action. Its `existing_deferred_checkpoints` keyword is mandatory: omission is
+an error rather than an implicit empty inventory. Persist Task A with revision
+protection **before** executing Task B.
 `TaskCheckpoint.validate_deferred_limit!` evaluates the explicit active-task
 inventory supplied by the Worker and permits at most one deferred checkpoint.
 It does not discover or schedule tasks.

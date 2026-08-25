@@ -233,7 +233,7 @@ class TaskCheckpoint
 
   def defer_for_authorized_task!(blocker:, blocker_disposition:, resume_after_task_id:,
                                  next_authorized_task_packet_ref:, task_b_independent:,
-                                 task_b_packet_authorized:, existing_deferred_checkpoints: [])
+                                 task_b_packet_authorized:, existing_deferred_checkpoints:)
     validate!
     raise DeferredQueueStateError, "task #{@task_id} is already deferred" if deferred?
     unless %w[IN_PROGRESS BLOCKED].include?(@task_lifecycle_state)

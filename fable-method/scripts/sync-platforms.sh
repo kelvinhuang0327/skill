@@ -7,6 +7,7 @@ readonly REPOSITORY_ROOT="$(cd "${FABLE_ROOT}/.." && pwd)"
 readonly MANIFEST="${FABLE_ROOT}/platforms.yaml"
 readonly MATERIALIZED_ROOT="${FABLE_ROOT}/platforms"
 readonly EXPECTED_REPOSITORY_ROOT='/Users/kelvin/VibeCoding-WorkSpace/skill'
+readonly TRUSTED_GIT_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 
 die() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -25,10 +26,8 @@ canonical_directory() {
 }
 
 git_identity() {
-  local git_executable
-  git_executable="$(type -P git)" || return 1
-  [[ -x "$git_executable" ]] || return 1
-  env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' "$git_executable" "$@"
+  [[ -x /usr/bin/env ]] || return 1
+  /usr/bin/env -i PATH="$TRUSTED_GIT_PATH" git "$@"
 }
 
 git_toplevel() {
