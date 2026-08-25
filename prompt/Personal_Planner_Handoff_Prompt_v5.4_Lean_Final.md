@@ -445,6 +445,59 @@ preservation manifest、歷史報告或不同 absolute path 為由的 stop condi
 discovery、reading、migration 與 parity 屬於同一輪任務，不拆成連續數輪的
 donor discovery／verification／authority 前置任務。
 
+### 5.7 Deferred blocked-task queue（僅限一個 transient blocker）
+
+這是 Planner 可選擇的 bounded continuation exception，不是新的 scheduler、
+governance layer 或 lifecycle。只有 Task A 已被一個可重查、預期可由外部狀態改變
+而解除、且不需要新語義決策的 transient blocker 阻止時才可使用。Semantic、
+authorization、safety、database-authority 與 permanent blocker 一律不符合 defer
+資格；不得把未知 root cause 或一般困難包裝成 transient。
+
+Planner 必須在 Packet 內直接指定一個 Task B。Task B 必須與 Task A 獨立，且在
+defer 前已經有一份 executable Owner-authorized Packet 與 fresh Worker 可解析的
+durable locator。Planner 與 Worker 都不得掃描 roadmap、挑選「下一件可做的事」或
+臨時發明 Task B。
+
+Frozen queue semantics：
+
+~~~text
+Task A transient eligible blocker
+→ task_lifecycle_state: BLOCKED
+→ queue_disposition: BLOCKED_DEFERRED
+→ durable Task A checkpoint persisted
+→ execute exactly one named independent authorized Task B
+→ Task B reaches an end-of-task state
+→ exactly one Task A end-of-task recheck
+→ PASS: resume Task A from its preserved continuation action
+→ FAIL: Task A remains BLOCKED_DEFERRED
+~~~
+
+`BLOCKED_DEFERRED` 只是一個 queue disposition，不得加入 lifecycle enum。最多只
+能有一個 deferred task，最多只做一次 automatic end recheck。Task B 若 BLOCKED，
+仍不得尋找或串接 Task C；完成本輪 Task B handoff 後只依上述規則重查 Task A。
+
+適用時，Packet 的 Task-specific contract 可加入以下 queue-specific values；不
+適用時全部省略。這些值不取代 /fable-method 的 checkpoint、reconciliation、
+writer/quiescence、authorization 或 fail-closed mechanics：
+
+~~~text
+DEFERRED_QUEUE_MODE: ONE_TRANSIENT_BLOCKER
+DEFERRED_TASK_A_ID: <EXACT_TASK_A_ID>
+DEFERRED_BLOCKER_CLASSIFICATION: TRANSIENT_ELIGIBLE
+DEFERRED_BLOCKER_RECHECK: <ONE_EXACT_FALSIFIABLE_RECHECK>
+NEXT_AUTHORIZED_TASK_ID: <EXACT_INDEPENDENT_TASK_B_ID>
+NEXT_AUTHORIZED_TASK_PACKET_REF: <DURABLE_EXECUTABLE_PACKET_LOCATOR>
+TASK_B_INDEPENDENCE: CONFIRMED
+TASK_B_OWNER_AUTHORIZATION_STATUS: PRESENT
+MAX_DEFERRED_TASKS: 1
+MAX_AUTOMATIC_END_RECHECKS: 1
+~~~
+
+Planner §5.7 只負責 eligibility、排除項、Task B independence／existing authority、
+one-deferred／one-recheck／no-Task-C 限制與上述可選 Packet values。詳細持久化欄位、
+執行順序、fresh-process reconciliation、scope-qualified writer evidence 與 resume
+mechanics 由 `/fable-method` 及 `references/task-checkpoint.md` 唯一管理。
+
 ## 6. Judge boundary
 
 不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立
@@ -481,7 +534,9 @@ Judge pending 時 integration、push、publish、merge 或 cleanup。
 §5.5 的 Lifecycle closure bundle 欄位；一般任務不需要。若任務是從既有實作
 移植行為的 legacy code migration，同樣在 Task-specific contract 後插入 §5.6
 的 bundle 欄位與 provenance override，並把 §5.6 的 stop values 併入下方
-Stop conditions。若任務需要 standalone authorization，且下一個 Worker 不保證與
+Stop conditions。若任務明確符合 Deferred Queue，僅插入 §5.7 的 queue-specific
+values；不得複製 runtime/reconciliation mechanics。若任務需要 standalone
+authorization，且下一個 Worker 不保證與
 本輪同一個 conversation，在 Commit/publication 區塊填入 §4.3 的
 AUTHORIZATION_HANDOFF_MODE 等欄位，並依 §4.3 準備兩則獨立訊息；下一個 Worker
 確定延續本輪同一個 conversation 時，用 AUTHORIZATION_HANDOFF_MODE:
