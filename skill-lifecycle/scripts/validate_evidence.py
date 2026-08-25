@@ -155,6 +155,29 @@ def _text(value):
     return value if isinstance(value, str) else ""
 
 
+# Every character str.splitlines() treats as a line boundary. A manifest-
+# controlled scalar (a candidate id, a locator, an error message built from
+# a manifest-supplied fixture_id/item_id) must not be able to inject one of
+# these into the line-oriented text renderer and forge a second logical
+# line - in particular a second `PROMOTION_AUTHORIZED:` line. Escaped, never
+# dropped, so content is not silently lost. A literal backslash is left
+# alone, so an already-escaped-looking input and a real line break render
+# the same way; that ambiguity is accepted because the invariant this
+# defends is "no extra line", not "the text round-trips". JSON output is
+# untouched by construction - json.dumps already escapes every one of these
+# inside a string literal - so this is applied only to text-rendering
+# copies, never to the `result` mapping itself.
+_TEXT_LINE_BREAKS = {
+    "\r": "\\r", "\n": "\\n", "\v": "\\v", "\f": "\\f",
+    "\x1c": "\\x1c", "\x1d": "\\x1d", "\x1e": "\\x1e",
+    "\x85": "\\x85", "\u2028": "\\u2028", "\u2029": "\\u2029",
+}
+
+
+def _text_safe(value):
+    return "".join(_TEXT_LINE_BREAKS.get(ch, ch) for ch in value)
+
+
 def _resolve(base_dir, raw_path):
     p = Path(raw_path)
     return p if p.is_absolute() else (base_dir / p)
@@ -607,24 +630,24 @@ def render(result, as_json):
         return json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False)
     lines = [
         "STATUS: " + result["STATUS"],
-        "CANDIDATE_ID: " + result["CANDIDATE_ID"],
+        "CANDIDATE_ID: " + _text_safe(result["CANDIDATE_ID"]),
         "EVIDENCE_INTEGRITY: " + result["EVIDENCE_INTEGRITY"],
         "PROMOTION_AUTHORIZED: false",
         "FAILED_CHECKS: " + (str(len(result["FAILED_CHECKS"])) if result["FAILED_CHECKS"] else "NONE"),
     ]
     for item in result["FAILED_CHECKS"]:
-        lines.append("  FAIL " + item)
+        lines.append("  FAIL " + _text_safe(item))
     lines.append("WARNINGS: " + (str(len(result["WARNINGS"])) if result["WARNINGS"] else "NONE"))
     for item in result["WARNINGS"]:
-        lines.append("  WARN " + item)
+        lines.append("  WARN " + _text_safe(item))
     lines.append("MANUAL_REVIEW_REQUIRED: " + (
         str(len(result["MANUAL_REVIEW_REQUIRED"])) if result["MANUAL_REVIEW_REQUIRED"] else "NONE"))
     for item in result["MANUAL_REVIEW_REQUIRED"]:
-        lines.append("  REVIEW " + item)
+        lines.append("  REVIEW " + _text_safe(item))
     lines.append("STRUCTURAL_FACTS_VERIFIED: " + (
         str(len(result["STRUCTURAL_FACTS_VERIFIED"])) if result["STRUCTURAL_FACTS_VERIFIED"] else "NONE"))
     for item in result["STRUCTURAL_FACTS_VERIFIED"]:
-        lines.append("  OK " + item)
+        lines.append("  OK " + _text_safe(item))
     return "\n".join(lines)
 
 
@@ -666,7 +689,7 @@ def main(argv=None):
             print("CANDIDATE_ID: UNRESOLVED")
             print("EVIDENCE_INTEGRITY: " + EVIDENCE_INTEGRITY_NOT_ESTABLISHED)
             print("PROMOTION_AUTHORIZED: false")
-            print("MESSAGE: " + payload["MESSAGE"])
+            print("MESSAGE: " + _text_safe(payload["MESSAGE"]))
         return 2
 
     print(render(result, args.json))

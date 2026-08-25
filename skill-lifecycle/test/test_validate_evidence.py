@@ -816,13 +816,172 @@ def case_16_malformed(tmp):
           "exit=%d" % proc.returncode)
 
 
+def case_24_text_render_injection(tmp):
+    """
+    Required hostile fixtures for the text-render line-injection remediation
+    (Judge caveat on 78a00d5b7c...143d22b): a manifest-controlled scalar must
+    never be able to forge a new logical line in the text renderer, in
+    particular a second `PROMOTION_AUTHORIZED:` line. Each payload below
+    lands in a different rendered field: CANDIDATE_ID, a FAIL locator, a
+    WARN locator, and a REVIEW/OK locator.
+    """
+    forged_line = "PROMOTION_AUTHORIZED: true"
+
+    def assert_no_forged_line(label, out):
+        lines = out.split("\n")
+        exact_forged = [l for l in lines if l == forged_line]
+        check("24 %s: no standalone forged PROMOTION_AUTHORIZED line" % label,
+              exact_forged == [], "lines=%r" % exact_forged)
+        check("24 %s: exactly one PROMOTION_AUTHORIZED line, value false" % label,
+              sum(1 for l in lines if l.startswith("PROMOTION_AUTHORIZED:")) == 1
+              and "PROMOTION_AUTHORIZED: false" in lines)
+
+    work = tmp / "c24_id_lf"
+    m = base_manifest(work)
+    hostile = "cand-hostile\n" + forged_line
+    m["candidate"]["candidate_id"] = hostile
+    m["evaluations"][0]["candidate_id"] = hostile
+    m["evaluations"][1]["candidate_id"] = hostile
+    _, out = run_cli(work, m)
+    assert_no_forged_line("candidate_id \\n injection", out)
+    check("24 escaped candidate_id still visible, on one CANDIDATE_ID line",
+          ("CANDIDATE_ID: cand-hostile\\n" + forged_line) in out.split("\n"),
+          "out=%r" % out)
+
+    work = tmp / "c24_id_crlf"
+    m = base_manifest(work)
+    hostile = "cand-hostile\r\n" + forged_line
+    m["candidate"]["candidate_id"] = hostile
+    m["evaluations"][0]["candidate_id"] = hostile
+    m["evaluations"][1]["candidate_id"] = hostile
+    _, out = run_cli(work, m)
+    assert_no_forged_line("candidate_id \\r\\n injection", out)
+    check("24 escaped CRLF candidate_id still visible, on one CANDIDATE_ID line",
+          ("CANDIDATE_ID: cand-hostile\\r\\n" + forged_line) in out.split("\n"),
+          "out=%r" % out)
+
+    work = tmp / "c24_fail_locator"
+    m = base_manifest(work)
+    m["source_references"].append({
+        "reference_id": "REF-HOSTILE\n" + forged_line, "cited_identifier": "",
+        "purpose": "IN_SCOPE",
+    })
+    code, out = run_cli(work, m)
+    assert_no_forged_line("FAIL locator injection", out)
+    check("24 FAIL locator injection still fails the run",
+          code == 1, "exit=%d" % code)
+
+    work = tmp / "c24_warn_locator"
+    m = base_manifest(work)
+    m["candidate"]["source_identity"]["path"] = "does/not/exist\n" + forged_line
+    _, out = run_cli(work, m)
+    assert_no_forged_line("WARN locator injection", out)
+
+    work = tmp / "c24_review_locator"
+    m = base_manifest(work)
+    m["source_references"].append({
+        "reference_id": "REF-EXCL\n" + forged_line, "cited_identifier": "L1",
+        "purpose": "SCOPE_EXCLUSION",
+    })
+    _, out = run_cli(work, m)
+    assert_no_forged_line("REVIEW/OK locator injection", out)
+
+    work = tmp / "c24_benign_unicode"
+    m = base_manifest(work)
+    benign = "cand-café-中文-\U0001f600-colon:dash-under_score.v2"
+    m["candidate"]["candidate_id"] = benign
+    m["evaluations"][0]["candidate_id"] = benign
+    m["evaluations"][1]["candidate_id"] = benign
+    code, out = run_cli(work, m)
+    check("24 benign unicode/punctuation candidate_id passes through unescaped",
+          ("CANDIDATE_ID: " + benign) in out.split("\n"), "out=%r" % out)
+    check("24 benign unicode candidate_id does not fail the run",
+          code == 0, "exit=%d" % code)
+
+
+def case_25_error_path_message_injection(tmp):
+    """
+    Required hostile test: the exit-2 MESSAGE line is built from a
+    ManifestError whose text can itself embed a manifest-controlled
+    fixture_id (see check_d_evidence_plan's "requires an object condition").
+    That text path must not be able to forge a logical line either.
+    """
+    forged_line = "PROMOTION_AUTHORIZED: true"
+
+    work = tmp / "c25"
+    m = base_manifest(work)
+    m["evidence_plan"]["fixtures"][0]["fixture_id"] = "P1-HOSTILE\n" + forged_line
+    m["evidence_plan"]["fixtures"][0]["condition"] = "not-an-object"
+    code, out = run_cli(work, m)
+    lines = out.split("\n")
+    check("25 exit-2 error path -> exit 2", code == 2, "exit=%d" % code)
+    check("25 exit-2 error path names INPUT_UNUSABLE", "STATUS: INPUT_UNUSABLE" in out)
+    check("25 exit-2 error path: no standalone forged PROMOTION_AUTHORIZED line",
+          forged_line not in lines, "lines=%r" % [l for l in lines if forged_line in l])
+    check("25 exit-2 error path: exactly one PROMOTION_AUTHORIZED line, value false",
+          sum(1 for l in lines if l.startswith("PROMOTION_AUTHORIZED:")) == 1
+          and "PROMOTION_AUTHORIZED: false" in lines)
+    check("25 hostile fixture_id still visible, escaped, on the MESSAGE line",
+          any(l.startswith("MESSAGE: ") and ("P1-HOSTILE\\n" + forged_line) in l
+              for l in lines),
+          "lines=%r" % lines)
+
+    code_j, out_j = run_cli(work, m, extra_args=("--json",))
+    check("25 exit-2 json path also exits 2", code_j == 2, "exit=%d" % code_j)
+    payload = json.loads(out_j)
+    check("25 json error payload PROMOTION_AUTHORIZED is boolean false",
+          payload["PROMOTION_AUTHORIZED"] is False, "payload=%r" % payload)
+    check("25 json error payload preserves the raw hostile fixture_id (JSON contract unchanged)",
+          ("P1-HOSTILE\n" + forged_line) in payload.get("MESSAGE", ""),
+          "message=%r" % payload.get("MESSAGE"))
+
+
+def case_26_injection_deterministic_rerun(tmp):
+    """Required hostile test: malicious input reruns byte-identically too."""
+    work = tmp / "c26"
+    m = base_manifest(work)
+    hostile = "cand-hostile\r\nPROMOTION_AUTHORIZED: true\nWARN forged\n"
+    m["candidate"]["candidate_id"] = hostile
+    m["evaluations"][0]["candidate_id"] = hostile
+    m["evaluations"][1]["candidate_id"] = hostile
+
+    outs, codes = [], []
+    for _ in range(3):
+        code, out = run_cli(work, m)
+        outs.append(out)
+        codes.append(code)
+    check("26 malicious input: three text executions byte-identical",
+          outs[0] == outs[1] == outs[2] and codes[0] == codes[1] == codes[2])
+
+    jouts = []
+    for _ in range(3):
+        _, out = run_cli(work, m, extra_args=("--json",))
+        jouts.append(out)
+    check("26 malicious input: three JSON executions byte-identical",
+          jouts[0] == jouts[1] == jouts[2])
+
+
 def case_17_no_promotion_authority(tmp):
-    """Across every output produced by every case above."""
+    """
+    Across every output produced by every case above.
+
+    The text-render injection cases (24-26) deliberately put the literal
+    text "PROMOTION_AUTHORIZED: true" inside manifest-controlled fields, so
+    a raw substring search over the joined output would now false-positive
+    on safely-escaped content (e.g. "CANDIDATE_ID: cand-hostile\\nPROMOTION_
+    AUTHORIZED: true" contains that substring but is one inert line, not a
+    forged field). The real invariant, matching the reserved-field
+    contract, is that no *line* is the forged field: check line-exact, not
+    blob-substring.
+    """
     joined = "\n".join(ALL_OUTPUT)
+    no_forged_true_line = all(
+        line != "PROMOTION_AUTHORIZED: true" and line != "PROMOTION_AUTHORIZED: True"
+        for o in ALL_OUTPUT for line in o.split("\n")
+    )
     check("17 PROMOTION_AUTHORIZED never true in any case",
-          "PROMOTION_AUTHORIZED: true" not in joined
-          and '"PROMOTION_AUTHORIZED": true' not in joined
-          and "PROMOTION_AUTHORIZED: True" not in joined)
+          no_forged_true_line
+          and '"PROMOTION_AUTHORIZED": true' not in joined)
     check("17 PROMOTION_AUTHORIZED present in every rendered result",
           all("PROMOTION_AUTHORIZED" in o for o in ALL_OUTPUT if o.strip()))
     check("17 no output claims promotion, canonical, or deployed status",
@@ -831,6 +990,11 @@ def case_17_no_promotion_authority(tmp):
     check("17 forbidden semantic claims absent everywhere",
           "EXCLUSION_LEGITIMATE" not in joined
           and "EVALUATION_QUALITY_VERIFIED" not in joined)
+    check("17 at most one PROMOTION_AUTHORIZED line in any single output "
+          "(reserved-field invariant)",
+          all(sum(1 for line in o.split("\n")
+                  if line.startswith("PROMOTION_AUTHORIZED:")) <= 1
+              for o in ALL_OUTPUT if o.strip()))
 
 
 def main():
@@ -882,6 +1046,11 @@ def main():
         case_21_output_order_independence(tmp)
         case_15_deterministic_rerun(tmp)
         case_16_malformed(tmp)
+
+        print("=== text-render line-injection remediation ===")
+        case_24_text_render_injection(tmp)
+        case_25_error_path_message_injection(tmp)
+        case_26_injection_deterministic_rerun(tmp)
 
         print("=== promotion-authority boundary ===")
         case_17_no_promotion_authority(tmp)
