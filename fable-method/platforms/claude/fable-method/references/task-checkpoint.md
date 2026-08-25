@@ -6,6 +6,8 @@
 - [Authoritative checkpoint contract](#authoritative-checkpoint-contract)
 - [Storage and lifecycle](#storage-and-lifecycle)
 - [Update semantics and revision protection](#update-semantics-and-revision-protection)
+- [Deferred blocked-task queue](#deferred-blocked-task-queue)
+- [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
@@ -53,9 +55,17 @@ minimal load-bearing fields:
   "pr_number": "<NUMBER_OR_NULL>",
   "pr_url": "<URL_OR_NULL>",
   "updated_at": "<ISO8601_TIMESTAMP>",
-  "revision": 1
+  "revision": 1,
+  "queue_disposition": "BLOCKED_DEFERRED",
+  "resume_after_task_id": "<EXACT_TASK_B_ID>",
+  "next_authorized_task_packet_ref": "<DURABLE_TASK_B_PACKET_LOCATOR>",
+  "deferred_resume_action": "<TASK_A_ORIGINAL_CONTINUATION_ACTION>",
+  "deferred_recheck_count": 0
 }
 ```
+
+The five queue fields are backward-compatible and optional. A normal schema-1
+checkpoint omits them. `SCHEMA_VERSION` remains `1`.
 
 ### Field definitions
 
@@ -86,6 +96,15 @@ minimal load-bearing fields:
 - `updated_at`: ISO 8601 UTC timestamp of last state update.
 - `revision`: Monotonically increasing integer used for optimistic concurrency
   and overwrite protection.
+- `queue_disposition`: Optional queue axis. The only queue value is
+  `BLOCKED_DEFERRED`; it is **not** a lifecycle enum.
+- `resume_after_task_id`: Exact, independent Task B selected by the Planner.
+- `next_authorized_task_packet_ref`: Durable locator for Task B's existing,
+  executable Owner-authorized Packet. Ephemeral conversation/session/chat
+  locators and inheritance-only statements fail closed.
+- `deferred_resume_action`: Task A's original continuation action, preserved
+  separately while `next_action` is `RECHECK_DEFERRED_RESUME_GATE`.
+- `deferred_recheck_count`: Durable count constrained to `0` or `1`.
 
 ## Storage and lifecycle
 
@@ -111,6 +130,69 @@ minimal load-bearing fields:
 - Updates require incrementing `revision` by 1. A write attempting to update a
   stale revision fails closed to prevent silent overwrites.
 
+## Deferred blocked-task queue
+
+This is a bounded continuation exception, not a scheduler, lifecycle state, or
+authority source. The Planner must explicitly classify Task A's blocker as
+`TRANSIENT_ELIGIBLE`, prove Task B is independent, and provide Task B's already
+executable Owner-authorized Packet through a durable locator. Semantic,
+authorization, safety, database-authority, and permanent blockers are never
+eligible. The Worker never scans a roadmap, searches for work, or invents Task B.
+
+The only valid deferred Task A state is:
+
+```text
+task_lifecycle_state: BLOCKED
+queue_disposition: BLOCKED_DEFERRED
+current_blocker: <specific transient blocker>
+next_action: RECHECK_DEFERRED_RESUME_GATE
+resume_after_task_id: <exact Task B>
+next_authorized_task_packet_ref: <durable Task B Packet>
+deferred_resume_action: <Task A original continuation>
+deferred_recheck_count: 0 | 1
+```
+
+`TaskCheckpoint#defer_for_authorized_task!` requires explicit confirmations for
+transient eligibility, Task B independence, and Packet authorization; resolves
+the Packet locator before changing Task A; and preserves the prior continuation
+action. Persist Task A with revision protection **before** executing Task B.
+`TaskCheckpoint.validate_deferred_limit!` evaluates the explicit active-task
+inventory supplied by the Worker and permits at most one deferred checkpoint.
+It does not discover or schedule tasks.
+
+The frozen sequence is:
+
+1. Persist eligible Task A as `BLOCKED` / `BLOCKED_DEFERRED`.
+2. Execute exactly the named Task B from `next_authorized_task_packet_ref`.
+3. Task B reaches an end-of-task state: `COMPLETED`, `ABORTED`, or `BLOCKED`.
+   `BLOCKED` ends Task B for this queue decision; do not search for Task C.
+4. Perform exactly one end-of-task recheck of Task A's transient blocker.
+5. On PASS, restore Task A to `IN_PROGRESS`, clear queue fields, and resume from
+   `deferred_resume_action`. On FAIL, retain `BLOCKED_DEFERRED`, set
+   `deferred_recheck_count: 1`, and make no second automatic recheck.
+
+`TaskCheckpoint#recheck_deferred_resume_gate!` requires the exact Task B
+checkpoint and a terminal end-of-task state. A mismatched or still-running Task
+B, a Task B that is itself deferred, a second deferred checkpoint, or a second
+recheck fails closed. A fresh process reconstructs all queue state from Task A's
+checkpoint and the exact Task B checkpoint; chat memory is never required.
+
+## Scope-qualified writer and quiescence checks
+
+Concurrent-writer detection must concern the exact worktree and task-owned
+surface. A process name alone is not mutation evidence. Treat a writer as active
+only when evidence connects it to that surface (for example its working/open
+paths or command target can affect the worktree), or when the surface itself is
+observed changing.
+
+Before a load-bearing checkpoint, source, or Git mutation, take a scoped state
+snapshot and observe it for a bounded interval. The default interval is about
+five seconds: compare the exact branch/HEAD/tree/status and relevant task-owned
+path identity or content metadata at both ends. This is a default observation
+window, not a universal safety constant. Do not poll indefinitely. Stable scoped
+evidence permits progress; unexplained scoped mutation stops the write and
+requires ownership reconciliation.
+
 ## Bounded reconciliation algorithm
 
 When a new Agent or session begins execution:
@@ -127,6 +209,9 @@ When a new Agent or session begins execution:
    - *Authoritative packet resolution*: If `checkpoint.authoritative_packet_ref`
      is an ephemeral session URI (`conversation://...`) or cannot be resolved to
      a readable file/git blob, verdict is `STOP_UNRESOLVED`.
+   - *Deferred Task B packet resolution*: For `BLOCKED_DEFERRED`, resolve
+     `next_authorized_task_packet_ref` independently. Missing, ephemeral, or
+     inheritance-only Task B authority is `STOP_UNRESOLVED`.
    - *PR already merged / Terminal state*: If live PR is `MERGED` or checkpoint
      state is `COMPLETED`, verdict is `ALREADY_COMPLETED`.
    - *Next action already done*: If the recorded `next_action` was completed
@@ -146,6 +231,13 @@ When a new Agent or session begins execution:
      verdict is `AUTHORIZATION_REQUIRED`. Quoted tokens in the checkpoint or
      packet do **not** transfer authorization across sessions.
 6. **Blocker & continuation check**:
+   - If `queue_disposition` is `BLOCKED_DEFERRED` and the single recheck is
+     already consumed, retain Task A and return `STOP_UNRESOLVED`; do not retry.
+   - If exact Task B evidence is absent or Task B remains `IN_PROGRESS`, return
+     `CONTINUE` only for that named Task B and Packet. Never select Task C.
+   - If exact Task B is `COMPLETED`, `ABORTED`, or `BLOCKED`, return `CONTINUE`
+     with `RECHECK_DEFERRED_RESUME_GATE`. Reconciliation itself does not mutate
+     Task A or consume the recheck.
    - If `current_blocker` is present (e.g. parity mismatch) and implementation
      is unchanged -> verdict is `CONTINUE` with the recorded `next_action` (e.g.
      investigate first divergent intermediate). Do not restart planning from scratch.
@@ -164,6 +256,12 @@ The reconciliation mechanism emits exactly one verdict and a concise reason:
 
 Each verdict must include `REASON: <concise explanation>` and `RECOMMENDED_ACTION: <step>`.
 
+Deferred reconciliation uses two exact recommended actions without adding a
+verdict or lifecycle enum:
+
+- `EXECUTE_AUTHORIZED_DEFERRED_TASK task_id=<Task B> packet_ref=<locator>`
+- `RECHECK_DEFERRED_RESUME_GATE`
+
 ## Authorization boundary rules
 
 A checkpoint preserves known authorization boundaries and tokens for reference,
@@ -175,6 +273,8 @@ but **authorization does not transfer across conversation boundaries**.
   high-risk actions.
 - Quoted authorization strings inside the checkpoint or packet serve as scope
   specifications, not live execution permission.
+- A durable Task B Packet proves which task is authorized; it does not transfer
+  any standalone high-risk authorization into a fresh conversation.
 
 ## Terminal closure and archiving
 

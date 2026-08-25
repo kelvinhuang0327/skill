@@ -14,6 +14,19 @@ class TaskCheckpoint
 
   VALID_LIFECYCLE_STATES = %w[IN_PROGRESS BLOCKED COMPLETED ABORTED].freeze
   VALID_VERDICTS = %w[CONTINUE ALREADY_COMPLETED RECONCILE_LIVE_STATE AUTHORIZATION_REQUIRED STOP_UNRESOLVED].freeze
+  QUEUE_DISPOSITION_BLOCKED_DEFERRED = 'BLOCKED_DEFERRED'
+  DEFERRED_RECHECK_ACTION = 'RECHECK_DEFERRED_RESUME_GATE'
+  DEFER_ELIGIBLE_BLOCKER = 'TRANSIENT_ELIGIBLE'
+  MAX_DEFERRED_TASKS = 1
+  MAX_AUTOMATIC_END_RECHECKS = 1
+  DEFERRED_TASK_TERMINAL_STATES = %w[BLOCKED COMPLETED ABORTED].freeze
+  OPTIONAL_QUEUE_FIELDS = %i[
+    queue_disposition
+    resume_after_task_id
+    next_authorized_task_packet_ref
+    deferred_resume_action
+    deferred_recheck_count
+  ].freeze
 
   REQUIRED_FIELDS = %i[
     task_id
@@ -46,7 +59,12 @@ class TaskCheckpoint
                 :pr_number,
                 :pr_url,
                 :updated_at,
-                :revision
+                :revision,
+                :queue_disposition,
+                :resume_after_task_id,
+                :next_authorized_task_packet_ref,
+                :deferred_resume_action,
+                :deferred_recheck_count
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -66,6 +84,11 @@ class TaskCheckpoint
     @pr_url = attrs[:pr_url] || attrs['pr_url']
     @updated_at = (attrs[:updated_at] || attrs['updated_at'] || Time.now.utc.iso8601)&.to_s
     @revision = (attrs[:revision] || attrs['revision'] || 1).to_i
+    @queue_disposition = optional_value(attrs, :queue_disposition)&.to_s
+    @resume_after_task_id = optional_value(attrs, :resume_after_task_id)&.to_s
+    @next_authorized_task_packet_ref = optional_value(attrs, :next_authorized_task_packet_ref)&.to_s
+    @deferred_resume_action = optional_value(attrs, :deferred_resume_action)&.to_s
+    @deferred_recheck_count = optional_value(attrs, :deferred_recheck_count)
   end
 
   def validate!
@@ -92,6 +115,8 @@ class TaskCheckpoint
 
     errors << 'revision must be a positive integer >= 1' if @revision.nil? || @revision < 1
 
+    validate_queue_fields(errors)
+
     raise ValidationError, "Checkpoint validation failed: #{errors.join('; ')}" unless errors.empty?
 
     true
@@ -105,7 +130,7 @@ class TaskCheckpoint
   end
 
   def to_h
-    {
+    data = {
       'schema_version' => @schema_version,
       'task_id' => @task_id,
       'repository' => @repository,
@@ -124,6 +149,11 @@ class TaskCheckpoint
       'updated_at' => @updated_at,
       'revision' => @revision
     }
+    OPTIONAL_QUEUE_FIELDS.each do |field|
+      value = send(field)
+      data[field.to_s] = value unless value.nil?
+    end
+    data
   end
 
   def to_json(*args)
@@ -183,6 +213,128 @@ class TaskCheckpoint
     true
   end
 
+  def deferred?
+    @queue_disposition == QUEUE_DISPOSITION_BLOCKED_DEFERRED
+  end
+
+  def self.validate_deferred_limit!(checkpoints)
+    checkpoints = Array(checkpoints)
+    unless checkpoints.all? { |checkpoint| checkpoint.is_a?(TaskCheckpoint) }
+      raise DeferredQueueStateError, 'deferred-task inventory must contain only TaskCheckpoint records'
+    end
+    checkpoints.each(&:validate!)
+
+    deferred_count = checkpoints.count(&:deferred?)
+    return true if deferred_count <= MAX_DEFERRED_TASKS
+
+    raise DeferredQueueLimitError,
+          "maximum deferred tasks exceeded: #{deferred_count} present, #{MAX_DEFERRED_TASKS} allowed"
+  end
+
+  def defer_for_authorized_task!(blocker:, blocker_disposition:, resume_after_task_id:,
+                                 next_authorized_task_packet_ref:, task_b_independent:,
+                                 task_b_packet_authorized:, existing_deferred_checkpoints: [])
+    validate!
+    raise DeferredQueueStateError, "task #{@task_id} is already deferred" if deferred?
+    unless %w[IN_PROGRESS BLOCKED].include?(@task_lifecycle_state)
+      raise DeferredQueueStateError, "terminal Task A state #{@task_lifecycle_state} cannot enter the deferred queue"
+    end
+    unless blocker_disposition.to_s == DEFER_ELIGIBLE_BLOCKER
+      raise DeferredQueueEligibilityError,
+            "blocker disposition must be #{DEFER_ELIGIBLE_BLOCKER}; semantic, authorization, safety, database-authority, and permanent blockers are ineligible"
+    end
+    unless task_b_independent == true
+      raise DeferredQueueEligibilityError, 'Task B independence must be explicitly confirmed by the authoritative Packet'
+    end
+    unless task_b_packet_authorized == true
+      raise DeferredQueueEligibilityError, 'Task B must already have an executable Owner-authorized Packet'
+    end
+
+    blocker = blocker.to_s.strip
+    task_b_id = resume_after_task_id.to_s.strip
+    task_b_packet_ref = next_authorized_task_packet_ref.to_s.strip
+    original_next_action = @next_action.to_s.strip
+    raise DeferredQueueStateError, 'deferred blocker must be specific and non-empty' if blocker.empty?
+    raise DeferredQueueStateError, 'resume_after_task_id must be non-empty' if task_b_id.empty?
+    raise DeferredQueueStateError, 'Task B must be independent from Task A' if task_b_id == @task_id
+    if original_next_action.empty? || original_next_action == DEFERRED_RECHECK_ACTION
+      raise DeferredQueueStateError, 'Task A must have an original continuation action distinct from the deferred recheck gate'
+    end
+
+    inventory = Array(existing_deferred_checkpoints)
+    self.class.validate_deferred_limit!(inventory)
+    if inventory.any?(&:deferred?)
+      raise DeferredQueueLimitError, "maximum deferred tasks is #{MAX_DEFERRED_TASKS}; Task C chaining is prohibited"
+    end
+
+    resolve_packet_locator(task_b_packet_ref, @repository)
+
+    @task_lifecycle_state = 'BLOCKED'
+    @current_blocker = blocker
+    @queue_disposition = QUEUE_DISPOSITION_BLOCKED_DEFERRED
+    @resume_after_task_id = task_b_id
+    @next_authorized_task_packet_ref = task_b_packet_ref
+    @deferred_resume_action = original_next_action
+    @deferred_recheck_count = 0
+    @next_action = DEFERRED_RECHECK_ACTION
+    validate!
+    self
+  end
+
+  def authorized_deferred_task
+    return nil unless deferred?
+
+    {
+      task_id: @resume_after_task_id,
+      authoritative_packet_ref: @next_authorized_task_packet_ref
+    }
+  end
+
+  def recheck_deferred_resume_gate!(completed_task:, gate_passed:)
+    validate!
+    raise DeferredQueueStateError, "task #{@task_id} is not BLOCKED_DEFERRED" unless deferred?
+    unless completed_task.is_a?(TaskCheckpoint)
+      raise DeferredQueueStateError, 'deferred resume recheck requires the exact Task B checkpoint'
+    end
+    completed_task.validate!
+    unless completed_task.task_id == @resume_after_task_id
+      raise DeferredQueueStateError,
+            "deferred resume expected Task B '#{@resume_after_task_id}', received '#{completed_task.task_id}'"
+    end
+    unless completed_task.authoritative_packet_ref == @next_authorized_task_packet_ref
+      raise DeferredQueueStateError,
+            "Task B checkpoint Packet ref does not match '#{@next_authorized_task_packet_ref}'"
+    end
+    if completed_task.deferred?
+      raise DeferredQueueLimitError, 'Task B cannot defer to Task C while Task A occupies the single deferred slot'
+    end
+    unless DEFERRED_TASK_TERMINAL_STATES.include?(completed_task.task_lifecycle_state)
+      raise DeferredQueueStateError,
+            "Task B must reach a terminal end-of-task state before recheck (received #{completed_task.task_lifecycle_state})"
+    end
+    unless gate_passed == true || gate_passed == false
+      raise DeferredQueueStateError, 'gate_passed must be exactly true or false'
+    end
+    if @deferred_recheck_count >= MAX_AUTOMATIC_END_RECHECKS
+      raise DeferredQueueLimitError,
+            "maximum automatic end rechecks is #{MAX_AUTOMATIC_END_RECHECKS}"
+    end
+
+    @deferred_recheck_count += 1
+    unless gate_passed
+      validate!
+      return :blocked_deferred
+    end
+
+    resumed_action = @deferred_resume_action
+    @task_lifecycle_state = 'IN_PROGRESS'
+    @current_blocker = nil
+    @next_action = resumed_action
+    clear_deferred_queue_fields
+    validate!
+    :resumed
+  end
+
   def resolve_authoritative_packet(base_repo = nil)
     locator = @authoritative_packet_ref.to_s.strip
     raise ResolutionError, 'authoritative_packet_ref is empty' if locator.empty?
@@ -193,6 +345,19 @@ class TaskCheckpoint
 
     if locator =~ %r{\A(conversation|session|chat)://}i
       raise ResolutionError, "authoritative_packet_ref uses ephemeral session URI '#{locator}' which cannot be resolved by a fresh Worker without chat memory"
+    end
+
+    resolve_packet_locator(locator, base_repo)
+  end
+
+  def resolve_packet_locator(locator, base_repo = nil)
+    locator = locator.to_s.strip
+    raise ResolutionError, 'packet locator is empty' if locator.empty?
+    if locator == 'ORIGINAL_TASK_RULES_INHERITED: YES'
+      raise ResolutionError, 'packet locator is only an inheritance affirmation without an explicit locator'
+    end
+    if locator =~ %r{\A(conversation|session|chat)://}i
+      raise ResolutionError, "packet locator uses ephemeral session URI '#{locator}' which cannot be resolved by a fresh Worker without chat memory"
     end
 
     root = base_repo || @repository || Dir.pwd
@@ -227,10 +392,73 @@ class TaskCheckpoint
     raise ResolutionError, "Durable packet file not found at '#{target_path}' (locator: '#{locator}')"
   end
 
+  private
+
+  def optional_value(attrs, field)
+    return attrs[field] if attrs.key?(field)
+
+    attrs[field.to_s]
+  end
+
+  def validate_queue_fields(errors)
+    if @queue_disposition.nil?
+      populated = OPTIONAL_QUEUE_FIELDS.reject { |field| field == :queue_disposition }.select do |field|
+        !send(field).nil?
+      end
+      errors << "queue-specific fields require queue_disposition: #{populated.join(', ')}" unless populated.empty?
+      return
+    end
+
+    unless @queue_disposition == QUEUE_DISPOSITION_BLOCKED_DEFERRED
+      errors << "invalid queue_disposition: #{@queue_disposition} (must be #{QUEUE_DISPOSITION_BLOCKED_DEFERRED})"
+      return
+    end
+
+    errors << 'BLOCKED_DEFERRED requires task_lifecycle_state BLOCKED' unless @task_lifecycle_state == 'BLOCKED'
+    if @current_blocker.nil? || @current_blocker.to_s.strip.empty?
+      errors << 'BLOCKED_DEFERRED requires a specific current_blocker'
+    end
+    unless @next_action == DEFERRED_RECHECK_ACTION
+      errors << "BLOCKED_DEFERRED next_action must be #{DEFERRED_RECHECK_ACTION}"
+    end
+    if @resume_after_task_id.nil? || @resume_after_task_id.strip.empty?
+      errors << 'BLOCKED_DEFERRED requires resume_after_task_id'
+    elsif @resume_after_task_id == @task_id
+      errors << 'resume_after_task_id must identify an independent Task B'
+    end
+    if @next_authorized_task_packet_ref.nil? || @next_authorized_task_packet_ref.strip.empty?
+      errors << 'BLOCKED_DEFERRED requires next_authorized_task_packet_ref'
+    elsif @next_authorized_task_packet_ref == 'ORIGINAL_TASK_RULES_INHERITED: YES'
+      errors << 'next_authorized_task_packet_ref must be an explicit durable locator'
+    elsif @next_authorized_task_packet_ref =~ %r{\A(conversation|session|chat)://}i
+      errors << 'next_authorized_task_packet_ref must be durable, not an ephemeral session URI'
+    end
+    if @deferred_resume_action.nil? || @deferred_resume_action.strip.empty?
+      errors << 'BLOCKED_DEFERRED requires deferred_resume_action'
+    elsif @deferred_resume_action == DEFERRED_RECHECK_ACTION
+      errors << 'deferred_resume_action must preserve Task A continuation separately from the recheck gate'
+    end
+    unless @deferred_recheck_count.is_a?(Integer) && @deferred_recheck_count.between?(0, MAX_AUTOMATIC_END_RECHECKS)
+      errors << "deferred_recheck_count must be an integer from 0 to #{MAX_AUTOMATIC_END_RECHECKS}"
+    end
+  end
+
+  def clear_deferred_queue_fields
+    @queue_disposition = nil
+    @resume_after_task_id = nil
+    @next_authorized_task_packet_ref = nil
+    @deferred_resume_action = nil
+    @deferred_recheck_count = nil
+  end
+
   class ValidationError < StandardError; end
   class LoadError < StandardError; end
   class ConcurrencyError < StandardError; end
   class ResolutionError < StandardError; end
+  class DeferredQueueError < StandardError; end
+  class DeferredQueueEligibilityError < DeferredQueueError; end
+  class DeferredQueueStateError < DeferredQueueError; end
+  class DeferredQueueLimitError < DeferredQueueError; end
 end
 
 # TaskReconciler performs bounded reconciliation between a durable checkpoint
@@ -309,6 +537,20 @@ class TaskReconciler
       )
     end
 
+    if checkpoint.deferred?
+      begin
+        checkpoint.resolve_packet_locator(checkpoint.next_authorized_task_packet_ref, live[:repository])
+      rescue TaskCheckpoint::ResolutionError => e
+        return ReconciliationResult.new(
+          verdict: 'STOP_UNRESOLVED',
+          reason: "Deferred Task B packet ref cannot be resolved across sessions: #{e.message}",
+          recommended_action: 'Provide the existing executable Owner-authorized Task B Packet through a durable locator',
+          checkpoint: checkpoint,
+          live_state: live
+        )
+      end
+    end
+
     # Guard 3: PR / Task Terminal Status
     if checkpoint.task_lifecycle_state == 'COMPLETED'
       return ReconciliationResult.new(
@@ -350,6 +592,8 @@ class TaskReconciler
 
     if head_matches && tree_matches
       # Tree matches checkpoint state exactly
+      return reconcile_deferred_checkpoint(live) if checkpoint.deferred?
+
       if checkpoint.current_blocker && !checkpoint.current_blocker.strip.empty?
         return ReconciliationResult.new(
           verdict: 'CONTINUE',
@@ -409,6 +653,102 @@ class TaskReconciler
   end
 
   private
+
+  def reconcile_deferred_checkpoint(live)
+    if checkpoint.deferred_recheck_count >= TaskCheckpoint::MAX_AUTOMATIC_END_RECHECKS
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: 'Task A remains BLOCKED_DEFERRED after its single automatic end-of-task recheck',
+        recommended_action: 'Retain the durable checkpoint and request a new Owner/Planner decision; do not recheck again automatically',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    task_b = options[:resume_after_task_checkpoint]
+    if task_b && !task_b.is_a?(TaskCheckpoint)
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: 'Deferred Task B evidence is not a TaskCheckpoint record',
+        recommended_action: 'Load the exact durable Task B checkpoint before rechecking Task A',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    if task_b && task_b.task_id != checkpoint.resume_after_task_id
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: "Deferred queue expected Task B '#{checkpoint.resume_after_task_id}', received '#{task_b.task_id}'",
+        recommended_action: 'Load only the exact Task B named by Task A checkpoint',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    if task_b && task_b.authoritative_packet_ref != checkpoint.next_authorized_task_packet_ref
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: "Deferred Task B checkpoint Packet ref does not match '#{checkpoint.next_authorized_task_packet_ref}'",
+        recommended_action: 'Load the exact Task B checkpoint rooted in the Packet named by Task A',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    if task_b&.deferred?
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: 'Task B attempted to defer to Task C while Task A occupies the single deferred slot',
+        recommended_action: 'Stop Task B chaining; retain Task A as the only deferred task',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    task_b_state = task_b&.task_lifecycle_state
+    if task_b_state.nil?
+      return ReconciliationResult.new(
+        verdict: 'CONTINUE',
+        reason: "Task A is durably BLOCKED_DEFERRED pending the exact authorized independent Task B '#{checkpoint.resume_after_task_id}'",
+        recommended_action: deferred_task_execution_action,
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    unless TaskCheckpoint::VALID_LIFECYCLE_STATES.include?(task_b_state)
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: "Deferred Task B lifecycle state is invalid: #{task_b_state}",
+        recommended_action: 'Reconcile the exact Task B checkpoint before continuing',
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    unless TaskCheckpoint::DEFERRED_TASK_TERMINAL_STATES.include?(task_b_state)
+      return ReconciliationResult.new(
+        verdict: 'CONTINUE',
+        reason: "Authorized Task B '#{checkpoint.resume_after_task_id}' has not reached an end-of-task state (#{task_b_state})",
+        recommended_action: deferred_task_execution_action,
+        checkpoint: checkpoint,
+        live_state: live
+      )
+    end
+
+    ReconciliationResult.new(
+      verdict: 'CONTINUE',
+      reason: "Authorized Task B '#{checkpoint.resume_after_task_id}' reached #{task_b_state}; Task C chaining is prohibited and Task A has one recheck available",
+      recommended_action: TaskCheckpoint::DEFERRED_RECHECK_ACTION,
+      checkpoint: checkpoint,
+      live_state: live
+    )
+  end
+
+  def deferred_task_execution_action
+    "EXECUTE_AUTHORIZED_DEFERRED_TASK task_id=#{checkpoint.resume_after_task_id} packet_ref=#{checkpoint.next_authorized_task_packet_ref}"
+  end
 
   def capture_live_state
     {
@@ -521,6 +861,9 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--tree SHA', 'Override live git tree SHA') { |v| options[:tree] = v }
     opts.on('--branch NAME', 'Override live git branch') { |v| options[:branch] = v }
     opts.on('--pr-state STATE', 'Override live PR state') { |v| options[:pr_state] = v }
+    opts.on('--resume-after-task-checkpoint PATH', 'Load the exact Task B checkpoint for deferred resume reconciliation') do |v|
+      options[:resume_after_task_checkpoint_path] = v
+    end
     opts.on('--auth TOKEN', 'Provide direct conversation authorization token') do |v|
       (options[:conversation_authorizations] ||= []) << v
     end
@@ -555,6 +898,9 @@ if __FILE__ == $PROGRAM_NAME
   when :reconcile
     begin
       cp = TaskCheckpoint.load(checkpoint_path)
+      if options[:resume_after_task_checkpoint_path]
+        options[:resume_after_task_checkpoint] = TaskCheckpoint.load(options.delete(:resume_after_task_checkpoint_path))
+      end
       reconciler = TaskReconciler.new(cp, options)
       result = reconciler.reconcile
       puts result.to_text

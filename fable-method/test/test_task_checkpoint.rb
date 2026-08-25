@@ -4,6 +4,8 @@ require 'minitest/autorun'
 require 'fileutils'
 require 'tmpdir'
 require 'json'
+require 'open3'
+require 'rbconfig'
 require_relative '../scripts/task_checkpoint'
 
 class TaskCheckpointTest < Minitest::Test
@@ -17,6 +19,11 @@ class TaskCheckpointTest < Minitest::Test
     File.write(
       File.join(@repo_dir, 'prompt', 'Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
       "# Task 001 Authoritative Packet\nGoal: Resumable Checkpoints\n"
+    )
+    @task_b_packet_ref = 'prompt/TASK_B_002.md'
+    File.write(
+      File.join(@repo_dir, @task_b_packet_ref),
+      "# Executable Owner-authorized Packet\nTask: TASK_B_002\nIndependent: YES\n"
     )
 
     @valid_attrs = {
@@ -41,6 +48,39 @@ class TaskCheckpointTest < Minitest::Test
 
   def teardown
     FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def deferred_task_a(existing_deferred_checkpoints: [])
+    cp = TaskCheckpoint.new(@valid_attrs)
+    cp.defer_for_authorized_task!(
+      blocker: 'transient external service outage',
+      blocker_disposition: 'TRANSIENT_ELIGIBLE',
+      resume_after_task_id: 'TASK_B_002',
+      next_authorized_task_packet_ref: @task_b_packet_ref,
+      task_b_independent: true,
+      task_b_packet_authorized: true,
+      existing_deferred_checkpoints: existing_deferred_checkpoints
+    )
+    cp
+  end
+
+  def task_b_checkpoint(state: 'COMPLETED', task_id: 'TASK_B_002', packet_ref: @task_b_packet_ref)
+    TaskCheckpoint.new(@valid_attrs.merge(
+      task_id: task_id,
+      authoritative_packet_ref: packet_ref,
+      task_lifecycle_state: state,
+      current_blocker: state == 'BLOCKED' ? 'Task B terminal blocker' : nil,
+      next_action: 'TASK_B_TERMINAL_HANDOFF'
+    ))
+  end
+
+  def live_reconciliation_options(extra = {})
+    {
+      repository: @repo_dir,
+      worktree: @worktree_dir,
+      head: @valid_attrs[:current_head],
+      tree: @valid_attrs[:current_tree]
+    }.merge(extra)
   end
 
   # =========================================================================
@@ -419,5 +459,328 @@ class TaskCheckpointTest < Minitest::Test
     result = reconciler.reconcile
     assert_equal 'STOP_UNRESOLVED', result.verdict
     assert_match(/Durable packet file not found/i, result.reason)
+  end
+
+  # =========================================================================
+  # 11. Deferred blocked-task queue contract
+  # =========================================================================
+
+  def test_old_schema_v1_checkpoint_remains_queue_field_free_and_loadable
+    cp = TaskCheckpoint.new(@valid_attrs)
+    data = cp.to_h
+
+    assert_equal 1, data.fetch('schema_version')
+    TaskCheckpoint::OPTIONAL_QUEUE_FIELDS.each do |field|
+      refute data.key?(field.to_s), "legacy non-deferred checkpoint unexpectedly emitted #{field}"
+    end
+
+    loaded = TaskCheckpoint.from_json(JSON.generate(data))
+    assert loaded.validate!
+    refute loaded.deferred?
+  end
+
+  def test_blocked_deferred_is_not_a_lifecycle_enum
+    assert_equal %w[IN_PROGRESS BLOCKED COMPLETED ABORTED], TaskCheckpoint::VALID_LIFECYCLE_STATES
+    refute_includes TaskCheckpoint::VALID_LIFECYCLE_STATES, 'BLOCKED_DEFERRED'
+    assert_equal 1, TaskCheckpoint::SCHEMA_VERSION
+  end
+
+  def test_inconsistent_or_partial_queue_fields_fail_closed
+    partial = TaskCheckpoint.new(@valid_attrs.merge(resume_after_task_id: 'TASK_B_002'))
+    error = assert_raises(TaskCheckpoint::ValidationError) { partial.validate! }
+    assert_match(/queue-specific fields require queue_disposition/, error.message)
+
+    inconsistent = TaskCheckpoint.new(@valid_attrs.merge(
+      queue_disposition: 'BLOCKED_DEFERRED',
+      resume_after_task_id: 'TASK_B_002',
+      next_authorized_task_packet_ref: 'conversation://task-b',
+      deferred_resume_action: 'resume-a',
+      deferred_recheck_count: 2
+    ))
+    error = assert_raises(TaskCheckpoint::ValidationError) { inconsistent.validate! }
+    assert_match(/task_lifecycle_state BLOCKED/, error.message)
+    assert_match(/ephemeral session URI/, error.message)
+    assert_match(/integer from 0 to 1/, error.message)
+  end
+
+  def test_defer_persists_queue_disposition_and_original_continuation
+    cp = deferred_task_a
+    checkpoint_path = File.join(@tmpdir, 'task-a-deferred.json')
+    cp.save(checkpoint_path)
+    loaded = TaskCheckpoint.load(checkpoint_path)
+
+    assert_equal 1, loaded.schema_version
+    assert_equal 'BLOCKED', loaded.task_lifecycle_state
+    assert_equal 'BLOCKED_DEFERRED', loaded.queue_disposition
+    assert_equal 'TASK_B_002', loaded.resume_after_task_id
+    assert_equal @task_b_packet_ref, loaded.next_authorized_task_packet_ref
+    assert_equal 'implement_bounded_reconciliation', loaded.deferred_resume_action
+    assert_equal 'RECHECK_DEFERRED_RESUME_GATE', loaded.next_action
+    assert_equal 0, loaded.deferred_recheck_count
+    assert_equal({ task_id: 'TASK_B_002', authoritative_packet_ref: @task_b_packet_ref }, loaded.authorized_deferred_task)
+  end
+
+  def test_defer_rejects_ineligible_blocker_classes
+    %w[SEMANTIC AUTHORIZATION SAFETY DATABASE_AUTHORITY PERMANENT].each do |blocker_class|
+      cp = TaskCheckpoint.new(@valid_attrs)
+      error = assert_raises(TaskCheckpoint::DeferredQueueEligibilityError) do
+        cp.defer_for_authorized_task!(
+          blocker: 'not transient',
+          blocker_disposition: blocker_class,
+          resume_after_task_id: 'TASK_B_002',
+          next_authorized_task_packet_ref: @task_b_packet_ref,
+          task_b_independent: true,
+          task_b_packet_authorized: true
+        )
+      end
+      assert_match(/TRANSIENT_ELIGIBLE/, error.message)
+      refute cp.deferred?
+    end
+  end
+
+  def test_defer_requires_independent_already_authorized_task_b
+    cp = TaskCheckpoint.new(@valid_attrs)
+    assert_raises(TaskCheckpoint::DeferredQueueEligibilityError) do
+      cp.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: false, task_b_packet_authorized: true
+      )
+    end
+
+    assert_raises(TaskCheckpoint::DeferredQueueEligibilityError) do
+      cp.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true, task_b_packet_authorized: false
+      )
+    end
+
+    assert_raises(TaskCheckpoint::DeferredQueueStateError) do
+      cp.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: cp.task_id, next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true, task_b_packet_authorized: true
+      )
+    end
+
+    completed = TaskCheckpoint.new(@valid_attrs.merge(task_lifecycle_state: 'COMPLETED'))
+    assert_raises(TaskCheckpoint::DeferredQueueStateError) do
+      completed.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true, task_b_packet_authorized: true
+      )
+    end
+  end
+
+  def test_defer_rejects_ephemeral_or_unresolvable_task_b_packet
+    ephemeral = TaskCheckpoint.new(@valid_attrs)
+    assert_raises(TaskCheckpoint::ResolutionError) do
+      ephemeral.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: 'conversation://task-b',
+        task_b_independent: true, task_b_packet_authorized: true
+      )
+    end
+
+    missing = TaskCheckpoint.new(@valid_attrs)
+    assert_raises(TaskCheckpoint::ResolutionError) do
+      missing.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: 'prompt/missing-task-b.md',
+        task_b_independent: true, task_b_packet_authorized: true
+      )
+    end
+  end
+
+  def test_maximum_one_deferred_task_prevents_task_c_chaining
+    task_a = deferred_task_a
+    task_b = TaskCheckpoint.new(@valid_attrs.merge(task_id: 'TASK_B_002', next_action: 'TASK_B_CONTINUE'))
+
+    error = assert_raises(TaskCheckpoint::DeferredQueueLimitError) do
+      task_b.defer_for_authorized_task!(
+        blocker: 'another transient blocker', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_C_003', next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: [task_a]
+      )
+    end
+    assert_match(/Task C chaining is prohibited/, error.message)
+
+    second_deferred = TaskCheckpoint.from_json(task_a.to_json)
+    second_deferred.task_id = 'TASK_OTHER'
+    second_deferred.resume_after_task_id = 'TASK_OTHER_B'
+    assert_raises(TaskCheckpoint::DeferredQueueLimitError) do
+      TaskCheckpoint.validate_deferred_limit!([task_a, second_deferred])
+    end
+  end
+
+  def test_task_b_must_be_terminal_before_the_single_recheck
+    task_a = deferred_task_a
+    task_b = task_b_checkpoint(state: 'IN_PROGRESS')
+
+    error = assert_raises(TaskCheckpoint::DeferredQueueStateError) do
+      task_a.recheck_deferred_resume_gate!(completed_task: task_b, gate_passed: true)
+    end
+    assert_match(/terminal end-of-task state/, error.message)
+    assert_equal 0, task_a.deferred_recheck_count
+  end
+
+  def test_recheck_requires_task_b_checkpoint_rooted_in_named_packet
+    task_a = deferred_task_a
+    wrong_packet_task_b = task_b_checkpoint(packet_ref: @valid_attrs[:authoritative_packet_ref])
+
+    error = assert_raises(TaskCheckpoint::DeferredQueueStateError) do
+      task_a.recheck_deferred_resume_gate!(completed_task: wrong_packet_task_b, gate_passed: true)
+    end
+    assert_match(/Packet ref does not match/, error.message)
+    assert_equal 0, task_a.deferred_recheck_count
+  end
+
+  def test_failed_recheck_remains_blocked_deferred_and_cannot_repeat
+    task_a = deferred_task_a
+    blocked_task_b = task_b_checkpoint(state: 'BLOCKED')
+
+    assert_equal :blocked_deferred,
+                 task_a.recheck_deferred_resume_gate!(completed_task: blocked_task_b, gate_passed: false)
+    assert_equal 'BLOCKED', task_a.task_lifecycle_state
+    assert_equal 'BLOCKED_DEFERRED', task_a.queue_disposition
+    assert_equal 'RECHECK_DEFERRED_RESUME_GATE', task_a.next_action
+    assert_equal 1, task_a.deferred_recheck_count
+
+    assert_raises(TaskCheckpoint::DeferredQueueLimitError) do
+      task_a.recheck_deferred_resume_gate!(completed_task: blocked_task_b, gate_passed: true)
+    end
+  end
+
+  def test_passing_recheck_resumes_preserved_task_a_action
+    task_a = deferred_task_a
+    completed_task_b = task_b_checkpoint
+
+    assert_equal :resumed,
+                 task_a.recheck_deferred_resume_gate!(completed_task: completed_task_b, gate_passed: true)
+    assert_equal 'IN_PROGRESS', task_a.task_lifecycle_state
+    assert_nil task_a.current_blocker
+    assert_equal 'implement_bounded_reconciliation', task_a.next_action
+    refute task_a.deferred?
+    TaskCheckpoint::OPTIONAL_QUEUE_FIELDS.each do |field|
+      assert_nil task_a.send(field)
+    end
+  end
+
+  def test_reconciler_executes_only_named_task_b_then_exposes_recheck_gate
+    task_a = deferred_task_a
+
+    pending = TaskReconciler.new(task_a, live_reconciliation_options).reconcile
+    assert_equal 'CONTINUE', pending.verdict
+    assert_match(/EXECUTE_AUTHORIZED_DEFERRED_TASK task_id=TASK_B_002/, pending.recommended_action)
+    assert_match(/packet_ref=#{Regexp.escape(@task_b_packet_ref)}/, pending.recommended_action)
+
+    in_progress = TaskReconciler.new(
+      task_a,
+      live_reconciliation_options(resume_after_task_checkpoint: task_b_checkpoint(state: 'IN_PROGRESS'))
+    ).reconcile
+    assert_equal 'CONTINUE', in_progress.verdict
+    assert_match(/EXECUTE_AUTHORIZED_DEFERRED_TASK/, in_progress.recommended_action)
+
+    terminal = TaskReconciler.new(
+      task_a,
+      live_reconciliation_options(resume_after_task_checkpoint: task_b_checkpoint)
+    ).reconcile
+    assert_equal 'CONTINUE', terminal.verdict
+    assert_equal 'RECHECK_DEFERRED_RESUME_GATE', terminal.recommended_action
+    assert_match(/one recheck available/, terminal.reason)
+  end
+
+  def test_reconciler_fails_closed_when_durable_task_b_packet_is_missing
+    task_a = TaskCheckpoint.new(@valid_attrs.merge(
+      task_lifecycle_state: 'BLOCKED',
+      current_blocker: 'transient blocker',
+      next_action: 'RECHECK_DEFERRED_RESUME_GATE',
+      queue_disposition: 'BLOCKED_DEFERRED',
+      resume_after_task_id: 'TASK_B_002',
+      next_authorized_task_packet_ref: 'prompt/missing-task-b.md',
+      deferred_resume_action: 'implement_bounded_reconciliation',
+      deferred_recheck_count: 0
+    ))
+    assert task_a.validate!
+
+    result = TaskReconciler.new(task_a, live_reconciliation_options).reconcile
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Task B packet ref cannot be resolved/, result.reason)
+  end
+
+  def test_reconciler_fails_closed_if_task_b_is_already_deferred_to_task_c
+    task_a = deferred_task_a
+    task_b = TaskCheckpoint.new(@valid_attrs.merge(
+      task_id: 'TASK_B_002',
+      authoritative_packet_ref: @task_b_packet_ref,
+      next_action: 'TASK_B_CONTINUE'
+    ))
+    task_b.defer_for_authorized_task!(
+      blocker: 'Task B transient blocker', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+      resume_after_task_id: 'TASK_C_003', next_authorized_task_packet_ref: @task_b_packet_ref,
+      task_b_independent: true, task_b_packet_authorized: true
+    )
+
+    result = TaskReconciler.new(
+      task_a,
+      live_reconciliation_options(resume_after_task_checkpoint: task_b)
+    ).reconcile
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Task B attempted to defer to Task C/, result.reason)
+  end
+
+  def test_reconciler_rejects_wrong_task_b_and_exhausted_recheck
+    task_a = deferred_task_a
+    wrong_task = TaskReconciler.new(
+      task_a,
+      live_reconciliation_options(resume_after_task_checkpoint: task_b_checkpoint(task_id: 'TASK_X'))
+    ).reconcile
+    assert_equal 'STOP_UNRESOLVED', wrong_task.verdict
+    assert_match(/expected Task B 'TASK_B_002'/, wrong_task.reason)
+
+    wrong_packet = TaskReconciler.new(
+      task_a,
+      live_reconciliation_options(
+        resume_after_task_checkpoint: task_b_checkpoint(packet_ref: @valid_attrs[:authoritative_packet_ref])
+      )
+    ).reconcile
+    assert_equal 'STOP_UNRESOLVED', wrong_packet.verdict
+    assert_match(/Packet ref does not match/, wrong_packet.reason)
+
+    task_a.recheck_deferred_resume_gate!(completed_task: task_b_checkpoint(state: 'BLOCKED'), gate_passed: false)
+    exhausted = TaskReconciler.new(
+      task_a,
+      live_reconciliation_options(resume_after_task_checkpoint: task_b_checkpoint)
+    ).reconcile
+    assert_equal 'STOP_UNRESOLVED', exhausted.verdict
+    assert_match(/single automatic end-of-task recheck/, exhausted.reason)
+  end
+
+  def test_fresh_process_loads_deferred_state_and_reconciles_terminal_task_b
+    task_a_path = File.join(@tmpdir, 'fresh-process-task-a.json')
+    task_b_path = File.join(@tmpdir, 'fresh-process-task-b.json')
+    deferred_task_a.save(task_a_path)
+    task_b_checkpoint.save(task_b_path)
+    script = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+
+    show_stdout, show_stderr, show_status = Open3.capture3(RbConfig.ruby, script, '--show', task_a_path)
+    assert show_status.success?, show_stderr
+    shown = JSON.parse(show_stdout)
+    assert_equal 'BLOCKED_DEFERRED', shown.fetch('queue_disposition')
+    assert_equal 'implement_bounded_reconciliation', shown.fetch('deferred_resume_action')
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, script, '--reconcile',
+      '--repo', @repo_dir, '--worktree', @worktree_dir,
+      '--head', @valid_attrs[:current_head], '--tree', @valid_attrs[:current_tree],
+      '--resume-after-task-checkpoint', task_b_path,
+      task_a_path
+    )
+    assert status.success?, stderr
+    assert_match(/RECONCILIATION_VERDICT: CONTINUE/, stdout)
+    assert_match(/RECOMMENDED_ACTION: RECHECK_DEFERRED_RESUME_GATE/, stdout)
   end
 end

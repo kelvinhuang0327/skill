@@ -18,7 +18,66 @@ usage() {
   exit 2
 }
 
-[[ "$REPOSITORY_ROOT" == "$EXPECTED_REPOSITORY_ROOT" ]] || die 'repository path guard failed'
+canonical_directory() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  (cd "$path" 2>/dev/null && pwd -P)
+}
+
+git_identity() {
+  local git_executable
+  git_executable="$(type -P git)" || return 1
+  [[ -x "$git_executable" ]] || return 1
+  env -i PATH='/usr/bin:/bin:/usr/sbin:/sbin' "$git_executable" "$@"
+}
+
+git_toplevel() {
+  git_identity -C "$1" rev-parse --show-toplevel 2>/dev/null
+}
+
+git_common_directory() {
+  local root="$1"
+  local common_dir
+  common_dir="$(git_identity -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  if [[ "$common_dir" == /* ]]; then
+    canonical_directory "$common_dir"
+  else
+    canonical_directory "$root/$common_dir"
+  fi
+}
+
+assert_repository_identity() {
+  local repository_root canonical_root repository_toplevel canonical_toplevel
+  local repository_common_dir canonical_common_dir
+
+  repository_root="$(canonical_directory "$REPOSITORY_ROOT")" \
+    || die 'repository identity guard failed: executing repository root cannot be canonicalized'
+  canonical_root="$(canonical_directory "$EXPECTED_REPOSITORY_ROOT")" \
+    || die 'repository identity guard failed: canonical repository root cannot be canonicalized'
+  repository_toplevel="$(git_toplevel "$repository_root")" \
+    || die 'repository identity guard failed: executing repository root is not a Git repository'
+  canonical_toplevel="$(git_toplevel "$canonical_root")" \
+    || die 'repository identity guard failed: canonical repository root is not a Git repository'
+  repository_toplevel="$(canonical_directory "$repository_toplevel")" \
+    || die 'repository identity guard failed: executing Git top-level cannot be canonicalized'
+  canonical_toplevel="$(canonical_directory "$canonical_toplevel")" \
+    || die 'repository identity guard failed: canonical Git top-level cannot be canonicalized'
+
+  [[ "$repository_root" == "$repository_toplevel" ]] \
+    || die 'repository identity guard failed: executing repository root is not its Git top-level'
+  [[ "$canonical_root" == "$canonical_toplevel" ]] \
+    || die 'repository identity guard failed: canonical repository root is not its Git top-level'
+
+  repository_common_dir="$(git_common_directory "$repository_root")" \
+    || die 'repository identity guard failed: executing Git common directory cannot be resolved'
+  canonical_common_dir="$(git_common_directory "$canonical_root")" \
+    || die 'repository identity guard failed: canonical Git common directory cannot be resolved'
+
+  [[ "$repository_common_dir" == "$canonical_common_dir" ]] \
+    || die 'repository identity guard failed: Git common directory does not match canonical repository'
+}
+
+assert_repository_identity
 [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || die 'platform manifest is missing or is a symlink'
 
 manifest_records() {

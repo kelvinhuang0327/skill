@@ -82,27 +82,21 @@ IMPACT_ON_ROUTE:
 
 ## Context and continuity
 
-Never infer model identity, context capacity, current usage, or billing policy
-from the product name or maximum window. Resolve each independently and mark
-unavailable values UNKNOWN; do not make a cost-multiplier claim unless the
-active model, plan/policy, and threshold are all current and authoritative.
+Never infer model identity, context capacity, current usage, or billing policy from the product name or maximum window. Resolve each independently and mark unavailable values UNKNOWN; do not make a cost-multiplier claim unless the active model, plan/policy, and threshold are all current and authoritative.
 
-When exact usage metadata is unavailable, report CURRENT_CONTEXT_PERCENT:
-UNKNOWN, CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC, and a qualitative pressure
-level. At a stable milestone, or before a new large phase or handoff, preserve
-only observable state: exact repository/branch/HEAD/tree/status, active
-processes and pending mutations, completed files/commits, verification and
-NOT RUN, failed attempts, current blocker, next single action, next milestone,
-and stop conditions. Do not write a checkpoint file unless a Packet explicitly
-supplies both HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE and an exact
-HANDOFF_OUTPUT_PATH; the default is TRANSCRIPT_ONLY.
+When exact usage metadata is unavailable, report CURRENT_CONTEXT_PERCENT: UNKNOWN, CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC, and a qualitative pressure level. At a stable milestone, or before a new large phase or handoff, preserve only observable state: exact repository/branch/HEAD/tree/status, active processes and pending mutations, completed files/commits, verification and NOT RUN, failed attempts, current blocker, next single action, next milestone, and stop conditions. Do not write a checkpoint file unless a Packet explicitly supplies both HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE and an exact HANDOFF_OUTPUT_PATH; the default is TRANSCRIPT_ONLY.
 
-After compaction or resume, report CONTEXT_REHYDRATION_STATUS: PASS only when
-project, task, authority, repository, sandbox, modified-path ledger, observable
-history, milestone, blocker, next action, next milestone, and stop conditions
-are all resolved YES. Otherwise report CONTEXT_HANDOFF_INCOMPLETE and do only
-read-only state resolution. Never use compaction to clear a blocker, extend
-authorization, hide a failed attempt, or reopen a stopped mutation.
+After compaction or resume, report CONTEXT_REHYDRATION_STATUS: PASS only when project, task, authority, repository, sandbox, modified-path ledger, observable history, milestone, blocker, next action, next milestone, and stop conditions are all resolved YES. Otherwise report CONTEXT_HANDOFF_INCOMPLETE and do only read-only state resolution. Never use compaction to clear a blocker, extend authorization, hide a failed attempt, or reopen a stopped mutation.
+
+## Deferred blocked-task queue
+
+Use this exception only when the Planner explicitly classifies Task A's blocker as transient-eligible; semantic, authorization, safety, database-authority, and permanent blockers never qualify. Task B must be independent and already have an executable Owner-authorized Packet through a durable locator. Never scan a roadmap or invent Task B.
+
+Persist Task A with lifecycle `BLOCKED`, queue disposition `BLOCKED_DEFERRED`, its original continuation in `deferred_resume_action`, and `next_action: RECHECK_DEFERRED_RESUME_GATE` before executing exactly Task B. `BLOCKED_DEFERRED` is not a lifecycle enum.
+
+Only one task may be deferred and only one end-of-task recheck is automatic. When Task B reaches `COMPLETED`, `ABORTED`, or `BLOCKED`, do not chain Task C: recheck Task A once. PASS restores `IN_PROGRESS` and the preserved action; FAIL retains `BLOCKED_DEFERRED` with the recheck consumed.
+
+Writer evidence must be qualified to the exact worktree/task-owned surface or to observed mutation there; a process name alone proves nothing. Use an approximately five-second bounded observation by default, never indefinite polling. Follow [task checkpoints](references/task-checkpoint.md) for durable fields, reconciliation, and fail-closed mechanics.
 
 ## Authority and Packet fast path
 
