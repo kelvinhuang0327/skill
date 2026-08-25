@@ -65,7 +65,8 @@
    - 目錄（TOC）：透過 `update_toc_entry()` 更新，只改 content runs，不破壞 `<w:hyperlink>` 結構與 PAGEREF
    - 附錄列表：以 `appendix_title_idx + 2` 取 `proto_bullet`（`v24ListBullet`），不可用 `+1`（`v24heading2`）
    - 表格型 diff 範例：逐行建立帶顏色的 `<w:r>` runs，詳見 `OUTPUT_SPEC.md` OOXML Style Constraints
-6. 輸出新版本 docx，必要時同步輸出 md。
+6. 在輸出最終 docx 之前，對每個 3.x.3 代表範例 diff cell 執行 `tools/rule21_linter.py`（Rule 21.1–21.3 決定性檢查：git metadata / ellipsis / 是否逐字可追溯至 patch）。輸入為已擷取的 cell 文字與對應 patch 原文，不需先產生 docx；規則全文與語意權威見 `SKILL.md` Rule 21，本步驟只是機械化執行。任一 unit 出現 violation 即為 FAIL，須修正代表範例後重新產生，不得略過或事後補登。Rule 21.4（節錄說明段落須在表格外）為 DOCX 結構性檢查，不在此腳本範圍內，仍依 `SKILL.md` Rule 21 既有方式確認。
+7. 輸出新版本 docx，必要時同步輸出 md。
 
 ---
 

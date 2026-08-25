@@ -146,6 +146,8 @@ rename to ...
 
 **FAIL trigger:** `diff --git` / `new file mode` / `deleted file mode` / `index` / `similarity index` / `rename from` / `rename to` 出現在任何 diff cell 內部。
 
+**Enforcement:** 本規則語意以此段文字為準；`tools/rule21_linter.py`（violation_id `P1_GIT_METADATA_IN_CELL`，經 `core/WORKFLOW.md` 呼叫）提供決定性機械化檢查，僅實作本段落所列的 git metadata 偵測，不取代本段文字的語意權威。
+
 ---
 
 ### PFC-12 — Representative Example Must Be Logic-Bearing（新增）

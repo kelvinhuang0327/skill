@@ -170,6 +170,8 @@ for table_idx, table in enumerate(doc.tables):
 
 **FAIL trigger:** `"..."` in diff cell; sampled lines mismatch; file not in patch; note inside cell; git metadata inside diff cell; example is getter/setter/boilerplate only.
 
+**Enforcement:** F1, F2, and F7 are checked deterministically by `tools/rule21_linter.py` (P2_ELLIPSIS_IN_CELL, P3_NOT_VERBATIM_FROM_PATCH, P1_GIT_METADATA_IN_CELL respectively), invoked from `core/WORKFLOW.md`. F3, F4, F5, F6, and F8 remain manual/judgment-based checks; this table's prose is the semantic authority for all eight.
+
 ---
 
 ## Gate G — Render / Visual QA
@@ -268,6 +270,8 @@ disclosed in the rationale — not that they are split into separate sections.
 8. Run coverage equation: missing = 0 required (FAIL if missing > 0 → H10).
 9. Scan 3.x.3 diff cells for git metadata (FAIL if found → H11).
 10. Sample `+` lines from diff cells; check for logic content (FAIL if only boilerplate → H12).
+
+**Enforcement:** H11 (step 9 above) is checked deterministically by `tools/rule21_linter.py` (P1_GIT_METADATA_IN_CELL), invoked from `core/WORKFLOW.md`. H1–H10 and H12 remain manual/judgment-based checks against this table's prose.
 
 ---
 
@@ -413,6 +417,8 @@ Verify that the 3.x.3 representative example for every section follows the manda
 | Priority 5 fallback and marked WEAK with explanation | J10 | PASS |
 
 **FAIL trigger:** Any J1–J10 check is FAIL.
+
+**Enforcement:** J6, J8, and J9 are checked deterministically by `tools/rule21_linter.py` (P3_NOT_VERBATIM_FROM_PATCH, P1_GIT_METADATA_IN_CELL, P2_ELLIPSIS_IN_CELL respectively), invoked from `core/WORKFLOW.md`. J1–J5, J7, and J10 remain manual/judgment-based checks against this table's prose.
 
 **Full priority detail:** See `core/EXAMPLE_SELECTION_RULES.md`.
 

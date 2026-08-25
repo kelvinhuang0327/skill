@@ -724,6 +724,8 @@ rename to ...                   ← git metadata — FORBIDDEN
 
 **FAIL if** any paragraph inside a diff cell contains text that is exactly `"..."` or is not traceable to the patch.
 
+**Enforcement:** The prose above is the semantic rule — authoritative for authors, manual review, and future maintenance. Rule 21.1 (git metadata), Rule 21.2 (ellipsis), and Rule 21.3 (non-verbatim-from-patch) are additionally enforced deterministically by `tools/rule21_linter.py`, invoked as a validation step in `core/WORKFLOW.md`. That script implements exactly these three predicates — it is not a complete Rule 21 validator. Rule 21.4 (the truncation-note-placement requirement above) remains a manual / DOCX-structural check and is not covered by that script.
+
 ---
 
 ### Rule 22 — Appendix Hyperlink / Bookmark Rule (CRITICAL)
