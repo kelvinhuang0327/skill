@@ -4,11 +4,12 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly FABLE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly REPOSITORY_ROOT="$(cd "${FABLE_ROOT}/.." && pwd)"
-readonly EXPECTED_REPOSITORY_ROOT='/Users/kelvin/VibeCoding-WorkSpace/skill'
+readonly CANONICAL_REPOSITORY_ROOT='/Users/kelvin/VibeCoding-WorkSpace/skill'
 readonly USER_HOME='/Users/kelvin'
 readonly MANIFEST="${FABLE_ROOT}/platforms.yaml"
 readonly SYNC_SCRIPT="${SCRIPT_DIR}/sync-platforms.sh"
 readonly PLATFORMS=(codex claude gemini antigravity)
+readonly TRUSTED_GIT_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 
 die() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -87,14 +88,81 @@ repo_path() {
   printf '%s/%s\n' "$REPOSITORY_ROOT" "$1"
 }
 
+canonical_directory() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  (cd "$path" 2>/dev/null && pwd -P)
+}
+
+git_identity() {
+  [[ -x /usr/bin/env ]] || return 1
+  /usr/bin/env -i PATH="$TRUSTED_GIT_PATH" GIT_OPTIONAL_LOCKS=0 git "$@"
+}
+
+git_toplevel() {
+  git_identity -C "$1" rev-parse --show-toplevel 2>/dev/null
+}
+
+git_common_directory() {
+  local root="$1"
+  local common_dir
+  common_dir="$(git_identity -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  if [[ "$common_dir" == /* ]]; then
+    canonical_directory "$common_dir"
+  else
+    canonical_directory "$root/$common_dir"
+  fi
+}
+
+reject_git_environment_spoof() {
+  [[ -z "${GIT_DIR+x}" ]] \
+    || die 'repository identity guard failed: GIT_DIR override is not allowed'
+  [[ -z "${GIT_WORK_TREE+x}" ]] \
+    || die 'repository identity guard failed: GIT_WORK_TREE override is not allowed'
+  [[ -z "${GIT_COMMON_DIR+x}" ]] \
+    || die 'repository identity guard failed: GIT_COMMON_DIR override is not allowed'
+  [[ -z "${GIT_OBJECT_DIRECTORY+x}" ]] \
+    || die 'repository identity guard failed: GIT_OBJECT_DIRECTORY override is not allowed'
+  [[ -z "${GIT_ALTERNATE_OBJECT_DIRECTORIES+x}" ]] \
+    || die 'repository identity guard failed: GIT_ALTERNATE_OBJECT_DIRECTORIES override is not allowed'
+  [[ -z "${GIT_INDEX_FILE+x}" ]] \
+    || die 'repository identity guard failed: GIT_INDEX_FILE override is not allowed'
+}
+
+assert_repository_identity() {
+  local repository_root canonical_root repository_toplevel canonical_toplevel
+  local repository_common_dir canonical_common_dir
+
+  repository_root="$(canonical_directory "$REPOSITORY_ROOT")" \
+    || die 'repository identity guard failed: executing repository root cannot be canonicalized'
+  canonical_root="$(canonical_directory "$CANONICAL_REPOSITORY_ROOT")" \
+    || die 'repository identity guard failed: canonical repository root cannot be canonicalized'
+  repository_toplevel="$(git_toplevel "$repository_root")" \
+    || die 'repository identity guard failed: executing repository root is not a Git repository'
+  canonical_toplevel="$(git_toplevel "$canonical_root")" \
+    || die 'repository identity guard failed: canonical repository root is not a Git repository'
+  repository_toplevel="$(canonical_directory "$repository_toplevel")" \
+    || die 'repository identity guard failed: executing Git top-level cannot be canonicalized'
+  canonical_toplevel="$(canonical_directory "$canonical_toplevel")" \
+    || die 'repository identity guard failed: canonical Git top-level cannot be canonicalized'
+
+  [[ "$repository_root" == "$repository_toplevel" ]] \
+    || die 'repository identity guard failed: executing repository root is not its Git top-level'
+  [[ "$canonical_root" == "$canonical_toplevel" ]] \
+    || die 'repository identity guard failed: canonical repository root is not its Git top-level'
+
+  repository_common_dir="$(git_common_directory "$repository_root")" \
+    || die 'repository identity guard failed: executing Git common directory cannot be resolved'
+  canonical_common_dir="$(git_common_directory "$canonical_root")" \
+    || die 'repository identity guard failed: canonical Git common directory cannot be resolved'
+
+  [[ "$repository_common_dir" == "$canonical_common_dir" ]] \
+    || die 'repository identity guard failed: Git common directory does not match canonical repository'
+}
+
 guard_repository_root() {
-  [[ "$REPOSITORY_ROOT" == "$EXPECTED_REPOSITORY_ROOT" ]] \
-    || die 'repository path guard failed: script is not running from the canonical repository'
-  local toplevel
-  toplevel="$(git -C "$REPOSITORY_ROOT" rev-parse --show-toplevel 2>/dev/null)" \
-    || die 'repository path guard failed: canonical root is not a git repository'
-  [[ "$toplevel" == "$EXPECTED_REPOSITORY_ROOT" ]] \
-    || die 'repository path guard failed: git toplevel does not match the expected repository root'
+  reject_git_environment_spoof
+  assert_repository_identity
 }
 
 read_manifest_records() {
@@ -144,14 +212,27 @@ verify_manifest_paths() {
 require_canonical_source_gate() {
   [[ -f "$SYNC_SCRIPT" ]] || die "canonical sync script missing: $SYNC_SCRIPT"
   local output
-  if ! output="$(bash "$SYNC_SCRIPT" --check 2>&1)"; then
+  if ! output="$(/bin/bash "$SYNC_SCRIPT" --check 2>&1)"; then
     printf '%s\n' "$output" >&2
     die 'CANONICAL_MATERIALIZATION_DRIFT: sync-platforms.sh --check did not pass'
   fi
 }
 
 current_branch() {
-  git -C "$REPOSITORY_ROOT" rev-parse --abbrev-ref HEAD
+  local branch
+  if branch="$(git_identity -C "$REPOSITORY_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+    printf '%s\n' "$branch"
+  else
+    printf '%s\n' 'DETACHED'
+  fi
+}
+
+activation_source_head() {
+  git_identity -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null
+}
+
+canonical_master_head() {
+  git_identity -C "$REPOSITORY_ROOT" rev-parse --verify 'refs/remotes/origin/master^{commit}' 2>/dev/null
 }
 
 path_in_fable_scope() {
@@ -184,13 +265,15 @@ classify_one_status_entry() {
 classify_repository_dirty_state() {
   FABLE_STAGED_COUNT=0
   FABLE_TRACKED_DIRTY_COUNT=0
+  FABLE_UNTRACKED_COUNT=0
   UNRELATED_STAGED_COUNT=0
   UNRELATED_TRACKED_DIRTY_COUNT=0
+  UNRELATED_UNTRACKED_COUNT=0
 
   local status_file
   status_file="$(mktemp)" || die 'unable to read repository status'
 
-  if ! git -C "$REPOSITORY_ROOT" status --porcelain=v2 --untracked-files=all -z >"$status_file"; then
+  if ! git_identity -C "$REPOSITORY_ROOT" status --porcelain=v2 --untracked-files=all -z >"$status_file"; then
     rm -f "$status_file"
     die 'unable to read repository status'
   fi
@@ -212,7 +295,16 @@ classify_repository_dirty_state() {
     fi
     local rtype="${rec%% *}"
     case "$rtype" in
-      '?'|'!')
+      '?')
+        local path="${rec#\? }"
+        if path_in_fable_scope "$path"; then
+          FABLE_UNTRACKED_COUNT=$((FABLE_UNTRACKED_COUNT + 1))
+        else
+          UNRELATED_UNTRACKED_COUNT=$((UNRELATED_UNTRACKED_COUNT + 1))
+        fi
+        i=$((i + 1))
+        ;;
+      '!')
         i=$((i + 1))
         ;;
       1)
@@ -243,30 +335,48 @@ classify_repository_dirty_state() {
 }
 
 require_canonical_repository_state_for_activation() {
-  local branch
+  local branch source_head canonical_head
   branch="$(current_branch)"
+  source_head="$(activation_source_head)" \
+    || die 'ACTIVATION_SOURCE_HEAD_UNRESOLVED: executing worktree HEAD is not a commit'
+  canonical_head="$(canonical_master_head)" \
+    || die 'CANONICAL_MASTER_REF_UNRESOLVED: refs/remotes/origin/master is not a commit'
   classify_repository_dirty_state
-  if [[ "$branch" != 'master' || "$FABLE_STAGED_COUNT" -ne 0 || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 ]]; then
+  if [[ "$source_head" != "$canonical_head" || "$FABLE_STAGED_COUNT" -ne 0 \
+        || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 || "$FABLE_UNTRACKED_COUNT" -ne 0 ]]; then
     printf 'ACTIVATION_REPOSITORY_STATE_NOT_READY\n' >&2
-    printf '  branch: %s (required: master)\n' "$branch" >&2
+    printf '  branch: %s (informational; detached HEAD is allowed)\n' "$branch" >&2
+    printf '  activation_source_head: %s\n' "$source_head" >&2
+    printf '  canonical_master_head: %s\n' "$canonical_head" >&2
     printf '  fable_staged: %s (required: 0)\n' "$FABLE_STAGED_COUNT" >&2
     printf '  fable_tracked_dirty: %s (required: 0)\n' "$FABLE_TRACKED_DIRTY_COUNT" >&2
-    if [[ "$UNRELATED_STAGED_COUNT" -ne 0 || "$UNRELATED_TRACKED_DIRTY_COUNT" -ne 0 ]]; then
+    printf '  fable_untracked: %s (required: 0)\n' "$FABLE_UNTRACKED_COUNT" >&2
+    if [[ "$UNRELATED_STAGED_COUNT" -ne 0 || "$UNRELATED_TRACKED_DIRTY_COUNT" -ne 0 \
+          || "$UNRELATED_UNTRACKED_COUNT" -ne 0 ]]; then
       printf '  unrelated_staged: %s (not blocking)\n' "$UNRELATED_STAGED_COUNT" >&2
       printf '  unrelated_tracked_dirty: %s (not blocking)\n' "$UNRELATED_TRACKED_DIRTY_COUNT" >&2
+      printf '  unrelated_untracked: %s (not blocking)\n' "$UNRELATED_UNTRACKED_COUNT" >&2
     fi
     exit 2
   fi
 }
 
 report_canonical_repository_state_for_check() {
-  local branch
+  local branch source_head canonical_head
   branch="$(current_branch)"
+  source_head="$(activation_source_head)" \
+    || die 'ACTIVATION_SOURCE_HEAD_UNRESOLVED: executing worktree HEAD is not a commit'
+  canonical_head="$(canonical_master_head)" \
+    || die 'CANONICAL_MASTER_REF_UNRESOLVED: refs/remotes/origin/master is not a commit'
   classify_repository_dirty_state
-  if [[ "$branch" != 'master' || "$FABLE_STAGED_COUNT" -ne 0 || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 \
-        || "$UNRELATED_STAGED_COUNT" -ne 0 || "$UNRELATED_TRACKED_DIRTY_COUNT" -ne 0 ]]; then
-    printf 'CANONICAL_REPOSITORY_STATE_NOTE: branch=%s fable_staged=%s fable_tracked_dirty=%s unrelated_staged=%s unrelated_tracked_dirty=%s\n' \
-      "$branch" "$FABLE_STAGED_COUNT" "$FABLE_TRACKED_DIRTY_COUNT" "$UNRELATED_STAGED_COUNT" "$UNRELATED_TRACKED_DIRTY_COUNT"
+  if [[ "$source_head" != "$canonical_head" || "$FABLE_STAGED_COUNT" -ne 0 \
+        || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 || "$FABLE_UNTRACKED_COUNT" -ne 0 \
+        || "$UNRELATED_STAGED_COUNT" -ne 0 || "$UNRELATED_TRACKED_DIRTY_COUNT" -ne 0 \
+        || "$UNRELATED_UNTRACKED_COUNT" -ne 0 ]]; then
+    printf 'CANONICAL_REPOSITORY_STATE_NOTE: branch=%s activation_source_head=%s canonical_master_head=%s fable_staged=%s fable_tracked_dirty=%s fable_untracked=%s unrelated_staged=%s unrelated_tracked_dirty=%s unrelated_untracked=%s\n' \
+      "$branch" "$source_head" "$canonical_head" "$FABLE_STAGED_COUNT" "$FABLE_TRACKED_DIRTY_COUNT" \
+      "$FABLE_UNTRACKED_COUNT" "$UNRELATED_STAGED_COUNT" "$UNRELATED_TRACKED_DIRTY_COUNT" \
+      "$UNRELATED_UNTRACKED_COUNT"
   fi
 }
 
@@ -305,14 +415,14 @@ known_paths_for_platform() {
   {
     while IFS= read -r commit; do
       [[ -n "$commit" ]] || continue
-      git -C "$REPOSITORY_ROOT" ls-tree -r --name-only "$commit" -- "$rel" 2>/dev/null
-    done < <(git -C "$REPOSITORY_ROOT" log --format=%H -- "$rel")
+      git_identity -C "$REPOSITORY_ROOT" ls-tree -r --name-only "$commit" -- "$rel" 2>/dev/null
+    done < <(git_identity -C "$REPOSITORY_ROOT" log --format=%H -- "$rel")
   } | sed "s#^${rel}/##" | LC_ALL=C sort -u
 }
 
 commit_tree_entries() {
   local commit="$1" rel="$2"
-  git -C "$REPOSITORY_ROOT" ls-tree -r "$commit" -- "$rel" 2>/dev/null | while IFS=$'\t' read -r meta path; do
+  git_identity -C "$REPOSITORY_ROOT" ls-tree -r "$commit" -- "$rel" 2>/dev/null | while IFS=$'\t' read -r meta path; do
     [[ -n "$path" ]] || continue
     local mode hash
     mode="$(awk '{print $1}' <<<"$meta")"
@@ -328,7 +438,7 @@ live_tree_entries() {
     [[ -n "$rel" ]] || continue
     f="$live/$rel"
     if [[ -x "$f" ]]; then mode=100755; else mode=100644; fi
-    hash="$(git -C "$REPOSITORY_ROOT" hash-object --no-filters -- "$f")"
+    hash="$(git_identity -C "$REPOSITORY_ROOT" hash-object --no-filters -- "$f")"
     printf '%s\t%s\t%s\n' "$mode" "$hash" "$rel"
   done <<<"$paths" | LC_ALL=C sort
 }
@@ -403,7 +513,7 @@ classify_platform() {
   current_entries="$(commit_tree_entries HEAD "$rel")"
   if [[ "$live_entries" == "$current_entries" ]]; then
     CLASSIFY_STATE=EXACT_CURRENT_MATERIALIZATION
-    CLASSIFY_MATCHED_COMMIT="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
+    CLASSIFY_MATCHED_COMMIT="$(activation_source_head)"
     return 0
   fi
 
@@ -416,7 +526,7 @@ classify_platform() {
       CLASSIFY_MATCHED_COMMIT="$commit"
       return 0
     fi
-  done < <(git -C "$REPOSITORY_ROOT" log --format=%H -- "$rel")
+  done < <(git_identity -C "$REPOSITORY_ROOT" log --format=%H -- "$rel")
 
   CLASSIFY_STATE=LOCAL_DRIFT
   return 0
@@ -436,6 +546,12 @@ do_check() {
   require_canonical_source_gate
   report_canonical_repository_state_for_check
 
+  local source_head canonical_head
+  source_head="$(activation_source_head)" \
+    || die 'ACTIVATION_SOURCE_HEAD_UNRESOLVED: executing worktree HEAD is not a commit'
+  canonical_head="$(canonical_master_head)" \
+    || die 'CANONICAL_MASTER_REF_UNRESOLVED: refs/remotes/origin/master is not a commit'
+
   local -a targets=()
   if [[ -n "$only_platform" ]]; then
     targets=("$only_platform")
@@ -453,7 +569,8 @@ do_check() {
     printf 'PLATFORM: %s\n' "$platform"
     printf 'STATE: %s\n' "$CLASSIFY_STATE"
     printf 'MATCHED_COMMIT: %s\n' "$CLASSIFY_MATCHED_COMMIT"
-    printf 'CANONICAL_HEAD: %s\n' "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
+    printf 'CANONICAL_HEAD: %s\n' "$source_head"
+    printf 'CANONICAL_MASTER_HEAD: %s\n' "$canonical_head"
     printf 'LIVE_TARGET: %s\n' "$(platform_live_path "$platform")"
     printf 'ACTIVATION_READY: %s\n' "$ready"
   done
@@ -532,7 +649,8 @@ do_activate() {
   fi
   printf 'ACTIVATION_RESULT: %s\n' "$result"
   printf 'FINAL_STATE: %s\n' "$CLASSIFY_STATE"
-  printf 'CANONICAL_HEAD: %s\n' "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
+  printf 'CANONICAL_HEAD: %s\n' "$(activation_source_head)"
+  printf 'CANONICAL_MASTER_HEAD: %s\n' "$(canonical_master_head)"
   printf 'LIVE_TARGET: %s\n' "$live"
 }
 
