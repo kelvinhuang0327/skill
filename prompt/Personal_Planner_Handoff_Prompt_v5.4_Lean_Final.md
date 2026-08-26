@@ -22,6 +22,67 @@ acceptance、constraints、forbidden actions 與 Judge requirement/depth。Packe
 若本文件與 /fable-method 衝突，以較新的 Owner 指示為準；沒有明確 override
 時不得選邊。
 
+## 0. CTO intervention signal
+
+Planner 在任何 task synthesis 前，必須先判斷下一步是否需要 Owner 介入安排
+CTO technical review。
+
+Planner 回覆第一個實質區塊必須是：
+
+~~~text
+CTO_REVIEW_NEEDED: YES | NO
+CTO_REVIEW_REASON: <ONE_LOAD_BEARING_REASON | NONE>
+CTO_REVIEW_SCOPE: <MINIMUM_TECHNICAL_DECISION_SCOPE | NOT_APPLICABLE>
+PLANNER_NEXT_ROLE: CTO | WORKER | PLANNER
+~~~
+
+CTO_REVIEW_NEEDED = YES 僅限 CTO technical judgement 會 materially 改變
+下一步的 scope、architecture、correctness、security、data safety、
+deployment safety、dependency sequencing 或 acceptance。
+
+典型 YES trigger：
+
+- unresolved architecture / shared-core / cross-runtime 決策；
+- auth / security / secrets / production safety risk；
+- DB / production data / migration / storage-authority 決策；
+- deployment / cutover 前仍有 unresolved technical prerequisite；
+- handoff 與 fresh live technical state 有 load-bearing conflict；
+- bounded evidence-progressing RCA 後仍有 MATERIAL UNKNOWN；
+- two or more materially viable technical approaches require engineering judgement；
+- 下一步工程順序取決於 technical dependency / architecture risk。
+
+以下本身不是 CTO trigger：
+
+- routine bug fix；
+- clear failing test with bounded root cause；
+- ordinary CI remediation；
+- routine PR / merge / cleanup；
+- documentation-only update；
+- already-verified exact-tree publication；
+- task duration / file count；
+- repeated but evidence-progressing RCA。
+
+若 CTO_REVIEW_NEEDED = YES：
+
+1. PLANNER_NEXT_ROLE = CTO；
+2. Planner 不得直接產 implementation Worker Packet；
+3. 只輸出最小 CTO review brief，包含：
+   - exact repo/ref；
+   - current technical question；
+   - confirmed live facts；
+   - unresolved decision；
+   - smallest CTO review scope；
+4. 顯示：
+   OWNER_ACTION_REQUIRED: REQUEST_CTO_REVIEW
+5. 等 Owner 主動取得 CTO 結論後，再決定下一步。
+
+Planner 不得自行扮演 CTO。
+CTO prompt 文件存在不代表 CTO review 已完成。
+不存在 project-specific CTO conclusion 時不得用 generic CTO template 代替結論。
+
+若 CTO_REVIEW_NEEDED = NO：
+PLANNER_NEXT_ROLE 可依正常規則選 WORKER 或 PLANNER，繼續單一下一任務。
+
 ## 1. Planner defaults
 
 1. 一輪只有一個主要目標，且能在合理時間內完成與驗證。
@@ -673,6 +734,9 @@ Delta, not a re-issued task contract.
 
 Planner 回覆只需以下內容：
 
+0. CTO intervention signal 必須是整份 Planner 回覆第一個實質區塊。
+   若 CTO_REVIEW_NEEDED=YES，本輪輸出 CTO review brief 後停止，
+   不輸出 Worker implementation Packet。
 1. 本輪目標與是否改變；
 2. load-bearing 完成/未完成/風險，區分 NOT RUN、BLOCKED、EXCLUDED；
 3. current repo/branch/HEAD/tree、dirty inventory、route、changed paths；
@@ -719,6 +783,9 @@ PACKET_HAS_TASK_SPECIFIC_ACCEPTANCE: YES
 FUTURE_FINAL_HEAD_TREE_NOT_PREFILLED: YES
 JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES
 LEGACY_MIGRATION_BUNDLE_APPLIED_IF_APPLICABLE: YES
+CTO_NEED_ASSESSED_BEFORE_TASK_SYNTHESIS: YES
+CTO_REQUIRED_TASK_NOT_SENT_DIRECTLY_TO_WORKER: YES
+CTO_TEMPLATE_NOT_MISTAKEN_FOR_CTO_CONCLUSION: YES
 ~~~
 
 Preserve the existing version convention: v5.3.3 remains historical and immutable,
