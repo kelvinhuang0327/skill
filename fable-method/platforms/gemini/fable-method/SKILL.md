@@ -214,6 +214,10 @@ deleted temporary files, checkout materialization, Git metadata, and harness
 metadata. Do not create a handoff, report, log, or scratch file outside an
 explicitly allowlisted path.
 
+CPU-heavy work uses the `SHARED_WORKSTATION` budget in [operational gates](references/operational-gates.md):
+two workers by default and at most two without direct Owner authorization; the Worker may
+reduce to one but never auto-scale, use all cores, or saturate the workstation.
+
 Non-Git source roots remain supported: do not run `git init`, create a nested
 repository, or turn a non-Git source root into a Git authority merely to make a
 check convenient. Keep `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence
@@ -306,14 +310,16 @@ Documentation or task completion is not authorization.
 ## Execution failures and retries
 
 On acceptance failure, attribute in order: harness/fixture/command, then the
-deployment or execution chain, then the product invariant. A valid attempt has
-a falsifiable hypothesis, a correction, a real rerun, and actual output. Keep
-an `ATTEMPT_LEDGER` for failures, retries, timeouts, terminations, overwritten
-or deleted artifacts, and superseded evidence. Identical reruns are not new
-attempts. After three evidence-backed failures for the same issue, stop with
-`BLOCKED_AFTER_THREE_EVIDENCE_BACKED_ATTEMPTS`. External credentials,
-permissions, missing runtimes, and unresolved authority are blockers; do not
-burn attempts on identical retries.
+deployment or execution chain, then the product invariant. Each continuation
+must test a falsifiable hypothesis and materially reduce uncertainty. When it
+applies a correction, rerun the real check and retain actual output. Keep an `ATTEMPT_LEDGER` for failures, retries,
+timeouts, terminations, overwritten or deleted artifacts, and superseded evidence.
+Identical blind retries and speculative patches are not evidence progress.
+Evidence-progressing RCA has no arbitrary numeric ceiling, so a fourth or later
+evidence-progressing step is permitted. This is not unlimited retry permission:
+stop when scope, safety, authority, capability, proportionality, or
+discriminating evidence is exhausted. External credentials, permissions, missing
+runtimes, and unresolved authority remain blockers.
 
 ## Verification and Judge handoff
 
