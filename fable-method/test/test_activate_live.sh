@@ -70,7 +70,7 @@ live_digest() {
 
 real_lock_fingerprint() {
   if [[ -e "$REAL_ACTIVATION_LOCK" ]]; then
-    stat -f '%i %z %m' "$REAL_ACTIVATION_LOCK"
+    stat -f '%i %z %m %c' "$REAL_ACTIVATION_LOCK"
   else
     printf 'ABSENT\n'
   fi
@@ -379,8 +379,8 @@ wait "$HOLDER_PID" 2>/dev/null
 HOLDER_STATUS=$?
 set -e
 HOLDER_PID=''
-[[ "$HOLDER_STATUS" -ne 0 ]] \
-  || fail 'T8d: the killed holder reported a normal exit'
+[[ "$HOLDER_STATUS" -eq 137 ]] \
+  || fail "T8d: the killed holder did not report SIGKILL: ${HOLDER_STATUS}"
 pass_case 'T8d crashed holder was reaped'
 
 assert_success_contains \
@@ -403,6 +403,18 @@ grep -Fq '/usr/bin/lockf -s -t 0 9' "$SOURCE_ACTIVATE_SCRIPT" \
   || fail 'T8e: the absolute /usr/bin/lockf descriptor form is missing'
 grep -Fq 'exec 9>>"$ACTIVATION_LOCK"' "$SOURCE_ACTIVATE_SCRIPT" \
   || fail 'T8e: fd 9 is not opened for append on the activation lock'
+readonly FD9_REDIRECTIONS="$(grep -o -E '(^|[^0-9])9[<>]' "$SOURCE_ACTIVATE_SCRIPT" | wc -l | tr -d ' ')"
+[[ "$FD9_REDIRECTIONS" -eq 1 ]] \
+  || fail "T8e: expected exactly one fd-9 redirection, found ${FD9_REDIRECTIONS}"
+grep -Fq '! -L "$ACTIVATION_LOCK"' "$SOURCE_ACTIVATE_SCRIPT" \
+  || fail 'T8e: the symlink refusal guard on the lock path is missing'
+readonly SYMLINK_GUARD_LINE="$(grep -n -F "die 'ACTIVATION_LOCK_PATH_IS_SYMLINK'" \
+  "$SOURCE_ACTIVATE_SCRIPT" | cut -d: -f1)"
+readonly FD9_OPEN_LINE="$(grep -n -F 'exec 9>>"$ACTIVATION_LOCK"' \
+  "$SOURCE_ACTIVATE_SCRIPT" | cut -d: -f1)"
+[[ -n "$SYMLINK_GUARD_LINE" && -n "$FD9_OPEN_LINE" \
+  && "$SYMLINK_GUARD_LINE" -lt "$FD9_OPEN_LINE" ]] \
+  || fail 'T8e: the symlink guard does not precede opening fd 9'
 pass_case 'T8e production locking uses the absolute lockf fd-9 form'
 
 readonly FIRST_ACTIVATE_STATEMENT="$(/usr/bin/awk '
@@ -455,7 +467,7 @@ readonly POST_WRITE_REGION="$(printf '%s\n' "$DO_ACTIVATE_BODY" | /usr/bin/awk '
 [[ "$POST_WRITE_REGION" == *'rsync -a --delete'* && "$POST_WRITE_REGION" == *'classify_platform'* ]] \
   || fail 'T8e: could not locate the rsync-to-verification region of do_activate'
 if printf '%s\n' "$POST_WRITE_REGION" \
-  | grep -E -q '9>&-|9<&-|lockf|ACTIVATION_LOCK|(^|[[:space:]])(rm|unlink)[[:space:]]'; then
+  | grep -E -q '9[<>]|lockf|ACTIVATION_LOCK|(^|[[:space:]])(rm|unlink)[[:space:]]'; then
   fail 'T8e: an explicit lock release exists between rsync and post-write verification'
 fi
 pass_case 'T8e no explicit lock release exists between rsync and post-write verification'
