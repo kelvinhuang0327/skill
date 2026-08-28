@@ -16,9 +16,7 @@ verdict.
 
 The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
 category and material consequence together. Do not restate or widen that list
-here. A single acceptance failure is not a trigger; a second retry whose cause
-is still unattributed is. `LOOP_JUDGED` is judged by route definition, not by
-category.
+here. `LOOP_JUDGED` is judged by route definition, not by category.
 
 `READ_ONLY_COMPLETION_REVIEW` goes directly to `fable-judge` and has no Worker
 route. A Worker with no fresh-context capability may self-check only, must mark

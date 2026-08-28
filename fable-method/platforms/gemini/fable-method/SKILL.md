@@ -240,7 +240,7 @@ security/authentication/authorization, finance/payment, database or
 production-data writes, shared-core or cross-runtime changes, real
 UI/browser/device validation, external side effects, explicit independent
 verification, or material unknown evidence. A single acceptance failure is not
-a trigger; a second retry whose cause is still unattributed is. Editing a
+a trigger at any attempt number; material unknown still applies. Editing a
 prompt, template, or this Skill is not by itself a shared-core trigger.
 
 Loop requires a fixed scope, at least two genuinely independent cards with

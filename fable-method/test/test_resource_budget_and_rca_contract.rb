@@ -9,8 +9,30 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   FLOWCHARTS = File.read(File.join(SHARED_ROOT, 'references', 'flowcharts.md'))
   FAILURE_MODES = File.read(File.join(SHARED_ROOT, 'references', 'failure-modes.md'))
   RCA_CONTRACT = [SKILL, FLOWCHARTS, FAILURE_MODES].join("\n")
+  JUDGE_HANDOFF = File.read(File.join(SHARED_ROOT, 'references', 'judge-handoff.md'))
+  JUDGE_TRIGGER_CONTRACT = {
+    'SKILL.md' => SKILL,
+    'references/judge-handoff.md' => JUDGE_HANDOFF,
+    'references/flowcharts.md' => FLOWCHARTS,
+    'references/failure-modes.md' => FAILURE_MODES
+  }.freeze
 
   NUMBER_WORD = '(?:one|two|three|four|five|six|seven|eight|nine|ten|\\d+)'
+
+  # An ordinal-position Judge trigger escalates by attempt number ("a second
+  # retry ... is a trigger") instead of by the material unknown category.
+  # Sentences are gated on Judge/escalation vocabulary, then split on clause
+  # boundaries so a compound "X is not a trigger; Y is" cannot hide an
+  # affirmative ordinal clause behind the negation in its first half.
+  ORDINAL_ATTEMPT = /
+    (?:second|third|fourth|fifth|sixth|nth|\d+(?:st|nd|rd|th))\s+
+    (?:(?:consecutive|failed|unattributed|blind|repeated)\s+)*
+    (?:retry|retries|attempt|attempts|failure|failures)
+    |
+    (?:retry|attempt|failure)\s+(?:number|count)
+  /xi
+  JUDGE_ESCALATION = /\b(?:judge|escalat\w*|trigger\w*)\b/i
+  TRIGGER_NEGATION = /\b(?:not|no|never|neither|nor|without|merely)\b/i
 
   def resource_value(key)
     match = /^#{Regexp.escape(key)}:\n([^\n]+)$/.match(OPERATIONAL_GATES)
@@ -88,5 +110,67 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
     assert_match(/This is not unlimited retry permission/, SKILL)
     assert_match(/stop when scope, safety, authority, capability, proportionality, or\ndiscriminating evidence is exhausted/,
                  SKILL)
+  end
+
+  def ordinal_judge_trigger_clauses(text)
+    text.gsub(/\s+/, ' ').split(/(?<=\.)\s+/).flat_map do |sentence|
+      next [] unless sentence.match?(JUDGE_ESCALATION)
+
+      sentence.split(/;\s*/).select do |clause|
+        clause.match?(ORDINAL_ATTEMPT) && !clause.match?(TRIGGER_NEGATION)
+      end
+    end
+  end
+
+  def test_ordinal_trigger_detector_flags_known_reintroductions
+    [
+      'A single acceptance failure is not a trigger; a second retry whose cause is still unattributed is.',
+      'A single acceptance failure is not a trigger; a third failed attempt escalates to the Judge.',
+      'The 2nd retry automatically triggers the Judge.',
+      'Escalate to the Judge once the retry count reaches two.'
+    ].each do |reintroduction|
+      refute_empty ordinal_judge_trigger_clauses(reintroduction),
+                   "detector missed an ordinal Judge trigger: #{reintroduction}"
+    end
+  end
+
+  def test_ordinal_trigger_detector_permits_non_ordinal_semantics
+    [
+      'A single acceptance failure is not a trigger at any attempt number; material unknown still applies.',
+      'A trigger never arises from ordinal position, including a second retry.',
+      'Evidence-progressing RCA has no arbitrary numeric ceiling, so a fourth or later evidence-progressing step is permitted.'
+    ].each do |permitted|
+      assert_empty ordinal_judge_trigger_clauses(permitted),
+                   "detector false-positived on permitted semantics: #{permitted}"
+    end
+  end
+
+  def test_no_ordinal_position_judge_trigger_in_shared_contract
+    JUDGE_TRIGGER_CONTRACT.each do |name, text|
+      assert_empty ordinal_judge_trigger_clauses(text),
+                   "#{name} escalates to the Judge by attempt number"
+    end
+  end
+
+  def test_retired_ordinal_trigger_clause_is_absent_everywhere
+    JUDGE_TRIGGER_CONTRACT.each do |name, text|
+      refute_match(/a second retry whose cause is still unattributed/i, text,
+                   "#{name} still carries the retired ordinal Judge trigger")
+    end
+  end
+
+  def test_material_unknown_remains_the_uncertainty_trigger
+    assert_match(/verification, or material unknown evidence\./, SKILL)
+    assert_match(
+      /A single acceptance failure is not\na trigger at any attempt number; material unknown still applies\./,
+      SKILL
+    )
+  end
+
+  def test_judge_handoff_defers_to_skill_for_the_trigger_definition
+    assert_match(/The Judge trigger has one definition, in `SKILL\.md` "Route once"/, JUDGE_HANDOFF)
+    assert_match(/Do not restate or widen that list\nhere\./, JUDGE_HANDOFF)
+    refute_match(/acceptance failure/i, JUDGE_HANDOFF,
+                 'judge-handoff.md restates Judge-trigger semantics instead of deferring to SKILL.md')
   end
 end
