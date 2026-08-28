@@ -10,6 +10,7 @@ readonly MANIFEST="${FABLE_ROOT}/platforms.yaml"
 readonly SYNC_SCRIPT="${SCRIPT_DIR}/sync-platforms.sh"
 readonly PLATFORMS=(codex claude gemini antigravity)
 readonly TRUSTED_GIT_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
+readonly ACTIVATION_LOCK="${USER_HOME}/.fable-method-activation.lock"
 
 die() {
   printf 'ERROR: %s\n' "$1" >&2
@@ -158,6 +159,21 @@ assert_repository_identity() {
 
   [[ "$repository_common_dir" == "$canonical_common_dir" ]] \
     || die 'repository identity guard failed: Git common directory does not match canonical repository'
+}
+
+# Global single-writer gate for activation. BSD flock(2) through the documented
+# /usr/bin/lockf descriptor form: the lock lives on this process's open file
+# description for fd 9, so the kernel releases it when this process exits or
+# dies. The zero-byte lock file is never removed and its mere existence is
+# never a held lock, so no stale-lock cleanup exists or is needed.
+acquire_activation_lock() {
+  [[ ! -L "$ACTIVATION_LOCK" ]] || die 'ACTIVATION_LOCK_PATH_IS_SYMLINK'
+  exec 9>>"$ACTIVATION_LOCK"
+  if ! /usr/bin/lockf -s -t 0 9; then
+    printf 'ACTIVATION_LOCK_BUSY\n' >&2
+    printf '  lock: %s\n' "$ACTIVATION_LOCK" >&2
+    exit 2
+  fi
 }
 
 guard_repository_root() {
@@ -579,6 +595,7 @@ do_check() {
 }
 
 do_activate() {
+  acquire_activation_lock
   local platform="$1"
   guard_repository_root
   verify_manifest_paths

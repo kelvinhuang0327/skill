@@ -5,11 +5,13 @@ readonly TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SOURCE_ROOT="$(cd "${TEST_DIR}/../.." && pwd)"
 readonly SOURCE_ACTIVATE_SCRIPT="${SOURCE_ROOT}/fable-method/scripts/activate-live.sh"
 readonly SYSTEM_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
+readonly REAL_ACTIVATION_LOCK='/Users/kelvin/.fable-method-activation.lock'
 
 PASS_COUNT=0
 COMMAND_OUTPUT=''
 COMMAND_STATUS=0
 SCRATCH=''
+HOLDER_PID=''
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -53,7 +55,65 @@ assert_failure_contains() {
   pass_case "$label"
 }
 
+# Fingerprints every regular file's content under a live root so an assertion
+# can prove a refused activation left the target byte-identical.
+live_digest() {
+  local root="$1" file
+  if [[ ! -d "$root" ]]; then
+    printf 'ABSENT\n'
+    return 0
+  fi
+  while IFS= read -r -d '' file; do
+    printf '%s  %s\n' "$(shasum -a 256 <"$file" | awk '{print $1}')" "${file#"$root"/}"
+  done < <(find "$root" -type f -print0 | LC_ALL=C sort -z)
+}
+
+real_lock_fingerprint() {
+  if [[ -e "$REAL_ACTIVATION_LOCK" ]]; then
+    stat -f '%i %z %m' "$REAL_ACTIVATION_LOCK"
+  else
+    printf 'ABSENT\n'
+  fi
+}
+
+# Probes the lock from a separate process holding its own descriptor, so a
+# held lock is observed rather than inferred. Succeeds when the lock is busy.
+lock_is_busy() {
+  local lock="$1"
+  if ( exec 9>>"$lock"; /usr/bin/lockf -s -t 0 9 ) 2>/dev/null; then
+    return 1
+  fi
+  return 0
+}
+
+# External activation-lock holder. Acquires the lock through the same
+# descriptor form production uses, signals acquisition over a FIFO, then keeps
+# the descriptor open while blocked on a second FIFO. No sleeps, no polling.
+hold_activation_lock() {
+  local lock="$1" ready="$2" release="$3"
+  exec 9>>"$lock"
+  if ! /usr/bin/lockf -s -t 0 9; then
+    printf 'HOLDER_LOCK_FAILED\n' >"$ready"
+    exit 3
+  fi
+  printf 'HOLDER_LOCK_ACQUIRED\n' >"$ready"
+  read -r _ <"$release" || true
+}
+
+# Guarantees no external lock holder outlives the harness. Without this, a
+# case that exits before its own release and reap would leave a holder alive
+# still owning the harness's inherited stdout, which stalls any piped caller.
+reap_lock_holder() {
+  [[ -n "$HOLDER_PID" ]] || return 0
+  if kill -0 "$HOLDER_PID" 2>/dev/null; then
+    kill -KILL "$HOLDER_PID" 2>/dev/null || true
+  fi
+  wait "$HOLDER_PID" 2>/dev/null || true
+  HOLDER_PID=''
+}
+
 cleanup() {
+  reap_lock_holder
   [[ -n "$SCRATCH" && -d "$SCRATCH" ]] || return 0
   case "$SCRATCH" in
     "${SCRATCH_BASE%/}"/fable-activate-live-test.*)
@@ -113,6 +173,14 @@ if grep -Fq '/Users/kelvin' \
   fail 'fixture isolation: a real user path survived rewriting'
 fi
 pass_case 'fixture activation targets are scratch-only'
+
+readonly FIXTURE_LOCK="${FIXTURE_HOME}/.fable-method-activation.lock"
+readonly REAL_LOCK_BEFORE="$(real_lock_fingerprint)"
+grep -Fxq "readonly USER_HOME='${FIXTURE_HOME}'" \
+  "$FIXTURE_CANONICAL/fable-method/scripts/activate-live.sh" \
+  || fail 'fixture isolation: fixture USER_HOME was not rewritten into scratch'
+[[ ! -e "$FIXTURE_LOCK" ]] || fail 'fixture isolation: the fixture lock already exists'
+pass_case 'fixture activation lock is scratch-only and absent'
 
 git -C "$FIXTURE_CANONICAL" init -q -b master
 git -C "$FIXTURE_CANONICAL" config user.name 'Fable Activate Test'
@@ -219,6 +287,182 @@ assert_success_contains \
   'branch worktree at canonical origin master is accepted' \
   'ACTIVATION_RESULT: ALREADY_CURRENT' \
   "$LINKED_BRANCH_CURRENT/fable-method/scripts/activate-live.sh" --activate --platform codex
+
+# --- Activation single-writer lock ----------------------------------------
+# These cases run before refs/remotes/origin/master is deleted, because an
+# accepted activation still requires that ref to resolve.
+
+readonly HOLDER_READY="${SCRATCH}/lock-holder-ready.fifo"
+readonly HOLDER_RELEASE="${SCRATCH}/lock-holder-release.fifo"
+readonly LIVE_DIGEST_BEFORE_LOCK="$(live_digest "$SCRATCH_LIVE")"
+
+[[ "$LIVE_DIGEST_BEFORE_LOCK" != 'ABSENT' ]] \
+  || fail 'T8a precondition: the scratch live target is absent'
+[[ -d "$FIXTURE_HOME" && -w "$FIXTURE_HOME" ]] \
+  || fail 'T8a precondition: the fixture home is not a writable directory'
+mkfifo "$HOLDER_READY" "$HOLDER_RELEASE"
+
+# T8a - contention fails closed and writes nothing.
+hold_activation_lock "$FIXTURE_LOCK" "$HOLDER_READY" "$HOLDER_RELEASE" &
+HOLDER_PID=$!
+read -r HOLDER_SIGNAL <"$HOLDER_READY"
+[[ "$HOLDER_SIGNAL" == 'HOLDER_LOCK_ACQUIRED' ]] \
+  || fail "T8a: the external holder did not acquire the fixture lock: ${HOLDER_SIGNAL}"
+pass_case 'T8a external holder owns the activation lock'
+
+assert_failure_contains \
+  'T8a contended --activate fails closed' \
+  'ACTIVATION_LOCK_BUSY' \
+  "$CURRENT_SCRIPT" --activate --platform codex
+[[ "$COMMAND_OUTPUT" == *"lock: ${FIXTURE_LOCK}"* ]] \
+  || fail 'T8a: the contention report did not name the fixture lock'
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$LIVE_DIGEST_BEFORE_LOCK" ]] \
+  || fail 'T8a: contended --activate changed the scratch live target'
+pass_case 'T8a contended --activate left the live target byte-identical'
+
+# T8b - --check stays lock-free and read-only while the lock is held.
+assert_success_contains \
+  'T8b --check succeeds while the activation lock is held' \
+  'ACTIVATION_READY: YES' \
+  "$CURRENT_SCRIPT" --check --platform codex
+lock_is_busy "$FIXTURE_LOCK" \
+  || fail 'T8b: --check released, stole, or never left the held activation lock'
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$LIVE_DIGEST_BEFORE_LOCK" ]] \
+  || fail 'T8b: --check altered the scratch live target'
+for OTHER_LIVE_ROOT in .claude/skills .gemini/skills .gemini/config/skills; do
+  [[ ! -e "${FIXTURE_HOME}/${OTHER_LIVE_ROOT}/fable-method" ]] \
+    || fail "T8b: --check created a fixture live root: ${OTHER_LIVE_ROOT}"
+done
+pass_case 'T8b --check left the held lock and every fixture live root untouched'
+
+# T8c - a normally released lock is reacquired with no manual cleanup.
+printf 'release\n' >"$HOLDER_RELEASE"
+set +e
+wait "$HOLDER_PID"
+HOLDER_STATUS=$?
+set -e
+HOLDER_PID=''
+[[ "$HOLDER_STATUS" -eq 0 ]] \
+  || fail "T8c: the holder did not exit normally: ${HOLDER_STATUS}"
+pass_case 'T8c external holder released the lock and was reaped'
+
+case "$SCRATCH_LIVE" in
+  "${SCRATCH}"/*) rm -r -- "$SCRATCH_LIVE" ;;
+  *) fail 'T8c: refused to remove a live target outside scratch' ;;
+esac
+assert_success_contains \
+  'T8c activation succeeds after a normal lock release' \
+  'ACTIVATION_RESULT: ACTIVATED' \
+  "$CURRENT_SCRIPT" --activate --platform codex
+[[ "$COMMAND_OUTPUT" == *'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION'* ]] \
+  || fail 'T8c: post-write verification did not report the current materialization'
+[[ -f "$SCRATCH_LIVE/SKILL.md" ]] \
+  || fail 'T8c: the accepted activation did not write the scratch fixture'
+[[ -f "$FIXTURE_LOCK" && ! -L "$FIXTURE_LOCK" ]] \
+  || fail 'T8c: the activation lock file was removed or replaced'
+pass_case 'T8c activation wrote the live target under the lock with no cleanup'
+
+# T8d - a crashed holder is released by the kernel. Mandatory regression for
+# the falsified PID/stale-file design: no sleep, no retry, no lock removal.
+hold_activation_lock "$FIXTURE_LOCK" "$HOLDER_READY" "$HOLDER_RELEASE" &
+HOLDER_PID=$!
+read -r HOLDER_SIGNAL <"$HOLDER_READY"
+[[ "$HOLDER_SIGNAL" == 'HOLDER_LOCK_ACQUIRED' ]] \
+  || fail "T8d: the external holder did not acquire the fixture lock: ${HOLDER_SIGNAL}"
+lock_is_busy "$FIXTURE_LOCK" \
+  || fail 'T8d: the holder does not actually own the lock'
+kill -KILL "$HOLDER_PID"
+set +e
+# The signal death is deliberate, so the shell's job notification for it is
+# noise; HOLDER_STATUS below is the assertion that the holder actually died.
+wait "$HOLDER_PID" 2>/dev/null
+HOLDER_STATUS=$?
+set -e
+HOLDER_PID=''
+[[ "$HOLDER_STATUS" -ne 0 ]] \
+  || fail 'T8d: the killed holder reported a normal exit'
+pass_case 'T8d crashed holder was reaped'
+
+assert_success_contains \
+  'T8d activation succeeds immediately after a holder crash' \
+  'ACTIVATION_RESULT: ALREADY_CURRENT' \
+  "$CURRENT_SCRIPT" --activate --platform codex
+[[ -f "$FIXTURE_LOCK" ]] \
+  || fail 'T8d: the lock file was removed to recover from the crash'
+pass_case 'T8d kernel released the crashed lock with no stale cleanup'
+
+# T8e - structural guard on the production script, not the rewritten fixture.
+readonly LOCK_ASSIGNMENT='readonly ACTIVATION_LOCK="${USER_HOME}/.fable-method-activation.lock"'
+grep -Fxq "$LOCK_ASSIGNMENT" "$SOURCE_ACTIVATE_SCRIPT" \
+  || fail 'T8e: the activation lock path is not derived verbatim from USER_HOME'
+[[ "$(grep -c 'ACTIVATION_LOCK=' "$SOURCE_ACTIVATE_SCRIPT")" -eq 1 ]] \
+  || fail 'T8e: the activation lock path is assigned more than once'
+[[ "$(grep -c -F '.fable-method-activation.lock' "$SOURCE_ACTIVATE_SCRIPT")" -eq 1 ]] \
+  || fail 'T8e: more than one activation lock path exists'
+grep -Fq '/usr/bin/lockf -s -t 0 9' "$SOURCE_ACTIVATE_SCRIPT" \
+  || fail 'T8e: the absolute /usr/bin/lockf descriptor form is missing'
+grep -Fq 'exec 9>>"$ACTIVATION_LOCK"' "$SOURCE_ACTIVATE_SCRIPT" \
+  || fail 'T8e: fd 9 is not opened for append on the activation lock'
+pass_case 'T8e production locking uses the absolute lockf fd-9 form'
+
+readonly FIRST_ACTIVATE_STATEMENT="$(/usr/bin/awk '
+  $0 == "do_activate() {" { found = 1; next }
+  found { sub(/^[[:space:]]+/, "", $0); print; exit }
+' "$SOURCE_ACTIVATE_SCRIPT")"
+[[ "$FIRST_ACTIVATE_STATEMENT" == 'acquire_activation_lock' ]] \
+  || fail "T8e: do_activate does not acquire the lock first: ${FIRST_ACTIVATE_STATEMENT}"
+
+readonly DO_ACTIVATE_BODY="$(/usr/bin/awk '
+  $0 == "do_activate() {" { inside = 1; next }
+  inside && $0 == "}" { exit }
+  inside { print }
+' "$SOURCE_ACTIVATE_SCRIPT")"
+[[ "$(printf '%s\n' "$DO_ACTIVATE_BODY" | grep -c 'acquire_activation_lock')" -eq 1 ]] \
+  || fail 'T8e: do_activate acquires the activation lock more than once'
+
+readonly DO_CHECK_BODY="$(/usr/bin/awk '
+  $0 == "do_check() {" { inside = 1; next }
+  inside && $0 == "}" { exit }
+  inside { print }
+' "$SOURCE_ACTIVATE_SCRIPT")"
+if printf '%s\n' "$DO_CHECK_BODY" | grep -Fq 'acquire_activation_lock'; then
+  fail 'T8e: do_check acquires the activation lock'
+fi
+pass_case 'T8e acquisition is the first and only statement of do_activate, never of do_check'
+
+forbid_in_source() {
+  local label="$1" pattern="$2"
+  if grep -E -q "$pattern" "$SOURCE_ACTIVATE_SCRIPT"; then
+    fail "T8e: ${label}"
+  fi
+}
+
+forbid_in_source 'the superseded shlock primitive is referenced' 'shlock'
+forbid_in_source 'fd 9 is explicitly closed' '9>&-|9<&-'
+forbid_in_source 'a trap touches the activation lock' 'trap.*(ACTIVATION_LOCK|lockf|9>)'
+forbid_in_source 'the activation lock is unlinked' '(^|[[:space:]])(rm|unlink)[[:space:]][^|&;]*ACTIVATION_LOCK'
+forbid_in_source 'the lock path has an environment override' 'ACTIVATION_LOCK[^=]*:-|:-[^=]*ACTIVATION_LOCK'
+forbid_in_source 'the lock path is derived from HOME or TMPDIR' '\$\{HOME\}|\$HOME([^_A-Za-z]|$)|\$\{?TMPDIR'
+forbid_in_source 'activation locking depends on a checkpoint' '[Cc]heckpoint'
+forbid_in_source 'lockf is resolved through PATH' '(^|[[:space:]])lockf[[:space:]]'
+pass_case 'T8e no stale-cleanup, override, trap, unlink, or PATH-resolved lock path exists'
+
+readonly POST_WRITE_REGION="$(printf '%s\n' "$DO_ACTIVATE_BODY" | /usr/bin/awk '
+  /rsync -a --delete/ { seen = 1 }
+  seen { print }
+  seen && /classify_platform/ { exit }
+')"
+[[ "$POST_WRITE_REGION" == *'rsync -a --delete'* && "$POST_WRITE_REGION" == *'classify_platform'* ]] \
+  || fail 'T8e: could not locate the rsync-to-verification region of do_activate'
+if printf '%s\n' "$POST_WRITE_REGION" \
+  | grep -E -q '9>&-|9<&-|lockf|ACTIVATION_LOCK|(^|[[:space:]])(rm|unlink)[[:space:]]'; then
+  fail 'T8e: an explicit lock release exists between rsync and post-write verification'
+fi
+pass_case 'T8e no explicit lock release exists between rsync and post-write verification'
+
+[[ "$(real_lock_fingerprint)" == "$REAL_LOCK_BEFORE" ]] \
+  || fail 'T8: the real activation lock was created or modified'
+pass_case 'T8 real activation lock was never created or modified'
 
 git -C "$FIXTURE_CANONICAL" update-ref -d refs/remotes/origin/master
 assert_failure_contains \
