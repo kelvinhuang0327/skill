@@ -524,7 +524,7 @@ class TaskCheckpointTest < Minitest::Test
   def test_inconsistent_or_partial_queue_fields_fail_closed
     partial = TaskCheckpoint.new(@valid_attrs.merge(resume_after_task_id: 'TASK_B_002'))
     error = assert_raises(TaskCheckpoint::ValidationError) { partial.validate! }
-    assert_match(/queue-specific fields require queue_disposition/, error.message)
+    assert_match(/queue-specific fields require queue_disposition or a complete consumed queue-run marker/, error.message)
 
     inconsistent = TaskCheckpoint.new(@valid_attrs.merge(
       queue_disposition: 'BLOCKED_DEFERRED',
@@ -537,6 +537,15 @@ class TaskCheckpointTest < Minitest::Test
     assert_match(/task_lifecycle_state BLOCKED/, error.message)
     assert_match(/ephemeral session URI/, error.message)
     assert_match(/integer from 0 to 1/, error.message)
+
+    invalid_consumed_marker = TaskCheckpoint.new(@valid_attrs.merge(
+      resume_after_task_id: 'TASK_B_002',
+      next_authorized_task_packet_ref: 'conversation://task-b',
+      deferred_resume_action: 'resume-a',
+      deferred_recheck_count: 1
+    ))
+    error = assert_raises(TaskCheckpoint::ValidationError) { invalid_consumed_marker.validate! }
+    assert_match(/ephemeral session URI/, error.message)
   end
 
   def test_defer_persists_queue_disposition_and_original_continuation
@@ -633,6 +642,28 @@ class TaskCheckpointTest < Minitest::Test
     end
   end
 
+  def test_overlapping_ownership_rejects_task_b_independence
+    cp = TaskCheckpoint.new(@valid_attrs)
+
+    error = assert_raises(TaskCheckpoint::DeferredQueueEligibilityError) do
+      cp.defer_for_authorized_task!(
+        blocker: 'transient', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: [],
+        task_a_owned_paths: ['fable-method/scripts'],
+        task_b_owned_paths: ['fable-method/scripts/task_checkpoint.rb']
+      )
+    end
+
+    assert_match(/ownership surfaces overlap/, error.message)
+    refute cp.deferred?
+    assert TaskCheckpoint.ownership_surfaces_overlap?(
+      ['.'],
+      ['fable-method/scripts/task_checkpoint.rb']
+    )
+  end
+
   def test_defer_rejects_ephemeral_or_unresolvable_task_b_packet
     ephemeral = TaskCheckpoint.new(@valid_attrs)
     assert_raises(TaskCheckpoint::ResolutionError) do
@@ -725,8 +756,72 @@ class TaskCheckpointTest < Minitest::Test
     assert_nil task_a.current_blocker
     assert_equal 'implement_bounded_reconciliation', task_a.next_action
     refute task_a.deferred?
-    TaskCheckpoint::OPTIONAL_QUEUE_FIELDS.each do |field|
-      assert_nil task_a.send(field)
+    assert_nil task_a.queue_disposition
+    assert_equal 'TASK_B_002', task_a.resume_after_task_id
+    assert_equal @task_b_packet_ref, task_a.next_authorized_task_packet_ref
+    assert_equal 'implement_bounded_reconciliation', task_a.deferred_resume_action
+    assert_equal 1, task_a.deferred_recheck_count
+    assert task_a.deferred_queue_run_consumed?
+    assert_nil task_a.authorized_deferred_task
+  end
+
+  def test_resumed_task_a_recurrence_blocks_without_second_automatic_retry
+    task_a = deferred_task_a
+    assert_equal :resumed,
+                 task_a.recheck_deferred_resume_gate!(completed_task: task_b_checkpoint, gate_passed: true)
+
+    checkpoint_path = File.join(@tmpdir, 'task-a-consumed-run.json')
+    task_a.save(checkpoint_path)
+    fresh_task_a = TaskCheckpoint.load(checkpoint_path)
+    assert fresh_task_a.deferred_queue_run_consumed?
+
+    error = assert_raises(TaskCheckpoint::DeferredQueueLimitError) do
+      fresh_task_a.defer_for_authorized_task!(
+        blocker: 'same transient blocker recurred', blocker_disposition: 'TRANSIENT_ELIGIBLE',
+        resume_after_task_id: 'TASK_B_002', next_authorized_task_packet_ref: @task_b_packet_ref,
+        task_b_independent: true, task_b_packet_authorized: true,
+        existing_deferred_checkpoints: []
+      )
+    end
+    assert_match(/automatic deferred queue run is already consumed/, error.message)
+
+    assert_equal :blocked_deferred_recurrence,
+                 fresh_task_a.block_recurrent_transient!(
+                   blocker: 'same transient blocker recurred',
+                   blocker_disposition: 'TRANSIENT_ELIGIBLE'
+                 )
+    assert_equal 'BLOCKED', fresh_task_a.task_lifecycle_state
+    assert_equal 'BLOCKED_DEFERRED', fresh_task_a.queue_disposition
+    assert_equal 1, fresh_task_a.deferred_recheck_count
+    assert_nil fresh_task_a.authorized_deferred_task
+
+    fresh_task_a.save(checkpoint_path, expected_revision: 1)
+    reloaded = TaskCheckpoint.load(checkpoint_path)
+    result = TaskReconciler.new(reloaded, live_reconciliation_options).reconcile
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/single automatic end-of-task recheck/, result.reason)
+  end
+
+  def test_recurrent_ineligible_blocker_does_not_enter_deferred_queue
+    task_a = deferred_task_a
+    task_a.recheck_deferred_resume_gate!(completed_task: task_b_checkpoint, gate_passed: true)
+
+    assert_raises(TaskCheckpoint::DeferredQueueEligibilityError) do
+      task_a.block_recurrent_transient!(
+        blocker: 'authorization is missing',
+        blocker_disposition: 'AUTHORIZATION'
+      )
+    end
+    refute task_a.deferred?
+    assert task_a.deferred_queue_run_consumed?
+
+    terminal = TaskCheckpoint.from_json(task_a.to_json)
+    terminal.task_lifecycle_state = 'COMPLETED'
+    assert_raises(TaskCheckpoint::DeferredQueueStateError) do
+      terminal.block_recurrent_transient!(
+        blocker: 'transient dependency returned after completion',
+        blocker_disposition: 'TRANSIENT_ELIGIBLE'
+      )
     end
   end
 
@@ -844,5 +939,52 @@ class TaskCheckpointTest < Minitest::Test
     assert status.success?, stderr
     assert_match(/RECONCILIATION_VERDICT: CONTINUE/, stdout)
     assert_match(/RECOMMENDED_ACTION: RECHECK_DEFERRED_RESUME_GATE/, stdout)
+  end
+
+  def test_unrelated_external_process_does_not_create_false_active_writer_block
+    before_snapshot = { head: 'same-head', tree: 'same-tree', status: '' }
+    after_snapshot = before_snapshot.dup
+    owned_paths = ['fable-method/scripts/task_checkpoint.rb']
+    unrelated_processes = [
+      {
+        process_name: 'pytest',
+        cwd: File.join(@tmpdir, 'other-repository'),
+        target_paths: ['tests']
+      },
+      {
+        process_name: 'python',
+        target_paths: [File.join(@tmpdir, 'unrelated-output')]
+      },
+      { process_name: 'Agent' }
+    ]
+
+    assert_equal 5, TaskCheckpoint::DEFAULT_QUIESCENCE_OBSERVATION_SECONDS
+    refute TaskCheckpoint.scope_qualified_active_writer?(
+      worktree: @worktree_dir,
+      task_owned_paths: owned_paths,
+      writer_evidence: unrelated_processes,
+      before_snapshot: before_snapshot,
+      after_snapshot: after_snapshot
+    )
+
+    assert TaskCheckpoint.scope_qualified_active_writer?(
+      worktree: @worktree_dir,
+      task_owned_paths: owned_paths,
+      writer_evidence: [{
+        process_name: 'ruby',
+        cwd: @worktree_dir,
+        target_paths: ['fable-method/scripts/task_checkpoint.rb']
+      }],
+      before_snapshot: before_snapshot,
+      after_snapshot: after_snapshot
+    )
+
+    assert TaskCheckpoint.scope_qualified_active_writer?(
+      worktree: @worktree_dir,
+      task_owned_paths: owned_paths,
+      writer_evidence: [],
+      before_snapshot: before_snapshot,
+      after_snapshot: before_snapshot.merge(status: 'M task_checkpoint.rb')
+    )
   end
 end

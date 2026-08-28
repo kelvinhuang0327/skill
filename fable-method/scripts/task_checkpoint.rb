@@ -4,6 +4,7 @@
 require 'json'
 require 'fileutils'
 require 'open3'
+require 'pathname'
 require 'time'
 require 'digest'
 
@@ -19,6 +20,7 @@ class TaskCheckpoint
   DEFER_ELIGIBLE_BLOCKER = 'TRANSIENT_ELIGIBLE'
   MAX_DEFERRED_TASKS = 1
   MAX_AUTOMATIC_END_RECHECKS = 1
+  DEFAULT_QUIESCENCE_OBSERVATION_SECONDS = 5
   DEFERRED_TASK_TERMINAL_STATES = %w[BLOCKED COMPLETED ABORTED].freeze
   OPTIONAL_QUEUE_FIELDS = %i[
     queue_disposition
@@ -217,6 +219,61 @@ class TaskCheckpoint
     @queue_disposition == QUEUE_DISPOSITION_BLOCKED_DEFERRED
   end
 
+  def deferred_recheck_consumed?
+    @deferred_recheck_count == MAX_AUTOMATIC_END_RECHECKS && deferred_queue_identity_complete?
+  end
+
+  def deferred_queue_run_consumed?
+    @queue_disposition.nil? && deferred_recheck_consumed?
+  end
+
+  def self.scope_qualified_active_writer?(worktree:, task_owned_paths:, writer_evidence:,
+                                          before_snapshot:, after_snapshot:)
+    root = worktree.to_s.strip
+    raise WriterEvidenceError, 'worktree must be a non-empty path' if root.empty?
+    if before_snapshot.nil? || after_snapshot.nil?
+      raise WriterEvidenceError, 'bounded quiescence requires both before and after scoped snapshots'
+    end
+
+    normalized_root = File.expand_path(root)
+    owned_surfaces = Array(task_owned_paths).map do |path|
+      value = path.to_s.strip
+      File.expand_path(value, normalized_root) unless value.empty?
+    end.compact
+    surfaces = [normalized_root, *owned_surfaces].uniq
+
+    return true unless before_snapshot == after_snapshot
+
+    Array(writer_evidence).any? do |evidence|
+      next false unless evidence.respond_to?(:[])
+
+      cwd = evidence[:cwd] || evidence['cwd']
+      cwd = cwd.to_s.strip
+      cwd = nil unless !cwd.empty? && Pathname.new(cwd).absolute?
+      targets = evidence[:target_paths] || evidence['target_paths']
+
+      Array(targets).any? do |target|
+        target = target.to_s.strip
+        next false if target.empty?
+
+        absolute_target = if Pathname.new(target).absolute?
+                            File.expand_path(target)
+                          elsif cwd
+                            File.expand_path(target, cwd)
+                          end
+        next false unless absolute_target
+
+        surfaces.any? { |surface| path_surfaces_overlap?(absolute_target, surface) }
+      end
+    end
+  end
+
+  def self.ownership_surfaces_overlap?(task_a_owned_paths, task_b_owned_paths)
+    task_a = Array(task_a_owned_paths).map { |path| normalize_ownership_surface(path) }
+    task_b = Array(task_b_owned_paths).map { |path| normalize_ownership_surface(path) }
+    task_a.product(task_b).any? { |left, right| path_surfaces_overlap?(left, right) }
+  end
+
   def self.validate_deferred_limit!(checkpoints)
     checkpoints = Array(checkpoints)
     unless checkpoints.all? { |checkpoint| checkpoint.is_a?(TaskCheckpoint) }
@@ -233,8 +290,13 @@ class TaskCheckpoint
 
   def defer_for_authorized_task!(blocker:, blocker_disposition:, resume_after_task_id:,
                                  next_authorized_task_packet_ref:, task_b_independent:,
-                                 task_b_packet_authorized:, existing_deferred_checkpoints:)
+                                 task_b_packet_authorized:, existing_deferred_checkpoints:,
+                                 task_a_owned_paths: nil, task_b_owned_paths: nil)
     validate!
+    if deferred_queue_run_consumed?
+      raise DeferredQueueLimitError,
+            'automatic deferred queue run is already consumed; record a recurrent transient blocker without executing Task B again'
+    end
     raise DeferredQueueStateError, "task #{@task_id} is already deferred" if deferred?
     unless %w[IN_PROGRESS BLOCKED].include?(@task_lifecycle_state)
       raise DeferredQueueStateError, "terminal Task A state #{@task_lifecycle_state} cannot enter the deferred queue"
@@ -246,6 +308,7 @@ class TaskCheckpoint
     unless task_b_independent == true
       raise DeferredQueueEligibilityError, 'Task B independence must be explicitly confirmed by the authoritative Packet'
     end
+    validate_task_b_ownership!(task_a_owned_paths, task_b_owned_paths)
     unless task_b_packet_authorized == true
       raise DeferredQueueEligibilityError, 'Task B must already have an executable Owner-authorized Packet'
     end
@@ -281,8 +344,33 @@ class TaskCheckpoint
     self
   end
 
+  def block_recurrent_transient!(blocker:, blocker_disposition:)
+    validate!
+    unless deferred_queue_run_consumed?
+      raise DeferredQueueStateError, 'Task A has no consumed deferred queue run to recur from'
+    end
+    unless %w[IN_PROGRESS BLOCKED].include?(@task_lifecycle_state)
+      raise DeferredQueueStateError, "terminal Task A state #{@task_lifecycle_state} cannot record a recurrent deferred blocker"
+    end
+    unless blocker_disposition.to_s == DEFER_ELIGIBLE_BLOCKER
+      raise DeferredQueueEligibilityError,
+            "recurrent blocker disposition must be #{DEFER_ELIGIBLE_BLOCKER}; ineligible blockers do not enter the queue"
+    end
+
+    blocker = blocker.to_s.strip
+    raise DeferredQueueStateError, 'recurrent deferred blocker must be specific and non-empty' if blocker.empty?
+
+    @task_lifecycle_state = 'BLOCKED'
+    @current_blocker = blocker
+    @queue_disposition = QUEUE_DISPOSITION_BLOCKED_DEFERRED
+    @next_action = DEFERRED_RECHECK_ACTION
+    validate!
+    :blocked_deferred_recurrence
+  end
+
   def authorized_deferred_task
     return nil unless deferred?
+    return nil if deferred_recheck_consumed?
 
     {
       task_id: @resume_after_task_id,
@@ -330,7 +418,7 @@ class TaskCheckpoint
     @task_lifecycle_state = 'IN_PROGRESS'
     @current_blocker = nil
     @next_action = resumed_action
-    clear_deferred_queue_fields
+    @queue_disposition = nil
     validate!
     :resumed
   end
@@ -405,7 +493,15 @@ class TaskCheckpoint
       populated = OPTIONAL_QUEUE_FIELDS.reject { |field| field == :queue_disposition }.select do |field|
         !send(field).nil?
       end
-      errors << "queue-specific fields require queue_disposition: #{populated.join(', ')}" unless populated.empty?
+      return if populated.empty?
+
+      unless deferred_queue_identity_complete?
+        errors << "queue-specific fields require queue_disposition or a complete consumed queue-run marker: #{populated.join(', ')}"
+      end
+      validate_deferred_queue_identity(errors, 'consumed queue-run marker')
+      unless @deferred_recheck_count == MAX_AUTOMATIC_END_RECHECKS
+        errors << "consumed queue-run marker requires deferred_recheck_count #{MAX_AUTOMATIC_END_RECHECKS}"
+      end
       return
     end
 
@@ -421,35 +517,70 @@ class TaskCheckpoint
     unless @next_action == DEFERRED_RECHECK_ACTION
       errors << "BLOCKED_DEFERRED next_action must be #{DEFERRED_RECHECK_ACTION}"
     end
+    validate_deferred_queue_identity(errors)
+    unless @deferred_recheck_count.is_a?(Integer) && @deferred_recheck_count.between?(0, MAX_AUTOMATIC_END_RECHECKS)
+      errors << "deferred_recheck_count must be an integer from 0 to #{MAX_AUTOMATIC_END_RECHECKS}"
+    end
+  end
+
+  def deferred_queue_identity_complete?
+    !@resume_after_task_id.to_s.strip.empty? &&
+      !@next_authorized_task_packet_ref.to_s.strip.empty? &&
+      !@deferred_resume_action.to_s.strip.empty?
+  end
+
+  def validate_deferred_queue_identity(errors, label = 'BLOCKED_DEFERRED')
     if @resume_after_task_id.nil? || @resume_after_task_id.strip.empty?
-      errors << 'BLOCKED_DEFERRED requires resume_after_task_id'
+      errors << "#{label} requires resume_after_task_id"
     elsif @resume_after_task_id == @task_id
       errors << 'resume_after_task_id must identify an independent Task B'
     end
     if @next_authorized_task_packet_ref.nil? || @next_authorized_task_packet_ref.strip.empty?
-      errors << 'BLOCKED_DEFERRED requires next_authorized_task_packet_ref'
+      errors << "#{label} requires next_authorized_task_packet_ref"
     elsif @next_authorized_task_packet_ref == 'ORIGINAL_TASK_RULES_INHERITED: YES'
       errors << 'next_authorized_task_packet_ref must be an explicit durable locator'
     elsif @next_authorized_task_packet_ref =~ %r{\A(conversation|session|chat)://}i
       errors << 'next_authorized_task_packet_ref must be durable, not an ephemeral session URI'
     end
     if @deferred_resume_action.nil? || @deferred_resume_action.strip.empty?
-      errors << 'BLOCKED_DEFERRED requires deferred_resume_action'
+      errors << "#{label} requires deferred_resume_action"
     elsif @deferred_resume_action == DEFERRED_RECHECK_ACTION
       errors << 'deferred_resume_action must preserve Task A continuation separately from the recheck gate'
     end
-    unless @deferred_recheck_count.is_a?(Integer) && @deferred_recheck_count.between?(0, MAX_AUTOMATIC_END_RECHECKS)
-      errors << "deferred_recheck_count must be an integer from 0 to #{MAX_AUTOMATIC_END_RECHECKS}"
+  end
+
+  def validate_task_b_ownership!(task_a_owned_paths, task_b_owned_paths)
+    return if task_a_owned_paths.nil? && task_b_owned_paths.nil?
+
+    if task_a_owned_paths.nil? || task_b_owned_paths.nil?
+      raise DeferredQueueEligibilityError, 'Task A and Task B ownership evidence must be supplied together'
+    end
+    if Array(task_a_owned_paths).empty? || Array(task_b_owned_paths).empty?
+      raise DeferredQueueEligibilityError, 'Task A and Task B ownership evidence must be non-empty'
+    end
+    if self.class.ownership_surfaces_overlap?(task_a_owned_paths, task_b_owned_paths)
+      raise DeferredQueueEligibilityError, 'Task A and Task B ownership surfaces overlap; Task B is not independent'
     end
   end
 
-  def clear_deferred_queue_fields
-    @queue_disposition = nil
-    @resume_after_task_id = nil
-    @next_authorized_task_packet_ref = nil
-    @deferred_resume_action = nil
-    @deferred_recheck_count = nil
+  def self.path_surfaces_overlap?(left, right)
+    return true if [left, right].any? { |surface| surface == '.' || surface == File::SEPARATOR }
+
+    left == right || left.start_with?("#{right}#{File::SEPARATOR}") || right.start_with?("#{left}#{File::SEPARATOR}")
   end
+
+  def self.normalize_ownership_surface(path)
+    value = path.to_s.strip
+    raise DeferredQueueStateError, 'ownership surface must be non-empty' if value.empty?
+
+    normalized = Pathname.new(value).cleanpath.to_s
+    if normalized == '..' || normalized.start_with?("..#{File::SEPARATOR}")
+      raise DeferredQueueStateError, "ownership surface escapes its namespace: #{value}"
+    end
+    normalized
+  end
+
+  private_class_method :path_surfaces_overlap?, :normalize_ownership_surface
 
   class ValidationError < StandardError; end
   class LoadError < StandardError; end
@@ -459,6 +590,7 @@ class TaskCheckpoint
   class DeferredQueueEligibilityError < DeferredQueueError; end
   class DeferredQueueStateError < DeferredQueueError; end
   class DeferredQueueLimitError < DeferredQueueError; end
+  class WriterEvidenceError < StandardError; end
 end
 
 # TaskReconciler performs bounded reconciliation between a durable checkpoint
@@ -537,7 +669,7 @@ class TaskReconciler
       )
     end
 
-    if checkpoint.deferred?
+    if checkpoint.deferred? && !checkpoint.deferred_recheck_consumed?
       begin
         checkpoint.resolve_packet_locator(checkpoint.next_authorized_task_packet_ref, live[:repository])
       rescue TaskCheckpoint::ResolutionError => e

@@ -65,7 +65,10 @@ minimal load-bearing fields:
 ```
 
 The five queue fields are backward-compatible and optional. A normal schema-1
-checkpoint omits them. `SCHEMA_VERSION` remains `1`.
+checkpoint omits them. After a successful recheck, `queue_disposition` is
+cleared while the other four fields remain as a consumed queue-run marker with
+`deferred_recheck_count: 1`. This marker is not an active deferred task and does
+not add a lifecycle state. `SCHEMA_VERSION` remains `1`.
 
 ### Field definitions
 
@@ -104,7 +107,9 @@ checkpoint omits them. `SCHEMA_VERSION` remains `1`.
   locators and inheritance-only statements fail closed.
 - `deferred_resume_action`: Task A's original continuation action, preserved
   separately while `next_action` is `RECHECK_DEFERRED_RESUME_GATE`.
-- `deferred_recheck_count`: Durable count constrained to `0` or `1`.
+- `deferred_recheck_count`: Durable count constrained to `0` or `1`. A value of
+  `1` remains durable after PASS so a fresh Worker cannot start a second
+  automatic queue cycle if the same transient blocker recurs.
 
 ## Storage and lifecycle
 
@@ -158,6 +163,9 @@ the Packet locator before changing Task A; and preserves the prior continuation
 action. Its `existing_deferred_checkpoints` keyword is mandatory: omission is
 an error rather than an implicit empty inventory. Persist Task A with revision
 protection **before** executing Task B.
+When bounded ownership surfaces are supplied, both Task A and Task B surfaces
+are required and any lexical overlap rejects the independence claim; a boolean
+confirmation cannot override contradictory ownership evidence.
 `TaskCheckpoint.validate_deferred_limit!` evaluates the explicit active-task
 inventory supplied by the Worker and permits at most one deferred checkpoint.
 It does not discover or schedule tasks.
@@ -169,15 +177,25 @@ The frozen sequence is:
 3. Task B reaches an end-of-task state: `COMPLETED`, `ABORTED`, or `BLOCKED`.
    `BLOCKED` ends Task B for this queue decision; do not search for Task C.
 4. Perform exactly one end-of-task recheck of Task A's transient blocker.
-5. On PASS, restore Task A to `IN_PROGRESS`, clear queue fields, and resume from
-   `deferred_resume_action`. On FAIL, retain `BLOCKED_DEFERRED`, set
+5. On PASS, restore Task A to `IN_PROGRESS`, clear only the active
+   `queue_disposition`, resume from `deferred_resume_action`, and retain the
+   Task B identity/action fields with `deferred_recheck_count: 1` as a consumed
+   run marker. On FAIL, retain `BLOCKED_DEFERRED`, set
    `deferred_recheck_count: 1`, and make no second automatic recheck.
+6. If the transient blocker recurs after PASS in the same queue run,
+   `TaskCheckpoint#block_recurrent_transient!` returns Task A to `BLOCKED` /
+   `BLOCKED_DEFERRED` with the consumed count intact. It does not expose an
+   authorized deferred task, execute Task B again, or select Task C; bounded
+   reconciliation returns `STOP_UNRESOLVED`.
 
 `TaskCheckpoint#recheck_deferred_resume_gate!` requires the exact Task B
 checkpoint and a terminal end-of-task state. A mismatched or still-running Task
 B, a Task B that is itself deferred, a second deferred checkpoint, or a second
 recheck fails closed. A fresh process reconstructs all queue state from Task A's
 checkpoint and the exact Task B checkpoint; chat memory is never required.
+`TaskCheckpoint#defer_for_authorized_task!` also rejects a checkpoint carrying
+the consumed marker, so callers cannot bypass the recurrence rule by presenting
+the same or a different Task B as a new automatic cycle.
 
 ## Scope-qualified writer and quiescence checks
 
@@ -195,6 +213,15 @@ window, not a universal safety constant. Do not poll indefinitely. Stable scoped
 evidence permits progress; unexplained scoped mutation stops the write and
 requires ownership reconciliation.
 
+`TaskCheckpoint.scope_qualified_active_writer?` evaluates this evidence without
+discovering or scheduling processes. The caller supplies the exact worktree,
+task-owned paths, before/after snapshots, and any observed process target paths.
+Snapshot drift is active mutation. With stable snapshots, only an observed
+target path overlapping the exact worktree or owned surface counts; names such
+as `pytest`, `python`, or `Agent` without that path evidence do not. The exposed
+default observation value is five seconds, but callers may choose another
+bounded interval when the task requires it.
+
 ## Bounded reconciliation algorithm
 
 When a new Agent or session begins execution:
@@ -211,9 +238,11 @@ When a new Agent or session begins execution:
    - *Authoritative packet resolution*: If `checkpoint.authoritative_packet_ref`
      is an ephemeral session URI (`conversation://...`) or cannot be resolved to
      a readable file/git blob, verdict is `STOP_UNRESOLVED`.
-   - *Deferred Task B packet resolution*: For `BLOCKED_DEFERRED`, resolve
-     `next_authorized_task_packet_ref` independently. Missing, ephemeral, or
-     inheritance-only Task B authority is `STOP_UNRESOLVED`.
+   - *Deferred Task B packet resolution*: Before the one recheck is consumed,
+     resolve `next_authorized_task_packet_ref` independently for
+     `BLOCKED_DEFERRED`. Missing, ephemeral, or inheritance-only Task B
+     authority is `STOP_UNRESOLVED`. A consumed recurrence never executes Task
+     B again, so reconciliation stops on the consumed count instead.
    - *PR already merged / Terminal state*: If live PR is `MERGED` or checkpoint
      state is `COMPLETED`, verdict is `ALREADY_COMPLETED`.
    - *Next action already done*: If the recorded `next_action` was completed
@@ -235,6 +264,9 @@ When a new Agent or session begins execution:
 6. **Blocker & continuation check**:
    - If `queue_disposition` is `BLOCKED_DEFERRED` and the single recheck is
      already consumed, retain Task A and return `STOP_UNRESOLVED`; do not retry.
+   - If `queue_disposition` is absent but the consumed queue-run marker remains,
+     continue Task A normally from its current `next_action`; preserve the marker
+     across fresh sessions until task closure or a recurrent transient block.
    - If exact Task B evidence is absent or Task B remains `IN_PROGRESS`, return
      `CONTINUE` only for that named Task B and Packet. Never select Task C.
    - If exact Task B is `COMPLETED`, `ABORTED`, or `BLOCKED`, return `CONTINUE`
