@@ -59,6 +59,8 @@ class SkillAuthoringIntegrityTest < Minitest::Test
       @registry = registry
     end
 
+    attr_reader :markdown_link_count
+
     def validate_canonical_entry!
       canonical_skill = canonical_skill_path!
       unless canonical_skill == CANONICAL_SKILL
@@ -190,7 +192,180 @@ class SkillAuthoringIntegrityTest < Minitest::Test
       true
     end
 
+    def validate_markdown_links!
+      @markdown_link_count = 0
+      managed_markdown_surfaces.each do |relative_path, intended_root|
+        validate_markdown_surface!(relative_path, intended_root)
+      end
+      true
+    end
+
     private
+
+    def managed_markdown_surfaces
+      surfaces = repository_files(SHARED_ROOT, '*.md').map do |path|
+        [path, SHARED_ROOT]
+      end
+      surfaces << [canonical_skill_path!, SHARED_ROOT]
+      registered_reference_paths!.each do |reference|
+        surfaces << [reference, SHARED_ROOT]
+      end
+
+      platform_records!.each_with_index do |platform, index|
+        label = "platforms[#{index}]"
+        materialized_root = normalize_repo_relative!(
+          scalar_field!(platform, 'materialized_destination', label),
+          "#{label}.materialized_destination"
+        )
+        repository_files(materialized_root, '*.md').each do |path|
+          surfaces << [path, materialized_root]
+        end
+        surfaces << [
+          destination_path!(materialized_root, 'SKILL.md', "#{label}.SKILL.md"),
+          materialized_root
+        ]
+
+        registered_reference_paths!.each do |reference|
+          relative_destination = reference.delete_prefix("#{SHARED_ROOT}/")
+          surfaces << [
+            destination_path!(materialized_root, relative_destination, reference),
+            materialized_root
+          ]
+        end
+
+        override_records!(platform, label).each_with_index do |override, override_index|
+          destination = scalar_field!(
+            override,
+            'destination',
+            "#{label}.reference_overrides[#{override_index}]"
+          )
+          surfaces << [
+            destination_path!(materialized_root, destination, destination),
+            materialized_root
+          ]
+        end
+      end
+
+      surfaces.uniq
+    end
+
+    def validate_markdown_surface!(relative_path, intended_root)
+      path = @repository_root.join(relative_path)
+      unless path.file?
+        violation!("managed Markdown surface is missing: #{relative_path}")
+      end
+
+      markdown_targets(File.read(path, encoding: 'UTF-8')).each do |target, line_number|
+        next if markdown_external_target?(target)
+
+        file_target = target.split('#', 2).first
+        next if file_target.empty?
+
+        @markdown_link_count += 1
+        validate_markdown_target!(relative_path, intended_root, target, line_number)
+      end
+    end
+
+    def markdown_targets(content)
+      lines = markdown_lines_outside_fences(content)
+      definitions = markdown_reference_definitions(lines)
+      targets = definitions.values.dup
+
+      lines.each do |line, line_number|
+        line.scan(/(?<!!)\[[^\]\n]+\]\(\s*(?:<([^>\n]+)>|([^\s)]+))/) do
+          targets << [Regexp.last_match(1) || Regexp.last_match(2), line_number]
+        end
+
+        line.scan(/(?<!!)\[([^\]\n]+)\]\[([^\]\n]*)\]/) do |label, reference|
+          target = definitions[normalize_reference_label(reference.empty? ? label : reference)]
+          targets << target if target
+        end
+      end
+
+      targets.compact.uniq
+    end
+
+    def markdown_lines_outside_fences(content)
+      lines = []
+      fence = nil
+
+      content.each_line.with_index(1) do |line, line_number|
+        if fence
+          fence = nil if markdown_fence_closes?(line, fence)
+          next
+        end
+
+        opening = line.match(/\A {0,3}(`{3,}|~{3,})/)
+        if opening
+          fence = { marker: opening[1][0], length: opening[1].length }
+          next
+        end
+
+        lines << [line, line_number]
+      end
+
+      lines
+    end
+
+    def markdown_fence_closes?(line, fence)
+      marker = Regexp.escape(fence.fetch(:marker))
+      minimum = fence.fetch(:length)
+      line.match?(Regexp.new("\\A {0,3}#{marker}{#{minimum},}\\s*\\z"))
+    end
+
+    def markdown_reference_definitions(lines)
+      lines.each_with_object({}) do |(line, line_number), definitions|
+        match = line.match(/\A {0,3}\[([^\]\n]+)\]:\s*(?:<([^>\n]+)>|(\S+))/)
+        next unless match
+
+        target = match[2] || match[3]
+        definitions[normalize_reference_label(match[1])] = [target, line_number]
+      end
+    end
+
+    def normalize_reference_label(label)
+      label.strip.downcase.gsub(/\s+/, ' ')
+    end
+
+    def markdown_external_target?(target)
+      target.match?(/\A(?:https?|mailto):/i)
+    end
+
+    def validate_markdown_target!(source_path, intended_root, target, line_number)
+      file_target = target.split('#', 2).first
+      intended_root_path = @repository_root.join(intended_root).cleanpath
+      source_file = @repository_root.join(source_path)
+      target_path = Pathname.new(file_target).absolute? ?
+        Pathname.new(file_target).cleanpath :
+        source_file.dirname.join(file_target).cleanpath
+
+      unless path_within_tree?(target_path, intended_root_path)
+        violation!(
+          "Markdown link path-safety violation at #{source_path}:#{line_number}: " \
+          "#{target} resolves outside #{intended_root}"
+        )
+      end
+
+      unless target_path.file?
+        violation!(
+          "broken Markdown local link at #{source_path}:#{line_number}: " \
+          "#{target} resolves to #{target_path.relative_path_from(@repository_root)}"
+        )
+      end
+
+      real_target = Pathname.new(File.realpath(target_path.to_s))
+      real_root = Pathname.new(File.realpath(intended_root_path.to_s))
+      unless path_within_tree?(real_target, real_root)
+        violation!(
+          "Markdown link path-safety violation at #{source_path}:#{line_number}: " \
+          "#{target} resolves outside #{intended_root}"
+        )
+      end
+    end
+
+    def path_within_tree?(path, root)
+      path == root || path.to_s.start_with?("#{root}/")
+    end
 
     def canonical_skill_path!
       shared = shared_registry!
@@ -354,6 +529,50 @@ class SkillAuthoringIntegrityTest < Minitest::Test
     assert @validator.validate_destination_ownership!
   end
 
+  def test_current_managed_markdown_local_links_are_valid
+    assert @validator.validate_markdown_links!
+    assert_operator @validator.markdown_link_count, :>, 0
+  end
+
+  def test_markdown_link_guard_ignores_external_and_fenced_examples
+    with_minimal_fixture do |root, registry|
+      write_fixture_file(
+        root,
+        CANONICAL_SKILL,
+        <<~MARKDOWN
+          [registered](references/registered.md)
+          [http](http://example.test/missing.md)
+          [https](https://example.test/missing.md)
+          [mail](mailto:someone@example.test)
+
+          ```markdown
+          [fenced](references/missing.md)
+          ```
+        MARKDOWN
+      )
+
+      validator = validator_for(registry, repository_root: root)
+      assert validator.validate_markdown_links!
+      assert_equal 1, validator.markdown_link_count
+    end
+  end
+
+  def test_negative_control_rejects_broken_markdown_local_link
+    with_minimal_fixture do |root, registry|
+      write_fixture_file(
+        root,
+        CANONICAL_SKILL,
+        "[missing](references/missing.md)\n"
+      )
+
+      error = assert_raises(IntegrityViolation) do
+        validator_for(registry, repository_root: root).validate_markdown_links!
+      end
+      assert_match(/broken Markdown local link/, error.message)
+      assert_match(%r{references/missing\.md}, error.message)
+    end
+  end
+
   def test_negative_control_rejects_ambiguous_or_second_shared_skill
     ambiguous = deep_copy(@registry)
     ambiguous.fetch('shared')['skill'] = [
@@ -402,6 +621,31 @@ class SkillAuthoringIntegrityTest < Minitest::Test
       validator_for(duplicate).validate_reference_registry!
     end
     assert_match(/entries must be unique/, error.message)
+  end
+
+  def test_negative_control_rejects_absolute_path_as_path_safety_violation
+    absolute_path = deep_copy(@registry)
+    absolute_path.fetch('shared')['skill'] = '/absolute/path'
+
+    error = assert_raises(IntegrityViolation) do
+      validator_for(absolute_path).validate_canonical_entry!
+    end
+    assert_match(%r{shared\.skill must be repo-relative: /absolute/path}, error.message)
+    refute_match(/ownership|canonical shared/, error.message)
+  end
+
+  def test_negative_control_rejects_parent_escape_as_path_safety_violation
+    parent_escape = deep_copy(@registry)
+    parent_escape.fetch('shared').fetch('references')[0] = '../../outside'
+
+    error = assert_raises(IntegrityViolation) do
+      validator_for(parent_escape).validate_reference_registry!
+    end
+    assert_match(
+      %r{shared\.references\[0\] escapes the repository: \.\./\.\./outside},
+      error.message
+    )
+    refute_match(/ownership|missing/, error.message)
   end
 
   def test_negative_control_rejects_unregistered_orphan_reference
@@ -482,9 +726,9 @@ class SkillAuthoringIntegrityTest < Minitest::Test
     end
   end
 
-  def write_fixture_file(root, relative_path)
+  def write_fixture_file(root, relative_path, contents = "# fixture\n")
     path = root.join(relative_path)
     FileUtils.mkdir_p(path.dirname)
-    File.write(path, "# fixture\n")
+    File.write(path, contents)
   end
 end
