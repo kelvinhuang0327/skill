@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Manifest-driven, provider-neutral harness for the Fable ablation pilot.
 
-The module deliberately has no provider subprocess implementation.  A caller
-must inject both workspace materialization and process execution.  This keeps
-offline validation offline and, more importantly, gives the provider adapter
-only :class:`ModelInvocation`, which contains no treatment label or
-orchestrator run identifier.
+A caller injects workspace materialization and a typed provider executor.  The
+executor receives only :class:`ModelInvocation`, which contains no treatment
+label or orchestrator run identifier, and returns a sealed
+:class:`ProviderExecution` rather than a lossy iterable of provider events.
 
 Treatment metadata remains in :class:`WorkspacePlan`, an orchestrator-only
 object used before the model process starts.  Evidence emitted after execution
@@ -14,13 +13,17 @@ keeps orchestrator identity separate from the explicitly model-visible view.
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
+import math
 import os
 import re
 import secrets
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence, Union
 
@@ -89,13 +92,400 @@ class ModelInvocation:
     task_visible_run_id: str
 
     def model_visible_record(self) -> dict[str, Any]:
+        secrets_to_redact = tuple(self.environment.values())
+        return {
+            "argv": [_redact_text(value, secrets_to_redact) for value in self.argv],
+            "cwd": _redact_text(self.cwd, secrets_to_redact),
+            "prompt": _redact_text(self.prompt, secrets_to_redact),
+            # Generic evidence cannot know every policy-specific secret key, so
+            # it never serializes raw environment values.  ProviderExecution
+            # retains non-secret values and equality-preserving secret hashes.
+            "environment": {
+                _redact_text(key, secrets_to_redact): {
+                    "value": "REDACTED",
+                    "sha256_fingerprint": hashlib.sha256(
+                        value.encode("utf-8", errors="surrogatepass")
+                    ).hexdigest(),
+                }
+                for key, value in sorted(self.environment.items())
+            },
+            "task_visible_run_id": _redact_text(
+                self.task_visible_run_id, secrets_to_redact
+            ),
+        }
+
+
+def _redact_text(value: str, secret_values: Sequence[str]) -> str:
+    candidates = sorted({secret for secret in secret_values if secret}, key=len, reverse=True)
+    if not candidates:
+        return value
+    return re.sub("|".join(re.escape(secret) for secret in candidates), "REDACTED", value)
+
+
+def _nonnegative_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return number if number.is_finite() and number >= 0 else None
+
+
+def _valid_model_usage(value: Any) -> bool:
+    if not isinstance(value, Mapping) or not value:
+        return False
+    for model, usage in value.items():
+        if not isinstance(model, str) or not model or not isinstance(usage, Mapping) or not usage:
+            return False
+        for metric, amount in usage.items():
+            if (
+                not isinstance(metric, str)
+                or not metric
+                or isinstance(amount, bool)
+                or not isinstance(amount, (int, float))
+                or amount < 0
+                or (isinstance(amount, float) and not math.isfinite(amount))
+            ):
+                return False
+            if metric.casefold().endswith(("tokens", "requests", "window")) and not isinstance(amount, int):
+                return False
+    return True
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError("duplicate JSON key")
+    return record
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class AdapterIdentity:
+    """Identity of the source adapter that produced provider evidence."""
+
+    name: str
+    version: str
+    source_realpath: str | None
+    source_sha256: str | None
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "source_realpath": self.source_realpath,
+            "source_sha256": self.source_sha256,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderBinaryIdentity:
+    """Pinned and observed identity of the provider executable."""
+
+    executable: str
+    realpath: str | None
+    sha256: str | None
+    version: str | None
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "executable": self.executable,
+            "realpath": self.realpath,
+            "sha256": self.sha256,
+            "version": self.version,
+        }
+
+
+@dataclass(frozen=True)
+class EnvironmentValueEvidence:
+    """One exact environment value, redacted when it may be a credential."""
+
+    key: str
+    value: str
+    sha256_fingerprint: str
+    redacted: bool
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "value": self.value,
+            "sha256_fingerprint": self.sha256_fingerprint,
+            "redacted": self.redacted,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderInvocationEvidence:
+    """Exact process-visible invocation evidence without raw secret values."""
+
+    argv: tuple[str, ...]
+    cwd: str
+    task_visible_run_id: str
+    stdin_sha256: str
+    stdin_length: int
+    environment: tuple[EnvironmentValueEvidence, ...]
+    shell: bool
+    close_fds: bool
+    start_new_session: bool
+    timeout_seconds: float
+
+    @property
+    def environment_keys(self) -> tuple[str, ...]:
+        return tuple(item.key for item in self.environment)
+
+    def matches_model_invocation(self, invocation: ModelInvocation) -> bool:
+        prompt = invocation.prompt.encode("utf-8", errors="surrogatepass")
+        expected_environment = tuple(
+            (key, _sha256_bytes(value.encode("utf-8", errors="surrogatepass")))
+            for key, value in sorted(invocation.environment.items())
+        )
+        return (
+            self.argv == invocation.argv
+            and self.cwd == invocation.cwd
+            and self.task_visible_run_id == invocation.task_visible_run_id
+            and self.stdin_sha256 == _sha256_bytes(prompt)
+            and self.stdin_length == len(prompt)
+            and tuple((item.key, item.sha256_fingerprint) for item in self.environment)
+            == expected_environment
+        )
+
+    def as_record(self) -> dict[str, Any]:
         return {
             "argv": list(self.argv),
             "cwd": self.cwd,
-            "prompt": self.prompt,
-            "environment": dict(self.environment),
             "task_visible_run_id": self.task_visible_run_id,
+            "stdin_sha256": self.stdin_sha256,
+            "stdin_length": self.stdin_length,
+            "environment": [item.as_record() for item in self.environment],
+            "environment_keys": list(self.environment_keys),
+            "shell": self.shell,
+            "close_fds": self.close_fds,
+            "start_new_session": self.start_new_session,
+            "timeout_seconds": self.timeout_seconds,
         }
+
+
+@dataclass(frozen=True)
+class ProcessEvidence:
+    """Observed subprocess lifecycle, including timeout/group termination."""
+
+    pid: int | None
+    pgid: int | None
+    returncode: int | None
+    status: str
+    timed_out: bool
+    termination_attempted: bool
+    termination_method: str | None
+    signals_sent: tuple[int, ...]
+    shell: bool
+    close_fds: bool
+    start_new_session: bool
+    timeout_seconds: float
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "pgid": self.pgid,
+            "returncode": self.returncode,
+            "status": self.status,
+            "timed_out": self.timed_out,
+            "termination_attempted": self.termination_attempted,
+            "termination_method": self.termination_method,
+            "signals_sent": list(self.signals_sent),
+            "shell": self.shell,
+            "close_fds": self.close_fds,
+            "start_new_session": self.start_new_session,
+            "timeout_seconds": self.timeout_seconds,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderExecution:
+    """Sealed provider evidence; failed runs retain every captured byte."""
+
+    adapter_identity: AdapterIdentity
+    provider_binary_identity: ProviderBinaryIdentity
+    provider_policy_identity: str
+    provider_policy: Mapping[str, Any]
+    invocation: ProviderInvocationEvidence
+    process: ProcessEvidence
+    raw_stdout: bytes
+    raw_stderr: bytes
+    raw_jsonl_records: tuple[Mapping[str, Any], ...]
+    init_index: int | None
+    assistant_message_ids: tuple[str, ...]
+    terminal_result_index: int | None
+    session_id: str | None
+    model_usage: Mapping[str, Any] | None
+    total_cost_usd: Decimal | None
+    validation_errors: tuple[str, ...]
+    evidence_sha256: str | None = None
+
+    @property
+    def unique_assistant_message_ids(self) -> tuple[str, ...]:
+        """Deduplicate IDs without losing their first-observed stream order."""
+
+        return tuple(dict.fromkeys(self.assistant_message_ids))
+
+    def _evidence_record(self) -> dict[str, Any]:
+        return {
+            "adapter_identity": self.adapter_identity.as_record(),
+            "provider_binary_identity": self.provider_binary_identity.as_record(),
+            "provider_policy_identity": self.provider_policy_identity,
+            "provider_policy": copy.deepcopy(dict(self.provider_policy)),
+            "invocation": self.invocation.as_record(),
+            "process": self.process.as_record(),
+            "raw_stdout_base64": base64.b64encode(self.raw_stdout).decode("ascii"),
+            "raw_stdout_sha256": _sha256_bytes(self.raw_stdout),
+            "raw_stderr_base64": base64.b64encode(self.raw_stderr).decode("ascii"),
+            "raw_stderr_sha256": _sha256_bytes(self.raw_stderr),
+            "raw_jsonl_records": [copy.deepcopy(dict(item)) for item in self.raw_jsonl_records],
+            "init_index": self.init_index,
+            "assistant_message_ids": list(self.assistant_message_ids),
+            "unique_assistant_message_ids": list(self.unique_assistant_message_ids),
+            "terminal_result_index": self.terminal_result_index,
+            "session_id": self.session_id,
+            "model_usage": (
+                None if self.model_usage is None else copy.deepcopy(dict(self.model_usage))
+            ),
+            "total_cost_usd": (
+                None if self.total_cost_usd is None else str(self.total_cost_usd)
+            ),
+            "validation_errors": list(self.validation_errors),
+        }
+
+    def computed_evidence_sha256(self) -> str:
+        return _sha256_bytes(_canonical_json_bytes(self._evidence_record()))
+
+    @property
+    def evidence_sealed(self) -> bool:
+        try:
+            return (
+                isinstance(self.evidence_sha256, str)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", self.evidence_sha256))
+                and secrets.compare_digest(
+                    self.evidence_sha256, self.computed_evidence_sha256()
+                )
+            )
+        except (TypeError, ValueError, AttributeError, RecursionError):
+            return False
+
+    def sealed(self) -> "ProviderExecution":
+        unsealed = replace(self, evidence_sha256=None)
+        return replace(unsealed, evidence_sha256=unsealed.computed_evidence_sha256())
+
+    @property
+    def run_countable(self) -> bool:
+        if self.validation_errors or not self.evidence_sealed or not self.raw_stdout:
+            return False
+        try:
+            # A seal proves integrity, not completeness or consistency of summaries.
+            records = tuple(
+                json.loads(line.decode("utf-8"), object_pairs_hook=_unique_json_object)
+                for line in self.raw_stdout.splitlines()
+            )
+            if _canonical_json_bytes(records) != _canonical_json_bytes(self.raw_jsonl_records):
+                return False
+            if not all(isinstance(record, Mapping) for record in records):
+                return False
+            init_indices = [
+                index for index, record in enumerate(records)
+                if record.get("type") == "system" and record.get("subtype") == "init"
+            ]
+            result_indices = [
+                index for index, record in enumerate(records) if record.get("type") == "result"
+            ]
+            if (
+                len(init_indices) != 1
+                or type(self.init_index) is not int
+                or self.init_index != init_indices[0]
+                or len(result_indices) != 1
+                or type(self.terminal_result_index) is not int
+                or self.terminal_result_index != result_indices[0]
+                or self.terminal_result_index != len(records) - 1
+                or not isinstance(self.session_id, str)
+                or not self.session_id
+            ):
+                return False
+            assistant_ids: list[str] = []
+            main_models: list[str] = []
+            for index, record in enumerate(records):
+                required_session = index in init_indices + result_indices or record.get("type") == "assistant"
+                if (required_session or "session_id" in record) and record.get("session_id") != self.session_id:
+                    return False
+                if record.get("type") != "assistant":
+                    continue
+                message = record.get("message")
+                if not isinstance(message, Mapping) or not isinstance(message.get("id"), str) or not message["id"]:
+                    return False
+                assistant_ids.append(message["id"])
+                if not any(record.get(key) for key in ("parent_tool_use_id", "is_subagent", "subagent")):
+                    if not self.init_index < index < self.terminal_result_index:
+                        return False
+                    if not isinstance(message.get("model"), str) or not message["model"]:
+                        return False
+                    main_models.append(message["model"])
+            terminal = records[self.terminal_result_index]
+            raw_cost = _nonnegative_decimal(terminal.get("total_cost_usd"))
+            return (
+                self.process.status == "EXITED"
+                and type(self.process.returncode) is int
+                and self.process.returncode == 0
+                and self.process.timed_out is False
+                and type(self.process.pid) is int and self.process.pid > 0
+                and self.process.pgid == self.process.pid
+                and self.process.shell is False
+                and self.process.close_fds is True
+                and self.process.start_new_session is True
+                and bool(self.adapter_identity.name)
+                and bool(self.adapter_identity.version)
+                and bool(self.adapter_identity.source_realpath)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", self.adapter_identity.source_sha256 or ""))
+                and bool(self.provider_binary_identity.executable)
+                and bool(self.provider_binary_identity.realpath)
+                and bool(self.provider_binary_identity.version)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", self.provider_binary_identity.sha256 or ""))
+                and bool(re.fullmatch(r"[0-9a-f]{64}", self.provider_policy_identity))
+                and bool(self.provider_policy)
+                and bool(main_models)
+                and tuple(assistant_ids) == self.assistant_message_ids
+                and terminal.get("subtype") == "success"
+                and terminal.get("is_error", False) is False
+                and _valid_model_usage(terminal.get("modelUsage"))
+                and self.model_usage == terminal["modelUsage"]
+                and all(model in self.model_usage for model in main_models)
+                and isinstance(self.total_cost_usd, Decimal)
+                and self.total_cost_usd.is_finite()
+                and raw_cost is not None
+                and self.total_cost_usd == raw_cost
+                and (
+                    "num_turns" not in terminal
+                    or (type(terminal["num_turns"]) is int and terminal["num_turns"] >= 0)
+                )
+            )
+        except (TypeError, ValueError, AttributeError, KeyError, InvalidOperation, RecursionError):
+            return False
+
+    def as_record(self) -> dict[str, Any]:
+        record = self._evidence_record()
+        record["evidence_sha256"] = self.evidence_sha256
+        record["evidence_sealed"] = self.evidence_sealed
+        record["run_countable"] = self.run_countable
+        return record
 
 
 @dataclass(frozen=True)
@@ -204,7 +594,7 @@ class RunEvidence:
     materializer_called: bool
     executor_called: bool
     materializer_error: str | None
-    executor_error: str | None
+    provider_execution: ProviderExecution | None
     run_countable: bool
 
     def as_record(self) -> dict[str, Any]:
@@ -221,14 +611,98 @@ class RunEvidence:
             "materializer_called": self.materializer_called,
             "executor_called": self.executor_called,
             "materializer_error": self.materializer_error,
-            "executor_error": self.executor_error,
+            "provider_execution": (
+                None
+                if self.provider_execution is None
+                else self.provider_execution.as_record()
+            ),
             "run_countable": self.run_countable,
         }
 
 
 Event = Union[Mapping[str, Any], str, bytes]
 Materializer = Callable[[WorkspacePlan], None]
-Executor = Callable[[ModelInvocation], Iterable[Event]]
+ProviderExecutor = Callable[[ModelInvocation], ProviderExecution]
+
+
+def _boundary_failure_execution(
+    invocation: ModelInvocation, validation_error: str
+) -> ProviderExecution:
+    """Retain safe invocation evidence when an injected executor breaks type."""
+
+    try:
+        stdin_bytes = invocation.prompt.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        stdin_bytes = invocation.prompt.encode("utf-8", errors="surrogatepass")
+    environment = tuple(
+        EnvironmentValueEvidence(
+            key=_redact_text(key, tuple(invocation.environment.values())),
+            value="REDACTED",
+            sha256_fingerprint=_sha256_bytes(
+                value.encode("utf-8", errors="surrogatepass")
+            ),
+            redacted=True,
+        )
+        for key, value in sorted(invocation.environment.items())
+    )
+    secrets_to_redact = tuple(invocation.environment.values())
+    invocation_evidence = ProviderInvocationEvidence(
+        argv=tuple(_redact_text(value, secrets_to_redact) for value in invocation.argv),
+        cwd=_redact_text(invocation.cwd, secrets_to_redact),
+        task_visible_run_id=_redact_text(invocation.task_visible_run_id, secrets_to_redact),
+        stdin_sha256=_sha256_bytes(stdin_bytes),
+        stdin_length=len(stdin_bytes),
+        environment=environment,
+        shell=False,
+        close_fds=True,
+        start_new_session=True,
+        timeout_seconds=0.0,
+    )
+    execution = ProviderExecution(
+        adapter_identity=AdapterIdentity(
+            name="UNRESOLVED_EXECUTOR",
+            version="UNRESOLVED",
+            source_realpath=None,
+            source_sha256=None,
+        ),
+        provider_binary_identity=ProviderBinaryIdentity(
+            executable=(
+                _redact_text(invocation.argv[0], secrets_to_redact)
+                if invocation.argv else "UNRESOLVED"
+            ),
+            realpath=None,
+            sha256=None,
+            version=None,
+        ),
+        provider_policy_identity="UNRESOLVED",
+        provider_policy={},
+        invocation=invocation_evidence,
+        process=ProcessEvidence(
+            pid=None,
+            pgid=None,
+            returncode=None,
+            status="EXECUTOR_BOUNDARY_FAILED",
+            timed_out=False,
+            termination_attempted=False,
+            termination_method=None,
+            signals_sent=(),
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+            timeout_seconds=0.0,
+        ),
+        raw_stdout=b"",
+        raw_stderr=b"",
+        raw_jsonl_records=(),
+        init_index=None,
+        assistant_message_ids=(),
+        terminal_result_index=None,
+        session_id=None,
+        model_usage=None,
+        total_cost_usd=None,
+        validation_errors=(validation_error,),
+    )
+    return execution.sealed()
 
 
 def load_manifest(path: str | os.PathLike[str]) -> dict[str, Any]:
@@ -850,15 +1324,15 @@ def execute_manifest_slot(
     workspace_parent: str | os.PathLike[str],
     reference_events: Iterable[Event],
     materializer: Materializer,
-    executor: Executor,
+    executor: ProviderExecutor,
     environment: Mapping[str, str] | None = None,
     opaque_id_factory: Callable[[], str] | None = None,
 ) -> RunEvidence:
     """Materialize and execute one slot through injected interfaces only.
 
     Invalid reference evidence or model-visible leakage prevents executor
-    invocation.  Executor failures, unresolved Git state, and purity failures
-    all make the final observation non-countable.
+    invocation.  Provider failures retain a typed execution record; unresolved
+    Git state and any provider/purity failure make the observation non-countable.
     """
 
     slot = select_manifest_slot(manifest, orchestrator_run_id)
@@ -879,7 +1353,9 @@ def execute_manifest_slot(
     try:
         materializer(plan)
     except Exception as exc:  # injected boundary: convert failure to evidence
-        materializer_error = f"{type(exc).__name__}: {exc}"
+        materializer_error = _redact_text(
+            f"{type(exc).__name__}: {exc}", tuple(invocation.environment.values())
+        )
 
     surface_audit = audit_model_visible_surfaces(
         invocation, workspace, slot.forbidden_model_tokens
@@ -900,14 +1376,24 @@ def execute_manifest_slot(
     )
 
     executor_called = False
-    executor_error: str | None = None
-    run_records: list[Event] = []
+    provider_execution: ProviderExecution | None = None
+    run_records: tuple[Mapping[str, Any], ...] = ()
     if surface_audit.passed and reference_preflight_pass and materializer_error is None:
         executor_called = True
         try:
-            run_records = list(executor(invocation))
-        except Exception as exc:  # injected boundary: fail closed, retain evidence
-            executor_error = f"{type(exc).__name__}: {exc}"
+            candidate = executor(invocation)
+        except Exception as exc:  # boundary failure still retains safe evidence
+            provider_execution = _boundary_failure_execution(
+                invocation, f"executor_boundary_exception:{type(exc).__name__}"
+            )
+        else:
+            if isinstance(candidate, ProviderExecution):
+                provider_execution = candidate
+            else:
+                provider_execution = _boundary_failure_execution(
+                    invocation, "executor_returned_non_provider_execution"
+                )
+        run_records = provider_execution.raw_jsonl_records
 
     purity = evaluate_purity(
         run_records,
@@ -921,7 +1407,9 @@ def execute_manifest_slot(
         purity.run_countable
         and git_state.state_resolved
         and executor_called
-        and executor_error is None
+        and provider_execution is not None
+        and provider_execution.run_countable
+        and provider_execution.invocation.matches_model_invocation(invocation)
         and materializer_error is None
     )
 
@@ -936,18 +1424,25 @@ def execute_manifest_slot(
         materializer_called=materializer_called,
         executor_called=executor_called,
         materializer_error=materializer_error,
-        executor_error=executor_error,
+        provider_execution=provider_execution,
         run_countable=countable,
     )
 
 
 __all__ = [
+    "AdapterIdentity",
+    "EnvironmentValueEvidence",
     "FABLE_SKILL_IDENTITY",
     "GitState",
     "HarnessContractError",
     "InitEvidence",
     "ManifestSlot",
     "ModelInvocation",
+    "ProcessEvidence",
+    "ProviderBinaryIdentity",
+    "ProviderExecution",
+    "ProviderExecutor",
+    "ProviderInvocationEvidence",
     "PurityResult",
     "RunEvidence",
     "SurfaceAudit",
