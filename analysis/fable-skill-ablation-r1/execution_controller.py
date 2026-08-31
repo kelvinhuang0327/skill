@@ -1282,8 +1282,8 @@ class ExecutionController:
                 ):
                     raise LedgerError("pending_attempt_cost_state_invalid")
             elif cost_status == "KNOWN":
-                if status_value != "SETTLED":
-                    raise LedgerError("known_cost_requires_settled_status")
+                if status_value not in {"SETTLED", "ORPHANED"}:
+                    raise LedgerError("known_cost_requires_settled_or_orphaned_status")
                 cost = _ledger_decimal(exact_cost, "exact_cost")
                 if cost > reserved or remaining != 0:
                     raise LedgerError("known_cost_settlement_invalid")
@@ -1300,6 +1300,8 @@ class ExecutionController:
                 )
             else:
                 raise LedgerError("terminal_attempt_cost_status_invalid")
+            if status_value == "ORPHANED" and outcome != "ORPHANED":
+                raise LedgerError("orphaned_attempt_outcome_invalid")
             evidence_refs = attempt.get("evidence_paths_and_sha256")
             result_refs = attempt.get("result_paths_and_sha256")
             if not isinstance(evidence_refs, list) or not isinstance(result_refs, list):
@@ -1317,6 +1319,29 @@ class ExecutionController:
                     expected_attempt_root / "result.json"
                 ]:
                     raise LedgerError("attempt_evidence_paths_invalid")
+            elif status_value == "ORPHANED":
+                evidence_paths = [Path(item["path"]) for item in evidence_refs]
+                result_paths = [Path(item["path"]) for item in result_refs]
+                if (
+                    len(set(evidence_paths + result_paths))
+                    != len(evidence_paths) + len(result_paths)
+                    or any(path.parent != expected_attempt_root for path in evidence_paths)
+                    or any(
+                        path.name in {"INVOCATION_INTENT.json", "result.json"}
+                        for path in evidence_paths
+                    )
+                    or result_paths not in ([], [expected_attempt_root / "result.json"])
+                ):
+                    raise LedgerError("orphaned_attempt_evidence_paths_invalid")
+                if cost_status == "KNOWN" and (
+                    evidence_paths
+                    != [
+                        expected_attempt_root / "provider-raw.bin",
+                        expected_attempt_root / "canonical-evidence.json",
+                    ]
+                    or result_paths != [expected_attempt_root / "result.json"]
+                ):
+                    raise LedgerError("known_orphan_requires_complete_provider_evidence")
             elif evidence_refs or result_refs:
                 raise LedgerError("nonsettled_attempt_contains_terminal_evidence")
             settlement_revision = attempt.get("settlement_revision")
@@ -1329,6 +1354,13 @@ class ExecutionController:
                     or not result_refs
                 ):
                     raise LedgerError("attempt_settlement_revision_or_evidence_invalid")
+            elif status_value == "ORPHANED" and (evidence_refs or result_refs):
+                if (
+                    not isinstance(settlement_revision, int)
+                    or settlement_revision <= 0
+                    or settlement_revision > revision
+                ):
+                    raise LedgerError("orphaned_attempt_evidence_revision_invalid")
             elif settlement_revision is not None:
                 raise LedgerError("nonsettled_attempt_has_settlement_revision")
             terminal = attempt.get("terminal_commit")
@@ -1607,6 +1639,260 @@ class ExecutionController:
             bind,
         )
 
+    def _read_crash_partial_intent(
+        self, authority: ManifestAuthority, attempt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        logical_attempt = (
+            authority.runs_root
+            / attempt["run_id"]
+            / f"attempt-{attempt['attempt_ordinal']}"
+        )
+        physical_run = self._physical(authority.runs_root / attempt["run_id"])
+        physical_attempt = self._physical(logical_attempt)
+        _ensure_directory(physical_run, "crash_partial_run_directory")
+        _ensure_directory(physical_attempt, "crash_partial_attempt_directory")
+        logical_intent = logical_attempt / "INVOCATION_INTENT.json"
+        raw, _ = _secure_read_regular(
+            self._physical(logical_intent), "crash_partial_invocation_intent"
+        )
+        record = _decode_json_object(raw, "crash_partial_invocation_intent")
+        if raw != _canonical_json(record):
+            raise AuthorityConflict("crash_partial_invocation_intent_not_canonical")
+        if set(record) != {
+            "manifest_sha256",
+            "epoch_id",
+            "pair_index",
+            "run_id",
+            "attempt_ordinal",
+            "workspace_path",
+            "invocation_sha256",
+        }:
+            raise AuthorityConflict("crash_partial_invocation_intent_fields_invalid")
+        if (
+            type(record.get("pair_index")) is not int
+            or type(record.get("attempt_ordinal")) is not int
+            or not isinstance(record.get("workspace_path"), str)
+            or not isinstance(record.get("invocation_sha256"), str)
+            or not _SHA256_RE.fullmatch(record["invocation_sha256"])
+        ):
+            raise AuthorityConflict("crash_partial_invocation_intent_types_invalid")
+        workspace_path = Path(record["workspace_path"])
+        try:
+            workspace_relative = workspace_path.relative_to(authority.workspaces_root)
+        except ValueError as exc:
+            raise AuthorityConflict("crash_partial_workspace_outside_authority") from exc
+        if (
+            len(workspace_relative.parts) != 1
+            or not _SESSION_RE.fullmatch(workspace_relative.name)
+        ):
+            raise AuthorityConflict("crash_partial_workspace_identity_invalid")
+        _ensure_directory(
+            self._physical(workspace_path), "crash_partial_intent_workspace"
+        )
+        expected = {
+            "manifest_sha256": authority.sha256,
+            "epoch_id": authority.epoch_id,
+            "pair_index": attempt["pair_index"],
+            "run_id": attempt["run_id"],
+            "attempt_ordinal": attempt["attempt_ordinal"],
+            "workspace_path": str(workspace_path),
+            "invocation_sha256": record["invocation_sha256"],
+        }
+        if record != expected:
+            raise AuthorityConflict("crash_partial_invocation_intent_semantic_mismatch")
+        reference = {
+            "path": str(logical_intent),
+            "sha256": _sha256_bytes(raw),
+            "workspace_path": str(workspace_path),
+            "invocation_sha256": record["invocation_sha256"],
+        }
+        bound = attempt.get("durable_intent")
+        if bound is not None and bound != reference:
+            raise AuthorityConflict("crash_partial_invocation_intent_binding_mismatch")
+        return reference
+
+    def _recoverable_crash_partial_cost(
+        self,
+        authority: ManifestAuthority,
+        attempt: Mapping[str, Any],
+        raw_by_name: Mapping[str, bytes],
+    ) -> str | None:
+        if set(raw_by_name) != {
+            "INVOCATION_INTENT.json",
+            "provider-raw.bin",
+            "canonical-evidence.json",
+            "result.json",
+        }:
+            return None
+        try:
+            canonical_record = _decode_json_object(
+                raw_by_name["canonical-evidence.json"],
+                "crash_partial_canonical_evidence",
+            )
+            result_record = _decode_json_object(
+                raw_by_name["result.json"], "crash_partial_result"
+            )
+        except AuthorityConflict:
+            return None
+        if (
+            raw_by_name["canonical-evidence.json"]
+            != _canonical_json(canonical_record)
+            or raw_by_name["result.json"] != _canonical_json(result_record)
+            or set(result_record)
+            != {"provider_result", "outcome", "cost_status", "exact_cost"}
+            or not isinstance(result_record.get("provider_result"), Mapping)
+            or result_record.get("cost_status") != "KNOWN"
+            or not isinstance(result_record.get("exact_cost"), str)
+        ):
+            return None
+        allowed_outcomes = set(
+            _required(
+                authority.data,
+                "failure_denominator",
+                "counted_in_denominator",
+            )
+        ) | {"INFRA_ERROR", "INFRA_FAIL"}
+        outcome = result_record.get("outcome")
+        if not isinstance(outcome, str) or outcome not in allowed_outcomes or (
+            attempt["attempt_ordinal"] == 2 and outcome == "INFRA_ERROR"
+        ):
+            return None
+        try:
+            exact_cost = _ledger_decimal(result_record["exact_cost"], "exact_cost")
+        except LedgerError:
+            return None
+        if exact_cost > authority.invocation_cap:
+            return None
+        return decimal_text(exact_cost)
+
+    def _collect_crash_partial_attempt(
+        self, authority: ManifestAuthority, attempt: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        logical_attempt = (
+            authority.runs_root
+            / attempt["run_id"]
+            / f"attempt-{attempt['attempt_ordinal']}"
+        )
+        physical_attempt = self._physical(logical_attempt)
+        intent_reference = self._read_crash_partial_intent(authority, attempt)
+        names = sorted(os.listdir(physical_attempt))
+        raw_by_name: dict[str, bytes] = {}
+        references_by_name: dict[str, dict[str, str]] = {}
+        for name in names:
+            raw, _ = _secure_read_regular(
+                physical_attempt / name, f"crash_partial_artifact_{name}"
+            )
+            raw_by_name[name] = raw
+            references_by_name[name] = {
+                "path": str(logical_attempt / name),
+                "sha256": _sha256_bytes(raw),
+            }
+        if references_by_name.get("INVOCATION_INTENT.json") != {
+            "path": intent_reference["path"],
+            "sha256": intent_reference["sha256"],
+        }:
+            raise AuthorityConflict("crash_partial_intent_inventory_mismatch")
+        ordered_evidence_names = [
+            name
+            for name in ("provider-raw.bin", "canonical-evidence.json")
+            if name in references_by_name
+        ] + [
+            name
+            for name in names
+            if name
+            not in {
+                "INVOCATION_INTENT.json",
+                "provider-raw.bin",
+                "canonical-evidence.json",
+                "result.json",
+            }
+        ]
+        evidence_refs = [
+            references_by_name[name] for name in ordered_evidence_names
+        ]
+        result_refs = (
+            [references_by_name["result.json"]]
+            if "result.json" in references_by_name
+            else []
+        )
+        return {
+            "intent": intent_reference,
+            "evidence": evidence_refs,
+            "results": result_refs,
+            "exact_cost": self._recoverable_crash_partial_cost(
+                authority, attempt, raw_by_name
+            ),
+        }
+
+    def _reconcile_crash_partial_invocations(
+        self, authority: ManifestAuthority
+    ) -> None:
+        _, ledger = self._require_started()
+        recoveries: dict[tuple[str, int], dict[str, Any]] = {}
+        original_statuses: dict[tuple[str, int], str] = {}
+        for attempt in ledger["attempts"]:
+            if attempt["status"] not in {"RESERVED", "INTENT_PERSISTED"}:
+                continue
+            logical_intent = (
+                authority.runs_root
+                / attempt["run_id"]
+                / f"attempt-{attempt['attempt_ordinal']}"
+                / "INVOCATION_INTENT.json"
+            )
+            if attempt["status"] == "RESERVED" and not os.path.lexists(
+                self._physical(logical_intent)
+            ):
+                continue
+            key = (attempt["run_id"], attempt["attempt_ordinal"])
+            recoveries[key] = self._collect_crash_partial_attempt(
+                authority, attempt
+            )
+            original_statuses[key] = attempt["status"]
+        if not recoveries:
+            return
+
+        def orphan(candidate: dict[str, Any], next_revision: int) -> None:
+            seen: set[tuple[str, int]] = set()
+            for target in candidate["attempts"]:
+                key = (target["run_id"], target["attempt_ordinal"])
+                recovery = recoveries.get(key)
+                if recovery is None:
+                    continue
+                if target["status"] != original_statuses[key]:
+                    raise LedgerError("crash_partial_reconciliation_target_changed")
+                target["durable_intent"] = copy.deepcopy(recovery["intent"])
+                target["evidence_paths_and_sha256"] = copy.deepcopy(
+                    recovery["evidence"]
+                )
+                target["result_paths_and_sha256"] = copy.deepcopy(
+                    recovery["results"]
+                )
+                target["outcome"] = "ORPHANED"
+                target["status"] = "ORPHANED"
+                target["terminal_commit"] = None
+                if recovery["evidence"] or recovery["results"]:
+                    target["settlement_revision"] = next_revision
+                else:
+                    target["settlement_revision"] = None
+                if recovery["exact_cost"] is None:
+                    target["cost_status"] = "UNRESOLVED"
+                    target["exact_cost"] = None
+                    target["unreleased_amount"] = target["reserved_amount"]
+                else:
+                    target["cost_status"] = "KNOWN"
+                    target["exact_cost"] = recovery["exact_cost"]
+                    target["unreleased_amount"] = "0"
+                seen.add(key)
+            if seen != set(recoveries):
+                raise LedgerError("crash_partial_reconciliation_target_missing")
+
+        self._update_ledger("restart_crash_partial_orphaned", orphan)
+        self._write_state(authority.aborted_state)
+        self.started = False
+        if self.lock is not None:
+            self.lock.release()
+        raise RecoveryAborted("CRASH_CASE_3:crash_partial_invocation_abort_only")
+
     def _verify_restart_artifacts(self, authority: ManifestAuthority) -> None:
         _, ledger = self._require_started()
         allowed_files: set[Path] = set()
@@ -1720,33 +2006,11 @@ class ExecutionController:
 
     def _reconcile_restart(self, authority: ManifestAuthority) -> str:
         _, ledger = self._require_started()
+        self._reconcile_crash_partial_invocations(authority)
         self._verify_restart_artifacts(authority)
-        intent_without_terminal = [
-            attempt
-            for attempt in ledger["attempts"]
-            if attempt["status"] == "INTENT_PERSISTED"
-        ]
-        if intent_without_terminal:
-            def orphan(candidate: dict[str, Any], _: int) -> None:
-                targets = {
-                    (item["run_id"], item["attempt_ordinal"])
-                    for item in intent_without_terminal
-                }
-                for attempt in candidate["attempts"]:
-                    if (attempt["run_id"], attempt["attempt_ordinal"]) in targets:
-                        attempt["status"] = "ORPHANED"
-                        attempt["outcome"] = "ORPHANED"
-                        attempt["cost_status"] = "UNRESOLVED"
-
-            self._update_ledger("restart_orphaned_invocation", orphan)
-            self._write_state(authority.aborted_state)
-            self.started = False
-            if self.lock is not None:
-                self.lock.release()
-            raise RecoveryAborted("CRASH_CASE_3:orphaned_invocation_abort_only")
-
         if any(
-            attempt["cost_status"] == "UNRESOLVED"
+            attempt["status"] == "ORPHANED"
+            or attempt["cost_status"] == "UNRESOLVED"
             for attempt in ledger["attempts"]
         ):
             self._write_state(authority.aborted_state)

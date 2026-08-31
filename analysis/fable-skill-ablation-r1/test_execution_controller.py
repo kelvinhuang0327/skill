@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
@@ -611,6 +612,115 @@ class ExecutionControllerOfflineTests(unittest.TestCase):
         self.assertEqual(provider.version_calls, 0)
         self.assertEqual(provider.invocations, [])
         self.assertFalse((self.offline.root / "execution-ledger.json").exists())
+
+    def test_26_restart_binds_durable_intent_before_strict_inventory_abort(self) -> None:
+        def crash_after_intent_file(event: str) -> None:
+            if event == "invocation_intent_file_persisted":
+                raise RuntimeError("simulated crash before intent ledger binding")
+
+        active, provider = self.offline.new_controller(
+            event_sink=crash_after_intent_file
+        )
+        active.start()
+        first, _ = active.reserve_pair(1)
+        with self.assertRaisesRegex(RuntimeError, "before intent ledger binding"):
+            active.invoke(first, self.offline.invocation(first.run_id))
+        attempt_root = self.offline.root / "runs" / first.run_id / "attempt-1"
+        intent_path = attempt_root / "INVOCATION_INTENT.json"
+        intent_before = intent_path.read_bytes()
+        self.assertEqual(self.offline.ledger()["attempts"][0]["status"], "RESERVED")
+        active.close()
+        self.assertEqual(provider.invocations, [])
+
+        restarted, restart_provider = self.offline.new_controller()
+        with self.assertRaisesRegex(controller.RecoveryAborted, "CRASH_CASE_3"):
+            restarted.start()
+
+        ledger = self.offline.ledger()
+        attempt = ledger["attempts"][0]
+        self.assertEqual(attempt["status"], "ORPHANED")
+        self.assertEqual(attempt["outcome"], "ORPHANED")
+        self.assertEqual(attempt["cost_status"], "UNRESOLVED")
+        self.assertEqual(attempt["unreleased_amount"], "2")
+        self.assertEqual(attempt["evidence_paths_and_sha256"], [])
+        self.assertEqual(attempt["result_paths_and_sha256"], [])
+        self.assertEqual(intent_path.read_bytes(), intent_before)
+        self.assertEqual(
+            attempt["durable_intent"]["sha256"],
+            hashlib.sha256(intent_before).hexdigest(),
+        )
+        self.assertEqual(ledger["unreleased_reservation_usd"], "4")
+        self.assertEqual(
+            ledger["unresolved_cost_items"],
+            [{"run_id": first.run_id, "attempt_ordinal": 1}],
+        )
+        self.assertEqual(ledger["history"][-1]["action"], "restart_crash_partial_orphaned")
+        self.assertEqual(self.offline.state()["state"], "ABORTED")
+        self.assertEqual(restart_provider.invocations, [])
+
+    def test_27_restart_preserves_and_charges_durable_provider_evidence(self) -> None:
+        def crash_after_evidence(event: str) -> None:
+            if event == "provider_evidence_persisted":
+                raise RuntimeError("simulated crash before provider settlement")
+
+        provider = FakeProvider(
+            self.offline.provider_version,
+            results=[provider_result("PASS", "0.25")],
+        )
+        active, _ = self.offline.new_controller(
+            provider=provider, event_sink=crash_after_evidence
+        )
+        active.start()
+        first, _ = active.reserve_pair(1)
+        with self.assertRaisesRegex(RuntimeError, "before provider settlement"):
+            active.invoke(first, self.offline.invocation(first.run_id))
+        attempt_root = self.offline.root / "runs" / first.run_id / "attempt-1"
+        preserved = {
+            path.name: path.read_bytes()
+            for path in attempt_root.iterdir()
+        }
+        self.assertEqual(
+            set(preserved),
+            {
+                "INVOCATION_INTENT.json",
+                "provider-raw.bin",
+                "canonical-evidence.json",
+                "result.json",
+            },
+        )
+        self.assertEqual(len(provider.invocations), 1)
+        active.close()
+
+        restarted, restart_provider = self.offline.new_controller()
+        with self.assertRaisesRegex(controller.RecoveryAborted, "CRASH_CASE_3"):
+            restarted.start()
+
+        ledger = self.offline.ledger()
+        attempt = ledger["attempts"][0]
+        self.assertEqual(attempt["status"], "ORPHANED")
+        self.assertEqual(attempt["outcome"], "ORPHANED")
+        self.assertEqual(attempt["cost_status"], "KNOWN")
+        self.assertEqual(attempt["exact_cost"], "0.25")
+        self.assertEqual(attempt["unreleased_amount"], "0")
+        self.assertEqual(attempt["terminal_commit"], None)
+        self.assertEqual(ledger["known_spend_usd"], "0.25")
+        self.assertEqual(ledger["unreleased_reservation_usd"], "2")
+        self.assertEqual(ledger["unresolved_cost_items"], [])
+        self.assertEqual(attempt["settlement_revision"], ledger["revision"])
+        self.assertEqual(
+            [Path(item["path"]).name for item in attempt["evidence_paths_and_sha256"]],
+            ["provider-raw.bin", "canonical-evidence.json"],
+        )
+        self.assertEqual(
+            [Path(item["path"]).name for item in attempt["result_paths_and_sha256"]],
+            ["result.json"],
+        )
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in attempt_root.iterdir()},
+            preserved,
+        )
+        self.assertEqual(self.offline.state()["state"], "ABORTED")
+        self.assertEqual(restart_provider.invocations, [])
 
 
 if __name__ == "__main__":
