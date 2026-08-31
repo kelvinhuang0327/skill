@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +66,85 @@ def evaluate(
         frozen_dimensions=FROZEN_DIMENSIONS,
         surface_audit=audit,
     )
+
+
+def provider_execution(
+    invocation: Any, records: list[dict[str, Any]]
+) -> Any:
+    """Build sealed offline provider evidence for generic harness tests."""
+
+    prompt_bytes = invocation.prompt.encode("utf-8")
+    environment = tuple(
+        runner.EnvironmentValueEvidence(
+            key=key,
+            value="REDACTED",
+            sha256_fingerprint=hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            redacted=True,
+        )
+        for key, value in sorted(invocation.environment.items())
+    )
+    raw_stdout = b"\n".join(
+        json.dumps(record, separators=(",", ":")).encode("utf-8")
+        for record in records
+    ) + b"\n"
+    terminal = records[-1]
+    execution = runner.ProviderExecution(
+        adapter_identity=runner.AdapterIdentity(
+            name="offline-test-adapter",
+            version="1",
+            source_realpath="/offline/test/adapter.py",
+            source_sha256="a" * 64,
+        ),
+        provider_binary_identity=runner.ProviderBinaryIdentity(
+            executable=invocation.argv[0],
+            realpath="/offline/test/provider",
+            sha256="b" * 64,
+            version="offline-test",
+        ),
+        provider_policy_identity="c" * 64,
+        provider_policy={"identity": "offline-test-policy"},
+        invocation=runner.ProviderInvocationEvidence(
+            argv=tuple(invocation.argv),
+            cwd=invocation.cwd,
+            task_visible_run_id=invocation.task_visible_run_id,
+            stdin_sha256=hashlib.sha256(prompt_bytes).hexdigest(),
+            stdin_length=len(prompt_bytes),
+            environment=environment,
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+            timeout_seconds=1.0,
+        ),
+        process=runner.ProcessEvidence(
+            pid=1234,
+            pgid=1234,
+            returncode=0,
+            status="EXITED",
+            timed_out=False,
+            termination_attempted=False,
+            termination_method=None,
+            signals_sent=(),
+            shell=False,
+            close_fds=True,
+            start_new_session=True,
+            timeout_seconds=1.0,
+        ),
+        raw_stdout=raw_stdout,
+        raw_stderr=b"",
+        raw_jsonl_records=tuple(records),
+        init_index=0,
+        assistant_message_ids=tuple(
+            record["message"]["id"]
+            for record in records
+            if record.get("type") == "assistant"
+        ),
+        terminal_result_index=len(records) - 1,
+        session_id="offline-session",
+        model_usage=terminal["modelUsage"],
+        total_cost_usd=Decimal(str(terminal["total_cost_usd"])),
+        validation_errors=(),
+    )
+    return execution.sealed()
 
 
 def git(repository: Path, *args: str) -> str:
@@ -348,9 +431,29 @@ class CanonicalHarnessTests(unittest.TestCase):
             git(root, "add", ".claude/skills/fable-method/SKILL.md")
             git(root, "commit", "-q", "-m", "materialize treatment")
 
-        def fake_executor(invocation: Any) -> list[dict[str, Any]]:
+        def fake_executor(invocation: Any) -> Any:
             executor_calls.append(invocation)
-            return [init_event(skills=["reference-skill", "fable-method"])]
+            return provider_execution(
+                invocation,
+                [
+                    init_event(
+                        skills=["reference-skill", "fable-method"],
+                        session_id="offline-session",
+                    ),
+                    {
+                        "type": "assistant",
+                        "session_id": "offline-session",
+                        "message": {"id": "msg-offline", "model": "offline-model"},
+                    },
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "session_id": "offline-session",
+                        "modelUsage": {"offline-model": {"input_tokens": 1}},
+                        "total_cost_usd": "0.0",
+                    },
+                ],
+            )
 
         with tempfile.TemporaryDirectory() as temporary:
             evidence = runner.execute_manifest_slot(
@@ -367,9 +470,258 @@ class CanonicalHarnessTests(unittest.TestCase):
         self.assertEqual(executor_calls[0].argv[0], "definitely-not-an-installed-provider")
         self.assertFalse(hasattr(executor_calls[0], "condition"))
         self.assertTrue(evidence.executor_called)
-        self.assertIsNone(evidence.executor_error)
+        self.assertIsNotNone(evidence.provider_execution)
+        self.assertTrue(evidence.provider_execution.evidence_sealed)
+        self.assertTrue(evidence.provider_execution.run_countable)
         self.assertTrue(evidence.purity.purity_pass, evidence.purity.reasons)
         self.assertTrue(evidence.run_countable)
+
+
+    def _complete_execution(self, invocation: Any | None = None) -> Any:
+        if invocation is None:
+            invocation = runner.ModelInvocation(
+                argv=("/offline/provider", "--stream-json"),
+                cwd="/opaque/session-00112233445566778899aabbccddeeff",
+                prompt="Offline fixture.",
+                environment={},
+                task_visible_run_id="session-00112233445566778899aabbccddeeff",
+            )
+        return provider_execution(
+            invocation,
+            [
+                init_event(session_id="offline-session"),
+                {
+                    "type": "assistant", "session_id": "offline-session",
+                    "message": {"id": "msg-offline", "model": "offline-model"},
+                },
+                {
+                    "type": "result", "subtype": "success", "is_error": False,
+                    "session_id": "offline-session",
+                    "modelUsage": {"offline-model": {"input_tokens": 1}},
+                    "total_cost_usd": "0.0",
+                },
+            ],
+        )
+
+    def _execute_offline_slot(
+        self, executor: Any, *, environment: Any = None, materializer: Any = None
+    ) -> Any:
+        def initialize(plan: Any) -> None:
+            make_git_repository(Path(plan.workspace_path))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            return runner.execute_manifest_slot(
+                synthetic_manifest(),
+                "s01-A01-r0-OFF",
+                workspace_parent=temporary,
+                reference_events=[init_event()],
+                materializer=initialize if materializer is None else materializer,
+                executor=executor,
+                environment=environment,
+                opaque_id_factory=lambda: "00112233445566778899aabbccddeeff",
+            )
+
+    def test_19_a_seal_cannot_replace_missing_or_inconsistent_raw_evidence(self) -> None:
+        execution = self._complete_execution()
+        self.assertTrue(execution.run_countable)
+        changes = [
+            {"raw_stdout": b""}, {"raw_jsonl_records": ()},
+            {"init_index": None}, {"init_index": 999}, {"init_index": True},
+            {"terminal_result_index": None}, {"terminal_result_index": 0},
+            {"assistant_message_ids": ()}, {"assistant_message_ids": ("invented-id",)},
+            {"session_id": None}, {"session_id": ""}, {"session_id": "invented-session"},
+            {"model_usage": None}, {"model_usage": {"offline-model": {"input_tokens": 2}}},
+            {"total_cost_usd": None}, {"total_cost_usd": Decimal("1.0")},
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                invalid = replace(execution, **change).sealed()
+                self.assertTrue(invalid.evidence_sealed)
+                self.assertFalse(invalid.run_countable)
+        unsealed = replace(execution, evidence_sha256=None)
+        self.assertFalse(unsealed.run_countable)
+
+    def test_20_terminal_raw_evidence_cannot_borrow_valid_summary_fields(self) -> None:
+        execution = self._complete_execution()
+        mutations = [
+            {"subtype": "error_max_turns"}, {"subtype": []}, {"is_error": True},
+            {"modelUsage": {}}, {"modelUsage": {"offline-model": {}}},
+            {"modelUsage": {"offline-model": {"input_tokens": -1}}},
+            {"total_cost_usd": None}, {"total_cost_usd": "NaN"},
+            {"total_cost_usd": "-0.1"}, {"num_turns": -1},
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                records = [dict(record) for record in execution.raw_jsonl_records]
+                records[-1].update(mutation)
+                raw = b"\n".join(json.dumps(record).encode() for record in records) + b"\n"
+                invalid = replace(execution, raw_stdout=raw, raw_jsonl_records=tuple(records)).sealed()
+                self.assertTrue(invalid.evidence_sealed)
+                self.assertFalse(invalid.run_countable)
+
+    def test_21_missing_process_and_provider_identity_evidence_fail_closed(self) -> None:
+        execution = self._complete_execution()
+        invalid_processes = [
+            replace(execution.process, status="START_FAILED"),
+            replace(execution.process, returncode=False),
+            replace(execution.process, returncode=None),
+            replace(execution.process, timed_out=True),
+            replace(execution.process, pid=None),
+            replace(execution.process, pgid=None),
+            replace(execution.process, shell=True),
+            replace(execution.process, close_fds=False),
+            replace(execution.process, start_new_session=False),
+        ]
+        for process in invalid_processes:
+            with self.subTest(process=process):
+                self.assertFalse(replace(execution, process=process).sealed().run_countable)
+        self.assertFalse(
+            replace(execution, provider_binary_identity=replace(
+                execution.provider_binary_identity, sha256=None
+            )).sealed().run_countable
+        )
+        self.assertFalse(
+            replace(execution, adapter_identity=replace(
+                execution.adapter_identity, source_realpath=None
+            )).sealed().run_countable
+        )
+        self.assertFalse(replace(execution, provider_policy={}).sealed().run_countable)
+
+    def test_22_malformed_or_duplicate_raw_json_cannot_be_countable(self) -> None:
+        execution = self._complete_execution()
+        duplicate = execution.raw_stdout.replace(
+            b'"type":"result"', b'"type":"assistant","type":"result"'
+        )
+        for raw in (duplicate, b"\xff\n" + execution.raw_stdout, b"\n" + execution.raw_stdout):
+            with self.subTest(raw_length=len(raw)):
+                self.assertFalse(replace(execution, raw_stdout=raw).sealed().run_countable)
+        malformed = replace(execution, raw_jsonl_records=(None,))
+        self.assertFalse(malformed.evidence_sealed)
+        self.assertFalse(malformed.run_countable)
+
+    def test_23_nested_session_and_subagent_evidence_cannot_be_ignored(self) -> None:
+        execution = self._complete_execution()
+        extras = [
+            {"type": "system", "subtype": "status", "session_id": "different-session"},
+            {"type": "assistant", "subagent": True, "session_id": "different-session",
+             "message": {"id": "msg-subagent", "model": "offline-model"}},
+        ]
+        for extra in extras:
+            with self.subTest(extra=extra):
+                records = list(execution.raw_jsonl_records)
+                records.insert(2, extra)
+                invalid = provider_execution(
+                    runner.ModelInvocation(
+                        execution.invocation.argv, execution.invocation.cwd, "Offline fixture.", {},
+                        execution.invocation.task_visible_run_id,
+                    ),
+                    records,
+                )
+                self.assertTrue(invalid.evidence_sealed)
+                self.assertFalse(invalid.run_countable)
+
+    def test_24_provider_evidence_must_match_the_actual_harness_invocation(self) -> None:
+        for field in ("argv", "cwd", "prompt", "environment", "task_visible_run_id"):
+            with self.subTest(field=field):
+                def mismatched(invocation: Any) -> Any:
+                    values = {
+                        "argv": ("/other/offline-provider",),
+                        "cwd": "/other/session-00112233445566778899aabbccddeeff",
+                        "prompt": "Different offline prompt.",
+                        "environment": {"OFFLINE_SETTING": "different"},
+                        "task_visible_run_id": "session-ffffffffffffffffffffffffffffffff",
+                    }
+                    return self._complete_execution(replace(invocation, **{field: values[field]}))
+
+                evidence = self._execute_offline_slot(mismatched)
+                self.assertTrue(evidence.purity.purity_pass)
+                self.assertTrue(evidence.provider_execution.run_countable)
+                self.assertFalse(evidence.run_countable)
+
+    def test_25_boundary_failures_retain_sealed_evidence_without_secret_messages(self) -> None:
+        secret = "synthetic-boundary-secret"
+
+        def fail(_invocation: Any) -> Any:
+            raise OSError(secret)
+
+        for executor in (fail, lambda _: [init_event()]):
+            with self.subTest(executor=executor.__name__):
+                evidence = self._execute_offline_slot(
+                    executor, environment={"CUSTOM_VALUE": secret}
+                )
+                self.assertTrue(evidence.executor_called)
+                self.assertTrue(evidence.provider_execution.evidence_sealed)
+                self.assertFalse(evidence.run_countable)
+                self.assertNotIn(secret, json.dumps(evidence.as_record()))
+
+    def test_26_generic_model_visible_record_redacts_environment_value_aliases(self) -> None:
+        secret = "synthetic-visible-secret"
+        invocation = runner.ModelInvocation(
+            argv=("/offline/provider", secret), cwd=f"/opaque/{secret}",
+            prompt=f"Prompt containing {secret}.",
+            environment={"CUSTOM_VALUE": secret, secret: secret},
+            task_visible_run_id=secret,
+        )
+        record = invocation.model_visible_record()
+        self.assertNotIn(secret, json.dumps(record))
+        self.assertEqual(
+            record["environment"]["CUSTOM_VALUE"]["sha256_fingerprint"],
+            hashlib.sha256(secret.encode()).hexdigest(),
+        )
+        boundary = runner._boundary_failure_execution(invocation, "offline_failure")
+        self.assertTrue(boundary.evidence_sealed)
+        self.assertNotIn(secret, json.dumps(boundary.as_record()))
+        self.assertFalse(boundary.run_countable)
+
+    def test_27_passing_purity_cannot_make_an_incomplete_provider_run_countable(self) -> None:
+        def init_only(invocation: Any) -> Any:
+            execution = self._complete_execution(invocation)
+            records = execution.raw_jsonl_records[:1]
+            return replace(
+                execution,
+                raw_stdout=json.dumps(records[0]).encode() + b"\n",
+                raw_jsonl_records=records,
+                terminal_result_index=None,
+            ).sealed()
+
+        evidence = self._execute_offline_slot(init_only)
+        self.assertTrue(evidence.purity.purity_pass)
+        self.assertTrue(evidence.provider_execution.evidence_sealed)
+        self.assertFalse(evidence.provider_execution.run_countable)
+        self.assertFalse(evidence.run_countable)
+
+    def test_28_materializer_failure_does_not_leak_environment_values(self) -> None:
+        secret = "synthetic-materializer-secret"
+
+        def materializer(_plan: Any) -> None:
+            raise OSError(secret)
+
+        def forbidden_executor(_invocation: Any) -> Any:
+            self.fail("executor must not run after materializer failure")
+
+        evidence = self._execute_offline_slot(
+            forbidden_executor, materializer=materializer,
+            environment={"CUSTOM_VALUE": secret},
+        )
+        self.assertFalse(evidence.executor_called)
+        self.assertFalse(evidence.run_countable)
+        self.assertIn("OSError", evidence.materializer_error)
+        self.assertNotIn(secret, json.dumps(evidence.as_record()))
+
+    def test_29_invalid_unicode_environment_still_retains_boundary_evidence(self) -> None:
+        def fail(_invocation: Any) -> Any:
+            raise OSError("offline-only")
+
+        evidence = self._execute_offline_slot(
+            fail, environment={"CUSTOM_VALUE": "\ud800"}
+        )
+        self.assertTrue(evidence.provider_execution.evidence_sealed)
+        self.assertFalse(evidence.run_countable)
+        self.assertEqual(
+            evidence.provider_execution.invocation.environment[0].sha256_fingerprint,
+            hashlib.sha256("\ud800".encode("utf-8", errors="surrogatepass")).hexdigest(),
+        )
+        json.dumps(evidence.as_record(), allow_nan=False)
 
 
 if __name__ == "__main__":
