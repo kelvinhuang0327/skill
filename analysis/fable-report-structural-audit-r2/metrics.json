@@ -1,0 +1,104 @@
+{
+  "audit_status": "INSUFFICIENT_REAL_CORPUS",
+  "combined_descriptive_metrics": {
+    "caveat": "DESCRIPTIVE_SUM_ONLY_NOT_A_PRODUCTION_FALSE_POSITIVE_RATE",
+    "metrics": {
+      "R3_PASS_NOT_RUN_CONFLICT": {
+        "FN": 0,
+        "FP": 0,
+        "TN": 44,
+        "TP": 20,
+        "cases": 64,
+        "expected_conflict": 20,
+        "expected_non_conflict": 44
+      },
+      "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT": {
+        "FN": 0,
+        "FP": 0,
+        "TN": 20,
+        "TP": 8,
+        "cases": 28,
+        "expected_conflict": 8,
+        "expected_non_conflict": 20
+      }
+    }
+  },
+  "detector": {
+    "modified_for_r2": false,
+    "sha256": "2d120b4d1dae080c0c47c49b4fecfd951e3b7f498b10aa2338da805c121062cc",
+    "version": "1.0.0-r1"
+  },
+  "final_disposition": "NEEDS_MORE_REAL_CORPUS",
+  "original_r1_regression": "PASS",
+  "real_corpus": {
+    "case_total": 36,
+    "conflict_class_available": false,
+    "false_negative_ledger": [],
+    "false_positive_ledger": [],
+    "metrics": {
+      "R3_PASS_NOT_RUN_CONFLICT": {
+        "FN": 0,
+        "FP": 0,
+        "TN": 24,
+        "TP": 0,
+        "cases": 24,
+        "expected_conflict": 0,
+        "expected_non_conflict": 24
+      },
+      "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT": {
+        "FN": 0,
+        "FP": 0,
+        "TN": 12,
+        "TP": 0,
+        "cases": 12,
+        "expected_conflict": 0,
+        "expected_non_conflict": 12
+      }
+    },
+    "provenance": "TRACKED_GIT_ONLY",
+    "source_documents": 4,
+    "source_versions": 7
+  },
+  "replay": {
+    "real_internal_replay": {
+      "byte_identical": true,
+      "complete_corpus_replays": 2,
+      "status": "PASS"
+    },
+    "synthetic_internal_replay": {
+      "byte_identical": true,
+      "complete_corpus_replays": 2,
+      "status": "PASS"
+    }
+  },
+  "semantic_judgement": "NOT_IMPLEMENTED",
+  "synthetic_r1_metrics": {
+    "R3_PASS_NOT_RUN_CONFLICT": {
+      "FN": 0,
+      "FP": 0,
+      "TN": 20,
+      "TP": 20,
+      "cases": 40,
+      "expected_conflict": 20,
+      "expected_non_conflict": 20
+    },
+    "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT": {
+      "FN": 0,
+      "FP": 0,
+      "TN": 8,
+      "TP": 8,
+      "cases": 16,
+      "expected_conflict": 8,
+      "expected_non_conflict": 8
+    },
+    "R6_REPETITION_LOOP": {
+      "FN": 0,
+      "FP": 0,
+      "TN": 6,
+      "TP": 6,
+      "cases": 12,
+      "expected_conflict": 6,
+      "expected_non_conflict": 6
+    }
+  }
+}

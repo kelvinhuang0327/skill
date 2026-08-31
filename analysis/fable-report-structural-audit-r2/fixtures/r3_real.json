@@ -1,0 +1,413 @@
+{
+  "cases": [
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-001",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real scope section contains no exact PASS/NOT RUN pair for one mechanical identity.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "6e48e6a83b9ae7d0c6c9d883b1d2f422f9dcaf01a5f86975d4ee10ac0b8ba442",
+        "document_id": "DOC-A",
+        "line_end": 24,
+        "line_start": 9,
+        "raw_excerpt_sha256": "33ece1ade71e10ec91b26e1be33b484d3b2793873eebff1dd2ac3e3f2b46dddb",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Scope and implementation\n\nAll retained changes are under\n`<REPO_PATH>`:\n\n- `audit_report.py`: standard-library-only detector and corpus runner.\n- `fixtures/r3.json`: 40 labelled R3 cases.\n- `fixtures/r4.json`: 16 labelled R4 cases.\n- `fixtures/r6.json`: 12 labelled R6 cases.\n- `expected/labels.json`: independent exact label/provenance manifest.\n- `metrics.json`: deterministic captured corpus output.\n- `report.md`: this report.\n\nNo canonical FRAMEWORK source, prompt, Planner, Judge, CI, lifecycle, or\npublication file was changed.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-002",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real rule-description section mentions statuses only as bounded explanatory prose and has no report-status conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "0fa4cb4cc12bc9d7df1e7338cd241cb13c4640ab8043b2ef55fd08bea79f3b9b",
+        "document_id": "DOC-A",
+        "line_end": 44,
+        "line_start": 27,
+        "raw_excerpt_sha256": "0fa4cb4cc12bc9d7df1e7338cd241cb13c4640ab8043b2ef55fd08bea79f3b9b",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "### R3_PASS_NOT_RUN_CONFLICT\n\nThe detector records a status only from one of four explicit structures:\n\n1. a label/value line;\n2. an explicit check/scope/status block;\n3. a Markdown table with recognized check/surface and status headers, plus an\n   optional scope header; or\n4. tightly constrained quoted English or Chinese status prose.\n\nIdentity is Unicode-NFKC normalized, case-folded, and whitespace-collapsed.\nPunctuation and all other name content remain significant. Explicit scope is\npart of identity: the same check name under different scopes is different,\nand scoped and unscoped observations are not merged. English status spelling\nand the explicitly mapped Chinese equivalents are recognized mechanically.\nFenced code is excluded. No fuzzy matching, substring matching, synonym\nmatching, or vague-prose inference is used.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-003",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real terminal-field rule description does not assert conflicting check statuses.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "6c3f98ec2aec0da0e9ba3656c26357c2f1bf4b967d3cf7fbc7e2f276a625c6ca",
+        "document_id": "DOC-A",
+        "line_end": 53,
+        "line_start": 45,
+        "raw_excerpt_sha256": "6c3f98ec2aec0da0e9ba3656c26357c2f1bf4b967d3cf7fbc7e2f276a625c6ca",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "### R4_DUPLICATE_TERMINAL_FIELD_CONFLICT\n\nThe detector considers only direct uppercase key/value assignments to an\nexplicit terminal field: suffixes `_STATUS`, `_VERDICT`, or `_DISPOSITION`,\nplus the exact fields `VERDICT`, `FINAL_DISPOSITION`, and\n`FULL_PR_LIFECYCLE_CLOSED`. A finding requires at least two different\nnormalized concrete values for the same exact field. Alternatives containing\n`|`, tables, free-form prose, and fenced code are excluded.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-004",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real repetition-rule section contains no exact check-status pair.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "21566de023282c110cf3b094245d993b5c8b544fd31277aed0587cef957eaa1c",
+        "document_id": "DOC-A",
+        "line_end": 62,
+        "line_start": 54,
+        "raw_excerpt_sha256": "21566de023282c110cf3b094245d993b5c8b544fd31277aed0587cef957eaa1c",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "### R6_REPETITION_LOOP\n\nR6 is advisory only. It flags either at least eight consecutive identical\nnon-structural lines, or a consecutive two-to-four-line block repeated at\nleast five times. Unicode and whitespace normalization are mechanical.\nMarkdown headings, tables, list examples, block quotes, thematic separators,\nshort lines, and fenced code are excluded. It does not assess ordinary\nrepeated headings, tables, or examples as degeneration.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-005",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "Real corpus and metrics tables contain no same-surface PASS/NOT RUN conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "053d9bea1d36ddd756e395162493b8aaa03a52bd622b6fe08cc3240f21d6b498",
+        "document_id": "DOC-A",
+        "line_end": 100,
+        "line_start": 63,
+        "raw_excerpt_sha256": "053d9bea1d36ddd756e395162493b8aaa03a52bd622b6fe08cc3240f21d6b498",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Corpus and provenance\n\nEvery case has a provenance label in its fixture and a matching entry in the\nindependent expected manifest.\n\n| Provenance | Count |\n|---|---:|\n| SYNTHETIC | 68 |\n| REAL_SAMPLED_DEIDENTIFIED | 0 |\n\nThese results measure detector correctness on this labelled corpus. Because\nthe corpus is entirely synthetic, they do not measure real-world production\nfalse-positive rate or evidence quality.\n\n| Rule | Cases | Expected conflict | Expected non-conflict | TP | FP | TN | FN |\n|---|---:|---:|---:|---:|---:|---:|---:|\n| R3_PASS_NOT_RUN_CONFLICT | 40 | 20 | 20 | 20 | 0 | 20 | 0 |\n| R4_DUPLICATE_TERMINAL_FIELD_CONFLICT | 16 | 8 | 8 | 8 | 0 | 8 | 0 |\n| R6_REPETITION_LOOP | 12 | 6 | 6 | 6 | 0 | 6 | 0 |\n\nR3 includes tables, prose, status blocks, English/Chinese, similar-but-\ndifferent checks, repeated names under different scopes, fenced examples,\nand benchmark/file names containing status-like text. R4 includes direct\nconflicts and non-conflicting same-value, different-field, fenced, prose,\ntable, alternatives-list, and non-terminal-field controls. R6 includes six\nobvious degenerations and six structural/below-threshold/progressing\ncontrols.\n\nTargeted feature replay results:\n\n| Feature group | Correct cases |\n|---|---:|\n| Code fences | 4/4 |\n| Tables | 9/9 |\n| Multilingual | 9/9 |\n| Similar names or explicit scopes | 5/5 |\n| Status-like benchmark/file names | 3/3 |\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-006",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real reproduction section contains no conflicting exact check statuses.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "b733f850aef21abc857136c342e5df92436938cf3c5e5fc3d09913bd3b1d28f9",
+        "document_id": "DOC-A",
+        "line_end": 117,
+        "line_start": 101,
+        "raw_excerpt_sha256": "b733f850aef21abc857136c342e5df92436938cf3c5e5fc3d09913bd3b1d28f9",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Reproduction and deterministic replay\n\n```bash\nPYTHONDONTWRITEBYTECODE=1 python3 audit_report.py corpus \\\n  --fixtures fixtures \\\n  --expected expected/labels.json\n```\n\nThe corpus command independently evaluates the complete corpus twice before\nemitting output. It was also invoked twice as separate commands; both outputs\nwere byte-identical to one another and to `metrics.json`.\n\n- Captured bytes: 14,149\n- SHA-256: `8bcbae4d6b78b804da3b0145c891729a68b2c047db2df4b0f727746c7cc8fd1c`\n- Complete internal corpus replays per command: 2\n- Additional external complete-corpus command runs compared: 2\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-007",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real tool-behavior table reports different invocation classes without an exact check identity conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "907abb4e7c729856623b2a1cf59df466b6a802adf976cf48848f337f61beb9ff",
+        "document_id": "DOC-A",
+        "line_end": 133,
+        "line_start": 118,
+        "raw_excerpt_sha256": "907abb4e7c729856623b2a1cf59df466b6a802adf976cf48848f337f61beb9ff",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Tool behavior\n\nObserved CLI results:\n\n| Invocation class | Exit | Observed result |\n|---|---:|---|\n| Finding present | 0 | One R3 finding reported |\n| Clean | 0 | Zero findings reported |\n| Invalid invocation | 2 | Rejected by argument parser |\n| Unreadable report path | 2 | Rejected as unreadable regular file |\n| Invalid UTF-8 input | 2 | Rejected as unsafe decoding |\n\nInputs are read with strict UTF-8 decoding, capped at 5 MiB, and rejected if\nthey contain a NUL byte. Findings remain advisory and never produce a\nnonzero audit exit.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-008",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "Real false-positive and false-negative ledgers contain no exact PASS/NOT RUN pair.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "44c4ca8ea9bfeb0ebd5129401db5f1523d40aeb72d5cb88fffcd7d01059085ec",
+        "document_id": "DOC-A",
+        "line_end": 153,
+        "line_start": 142,
+        "raw_excerpt_sha256": "44c4ca8ea9bfeb0ebd5129401db5f1523d40aeb72d5cb88fffcd7d01059085ec",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## False-positive and false-negative ledgers\n\nFALSE_POSITIVE_LEDGER: NONE\n\nR3 FP = 0 and R4 FP = 0. There were no false positives to classify manually.\nThe R6 targeted advisory corpus also had FP = 0.\n\nFALSE_NEGATIVE_LEDGER: NONE\n\nR3 FN = 0 and R4 FN = 0. There were no false negatives to classify manually.\nThe R6 targeted advisory corpus also had FN = 0.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-009",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real limitations section contains no mechanically conflicting status pair.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "70b6c137fe07d6ea896c08bbf21d69d6a403a5ff7f9d8fe222627bc059e3951b",
+        "document_id": "DOC-A",
+        "line_end": 167,
+        "line_start": 154,
+        "raw_excerpt_sha256": "70b6c137fe07d6ea896c08bbf21d69d6a403a5ff7f9d8fe222627bc059e3951b",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Safety and limitations\n\nThe fixture and expected-label files were scanned for local absolute paths,\nemail addresses, UUIDs, common secret-token shapes, private-key headers, and\nknown local identifiers. Four files were scanned and zero matches were found.\nNo transcript store or unrelated conversation was read to build the corpus.\n\nThe detector is intentionally conservative. Reports outside its explicit\ngrammar can yield false negatives; that is preferable here to semantic\nidentity inference. It does not decide whether a verifier or coverage is\nsufficient, whether a Judge verdict is credible, or whether evidence is\nhigh-quality. It does not inspect hidden reasoning or emotional/state\nmarkers. No promotion threshold was applied.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-010",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real required-results section has several single status assignments but no same-identity PASS/NOT RUN conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "6b761735170f1c26570e26458d034afee0ec19c8517cf5a3cb1d0cb96715f18d",
+        "document_id": "DOC-A",
+        "line_end": 198,
+        "line_start": 168,
+        "raw_excerpt_sha256": "9e7873e8fd17ab3afea77d8ad5f465e249d684bb7311bf601c5ef5a955d2067a",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Required results\n\nR3_TP: 20\nR3_FP: 0\nR3_TN: 20\nR3_FN: 0\n\nR4_TP: 8\nR4_FP: 0\nR4_TN: 8\nR4_FN: 0\n\nR6_RESULT: PASS — 12/12 targeted cases correctly classified; advisory only.\n\nDETERMINISTIC_REPLAY: PASS\n\nSENSITIVE_CONTENT_SCAN: PASS\n\nGIT_DIFF_CHECK: PASS\n\nSEMANTIC_JUDGEMENT: NOT_IMPLEMENTED\n\nCANONICAL_FRAMEWORK_CHANGED: NO\n\nFINAL_DISPOSITION: WORTH_LARGER_CORPUS\n\nThe rules are suitable to retain as a non-blocking offline pilot on this\nsynthetic corpus. A larger de-identified corpus is required before making any\nclaim about production false-positive behavior.\n\nPUSH: NOT RUN\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-011",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real diagnostic headline contains no recognized conflicting check status.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "cc020cb2cc453c8c49e9d8ee186480a30ee5f45101a4b2539a6af97dde2f93a1",
+        "document_id": "DOC-B",
+        "line_end": 21,
+        "line_start": 8,
+        "raw_excerpt_sha256": "344a80b3d65990f38e6ead5f9c9c4606da3d18b5efcc65200124cef57437b9e8",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## Headline result\n\nThe prior RCA's \"three tight repeat-bursts, calls 3–9 seconds apart, each\nfailing to read the cache the immediately preceding call had just written\"\nis **not three-to-four repeated cache misses**. It is **one real API request\nper burst**, logged as multiple separate JSONL lines because that response\ncontained multiple content blocks (`thinking`, `text`, `tool_use`), each\nsplit onto its own line while sharing one `requestId` and carrying an\nidentical copy of that request's `usage` and `diagnostics`. There is no\n\"why does the second call fail to read the first call's cache\" question to\nanswer, because there is no second call. And for the one real request each\nburst actually is, PROVIDER's own API tells us why it missed — directly,\nby name, no inference required.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-012",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real schema table uses non-R3 status vocabulary and must not be promoted to a PASS/NOT RUN conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "e88c0a6e258df326f8d8b006e17ec57cd4aaed130b3285558e2ea03732dc3a27",
+        "document_id": "DOC-B",
+        "line_end": 76,
+        "line_start": 46,
+        "raw_excerpt_sha256": "f37aea263d3a599ab5d023c2c0390f71fde57c2a23de513b4e11f8a020fb3790",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## Schema probe (required before building the analyzer)\n\nProbed structurally against the real historical S1 records, not assumed:\n\n| Field | Status | Detail |\n|---|---|---|\n| `message.diagnostics` | PRESENT | 10 of 402 lines |\n| `message.diagnostics.cache_miss_reason` | PRESENT | 10 of 402 lines |\n| `requestId` | PRESENT | 402 of 402 |\n| `entrypoint` | PRESENT | 402 of 402, constant `RUNTIME` |\n| `version` | PRESENT | 402 of 402, constant `2.1.227` |\n| `message.model` | PRESENT | 402 of 402, constant `RUNTIME` |\n| `usage.service_tier` | PRESENT | 402 of 402, constant `standard` |\n| `usage.speed` | PRESENT | 402 of 402, constant `standard` |\n| `effort` | PRESENT | 402 of 402, constant `max` |\n| `usage.cache_creation.ephemeral_1h_input_tokens` | PRESENT | 402 of 402 |\n| `usage.cache_creation.ephemeral_5m_input_tokens` | PRESENT | 402 of 402, always `0` |\n| `usage.iterations` | PRESENT | 402 of 402, always length 1 |\n| `attributionSkill` | PRESENT | 17 of 402 (sparse; only tags FRAMEWORK-method-attributed turns) |\n| `message.stop_reason` | PRESENT | 402 of 402 |\n| `parentUuid` / `uuid` | PRESENT | 402 of 402 — used only in-process to verify request-chaining structure, never persisted |\n| tool-definition/tool-schema identity | **NOT SAFELY ATTRIBUTABLE** | only tool_use *calls* are logged, never the tool schema offered to the model |\n| system-context identity/fingerprint | **NOT SAFELY ATTRIBUTABLE** | the rendered system prompt is not logged as content in this format (confirmed already in the prior RCA); `cache_miss_reason.type` is the only first-party signal for this |\n| retry/error fields | **NOT SAFELY ATTRIBUTABLE** | no retry count, error code, or transport-level field exists on assistant records in this schema |\n| transport/client metadata | PRESENT (partial) | `entrypoint`/`version` only; no lower-level transport metadata is logged |\n\nNo request-shape hash/fingerprint was constructed for tools or system\ncontext: the API's own `cache_miss_reason` field is a better, first-party\nsignal than a locally reconstructed proxy would be, and no safely\ncanonicalizable raw payload exists locally to hash in the first place.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-013",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real duplicate-record section contains no same-surface PASS/NOT RUN pair.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "3a49dcd5332d1e8935ef36352330e3a92ff7fd3feb81aba54da67e9c2b81717e",
+        "document_id": "DOC-B",
+        "line_end": 108,
+        "line_start": 77,
+        "raw_excerpt_sha256": "bc7eb34b451991b9a0f7d678f33124bba583beecdbddba48a5ae41f8441d0ee5",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## Duplicate-record guard (the load-bearing check this task required)\n\n- 402 JSONL assistant records in S1 map to only **162 distinct `requestId`\n  values**.\n- Group sizes: 28 requests logged as 1 line, 54 as 2 lines, 55 as 3 lines,\n  24 as 4 lines, 1 as 5 lines.\n- Verified — not assumed — that every one of the 162 groups carries\n  **identical** `usage` (all four token counts) **and** identical\n  `entrypoint`, `version`, `model`, `effort`, `attributionSkill`,\n  `service_tier`, and `diagnostics` across every member line. **Zero\n  mismatched groups.** `uuid`/`parentUuid` confirm the split lines chain\n  linearly within one request (verified directly for the three flagged\n  bursts; the same requestId-grouping guarantee applies to all 162 groups).\n- Raw (per-line) summed `cache_creation`: **4,841,260**. Deduplicated\n  (per-request) summed `cache_creation`: **1,564,018**. The prior RCA's\n  sum-based total was inflated **3.10×** for this session.\n- `CONTEXT_HIGH_WATER` (a `max`, not a `sum`) is **unaffected** by this —\n  637,127 stands exactly as reported in both prior tasks, since\n  `max(x, x, x) = x` regardless of duplication.\n\n**This is a reproducible defect in the prior task's counting methodology**\n(neither prior task was asked to check per-request deduplication; this task\nis the first to require it). Per this task's own instruction to flag,\nrather than silently recalculate around, a found defect: `PREFIX_REBUILD_\nDOMINANT` in `<REPO_PATH>`, and the absolute\n`cache_creation`/`NOVEL_TOKEN_VOLUME` totals in `<REPO_PATH>\nr1/report.md`, were computed by summing per-JSONL-line rather than\nper-request, and are likely inflated by a similar mechanism wherever a\nsession's assistant turns split across multiple content blocks. Both files\nare left unmodified, as this task's scope requires; this note is the\nflagged correction.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-014",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real classification table uses domain categories, not check statuses.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "656a0531e679e79920c99ae497bff984772a9666e5c2f2703018f635aea97c4b",
+        "document_id": "DOC-B",
+        "line_end": 128,
+        "line_start": 109,
+        "raw_excerpt_sha256": "656a0531e679e79920c99ae497bff984772a9666e5c2f2703018f635aea97c4b",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## Corrected mechanism classification (deduplicated, 162 requests)\n\n| Reuse state | Requests | Share of total cache_creation |\n|---|---:|---:|\n| NORMAL_REUSE_CANDIDATE | 158 | 30.66% |\n| MATERIAL_PREFIX_LOSS_CANDIDATE | 3 | 65.89% |\n| PARTIAL_REUSE | 0 | 0.0% |\n| INITIAL_REQUEST_NO_PRIOR | 1 | 3.45% |\n\n```text\nCACHE_CHURN_MECHANISM (deduplicated): MIXED_CACHE_BEHAVIOR\n```\n\n65.89% falls just under the pre-declared 70% dominance bar the prior RCA\nused — under the corrected denominator, the mechanism no longer meets the\n`PREFIX_REBUILD_DOMINANT` bar on its own numeric terms, though the practical\nfinding (3 large real misses dominate token cost far more than 158 healthy\nrequests) is unchanged in substance. Reported exactly, not rounded to fit\neither label.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-015",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real material-events table has no mechanically identical PASS/NOT RUN surface.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "f8f91adb08c2c12072cfab0cbd4bf4cd7d61a82a6d4f7c5bdb2c42fe34652d5a",
+        "document_id": "DOC-B",
+        "line_end": 147,
+        "line_start": 129,
+        "raw_excerpt_sha256": "f8f91adb08c2c12072cfab0cbd4bf4cd7d61a82a6d4f7c5bdb2c42fe34652d5a",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## Material events: exactly 3, not 9–13\n\n| Label | Content blocks in the one real request | cache_creation | cache_read | Reuse ratio | `cache_miss_reason.type` | Gap before |\n|---|---|---:|---:|---:|---|---:|\n| M1 | thinking, text, tool_use | 191,282 | 32,846 | 0.1584 | `system_changed` (137,955 tokens reported missed) | 2,533s (42 min) |\n| M2 | thinking, text, tool_use, tool_use | 275,806 | 0 | 0.0 | `previous_message_not_found` | 9,521s (2.6 hr) |\n| M3 | thinking, text, tool_use | 563,442 | 0 | 0.0 | `previous_message_not_found` | 3,884s (65 min) |\n\nAll three: `entrypoint_changed=NO`, `version_changed=NO`, `model_changed=NO`,\n`effort_changed=NO` — refuting D2 and D5 outright.\n\n**Recovery is immediate and exact for all three**: the very next request\nafter each one reads back *exactly* that event's own `cache_creation` value\n(M1's next request reads 224,128, more than covering M1's 191,282; M2's next\nreads exactly 275,806; M3's next reads exactly 563,442). This directly\nconfirms each event correctly wrote a usable cache that the next real\nrequest used normally — there is no lingering corruption, and no\n\"intra-burst\" failure to explain, because there was never an intra-burst.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-016",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real hypothesis-verdict table must not be interpreted as an R3 check-status conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "a4b6eb631e8cf48f9a23d87187d7988461ebbeb3e733de4d02e97af1dd2831d6",
+        "document_id": "DOC-B",
+        "line_end": 160,
+        "line_start": 148,
+        "raw_excerpt_sha256": "c208c6232b4f017bd3a09646fa90af4ef94e84be16515204b6f6765b85931041",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## D1–D8 verdicts\n\n| # | Hypothesis | Verdict | Evidence |\n|---|---|---|---|\n| D1 | EXPLICIT_CACHE_MISS_DIAGNOSTIC | **CONFIRMED** | `message.diagnostics.cache_miss_reason.type` identifies all 3 real material events by name (1 `system_changed`, 2 `previous_message_not_found`) and appears on **zero** of the 158 healthy control requests — perfect 1:1 correspondence in both directions. |\n| D2 | CLIENT_OR_ENTRYPOINT_CHANGE | **REFUTED** | `entrypoint`/`version` constant across all 162 deduplicated requests in the session; zero transitions anywhere, not just at the boundaries. |\n| D3 | SYSTEM_CONTEXT_CHANGE | **PARTIAL** | M1's own diagnostic literally says `system_changed`. The one observable structural correlate, `skill_attribution_changed = YES`, occurs at M1 — but it also occurs exactly once among the 158 controls **without** producing any miss. Rate is still far higher in material events (1 of 3 = 33%) than controls (1 of 158 = 0.6%), but the one control counterexample means skill-attribution-change is not shown to be a *sufficient* condition, only a plausible correlate, with n=1 material occurrence too small to fully resolve further from local evidence alone. |\n| D4 | TOOLSET_CHANGE | **NOT MEASURABLE** | No per-request tool-schema payload is logged in this transcript format (see schema probe). M1's own diagnostic names the cause as `system_changed`, not a separate `tools_changed` category, so this remains unmeasured rather than contradicted. |\n| D5 | EFFORT_OR_REQUEST_MODE_CHANGE | **REFUTED** | `effort` is `max` on all 162 deduplicated requests; zero transitions in the entire session. |\n| D6 | RETRY_OR_REISSUE_PATH | **REFUTED** | There is no retry or alternate execution path. Each \"burst\" is exactly one real request (one `requestId`, one linear `uuid`/`parentUuid` chain, byte-identical `usage`/`diagnostics` across every split line, verified with zero exceptions across all 162 request groups in the session). The apparent multi-second-apart repeats reported in the prior RCA are an artifact of counting each content-block-split JSONL line as an independent request — confirmed as a logging/serialization artifact, not a distinct execution path. |\n| D7 | TTL_OR_IDLE_ENTRY_ONLY | **CONFIRMED** | The original framing (\"explains entry, not intra-burst misses\") is moot once D6 is resolved — there is no intra-burst to explain. What remains, confirmed and reframed: M2 and M3 (both `previous_message_not_found`) have the **only two** idle gaps exceeding 3,600 seconds anywhere in the entire 162-request session. Zero of 158 controls have a gap over 3,600 seconds at all — meaning there is no counterexample in either direction within this session (no long gap ever occurred without a miss, and no miss of this type ever occurred without a long gap). This is stated as an exact, zero-counterexample structural correlation with the session's exclusive use of the `ephemeral_1h`-labeled cache breakpoint (402/402 requests write only to that breakpoint type, never `ephemeral_5m`) — not as a claim about PROVIDER's undocumented internal TTL implementation. Absolute sample size for this correlation is small (n=2). |\n| D8 | REQUEST_LEVEL_CAUSE_NOT_OBSERVABLE | **REFUTED** | A request-level cause *is* observable — directly, via the first-party diagnostic field. This is the task's most important negative-of-a-negative result: existing local evidence was sufficient after all, once request-level deduplication was applied first. |\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-017",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real root-cause section contains bounded prose and fenced fields but no exact status conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "017bcf9dd33df1d20995a0f5aa2d29ccc605a5397e8d67ecb6996696566cd875",
+        "document_id": "DOC-B",
+        "line_end": 207,
+        "line_start": 161,
+        "raw_excerpt_sha256": "9836ba947b95cdfd403623193a61642be8ffcad6e1ed308b43aff9d2736887db",
+        "source_id": "SRC-B1",
+        "version_id": "V1"
+      },
+      "text": "## Root-cause verdict\n\n```text\nCACHE_MISS_ROOT_CAUSE:\nLayer 1 (fully confirmed, resolves the packet's exact question — \"why does\nthe second request fail to read the cache written by the first request\nseconds earlier\"): it doesn't. There is no second request. Each burst is one\nreal API request whose multi-content-block response was logged as multiple\nJSONL lines sharing one requestId, each carrying a duplicate usage/\ndiagnostics object. This satisfies the root-cause standard's five conditions\nwithout caveat: it aligns exactly with all three boundaries, no control\nexhibits it (every control's request produces exactly one line-group with\nconsistent content), it fully explains the apparent repetition (there is\nnone to explain), it falsifies the retry/reissue hypothesis directly, and it\nrests on directly observed structural fields (requestId, uuid, parentUuid),\nnot an assumption.\n\nLayer 2 (the one real miss per event, categorized with certainty, explained\nwith one confirmed and one partial caveat): D1 is fully confirmed - all 3\nreal misses are explicitly diagnosed by PROVIDER's own API, by name, with\nperfect discrimination against 158 healthy controls. Within that: the single\nsystem_changed event (M1) correlates with the session's only other\nskill-attribution transition, but that same transition occurs once more\nwithout a miss, so this part stays PARTIAL rather than fully closed. The two\nprevious_message_not_found events (M2, M3) correlate exactly (2 of 2, 0\ncounterexamples in 158 controls) with idle gaps exceeding 3,600 seconds in a\nsession that exclusively uses the 1-hour cache breakpoint - stated as an\naligned structural correlation, not an assertion about undocumented\nPROVIDER internals.\n```\n\nThis is reported as a genuine root-cause finding, not\n`ROOT_CAUSE_NOT_IDENTIFIED`, because Layer 1 meets all five required\nconditions cleanly and by itself fully resolves the specific mechanistic\nquestion this task was opened to answer. Layer 2's partial elements are\nreported honestly as partial rather than rounded up to \"fully identified.\"\n\n```text\nNEXT_REQUIRED_EVIDENCE:\nNone required to close this task's primary question (Layer 1 closes it).\nIf the Layer-2 system_changed/skill-attribution correlation is worth fully\nresolving (n=1, one uncontrolled counterexample), the next evidence type\nneeded is per-request skill-context identity (which skill was attributed\nimmediately before vs at M1 and at the one control counterexample) - not a\nnew high-context reproduction, and not authorized by this task.\n```\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-018",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real privacy section contains no mechanically conflicting check status.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "79ed068e42ab6e080a90c6d5ccac38dd013963581c516aeec5ad2ca5bd1daa05",
+        "document_id": "DOC-B",
+        "line_end": 223,
+        "line_start": 208,
+        "raw_excerpt_sha256": "0456ce61f26330110520df708096ce227d9087e6368bc3ceebc075049832da62",
+        "source_id": "SRC-B1",
+        "version_id": "V1"
+      },
+      "text": "## Privacy / scope compliance\n\n- No session ID, request ID (the literal `req_...` strings), UUID,\n  transcript filename, prompt text, command text, or tool-result text\n  appears in this report, in `measure_cache_miss.py`, or in `metrics.json`\n  (scanned: 0 UUID-shaped matches, 0 `req_`-prefixed string matches in the\n  committed JSON).\n- `uuid`/`parentUuid`/`requestId` raw values were used only transiently,\n  in-process, to verify chaining structure and grouping; only derived\n  counts, booleans, and category labels were ever written to disk.\n- `<REPO_PATH>` and `<REPO_PATH>`\n  were read and are unmodified.\n- No file under `FRAMEWORK-method/` or `prompt/` was modified.\n- No file outside `<REPO_PATH>` was written.\n- No production-workspace transcript directory was read.\n- No new debug-enabled reproduction, proxy, or API interception was run.\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-019",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A corrected real report note contains superseded narrative but no exact R3 identity/status conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "eb823b97a9ad8ae6661c98a2561c5abcd4749b4878170d01fce1a32b1319b546",
+        "document_id": "DOC-C",
+        "line_end": 21,
+        "line_start": 7,
+        "raw_excerpt_sha256": "918c5e8571ad9507f0451cd2f98c0d0f271afc52ae3880dd7eb30062dbaf7550",
+        "source_id": "SRC-C2",
+        "version_id": "V2"
+      },
+      "text": "## Correction note (TASK_ALIAS)\n\nThis analysis originally treated usage-bearing assistant JSONL records as\nindependent model requests. Later request-level analysis\n(`<REPO_PATH>`) demonstrated that multi-content-block\nresponses can create multiple records sharing one `requestId`. This version\ndeduplicates by requestId before building the turn sequence\n(`build_deduplicated_turns_and_events` replaces `build_turns`); every\ndownstream computation is otherwise unchanged. The headline consequence:\n**the \"three tight repeat-bursts\" this report originally described do not\nexist** — they were consecutive duplicate JSONL lines of the same single\nreal request being compared against each other as if they were separate\ncalls. The burst detector, unmodified, now finds zero burst groups on the\nsame underlying data (see below).\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-020",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real request-identity table contains measurement states, not exact PASS/NOT RUN check pairs.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "92bd09cdb28cb3d4d8fee16084c27d3e5d5b3083c94983951e9cf49024d0ac15",
+        "document_id": "DOC-C",
+        "line_end": 41,
+        "line_start": 22,
+        "raw_excerpt_sha256": "08222e4f0bd003da43cc41e13b2b501a7988f19a0e4bc96280a9d05055451227",
+        "source_id": "SRC-C2",
+        "version_id": "V2"
+      },
+      "text": "## Request identity verification\n\n| | Value |\n|---|---:|\n| USAGE_RECORD_COUNT | 402 |\n| UNIQUE_REQUEST_COUNT | 162 |\n| DUPLICATED_REQUEST_RECORD_COUNT | 240 |\n| MISSING_REQUEST_ID_COUNT | 0 |\n| CONFLICTING_USAGE_WITHIN_REQUEST_COUNT | 0 |\n| NONCONTIGUOUS_REQUESTID_GROUPS | 0 |\n\n`requestId` is present on every usage-bearing record; zero groups contain\nconflicting usage (no arbitrary-row-choice case arises); zero groups are\nsplit across non-adjacent raw lines (confirms a tool_result never\ninterleaves inside one request's own multi-line span, which is what makes\nthe simple \"one events-between bucket per request\" construction valid here).\nThese figures are independently reproduced by this script and match\n`<REPO_PATH>`'s figures for the same session exactly\n— two independently written analyzers converging on the same ground truth.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-021",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real weighted classification section contains no exact R3 conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "9e0da284769a72c7f4229124c97b90703caaa9898a1cd29596fd42198c8f9db9",
+        "document_id": "DOC-C",
+        "line_end": 101,
+        "line_start": 81,
+        "raw_excerpt_sha256": "e57ebe2e5daa52f81af4690155240ff877fe950ec17bb385ea6ef12c55857138",
+        "source_id": "SRC-C2",
+        "version_id": "V2"
+      },
+      "text": "## Cache-creation-weighted classification\n\n| Reuse state | Request count | Share of total cache_creation |\n|---|---:|---:|\n| NORMAL_REUSE_CANDIDATE (ratio ≥ 0.80) | 158 | 30.66% |\n| PARTIAL_REUSE | 0 | 0.0% |\n| MATERIAL_PREFIX_LOSS_CANDIDATE (ratio < 0.50 and cache_creation ≥ 50% of prior) | 3 | 65.89% |\n| INITIAL_TURN_NO_PRIOR (cold start) | 1 | 3.45% |\n\n```text\nCACHE_CHURN_MECHANISM: MIXED_CACHE_BEHAVIOR\n```\n\n65.89% falls just under the pre-declared 70% dominance threshold — the\nmechanism no longer meets `PREFIX_REBUILD_DOMINANT` on its own numeric\nterms. The practical finding (3 large real misses dominate token cost far\nmore than any of the 158 healthy requests individually) is unchanged in\nsubstance; it is reported exactly, not rounded to fit either label. This\nmatches `<REPO_PATH>`'s independently computed\n30.66%/65.89%/0%/3.45% split exactly.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-022",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real hypothesis and root-cause section uses verdict vocabulary outside the R3 grammar.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "01260bb982defbd81c9968b30cdf66c1e80f98e8d25a5aea8f1c31dccf4ae00b",
+        "document_id": "DOC-C",
+        "line_end": 172,
+        "line_start": 137,
+        "raw_excerpt_sha256": "06ebd912204ac927bbebff98e1c0eb39e53692845ca000b6e7ea068bc9462966",
+        "source_id": "SRC-C2",
+        "version_id": "V2"
+      },
+      "text": "## Hypothesis verdicts (C1–C7)\n\n| # | Hypothesis | Verdict | Evidence |\n|---|---|---|---|\n| C1 | NORMAL_INCREMENTAL_REUSE | **REFUTED** (unchanged conclusion) | Normal-reuse requests hold 30.66% of cache_creation, still far under the 70% bar; still bimodal, not gradual. |\n| C2 | PREFIX_REBUILD | **NOT CONFIRMED at the pre-declared threshold** (changed from CONFIRMED) | 65.89% of cache_creation occurs in the 3 requests with `PRIOR_PREFIX_REUSE_RATIO` ≤ 0.1584 — under the pre-declared 70% bar. The original 71.79% CONFIRMED verdict was computed from line-duplicated data (see \"Required correction comparison\"); the corrected figure does not clear the bar the original verdict rested on. |\n| C3 | CONTEXT_REWRITE_OR_COMPACTION | **NOT MEASURABLE** (structural) / **REFUTED** (heuristic) — unchanged | Re-verified independently: no key matching `compact`/`summar`/`truncat`/`reset` exists in any structural field across all 995 raw lines in the session (0 matches; this raw-line total is unaffected by request-level dedup, since it counts every JSONL line, not just usage-bearing assistant ones). `COMPACTION_CANDIDATE` fires on 0 of 161 eligible deduplicated requests (was 0 of 401 line-counted turns — same conclusion, corrected denominator). |\n| C4 | MODEL_OR_RUNTIME_SHAPE_CHANGE | **REFUTED** (unchanged) | `model` is `RUNTIME` on all 162 real requests (zero transitions); `service_tier` is `standard` throughout; exclusively `ephemeral_1h` cache-breakpoint usage (162/162); `attributionSkill` is `FRAMEWORK-method` throughout. |\n| C5 | TIME_GAP_EFFECT | **TIME_GAP_CORRELATED for 2 of 3, with the 3rd independently explained by a different, non-competing mechanism** (sharpened from \"partial\") | The entry-gap figures were never affected by the duplication bug (they compare a burst's first line against its true predecessor, which the bug never touched) — 2 of the 3 real material events (turns 61, 137) begin after gaps exceeding 3,600s; the 3rd (turn 48) begins after 2,533s. `<REPO_PATH>` independently resolves this: the two >3,600s events both carry `cache_miss_reason=previous_message_not_found` (0 counterexamples in either direction across the session), while turn 48 carries `cache_miss_reason=system_changed` — a distinct, separately-diagnosed cause, not a stray counterexample to the time-gap pattern. |\n| C6 | TOOL_RESULT_GROWTH | **REFUTED** (strengthened) | Recomputed on deduplicated data: for every observed tool (Bash, Read, Edit, Write, AskUserQuestion), the material-event rate immediately after that tool is used is **exactly 0%**, versus 1.9–5.3% when not preceded by that tool — the opposite of what \"large tool output invalidates the cache\" predicts, and a cleaner (all-zero) result than the original line-counted data showed. |\n| C7 | CACHE_MECHANISM_NOT_IDENTIFIABLE | **REFUTED** (changed from \"confirmed for one sub-question\") | The original sub-question this hypothesis partially confirmed — \"why does the immediate repeat fail to read the cache its predecessor just wrote\" — no longer applies: there was never a repeat to explain (see above). The actual mechanism for the 3 real events is directly identifiable from first-party evidence (`cache_miss_reason`, per `<REPO_PATH>`), not merely \"not identifiable from transcript-only evidence\" as originally concluded. |\n\n## Root-cause verdict\n\n```text\nCACHE_CHURN_MECHANISM: MIXED_CACHE_BEHAVIOR\n```\n\nThe original `ROOT_CAUSE_NOT_IDENTIFIED` verdict rested entirely on\ncondition 5 failing because \"the within-burst repeat-miss mechanism has a\nplausible unmeasured competing explanation (client-side retry, a\nserver-side cache-propagation gap) that this transcript cannot rule out.\"\nThat premise is dissolved by request-level correction: there was no\nwithin-burst repeat, so there is nothing for a retry or propagation-gap\nhypothesis to compete to explain. This script's own corrected data\nindependently confirms three of the five original root-cause conditions\neven more cleanly than before (mechanism measurable: yes; control comparison\ndiscriminates against C1/C4/C6: yes, now with a cleaner all-zero C6 result;\ncompeting hypotheses falsified: yes — C1, C4, C6, and now C7 as originally\nframed). This document does not re-derive a positive root-cause verdict for\n*why* the 3 real requests individually missed the cache — that specific\nquestion was the deeper mandate of, and is directly answered by, the\nseparate `<REPO_PATH>` task (D1 CONFIRMED via the\nAPI's own `cache_miss_reason` field), which this report defers to rather\nthan duplicates.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-023",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real dominant-structure section contains no exact PASS/NOT RUN surface conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "aebf150e88c5864882d61b7a3deccd3f8b9ae7c26854c4a09dd468542b5b975b",
+        "document_id": "DOC-C",
+        "line_end": 103,
+        "line_start": 66,
+        "raw_excerpt_sha256": "aebf150e88c5864882d61b7a3deccd3f8b9ae7c26854c4a09dd468542b5b975b",
+        "source_id": "SRC-C1",
+        "version_id": "V1"
+      },
+      "text": "## The dominant structure: three tight repeat-bursts, not gradual drift\n\nRanking all 402 turns by `cache_creation_tokens` and taking the minimal set\ncovering ≥80% of the session total (the required `MATERIAL_CACHE_EVENTS`\nset) yields 51 turns, covering 80.12%. But most of that mass concentrates\ninto an even smaller, sharper structure: **consecutive turns that rebuild an\nalmost identical-sized cache from zero, seconds apart, with nothing new in\nbetween.**\n\nA burst detector (consecutive turns, cache_creation sizes within 2% of each\nother, near-zero intervening tool/subagent bytes) found this, reported in\ntwo variants side by side rather than one overwriting the other — the\nthresholds were fixed only after one instance was already visible during\ninvestigation, not frozen blind like the reuse-ratio thresholds, so both a\nstrict and a conservative-loose reading are shown for honesty about that:\n\n| Variant | Intervening-byte allowance | Burst groups | Turns involved | Share of total cache_creation \"wasted\" on repeats alone |\n|---|---:|---:|---:|---:|\n| STRICT | 0 bytes | 3 | 9 | 42.6% |\n| LOOSE | 5,000 bytes + allows session cold-start as an anchor | 4 | 13 | 50.5% |\n\nThe three groups both variants agree on:\n\n| Turns | Repeats | Cache_creation per repeat | Gap before burst | Bytes between repeats |\n|---|---:|---:|---:|---:|\n| 121, 122, 123 | 3 | 191,282 | 2,533s (42 min) | 0 |\n| 150, 151, (152, 153) | 3–4 | 275,806 | 9,521s (2.6 hr) | 0 |\n| 332, 333, 334 | 3 | 563,442 | 3,884s (64.7 min) | 0 |\n\nIn every group: the second and third calls, **3–9 seconds** after the\nprevious one wrote a fresh cache of that exact size, show\n`cache_read_input_tokens = 0` and write an almost identical-sized fresh\ncache again — as if the immediately preceding write were invisible to them.\nThe very next turn after each burst ends reads the full amount back\ncorrectly. **Just 9–13 of 402 turns account for 43–51% of the entire\nsession's cache-creation token volume.** This is a small number of sharp\nmechanical events, not a diffuse accumulation.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-024",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real terminal-attribution section has one disposition narrative and no exact R3 conflict.",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "eeb7d02b4256b3eefa8d8fbd54dede0cf8c9ce88607b1b7c49b533b9ea837a8a",
+        "document_id": "DOC-D",
+        "line_end": 199,
+        "line_start": 176,
+        "raw_excerpt_sha256": "eeb7d02b4256b3eefa8d8fbd54dede0cf8c9ce88607b1b7c49b533b9ea837a8a",
+        "source_id": "SRC-D1",
+        "version_id": "V1"
+      },
+      "text": "## Terminal attribution verdict\n\n```text\nATTRIBUTION_INCOMPLETE\n```\n\nReason: the pre-declared dominance rule (≥30% and ≥1.5× runner-up) cannot be\nsafely evaluated because the largest exact-token phenomenon found —\nrepeated, per-call cache-creation churn concentrated in S1, 79.5% of total\nNOVEL_TOKEN_VOLUME across the sample — has no exact A–G category attribution\navailable from transcript data alone. A material category (the true\ncomposition of that churn: tool-result-driven, tool-input-driven, or\nsomething else) could reverse or confirm H2, and no defensible number exists\nfor it yet. Reporting `NO_DOMINANT_SOURCE` here would mean ignoring the\nlargest number in the entire dataset; reporting `FIRST_MATERIAL_CONTEXT_SOURCE`\nfor any A–G category would mean forcing a winner the token data does not\nsupport (H1 refuted exactly, H3 refuted exactly, H4 refuted exactly, C\nrefuted exactly at token precision despite looking dominant in bytes).\n\n**What is safely established, independent of that open question:**\nsubagent-return compression (the withdrawn R1 proposal) would save\napproximately nothing in the sessions that actually cost the most. Any\nfuture optimization goal should not restart from that proposal.\n\n"
+    }
+  ],
+  "schema_version": 1
+}

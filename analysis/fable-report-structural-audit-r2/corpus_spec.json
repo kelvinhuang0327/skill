@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "authority_base_commit": "a6146dd2a36f7ee1151cdcd110987c88ce81e0f4",
+  "sources": [
+    {
+      "source_id": "SRC-A1",
+      "document_id": "DOC-A",
+      "version_id": "V1",
+      "blob_oid": "42e16d7cf9639c8a8851bd45ce920ffd6378cfce"
+    },
+    {
+      "source_id": "SRC-B2",
+      "document_id": "DOC-B",
+      "version_id": "V2",
+      "blob_oid": "b0aceb8d253e4e581b86b38450c6576973ab55ca"
+    },
+    {
+      "source_id": "SRC-B1",
+      "document_id": "DOC-B",
+      "version_id": "V1",
+      "blob_oid": "2a8f414988926961646a68cbe548646598ca0ddb"
+    },
+    {
+      "source_id": "SRC-C2",
+      "document_id": "DOC-C",
+      "version_id": "V2",
+      "blob_oid": "37965d55389764ea38946b28e165294512a1c74a"
+    },
+    {
+      "source_id": "SRC-C1",
+      "document_id": "DOC-C",
+      "version_id": "V1",
+      "blob_oid": "fb29b80a4bc769f3f090e1d01d53ef6fcb306388"
+    },
+    {
+      "source_id": "SRC-D2",
+      "document_id": "DOC-D",
+      "version_id": "V2",
+      "blob_oid": "6fc4862ab342c420f451796daf860d350e200bcb"
+    },
+    {
+      "source_id": "SRC-D1",
+      "document_id": "DOC-D",
+      "version_id": "V1",
+      "blob_oid": "ea11e496b596b8d27a818cd6d746600b9d3d2fd6"
+    }
+  ],
+  "cases": [
+    {"id": "R3-REAL-001", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 9, "line_end": 24, "rationale": "A real scope section contains no exact PASS/NOT RUN pair for one mechanical identity."},
+    {"id": "R3-REAL-002", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 27, "line_end": 44, "rationale": "A real rule-description section mentions statuses only as bounded explanatory prose and has no report-status conflict."},
+    {"id": "R3-REAL-003", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 45, "line_end": 53, "rationale": "A real terminal-field rule description does not assert conflicting check statuses."},
+    {"id": "R3-REAL-004", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 54, "line_end": 62, "rationale": "A real repetition-rule section contains no exact check-status pair."},
+    {"id": "R3-REAL-005", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 63, "line_end": 100, "rationale": "Real corpus and metrics tables contain no same-surface PASS/NOT RUN conflict."},
+    {"id": "R3-REAL-006", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 101, "line_end": 117, "rationale": "A real reproduction section contains no conflicting exact check statuses."},
+    {"id": "R3-REAL-007", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 118, "line_end": 133, "rationale": "A real tool-behavior table reports different invocation classes without an exact check identity conflict."},
+    {"id": "R3-REAL-008", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 142, "line_end": 153, "rationale": "Real false-positive and false-negative ledgers contain no exact PASS/NOT RUN pair."},
+    {"id": "R3-REAL-009", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 154, "line_end": 167, "rationale": "A real limitations section contains no mechanically conflicting status pair."},
+    {"id": "R3-REAL-010", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-A1", "line_start": 168, "line_end": 198, "rationale": "A real required-results section has several single status assignments but no same-identity PASS/NOT RUN conflict."},
+    {"id": "R3-REAL-011", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B2", "line_start": 8, "line_end": 21, "rationale": "A real diagnostic headline contains no recognized conflicting check status."},
+    {"id": "R3-REAL-012", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B2", "line_start": 46, "line_end": 76, "rationale": "A real schema table uses non-R3 status vocabulary and must not be promoted to a PASS/NOT RUN conflict."},
+    {"id": "R3-REAL-013", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B2", "line_start": 77, "line_end": 108, "rationale": "A real duplicate-record section contains no same-surface PASS/NOT RUN pair."},
+    {"id": "R3-REAL-014", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B2", "line_start": 109, "line_end": 128, "rationale": "A real classification table uses domain categories, not check statuses."},
+    {"id": "R3-REAL-015", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B2", "line_start": 129, "line_end": 147, "rationale": "A real material-events table has no mechanically identical PASS/NOT RUN surface."},
+    {"id": "R3-REAL-016", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B2", "line_start": 148, "line_end": 160, "rationale": "A real hypothesis-verdict table must not be interpreted as an R3 check-status conflict."},
+    {"id": "R3-REAL-017", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B1", "line_start": 161, "line_end": 207, "rationale": "A historical real root-cause section contains bounded prose and fenced fields but no exact status conflict."},
+    {"id": "R3-REAL-018", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-B1", "line_start": 208, "line_end": 223, "rationale": "A historical real privacy section contains no mechanically conflicting check status."},
+    {"id": "R3-REAL-019", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-C2", "line_start": 7, "line_end": 21, "rationale": "A corrected real report note contains superseded narrative but no exact R3 identity/status conflict."},
+    {"id": "R3-REAL-020", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-C2", "line_start": 22, "line_end": 41, "rationale": "A real request-identity table contains measurement states, not exact PASS/NOT RUN check pairs."},
+    {"id": "R3-REAL-021", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-C2", "line_start": 81, "line_end": 101, "rationale": "A real weighted classification section contains no exact R3 conflict."},
+    {"id": "R3-REAL-022", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-C2", "line_start": 137, "line_end": 172, "rationale": "A real hypothesis and root-cause section uses verdict vocabulary outside the R3 grammar."},
+    {"id": "R3-REAL-023", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-C1", "line_start": 66, "line_end": 103, "rationale": "A historical real dominant-structure section contains no exact PASS/NOT RUN surface conflict."},
+    {"id": "R3-REAL-024", "rule": "R3_PASS_NOT_RUN_CONFLICT", "source_id": "SRC-D1", "line_start": 176, "line_end": 199, "rationale": "A historical real terminal-attribution section has one disposition narrative and no exact R3 conflict."},
+
+    {"id": "R4-REAL-001", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-A1", "line_start": 45, "line_end": 53, "rationale": "A real explanatory list names terminal fields in prose but contains no conflicting direct assignments."},
+    {"id": "R4-REAL-002", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-A1", "line_start": 118, "line_end": 133, "rationale": "A real table reports invocation outcomes and must not be treated as duplicate terminal fields."},
+    {"id": "R4-REAL-003", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-A1", "line_start": 142, "line_end": 153, "rationale": "Real error-ledger labels are non-terminal fields and do not conflict."},
+    {"id": "R4-REAL-004", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-A1", "line_start": 168, "line_end": 198, "rationale": "A real required-results section contains one direct FINAL_DISPOSITION value and no conflicting duplicate."},
+    {"id": "R4-REAL-005", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-B2", "line_start": 46, "line_end": 76, "rationale": "A real schema table includes status language but no duplicate direct terminal field assignment."},
+    {"id": "R4-REAL-006", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-B2", "line_start": 148, "line_end": 160, "rationale": "A real verdict table is intentionally outside the direct terminal-field grammar."},
+    {"id": "R4-REAL-007", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-B1", "line_start": 161, "line_end": 207, "rationale": "A historical real root-cause section uses fenced and non-terminal fields without a direct duplicate conflict."},
+    {"id": "R4-REAL-008", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-C2", "line_start": 81, "line_end": 101, "rationale": "A real mechanism assignment is not a terminal field and appears without conflicting terminal duplicates."},
+    {"id": "R4-REAL-009", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-C1", "line_start": 49, "line_end": 65, "rationale": "A historical real mechanism assignment is non-terminal and must remain clean."},
+    {"id": "R4-REAL-010", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-C2", "line_start": 239, "line_end": 256, "rationale": "A real correction comparison presents old and new outcomes in a table, not conflicting direct field assignments."},
+    {"id": "R4-REAL-011", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-D2", "line_start": 202, "line_end": 238, "rationale": "A real hypothesis table and fenced terminal narrative contain no conflicting direct terminal field assignments."},
+    {"id": "R4-REAL-012", "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT", "source_id": "SRC-D1", "line_start": 166, "line_end": 199, "rationale": "A historical real hypothesis and terminal-attribution section contains no duplicate direct terminal field conflict."}
+  ]
+}
