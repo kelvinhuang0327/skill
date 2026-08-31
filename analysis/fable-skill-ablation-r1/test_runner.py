@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -25,6 +26,25 @@ if SPEC is None or SPEC.loader is None:
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
+
+COMPILER_PATH = Path(__file__).with_name("build_epoch_manifest.py")
+COMPILER_SPEC = importlib.util.spec_from_file_location(
+    "fable_ablation_epoch_compiler", COMPILER_PATH
+)
+if COMPILER_SPEC is None or COMPILER_SPEC.loader is None:
+    raise RuntimeError(f"cannot import {COMPILER_PATH}")
+compiler = importlib.util.module_from_spec(COMPILER_SPEC)
+sys.modules[COMPILER_SPEC.name] = compiler
+COMPILER_SPEC.loader.exec_module(compiler)
+
+# The identity of the runner implementation these tests actually execute,
+# derived without calling the runner's own helper so the self-binding gate is
+# checked against an outside oracle rather than against itself.
+RUNNER_BYTES = RUNNER_PATH.read_bytes()
+ACTUAL_RUNNER_SHA256 = hashlib.sha256(RUNNER_BYTES).hexdigest()
+ACTUAL_RUNNER_BLOB_OID = hashlib.sha1(
+    b"blob " + str(len(RUNNER_BYTES)).encode("ascii") + b"\x00" + RUNNER_BYTES
+).hexdigest()
 
 
 FROZEN_DIMENSIONS = ("tools", "agents", "mcp_servers")
@@ -186,6 +206,49 @@ def provider_execution(
     return execution.sealed()
 
 
+def git_blob_oid(payload: bytes) -> str:
+    """Git's own blob id for exact bytes, independent of the runner's helper."""
+
+    result = subprocess.run(
+        ["git", "hash-object", "--stdin"],
+        input=payload,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"git hash-object failed: {result.stderr!r}")
+    return result.stdout.decode("ascii").strip()
+
+
+def final_runtime_authority(
+    *,
+    blob_oid: str | None = ACTUAL_RUNNER_BLOB_OID,
+    sha256: str | None = ACTUAL_RUNNER_SHA256,
+) -> dict[str, Any]:
+    """A final_runtime_authority block in the compiled manifest's own shape."""
+
+    def component(oid: str | None, digest: str | None) -> dict[str, Any]:
+        pinned = oid is not None and digest is not None
+        return {
+            "status": "PINNED" if pinned else "UNRESOLVED",
+            "blob_oid": oid,
+            "sha256": digest,
+        }
+
+    return {
+        "status": "PINNED",
+        "publication_state": "PUBLISHED_DESCENDANT_PINNED",
+        "commit": "1" * 40,
+        "tree": "2" * 40,
+        "components": {
+            "runner": component(blob_oid, sha256),
+            "controller": component("3" * 40, "d" * 64),
+            "sandbox": component("4" * 40, "e" * 64),
+        },
+    }
+
+
 def git(repository: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(repository), *args],
@@ -228,6 +291,7 @@ def synthetic_manifest(provider_binary: str = "provider-binary-must-not-run") ->
     ]
     return {
         "schedule": schedule,
+        "final_runtime_authority": final_runtime_authority(),
         "tasks": [
             {
                 "task_id": "A01",
@@ -543,14 +607,19 @@ class CanonicalHarnessTests(unittest.TestCase):
         )
 
     def _execute_offline_slot(
-        self, executor: Any, *, environment: Any = None, materializer: Any = None
+        self,
+        executor: Any,
+        *,
+        environment: Any = None,
+        materializer: Any = None,
+        manifest: Any = None,
     ) -> Any:
         def initialize(plan: Any) -> None:
             make_git_repository(Path(plan.workspace_path))
 
         with tempfile.TemporaryDirectory() as temporary:
             return runner.execute_manifest_slot(
-                synthetic_manifest(),
+                synthetic_manifest() if manifest is None else manifest,
                 "s01-A01-r0-OFF",
                 workspace_parent=temporary,
                 reference_events=[init_event()],
@@ -1131,6 +1200,271 @@ class CanonicalHarnessTests(unittest.TestCase):
         )
         json.dumps(evidence.as_record(), allow_nan=False)
 
+
+    def _binding_blocked_evidence(self, manifest: Any) -> tuple[Any, list[Any]]:
+        """Run one slot whose provider executor must never be reached."""
+
+        calls: list[Any] = []
+
+        def forbidden_executor(invocation: Any) -> Any:
+            calls.append(invocation)
+            raise AssertionError("provider executor reached with an unbound runner")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = runner.execute_manifest_slot(
+                manifest,
+                "s01-A01-r0-OFF",
+                workspace_parent=temporary,
+                reference_events=[init_event()],
+                materializer=lambda plan: make_git_repository(
+                    Path(plan.workspace_path)
+                ),
+                executor=forbidden_executor,
+                opaque_id_factory=lambda: "00112233445566778899aabbccddeeff",
+            )
+        return evidence, calls
+
+    def _assert_closed_before_provider(
+        self, evidence: Any, calls: list[Any], state: str
+    ) -> None:
+        self.assertEqual(calls, [])
+        self.assertFalse(evidence.executor_called)
+        self.assertIsNone(evidence.provider_execution)
+        self.assertFalse(evidence.run_countable)
+        self.assertFalse(evidence.runner_self_binding.passed)
+        self.assertEqual(evidence.runner_self_binding.state, state)
+        json.dumps(evidence.as_record(), allow_nan=False)
+
+    def test_38_executing_runner_binds_to_the_final_runtime_authority_pin(self) -> None:
+        derived = runner.derive_executing_runner_identity()
+        self.assertIsNone(derived["error"])
+        self.assertEqual(Path(derived["source_path"]), RUNNER_PATH.resolve())
+        self.assertEqual(derived["sha256"], ACTUAL_RUNNER_SHA256)
+        # The blob identity is Git's, not a private digest scheme.
+        self.assertEqual(derived["blob_oid"], ACTUAL_RUNNER_BLOB_OID)
+        self.assertEqual(derived["blob_oid"], git_blob_oid(RUNNER_BYTES))
+
+        # The supplied pin is validated in the compiled manifest's own shape,
+        # so the gate reuses that identity contract instead of adding one.
+        authority = final_runtime_authority()
+        self.assertEqual(
+            compiler._normalize_final_runtime(
+                compiler._final_runtime_input(authority)
+            ),
+            authority,
+        )
+
+        binding = runner.evaluate_runner_self_binding(synthetic_manifest())
+        self.assertTrue(binding.passed, binding.reasons)
+        self.assertEqual(binding.state, runner.RUNNER_BINDING_BOUND)
+        self.assertEqual(binding.reasons, ())
+        self.assertEqual(binding.actual_blob_oid, binding.supplied_blob_oid)
+        self.assertEqual(binding.actual_sha256, binding.supplied_sha256)
+
+        calls: list[Any] = []
+
+        def counting_executor(invocation: Any) -> Any:
+            calls.append(invocation)
+            return self._complete_execution(invocation)
+
+        evidence = self._execute_offline_slot(counting_executor)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(evidence.runner_self_binding.passed)
+        self.assertTrue(evidence.executor_called)
+        self.assertTrue(evidence.run_countable, evidence.purity.reasons)
+        json.dumps(evidence.as_record(), allow_nan=False)
+
+    def test_39_missing_supplied_runner_identity_fails_before_the_provider(self) -> None:
+        absent = synthetic_manifest()
+        del absent["final_runtime_authority"]
+
+        no_components = synthetic_manifest()
+        del no_components["final_runtime_authority"]["components"]
+
+        no_runner = synthetic_manifest()
+        del no_runner["final_runtime_authority"]["components"]["runner"]
+
+        unresolved = synthetic_manifest()
+        unresolved["final_runtime_authority"]["components"]["runner"] = {
+            "status": "UNRESOLVED",
+            "blob_oid": None,
+            "sha256": None,
+        }
+
+        null_sha = synthetic_manifest()
+        null_sha["final_runtime_authority"]["components"]["runner"]["sha256"] = None
+
+        malformed = synthetic_manifest()
+        malformed["final_runtime_authority"]["components"]["runner"][
+            "blob_oid"
+        ] = "not-a-git-object-id"
+
+        not_an_object = synthetic_manifest()
+        not_an_object["final_runtime_authority"] = "PINNED"
+
+        cases = (
+            ("authority_absent", absent, "final_runtime_authority_absent"),
+            (
+                "components_absent",
+                no_components,
+                "final_runtime_authority_components_absent",
+            ),
+            (
+                "runner_component_absent",
+                no_runner,
+                "final_runtime_authority_runner_component_absent",
+            ),
+            ("not_pinned", unresolved, "supplied_runner_identity_not_pinned"),
+            ("sha256_absent", null_sha, "supplied_runner_sha256_absent"),
+            ("blob_oid_malformed", malformed, "supplied_runner_blob_oid_malformed"),
+            (
+                "authority_not_an_object",
+                not_an_object,
+                "final_runtime_authority_is_not_an_object",
+            ),
+        )
+        for label, manifest, reason in cases:
+            with self.subTest(case=label):
+                binding = runner.evaluate_runner_self_binding(manifest)
+                self.assertFalse(binding.passed)
+                self.assertEqual(
+                    binding.state, runner.RUNNER_BINDING_SUPPLIED_MISSING
+                )
+                self.assertIn(reason, binding.reasons)
+                # An unusable pin is never silently completed from the runner.
+                self.assertIsNone(binding.supplied_blob_oid)
+                self.assertIsNone(binding.supplied_sha256)
+                # The executing runner stays observable; only the pin is absent.
+                self.assertEqual(binding.actual_sha256, ACTUAL_RUNNER_SHA256)
+
+                evidence, calls = self._binding_blocked_evidence(manifest)
+                self._assert_closed_before_provider(
+                    evidence, calls, runner.RUNNER_BINDING_SUPPLIED_MISSING
+                )
+
+    def test_40_unavailable_actual_runner_identity_fails_before_the_provider(self) -> None:
+        manifest = synthetic_manifest()
+        original = runner.__file__
+
+        with tempfile.TemporaryDirectory() as temporary:
+            removed_source = str(Path(temporary) / "runner-was-removed.py")
+            cases = (
+                (
+                    "source_unreadable",
+                    removed_source,
+                    "runner_source_unreadable:FileNotFoundError",
+                ),
+                ("module_file_absent", None, "runner_source_path_unresolved"),
+            )
+            for label, replacement, reason in cases:
+                with self.subTest(case=label):
+                    try:
+                        if replacement is None:
+                            del runner.__file__
+                        else:
+                            runner.__file__ = replacement
+                        binding = runner.evaluate_runner_self_binding(manifest)
+                        evidence, calls = self._binding_blocked_evidence(manifest)
+                    finally:
+                        runner.__file__ = original
+
+                    self.assertFalse(binding.passed)
+                    self.assertEqual(
+                        binding.state, runner.RUNNER_BINDING_ACTUAL_UNAVAILABLE
+                    )
+                    self.assertIn(reason, binding.reasons)
+                    # Absence is never equality: no identity is invented.
+                    self.assertIsNone(binding.actual_blob_oid)
+                    self.assertIsNone(binding.actual_sha256)
+                    # The pin was readable; only the executing runner was not.
+                    self.assertEqual(binding.supplied_sha256, ACTUAL_RUNNER_SHA256)
+
+                    self._assert_closed_before_provider(
+                        evidence, calls, runner.RUNNER_BINDING_ACTUAL_UNAVAILABLE
+                    )
+
+        self.assertEqual(runner.__file__, original)
+        self.assertTrue(runner.evaluate_runner_self_binding(manifest).passed)
+
+    def test_41_supplied_runner_identity_mismatch_fails_before_the_provider(self) -> None:
+        other_blob_oid = "0" * 40
+        other_sha256 = "0" * 64
+        self.assertNotEqual(other_blob_oid, ACTUAL_RUNNER_BLOB_OID)
+        self.assertNotEqual(other_sha256, ACTUAL_RUNNER_SHA256)
+
+        cases = (
+            (
+                "blob_oid_differs",
+                other_blob_oid,
+                ACTUAL_RUNNER_SHA256,
+                ("runner_blob_oid_mismatch",),
+            ),
+            (
+                "sha256_differs",
+                ACTUAL_RUNNER_BLOB_OID,
+                other_sha256,
+                ("runner_sha256_mismatch",),
+            ),
+            (
+                "both_differ",
+                other_blob_oid,
+                other_sha256,
+                ("runner_blob_oid_mismatch", "runner_sha256_mismatch"),
+            ),
+        )
+        for label, blob_oid, sha256, reasons in cases:
+            with self.subTest(case=label):
+                manifest = synthetic_manifest()
+                manifest["final_runtime_authority"] = final_runtime_authority(
+                    blob_oid=blob_oid, sha256=sha256
+                )
+                binding = runner.evaluate_runner_self_binding(manifest)
+                self.assertFalse(binding.passed)
+                self.assertEqual(binding.state, runner.RUNNER_BINDING_MISMATCH)
+                self.assertEqual(binding.reasons, reasons)
+                self.assertEqual(binding.actual_blob_oid, ACTUAL_RUNNER_BLOB_OID)
+                self.assertEqual(binding.actual_sha256, ACTUAL_RUNNER_SHA256)
+                self.assertEqual(binding.supplied_blob_oid, blob_oid)
+                self.assertEqual(binding.supplied_sha256, sha256)
+
+                evidence, calls = self._binding_blocked_evidence(manifest)
+                self._assert_closed_before_provider(
+                    evidence, calls, runner.RUNNER_BINDING_MISMATCH
+                )
+
+    def test_42_historical_canonical_harness_pin_does_not_bind_the_runner(self) -> None:
+        historical = compiler.CANONICAL_HARNESS["runner"]["sha256"]
+        # The frozen base scaffold is by design a different runner than the one
+        # executing this epoch; that difference is not a binding failure.
+        self.assertNotEqual(historical, ACTUAL_RUNNER_SHA256)
+
+        manifest = synthetic_manifest("definitely-not-an-installed-provider")
+        manifest["canonical_harness"] = copy.deepcopy(compiler.CANONICAL_HARNESS)
+
+        binding = runner.evaluate_runner_self_binding(manifest)
+        self.assertTrue(binding.passed, binding.reasons)
+        self.assertEqual(binding.state, runner.RUNNER_BINDING_BOUND)
+        self.assertEqual(binding.actual_sha256, ACTUAL_RUNNER_SHA256)
+        self.assertNotEqual(binding.supplied_sha256, historical)
+
+        calls: list[Any] = []
+
+        def counting_executor(invocation: Any) -> Any:
+            calls.append(invocation)
+            return self._complete_execution(invocation)
+
+        evidence = self._execute_offline_slot(counting_executor, manifest=manifest)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(evidence.executor_called)
+        self.assertTrue(evidence.runner_self_binding.passed)
+        self.assertTrue(evidence.run_countable, evidence.purity.reasons)
+        json.dumps(evidence.as_record(), allow_nan=False)
+
+        # Absent the historical pin the binding is unchanged: the executable
+        # owner is final_runtime_authority alone.
+        without_history = synthetic_manifest()
+        self.assertNotIn("canonical_harness", without_history)
+        self.assertTrue(runner.evaluate_runner_self_binding(without_history).passed)
 
 
 if __name__ == "__main__":

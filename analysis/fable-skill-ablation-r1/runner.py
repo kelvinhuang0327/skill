@@ -30,6 +30,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, Union
 
 FABLE_SKILL_IDENTITY = "fable-method"
 _OPAQUE_ID_RE = re.compile(r"[0-9a-f]{32,64}")
+_GIT_OID_RE = re.compile(r"[0-9a-f]{40}")
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 _MISSING = object()
 _INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers", "plugins"})
 _DIMENSION_ALIASES = {
@@ -107,6 +109,21 @@ GLOBAL_INSTRUCTION_SURFACE_DIMENSIONS = (
     "user_rules",
     "instruction_sources",
 )
+
+# Runner self-binding states.  ``final_runtime_authority`` names the executable
+# owner of an epoch, so the runner that is actually executing must prove it is
+# that pinned component before any provider call.  Absence is never equality: a
+# supplied identity that is missing or unusable and an actual identity that
+# cannot be derived are each distinct from an outright mismatch.
+RUNNER_BINDING_BOUND = "BOUND"
+RUNNER_BINDING_SUPPLIED_MISSING = "SUPPLIED_IDENTITY_MISSING"
+RUNNER_BINDING_ACTUAL_UNAVAILABLE = "ACTUAL_IDENTITY_UNAVAILABLE"
+RUNNER_BINDING_MISMATCH = "ACTUAL_SUPPLIED_MISMATCH"
+
+# The final_runtime_authority component this runner is required to be, and the
+# manifest status that makes a component identity usable at all.
+_RUNNER_COMPONENT = "runner"
+_IDENTITY_PINNED = "PINNED"
 
 
 class HarnessContractError(ValueError):
@@ -562,6 +579,32 @@ class SurfaceAudit:
 
 
 @dataclass(frozen=True)
+class RunnerSelfBinding:
+    """Whether the executing runner is the runner final_runtime_authority pins."""
+
+    passed: bool = False
+    state: str = RUNNER_BINDING_ACTUAL_UNAVAILABLE
+    source_path: str | None = None
+    actual_blob_oid: str | None = None
+    actual_sha256: str | None = None
+    supplied_blob_oid: str | None = None
+    supplied_sha256: str | None = None
+    reasons: tuple[str, ...] = ()
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "state": self.state,
+            "source_path": self.source_path,
+            "actual_blob_oid": self.actual_blob_oid,
+            "actual_sha256": self.actual_sha256,
+            "supplied_blob_oid": self.supplied_blob_oid,
+            "supplied_sha256": self.supplied_sha256,
+            "reasons": list(self.reasons),
+        }
+
+
+@dataclass(frozen=True)
 class TreatmentSurface:
     """The one declared surface on which the two arms are allowed to differ.
 
@@ -758,6 +801,7 @@ class RunEvidence:
     condition: str
     task_id: str
     model_invocation: ModelInvocation
+    runner_self_binding: RunnerSelfBinding
     surface_audit: SurfaceAudit
     purity: PurityResult
     git_state: GitState
@@ -775,6 +819,7 @@ class RunEvidence:
                 "task_id": self.task_id,
             },
             "model_visible": self.model_invocation.model_visible_record(),
+            "runner_self_binding": self.runner_self_binding.as_record(),
             "surface_audit": self.surface_audit.as_record(),
             "purity": self.purity.as_record(),
             "git_state": self.git_state.as_record(),
@@ -886,6 +931,159 @@ def load_manifest(path: str | os.PathLike[str]) -> dict[str, Any]:
     if not isinstance(manifest, dict):
         raise HarnessContractError("manifest root must be an object")
     return manifest
+
+
+def _git_blob_oid(payload: bytes) -> str:
+    """The Git blob object id of exact bytes, matching ``git hash-object``."""
+
+    header = f"blob {len(payload)}".encode("ascii") + b"\x00"
+    return hashlib.sha1(header + payload).hexdigest()
+
+
+def _runner_source_path() -> Path | None:
+    """The source file of the runner implementation that is executing now."""
+
+    source = globals().get("__file__")
+    if not isinstance(source, str) or not source:
+        return None
+    try:
+        return Path(source).resolve()
+    except (OSError, RuntimeError):
+        return Path(source)
+
+
+def derive_executing_runner_identity() -> dict[str, Any]:
+    """Derive blob/sha256 identity from the runner implementation executing now.
+
+    The identity is read from this module's own source, never from a
+    caller-supplied value, so a manifest cannot assert the fact it is meant to
+    prove.  An identity that cannot be read is reported with an explicit error
+    rather than defaulted to any value.
+    """
+
+    source_path = _runner_source_path()
+    if source_path is None:
+        return {
+            "source_path": None,
+            "blob_oid": None,
+            "sha256": None,
+            "error": "runner_source_path_unresolved",
+        }
+    try:
+        payload = source_path.read_bytes()
+    except (OSError, ValueError) as exc:
+        return {
+            "source_path": str(source_path),
+            "blob_oid": None,
+            "sha256": None,
+            "error": f"runner_source_unreadable:{type(exc).__name__}",
+        }
+    return {
+        "source_path": str(source_path),
+        "blob_oid": _git_blob_oid(payload),
+        "sha256": _sha256_bytes(payload),
+        "error": None,
+    }
+
+
+def _supplied_runner_identity(
+    manifest: Mapping[str, Any],
+) -> tuple[tuple[str, str] | None, str | None]:
+    """The runner identity final_runtime_authority pins, or why it is unusable."""
+
+    authority = manifest.get("final_runtime_authority")
+    if authority is None:
+        return None, "final_runtime_authority_absent"
+    if not isinstance(authority, Mapping):
+        return None, "final_runtime_authority_is_not_an_object"
+    components = authority.get("components")
+    if components is None:
+        return None, "final_runtime_authority_components_absent"
+    if not isinstance(components, Mapping):
+        return None, "final_runtime_authority_components_is_not_an_object"
+    component = components.get(_RUNNER_COMPONENT)
+    if component is None:
+        return None, "final_runtime_authority_runner_component_absent"
+    if not isinstance(component, Mapping):
+        return None, "final_runtime_authority_runner_component_is_not_an_object"
+    if component.get("status") != _IDENTITY_PINNED:
+        return None, "supplied_runner_identity_not_pinned"
+
+    blob_oid = component.get("blob_oid")
+    sha256 = component.get("sha256")
+    for label, value in (("blob_oid", blob_oid), ("sha256", sha256)):
+        if value is None:
+            return None, f"supplied_runner_{label}_absent"
+        if not isinstance(value, str):
+            return None, f"supplied_runner_{label}_is_not_a_string"
+    if not _GIT_OID_RE.fullmatch(blob_oid):
+        return None, "supplied_runner_blob_oid_malformed"
+    if not _SHA256_HEX_RE.fullmatch(sha256):
+        return None, "supplied_runner_sha256_malformed"
+    return (blob_oid, sha256), None
+
+
+def evaluate_runner_self_binding(manifest: Mapping[str, Any]) -> RunnerSelfBinding:
+    """Bind the executing runner to the runner final_runtime_authority pins.
+
+    ``canonical_harness`` is deliberately not consulted: it freezes the
+    historical base scaffold and may legitimately differ from the runner that
+    executes an epoch, whose executable owner is ``final_runtime_authority``.
+    A supplied identity that is missing or unusable, an actual identity that
+    cannot be derived, and an actual identity that differs from the supplied one
+    are three distinct states, and none of them is provider-call eligible.
+    """
+
+    actual = derive_executing_runner_identity()
+    supplied, supplied_reason = _supplied_runner_identity(manifest)
+
+    reasons: list[str] = []
+    if supplied_reason is not None:
+        reasons.append(supplied_reason)
+    if actual["error"] is not None:
+        reasons.append(actual["error"])
+
+    observed: dict[str, Any] = {
+        "source_path": actual["source_path"],
+        "actual_blob_oid": actual["blob_oid"],
+        "actual_sha256": actual["sha256"],
+        "supplied_blob_oid": None if supplied is None else supplied[0],
+        "supplied_sha256": None if supplied is None else supplied[1],
+    }
+
+    if supplied is None:
+        return RunnerSelfBinding(
+            passed=False,
+            state=RUNNER_BINDING_SUPPLIED_MISSING,
+            reasons=tuple(reasons),
+            **observed,
+        )
+    if actual["blob_oid"] is None or actual["sha256"] is None:
+        return RunnerSelfBinding(
+            passed=False,
+            state=RUNNER_BINDING_ACTUAL_UNAVAILABLE,
+            reasons=tuple(reasons),
+            **observed,
+        )
+
+    mismatches: list[str] = []
+    if actual["blob_oid"] != supplied[0]:
+        mismatches.append("runner_blob_oid_mismatch")
+    if actual["sha256"] != supplied[1]:
+        mismatches.append("runner_sha256_mismatch")
+    if mismatches:
+        return RunnerSelfBinding(
+            passed=False,
+            state=RUNNER_BINDING_MISMATCH,
+            reasons=tuple(reasons + mismatches),
+            **observed,
+        )
+    return RunnerSelfBinding(
+        passed=True,
+        state=RUNNER_BINDING_BOUND,
+        reasons=tuple(reasons),
+        **observed,
+    )
 
 
 def _manifest_schedule(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -1837,11 +2035,14 @@ def execute_manifest_slot(
 ) -> RunEvidence:
     """Materialize and execute one slot through injected interfaces only.
 
-    Invalid reference evidence or model-visible leakage prevents executor
-    invocation.  Provider failures retain a typed execution record; unresolved
-    Git state and any provider/purity failure make the observation non-countable.
+    A runner that cannot prove it is the component pinned by
+    ``final_runtime_authority``, invalid reference evidence, or model-visible
+    leakage prevents executor invocation.  Provider failures retain a typed
+    execution record; unresolved Git state and any provider/purity failure make
+    the observation non-countable.
     """
 
+    runner_self_binding = evaluate_runner_self_binding(manifest)
     slot = select_manifest_slot(manifest, orchestrator_run_id)
     workspace, opaque_identity = create_condition_neutral_workspace(
         workspace_parent, opaque_id_factory
@@ -1886,7 +2087,12 @@ def execute_manifest_slot(
     executor_called = False
     provider_execution: ProviderExecution | None = None
     run_records: tuple[Mapping[str, Any], ...] = ()
-    if surface_audit.passed and reference_preflight_pass and materializer_error is None:
+    if (
+        runner_self_binding.passed
+        and surface_audit.passed
+        and reference_preflight_pass
+        and materializer_error is None
+    ):
         executor_called = True
         try:
             candidate = executor(invocation)
@@ -1913,7 +2119,8 @@ def execute_manifest_slot(
     )
     git_state = capture_git_state(workspace)
     countable = (
-        purity.run_countable
+        runner_self_binding.passed
+        and purity.run_countable
         and git_state.state_resolved
         and executor_called
         and provider_execution is not None
@@ -1927,6 +2134,7 @@ def execute_manifest_slot(
         condition=slot.condition,
         task_id=slot.task_id,
         model_invocation=invocation,
+        runner_self_binding=runner_self_binding,
         surface_audit=surface_audit,
         purity=purity,
         git_state=git_state,
@@ -1955,7 +2163,12 @@ __all__ = [
     "ProviderExecutor",
     "ProviderInvocationEvidence",
     "PurityResult",
+    "RUNNER_BINDING_ACTUAL_UNAVAILABLE",
+    "RUNNER_BINDING_BOUND",
+    "RUNNER_BINDING_MISMATCH",
+    "RUNNER_BINDING_SUPPLIED_MISSING",
     "RunEvidence",
+    "RunnerSelfBinding",
     "SKILL_INVENTORY_DIMENSION",
     "SURFACE_ALLOWED_TREATMENT_DELTA",
     "SURFACE_DIFFERENT",
@@ -1972,8 +2185,10 @@ __all__ = [
     "capture_git_state",
     "create_condition_neutral_workspace",
     "default_treatment_surface",
+    "derive_executing_runner_identity",
     "evaluate_global_instruction_surface_identity",
     "evaluate_purity",
+    "evaluate_runner_self_binding",
     "execute_manifest_slot",
     "load_manifest",
     "parse_init_events",
