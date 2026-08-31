@@ -28,8 +28,13 @@ except ModuleNotFoundError:  # Direct use with this directory on sys.path.
     import runner as harness  # type: ignore[no-redef]
 
 
+# The sibling harness already resolved the one canonical persisted USD
+# representation authority; reuse that exact module rather than formatting
+# money locally.
+_usd = harness._load_usd_authority()
+
 ADAPTER_NAME = "fable-claude-stream-json"
-ADAPTER_VERSION = "2"
+ADAPTER_VERSION = "3"
 CTO_MODEL_ID = "claude-sonnet-5"
 CTO_EFFORT = "medium"
 CTO_MAX_BUDGET_USD = Decimal("2.0000000")
@@ -37,6 +42,11 @@ CTO_MAX_TURNS = 32
 CTO_TOOLSET = ("Bash", "Read", "Edit", "Write", "Skill")
 CTO_PERMISSION_MODE = "bypassPermissions"
 FABLE_CARRIER_IDENTITY = "fable-method"
+SANDBOX_PROFILE_PATH = Path(__file__).with_name("claude-runtime.sb")
+SANDBOX_POLICY_IDENTITY_PREFIX = "sha256:"
+_SANDBOX_POLICY_IDENTITY_RE = re.compile(
+    re.escape(SANDBOX_POLICY_IDENTITY_PREFIX) + r"[0-9a-f]{64}"
+)
 PROHIBITED_FLAGS = frozenset(
     {
         "--continue",
@@ -49,7 +59,11 @@ PROHIBITED_FLAGS = frozenset(
     }
 )
 
-_OPAQUE_SESSION_RE = re.compile(r"session-[0-9a-f]{32,64}")
+# The epoch controller accepts exactly 32 lowercase hex.  Accepting a wider
+# token here would only defer a controller rejection until after preflight.
+_OPAQUE_SESSION_RE = re.compile(
+    r"session-[0-9a-f]{%d}" % harness.OPAQUE_SESSION_TOKEN_HEX_WIDTH
+)
 _SECRET_KEY_RE = re.compile(
     r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|AUTHORIZATION)(?:$|_)",
     re.IGNORECASE,
@@ -81,8 +95,31 @@ def _unique(errors: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(errors))
 
 
+def observed_sandbox_policy_identity(
+    profile_path: str | os.PathLike[str] = SANDBOX_PROFILE_PATH,
+) -> str:
+    """Bind the sandbox policy identity to the actual profile bytes.
+
+    A caller-supplied label proves nothing about what the kernel will enforce,
+    so the identity is the SHA256 of the bytes that will really be loaded.
+    """
+
+    try:
+        data = Path(profile_path).read_bytes()
+    except OSError as exc:
+        raise harness.HarnessContractError(
+            f"sandbox policy bytes are unreadable: {exc}"
+        ) from exc
+    return f"{SANDBOX_POLICY_IDENTITY_PREFIX}{_sha256(data)}"
+
+
 def build_cto_argv(provider_executable: str) -> tuple[str, ...]:
-    """Return the CTO-fixed logical invocation with no positional prompt."""
+    """Return the CTO-fixed *logical* provider argv, with no sandbox prefix.
+
+    The physical process argv is built separately by
+    ``epoch_controller.build_sandboxed_command``; this lane must never be
+    redefined as the sandbox-prefixed command.
+    """
 
     return (
         provider_executable,
@@ -99,7 +136,7 @@ def build_cto_argv(provider_executable: str) -> tuple[str, ...]:
         "--effort",
         CTO_EFFORT,
         "--max-budget-usd",
-        str(CTO_MAX_BUDGET_USD),
+        _usd.canonical_usd_text(CTO_MAX_BUDGET_USD),
         "--max-turns",
         str(CTO_MAX_TURNS),
         "--no-session-persistence",
@@ -164,7 +201,13 @@ class ClaudeProviderPolicy:
             raise harness.HarnessContractError("fallback model substitution is prohibited")
         if self.effort != CTO_EFFORT:
             raise harness.HarnessContractError("provider effort must remain CTO-fixed")
-        if self.max_budget_usd != CTO_MAX_BUDGET_USD or str(self.max_budget_usd) != str(
+        try:
+            budget_text = _usd.canonical_usd_text(self.max_budget_usd)
+        except _usd.CanonicalUsdError as exc:
+            raise harness.HarnessContractError(
+                f"provider max budget is not canonical persisted USD: {exc}"
+            ) from exc
+        if self.max_budget_usd != CTO_MAX_BUDGET_USD or budget_text != _usd.canonical_usd_text(
             CTO_MAX_BUDGET_USD
         ):
             raise harness.HarnessContractError("provider max budget decimal must remain exact")
@@ -199,8 +242,11 @@ class ClaudeProviderPolicy:
             raise harness.HarnessContractError("expected inventories must contain strings")
         if any(len(set(inventory)) != len(inventory) for inventory in inventories):
             raise harness.HarnessContractError("expected inventories must be unique")
-        if not self.sandbox_policy_identity:
-            raise harness.HarnessContractError("sandbox policy identity must be pinned")
+        if _SANDBOX_POLICY_IDENTITY_RE.fullmatch(self.sandbox_policy_identity or "") is None:
+            raise harness.HarnessContractError(
+                "sandbox policy identity must bind observed profile bytes as "
+                f"{SANDBOX_POLICY_IDENTITY_PREFIX}<sha256>"
+            )
         if any(not isinstance(key, str) or not key for key in self.secret_environment_keys):
             raise harness.HarnessContractError("secret environment keys must be strings")
 
@@ -211,7 +257,7 @@ class ClaudeProviderPolicy:
             "argv_template": list(self.argv_template),
             "model_id": self.model_id,
             "effort": self.effort,
-            "max_budget_usd": str(self.max_budget_usd),
+            "max_budget_usd": _usd.canonical_usd_text(self.max_budget_usd),
             "max_turns": self.max_turns,
             "timeout_seconds": self.timeout_seconds,
             "toolset": list(self.toolset),
@@ -249,7 +295,7 @@ def make_cto_policy(
     expected_agents: Sequence[str] = (),
     expected_mcp_servers: Sequence[str] = (),
     expected_plugins: Sequence[str] = (),
-    sandbox_policy_identity: str = "opaque-session-workspace-v1",
+    sandbox_policy_identity: str | None = None,
     secret_environment_keys: Sequence[str] = (),
     termination_grace_seconds: float = 2.0,
 ) -> ClaudeProviderPolicy:
@@ -270,7 +316,11 @@ def make_cto_policy(
         expected_agents=tuple(expected_agents),
         expected_mcp_servers=tuple(expected_mcp_servers),
         expected_plugins=tuple(expected_plugins),
-        sandbox_policy_identity=sandbox_policy_identity,
+        sandbox_policy_identity=(
+            observed_sandbox_policy_identity()
+            if sandbox_policy_identity is None
+            else sandbox_policy_identity
+        ),
         secret_environment_keys=frozenset(secret_environment_keys),
         termination_grace_seconds=termination_grace_seconds,
     )
@@ -406,7 +456,7 @@ def _validate_preflight(
         errors.append("requested_model_mismatch_or_fallback_substitution")
     if _value_after(invocation.argv, "--effort") != policy.effort:
         errors.append("invocation_effort_policy_mismatch")
-    if _value_after(invocation.argv, "--max-budget-usd") != str(
+    if _value_after(invocation.argv, "--max-budget-usd") != _usd.canonical_usd_text(
         policy.max_budget_usd
     ):
         errors.append("invocation_budget_policy_mismatch")
@@ -426,6 +476,28 @@ def _validate_preflight(
     if binary.as_record() != policy.provider_binary.as_record():
         errors.append("provider_binary_identity_mismatch")
     return _unique(errors)
+
+
+def _no_sanctioned_process_factory(*_args: Any, **_kwargs: Any) -> Any:
+    """The refusing default: there is no implicit unsandboxed launch path."""
+
+    raise harness.HarnessContractError(
+        "an explicit sandboxed process factory is required; unsandboxed "
+        "subprocess.Popen is not a production default"
+    )
+
+
+#: Sentinel default.  Production supplies the sandboxed launcher built by
+#: ``epoch_provider_composition``; tests supply a fake process factory.  Either
+#: way the caller must choose, and choosing nothing fails before any spawn.
+REQUIRED_PROCESS_FACTORY: Callable[..., Any] = _no_sanctioned_process_factory
+
+
+def _require_explicit_process_factory(popen_factory: Callable[..., Any]) -> None:
+    if popen_factory is REQUIRED_PROCESS_FACTORY:
+        raise harness.HarnessContractError(
+            "no explicit process factory was supplied; refusing before spawn"
+        )
 
 
 def _empty_process(policy: ClaudeProviderPolicy, status: str) -> harness.ProcessEvidence:
@@ -893,7 +965,7 @@ def execute_claude(
     invocation: harness.ModelInvocation,
     policy: ClaudeProviderPolicy,
     *,
-    popen_factory: Callable[..., Any] = subprocess.Popen,
+    popen_factory: Callable[..., Any] = REQUIRED_PROCESS_FACTORY,
     binary_identity_resolver: Callable[[str], harness.ProviderBinaryIdentity] = (
         resolve_provider_binary_identity
     ),
@@ -901,9 +973,17 @@ def execute_claude(
         current_adapter_identity
     ),
     group_signal: Callable[[int, int], Any] = os.killpg,
+    sandbox_identity_resolver: Callable[[], Mapping[str, Any] | None] | None = None,
 ) -> harness.ProviderExecution:
-    """Execute one exact provider call and always return sealed evidence."""
+    """Execute one exact provider call and always return sealed evidence.
 
+    ``popen_factory`` has no implicit production default: omitting it raises
+    before any identity resolution or spawn.  ``sandbox_identity_resolver``
+    lets the composition report the physical, sandbox-prefixed lane so both
+    argv lanes are sealed separately.
+    """
+
+    _require_explicit_process_factory(popen_factory)
     invocation_evidence, stdin_bytes, secret_values, invocation_errors = (
         _invocation_evidence(invocation, policy)
     )
@@ -989,6 +1069,24 @@ def execute_claude(
     errors.extend(policy_secret_errors)
     if safe_adapter != adapter_identity or safe_binary != binary_identity:
         errors.append("secret_value_redacted_from_provider_identity")
+    sandbox_identity: Mapping[str, Any] | None = None
+    if sandbox_identity_resolver is not None:
+        try:
+            observed = sandbox_identity_resolver()
+        except Exception as exc:
+            errors.append(f"sandbox_identity_resolution_failed:{type(exc).__name__}")
+        else:
+            if observed is None:
+                sandbox_identity = None
+            elif isinstance(observed, Mapping):
+                sandbox_identity = json.loads(
+                    _redact_secret_bytes(
+                        _canonical_json(dict(observed)), secret_values, "sandbox_identity"
+                    )[0]
+                )
+            else:
+                errors.append("sandbox_identity_not_a_mapping")
+
     execution = harness.ProviderExecution(
         adapter_identity=safe_adapter,
         provider_binary_identity=safe_binary,
@@ -1008,16 +1106,22 @@ def execute_claude(
         validation_errors=_unique(
             [harness._redact_text(error, secret_text) for error in errors]
         ),
+        sandbox_identity=sandbox_identity,
     )
     return execution.sealed()
 
 
 @dataclass(frozen=True)
 class ClaudeExecutor:
-    """Callable adapter suitable for ``ProviderExecutor`` injection."""
+    """Callable adapter suitable for ``ProviderExecutor`` injection.
+
+    Construction without an explicit process factory fails immediately, so an
+    executor that could reach an unsandboxed ``subprocess.Popen`` cannot even
+    be built, let alone called.
+    """
 
     policy: ClaudeProviderPolicy
-    popen_factory: Callable[..., Any] = subprocess.Popen
+    popen_factory: Callable[..., Any] = REQUIRED_PROCESS_FACTORY
     binary_identity_resolver: Callable[[str], harness.ProviderBinaryIdentity] = (
         resolve_provider_binary_identity
     )
@@ -1025,6 +1129,10 @@ class ClaudeExecutor:
         current_adapter_identity
     )
     group_signal: Callable[[int, int], Any] = os.killpg
+    sandbox_identity_resolver: Callable[[], Mapping[str, Any] | None] | None = None
+
+    def __post_init__(self) -> None:
+        _require_explicit_process_factory(self.popen_factory)
 
     def __call__(self, invocation: harness.ModelInvocation) -> harness.ProviderExecution:
         return execute_claude(
@@ -1034,6 +1142,7 @@ class ClaudeExecutor:
             binary_identity_resolver=self.binary_identity_resolver,
             adapter_identity_resolver=self.adapter_identity_resolver,
             group_signal=self.group_signal,
+            sandbox_identity_resolver=self.sandbox_identity_resolver,
         )
 
 
@@ -1071,6 +1180,13 @@ def _environment_fingerprints(
         for item in execution.invocation.environment
         if item.redacted is redacted
     }
+
+
+def _observed_policy_sha256(execution: harness.ProviderExecution) -> str | None:
+    if execution.sandbox_identity is None:
+        return None
+    value = execution.sandbox_identity.get("profile_sha256")
+    return value if isinstance(value, str) else None
 
 
 def _init_record(execution: harness.ProviderExecution) -> Mapping[str, Any] | None:
@@ -1145,6 +1261,27 @@ def compare_condition_neutral_evidence(
             and left_inventory == right_inventory
         )
 
+    # The physical lane is compared after the same opaque-root normalization as
+    # the logical lane, so two distinct session roots stay condition-neutral.
+    # An asymmetric lane -- one side sandboxed, the other not -- is a real
+    # difference and must fail rather than be ignored.
+    left_physical = left.physical_argv
+    right_physical = right.physical_argv
+    checks["physical_argv_lane_symmetric"] = (left_physical is None) == (
+        right_physical is None
+    )
+    checks["physical_argv_equal_after_opaque_root_normalization"] = (
+        left_physical is None and right_physical is None
+    ) or (
+        left_physical is not None
+        and right_physical is not None
+        and _normalize_opaque_root(left_physical, left.invocation.cwd)
+        == _normalize_opaque_root(right_physical, right.invocation.cwd)
+    )
+    checks["observed_sandbox_policy_bytes_equal"] = _observed_policy_sha256(
+        left
+    ) == _observed_policy_sha256(right)
+
     left_permission = None if left_init is None else _permission_from_init(left_init)
     right_permission = None if right_init is None else _permission_from_init(right_init)
     checks["actual_init_permission_mode_equal"] = (
@@ -1172,6 +1309,10 @@ def compare_condition_neutral_evidence(
 __all__ = [
     "ADAPTER_NAME",
     "ADAPTER_VERSION",
+    "REQUIRED_PROCESS_FACTORY",
+    "SANDBOX_POLICY_IDENTITY_PREFIX",
+    "SANDBOX_PROFILE_PATH",
+    "observed_sandbox_policy_identity",
     "CTO_EFFORT",
     "CTO_MAX_BUDGET_USD",
     "CTO_MAX_TURNS",

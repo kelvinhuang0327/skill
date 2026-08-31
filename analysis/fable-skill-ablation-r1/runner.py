@@ -16,20 +16,51 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import secrets
 import subprocess
+import sys
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence, Union
 
 
+def _load_usd_authority() -> Any:
+    """Resolve the one canonical persisted USD representation authority."""
+
+    for name in ("fable_epoch_manifest", "build_epoch_manifest"):
+        module = sys.modules.get(name)
+        if module is not None:
+            return module
+    path = Path(__file__).with_name("build_epoch_manifest.py")
+    spec = importlib.util.spec_from_file_location("fable_epoch_manifest", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"canonical USD representation authority missing: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["fable_epoch_manifest"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_usd = _load_usd_authority()
+
 FABLE_SKILL_IDENTITY = "fable-method"
-_OPAQUE_ID_RE = re.compile(r"[0-9a-f]{32,64}")
+
+# The run evidence schema now seals the logical and the physical argv lanes
+# separately, records observed sandbox identity, and persists derived USD in
+# the one canonical representation.  Condition identity stays orchestrator-side.
+RUN_EVIDENCE_SCHEMA = "FABLE_ABLATION_RUN_EVIDENCE/v2"
+
+# One opaque-session width across runner, adapter, and controller: the epoch
+# controller accepts exactly 32 lowercase hex, so nothing upstream may accept
+# a wider token the controller would later reject.
+OPAQUE_SESSION_TOKEN_HEX_WIDTH = 32
+_OPAQUE_ID_RE = re.compile(r"[0-9a-f]{%d}" % OPAQUE_SESSION_TOKEN_HEX_WIDTH)
 _MISSING = object()
 _INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers"})
 _DIMENSION_ALIASES = {
@@ -162,6 +193,22 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _persisted_usd(value: Decimal | None) -> tuple[str | None, str]:
+    """Render a derived USD amount in the one canonical persisted form.
+
+    Sealing must never raise, so a non-representable amount is reported as
+    such instead of being rounded or silently dropped; the provider-reported
+    raw value stays untouched in the raw stream and records.
+    """
+
+    if value is None:
+        return None, "ABSENT"
+    try:
+        return _usd.canonical_usd_text(value), "CANONICAL_USD"
+    except _usd.CanonicalUsdError:
+        return None, "NOT_REPRESENTABLE_IN_CANONICAL_USD"
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -334,6 +381,7 @@ class ProviderExecution:
     total_cost_usd: Decimal | None
     validation_errors: tuple[str, ...]
     evidence_sha256: str | None = None
+    sandbox_identity: Mapping[str, Any] | None = None
 
     @property
     def unique_assistant_message_ids(self) -> tuple[str, ...]:
@@ -341,13 +389,48 @@ class ProviderExecution:
 
         return tuple(dict.fromkeys(self.assistant_message_ids))
 
-    def _evidence_record(self) -> dict[str, Any]:
+    @property
+    def physical_argv(self) -> tuple[str, ...] | None:
+        """The sandbox-prefixed argv actually executed, when one was observed."""
+
+        if self.sandbox_identity is None:
+            return None
+        observed = self.sandbox_identity.get("physical_argv")
+        if not isinstance(observed, (list, tuple)):
+            return None
+        return tuple(str(part) for part in observed)
+
+    @property
+    def persisted_total_cost_usd(self) -> str | None:
+        """The derived cost in the one canonical persisted USD representation."""
+
+        return _persisted_usd(self.total_cost_usd)[0]
+
+    def _argv_lanes_record(self) -> dict[str, Any]:
+        physical = self.physical_argv
         return {
+            "logical": list(self.invocation.argv),
+            "logical_authority": "runner.ModelInvocation/ClaudeProviderPolicy",
+            "physical": None if physical is None else list(physical),
+            "physical_authority": "epoch_controller.build_sandboxed_command",
+            "physically_sandboxed": physical is not None,
+        }
+
+    def _evidence_record(self) -> dict[str, Any]:
+        persisted_cost, cost_representation = _persisted_usd(self.total_cost_usd)
+        return {
+            "schema": RUN_EVIDENCE_SCHEMA,
             "adapter_identity": self.adapter_identity.as_record(),
             "provider_binary_identity": self.provider_binary_identity.as_record(),
             "provider_policy_identity": self.provider_policy_identity,
             "provider_policy": copy.deepcopy(dict(self.provider_policy)),
             "invocation": self.invocation.as_record(),
+            "argv_lanes": self._argv_lanes_record(),
+            "sandbox_identity": (
+                None
+                if self.sandbox_identity is None
+                else copy.deepcopy(dict(self.sandbox_identity))
+            ),
             "process": self.process.as_record(),
             "raw_stdout_base64": base64.b64encode(self.raw_stdout).decode("ascii"),
             "raw_stdout_sha256": _sha256_bytes(self.raw_stdout),
@@ -362,9 +445,8 @@ class ProviderExecution:
             "model_usage": (
                 None if self.model_usage is None else copy.deepcopy(dict(self.model_usage))
             ),
-            "total_cost_usd": (
-                None if self.total_cost_usd is None else str(self.total_cost_usd)
-            ),
+            "total_cost_usd": persisted_cost,
+            "total_cost_usd_representation": cost_representation,
             "validation_errors": list(self.validation_errors),
         }
 
@@ -470,6 +552,7 @@ class ProviderExecution:
                 and all(model in self.model_usage for model in main_models)
                 and isinstance(self.total_cost_usd, Decimal)
                 and self.total_cost_usd.is_finite()
+                and self.persisted_total_cost_usd is not None
                 and raw_cost is not None
                 and self.total_cost_usd == raw_cost
                 and (
@@ -883,10 +966,15 @@ def create_condition_neutral_workspace(
     if not parent.is_dir():
         raise HarnessContractError("workspace parent must already exist")
     opaque_identity = (
-        opaque_id_factory() if opaque_id_factory is not None else secrets.token_hex(16)
+        opaque_id_factory()
+        if opaque_id_factory is not None
+        else secrets.token_hex(OPAQUE_SESSION_TOKEN_HEX_WIDTH // 2)
     )
     if not isinstance(opaque_identity, str) or not _OPAQUE_ID_RE.fullmatch(opaque_identity):
-        raise HarnessContractError("opaque workspace identity must be 32-64 lowercase hex characters")
+        raise HarnessContractError(
+            "opaque workspace identity must be exactly "
+            f"{OPAQUE_SESSION_TOKEN_HEX_WIDTH} lowercase hex characters"
+        )
     workspace = parent / f"session-{opaque_identity}"
     try:
         workspace.mkdir(mode=0o700)
@@ -1433,6 +1521,8 @@ __all__ = [
     "AdapterIdentity",
     "EnvironmentValueEvidence",
     "FABLE_SKILL_IDENTITY",
+    "OPAQUE_SESSION_TOKEN_HEX_WIDTH",
+    "RUN_EVIDENCE_SCHEMA",
     "GitState",
     "HarnessContractError",
     "InitEvidence",

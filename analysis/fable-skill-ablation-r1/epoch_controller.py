@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -31,6 +32,30 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+
+def _load_usd_authority() -> Any:
+    """Resolve the one canonical persisted USD representation authority.
+
+    The sibling compiler owns that representation.  Resolving it by module
+    object -- rather than re-deriving a formatter here -- keeps exactly one
+    implementation of persisted money across the runtime.
+    """
+
+    for name in ("fable_epoch_manifest", "build_epoch_manifest"):
+        module = sys.modules.get(name)
+        if module is not None:
+            return module
+    path = Path(__file__).with_name("build_epoch_manifest.py")
+    spec = importlib.util.spec_from_file_location("fable_epoch_manifest", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"canonical USD representation authority missing: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["fable_epoch_manifest"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_usd = _load_usd_authority()
 
 PRODUCTION_LOCK_PATH = Path("/Users/kelvin/.fable-ablation.lock")
 LOCK_FD = 9
@@ -48,12 +73,23 @@ LOCK_FAILURE = "FABLE_EPOCH_LOCK_FAILURE"
 RECOVERY_BLOCKED = "FABLE_EPOCH_RECOVERY_BLOCKED"
 AMBIGUOUS_LEDGER = "FABLE_EPOCH_AMBIGUOUS_LEDGER"
 
-_OPAQUE_SESSION_RE = re.compile(r"session-[0-9a-f]{32}\Z")
+OPAQUE_SESSION_TOKEN_HEX_WIDTH = 32
+_OPAQUE_SESSION_TOKEN_PATTERN = r"[0-9a-f]{%d}" % OPAQUE_SESSION_TOKEN_HEX_WIDTH
+_OPAQUE_SESSION_TOKEN_RE = re.compile(_OPAQUE_SESSION_TOKEN_PATTERN + r"\Z")
+_OPAQUE_SESSION_RE = re.compile(r"session-" + _OPAQUE_SESSION_TOKEN_PATTERN + r"\Z")
 _SLOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _HEX_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _LEDGER_TRANSITIONS = frozenset(
     {"reservation", "provider-start-intent", "settlement", "release"}
 )
+
+# Ledger version 1 persisted stripped-decimal amounts.  Its serialized bytes
+# and entry hashes stay valid forever and are never rewritten; only NEW writes
+# use version 2 with the canonical fixed-seven persisted USD representation.
+HISTORICAL_LEDGER_VERSION = 1
+LEDGER_WRITE_VERSION = 2
+SUPPORTED_LEDGER_VERSIONS = frozenset({HISTORICAL_LEDGER_VERSION, LEDGER_WRITE_VERSION})
+
 _PROCESS_LOCK_ACQUIRED = False
 
 
@@ -308,9 +344,44 @@ def decimal_text(value: Decimal | str | int) -> str:
     return text
 
 
-def _decimal(value: Any, field_name: str) -> Decimal:
+def canonical_amount_text(amount: Decimal | str | int, version: int) -> str:
+    """Serialize a ledger amount in the representation its version defines."""
+
+    if version == HISTORICAL_LEDGER_VERSION:
+        return decimal_text(amount)
+    if version != LEDGER_WRITE_VERSION:
+        raise LedgerError(f"unsupported_ledger_version:{version!r}")
+    try:
+        return _usd.canonical_usd_text(amount)
+    except _usd.CanonicalUsdError as exc:
+        raise LedgerError(f"amount_not_representable_in_canonical_usd:{exc}") from exc
+
+
+def _exact_amount(value: Decimal | str | int) -> Decimal:
+    """Parse a caller-supplied amount exactly, before any canonicalization.
+
+    Cap and slot invariants are evaluated on this exact value so a sub-quantum
+    amount can never slip under a limit by being rounded first.
+    """
+
+    try:
+        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise LedgerError(f"invalid_decimal:{value!r}") from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise LedgerError(f"invalid_decimal:{value!r}")
+    return parsed
+
+
+def _decimal(value: Any, field_name: str, version: int) -> Decimal:
+    """Parse a persisted amount under the representation of its own version."""
+
     if not isinstance(value, str):
         raise LedgerError(_error(AMBIGUOUS_LEDGER, f"{field_name}_not_string"))
+    if version == LEDGER_WRITE_VERSION:
+        if not _usd.is_canonical_usd(value):
+            raise LedgerError(_error(AMBIGUOUS_LEDGER, f"{field_name}_not_canonical"))
+        return _usd.parse_canonical_usd(value)
     try:
         parsed = Decimal(value)
     except InvalidOperation as exc:
@@ -428,7 +499,13 @@ class BudgetLedger:
                 ) from exc
             if not isinstance(record, dict):
                 raise LedgerError(_error(AMBIGUOUS_LEDGER, f"line_{index}_not_object"))
-            if record.get("version") != 1 or record.get("sequence") != index:
+            version = record.get("version")
+            # Version 1 and version 2 differ only in how the amount is
+            # written.  Both replay from their own persisted bytes, so no
+            # historical entry is ever rewritten to satisfy a newer format.
+            if isinstance(version, bool) or version not in SUPPORTED_LEDGER_VERSIONS:
+                raise LedgerError(_error(AMBIGUOUS_LEDGER, f"line_{index}_version"))
+            if record.get("sequence") != index:
                 raise LedgerError(_error(AMBIGUOUS_LEDGER, f"line_{index}_sequence"))
             if record.get("previous_hash") != previous_hash:
                 raise LedgerError(_error(AMBIGUOUS_LEDGER, f"line_{index}_chain"))
@@ -446,7 +523,7 @@ class BudgetLedger:
                 raise LedgerError(_error(AMBIGUOUS_LEDGER, f"line_{index}_transition"))
             if not isinstance(slot_id, str) or not _SLOT_ID_RE.fullmatch(slot_id):
                 raise LedgerError(_error(AMBIGUOUS_LEDGER, f"line_{index}_slot"))
-            amount = _decimal(record.get("amount"), f"line_{index}_amount")
+            amount = _decimal(record.get("amount"), f"line_{index}_amount", version)
 
             if transition == "reservation":
                 if slot_id in used_slots:
@@ -497,7 +574,7 @@ class BudgetLedger:
             raise LedgerError(f"unsupported_transition:{transition}")
         if not isinstance(slot_id, str) or not _SLOT_ID_RE.fullmatch(slot_id):
             raise LedgerError("invalid_slot_id")
-        amount_string = decimal_text(amount)
+        exact_amount = _exact_amount(amount)
         snapshot = self.load()
 
         if transition == "reservation":
@@ -506,7 +583,7 @@ class BudgetLedger:
             projected = (
                 snapshot.lifetime_total_spend
                 + snapshot.outstanding_total
-                + Decimal(amount_string)
+                + exact_amount
             )
             if projected > self.lifetime_hard_cap:
                 raise LedgerError("lifetime_hard_cap_would_be_exceeded")
@@ -514,23 +591,27 @@ class BudgetLedger:
             expected = snapshot.outstanding_reservations.get(slot_id)
             if expected is None or slot_id in snapshot.started_unresolved:
                 raise LedgerError("provider_start_requires_one_unstarted_reservation")
-            if Decimal(amount_string) != expected:
+            if exact_amount != expected:
                 raise LedgerError("provider_start_cap_mismatch")
         elif transition == "settlement":
             expected = snapshot.started_unresolved.get(slot_id)
             if expected is None:
                 raise LedgerError("settlement_requires_started_reservation")
-            if Decimal(amount_string) > expected:
+            if exact_amount > expected:
                 raise LedgerError("settlement_exceeds_sealed_invocation_cap")
         elif transition == "release":
             expected = snapshot.outstanding_reservations.get(slot_id)
             if expected is None or slot_id in snapshot.started_unresolved:
                 raise LedgerError("release_requires_unstarted_reservation")
-            if Decimal(amount_string) != expected:
+            if exact_amount != expected:
                 raise LedgerError("release_amount_mismatch")
 
+        # Canonicalize only after every invariant held for the exact value, so
+        # an amount finer than the quantum fails closed instead of rounding.
+        amount_string = canonical_amount_text(exact_amount, LEDGER_WRITE_VERSION)
+
         unsigned: dict[str, Any] = {
-            "version": 1,
+            "version": LEDGER_WRITE_VERSION,
             "sequence": len(snapshot.entries) + 1,
             "transition": transition,
             "slot_id": slot_id,
@@ -1003,9 +1084,15 @@ def create_opaque_session_root(
     root = Path(parent)
     if not root.is_dir():
         raise OpaqueWorkspaceError("session_parent_must_exist")
-    token = secrets.token_hex(16) if token_factory is None else token_factory()
-    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
-        raise OpaqueWorkspaceError("session_token_must_be_32_lowercase_hex")
+    token = (
+        secrets.token_hex(OPAQUE_SESSION_TOKEN_HEX_WIDTH // 2)
+        if token_factory is None
+        else token_factory()
+    )
+    if not isinstance(token, str) or _OPAQUE_SESSION_TOKEN_RE.fullmatch(token) is None:
+        raise OpaqueWorkspaceError(
+            f"session_token_must_be_{OPAQUE_SESSION_TOKEN_HEX_WIDTH}_lowercase_hex"
+        )
     session_root = root / f"session-{token}"
     try:
         session_root.mkdir(mode=0o700)
@@ -1060,6 +1147,85 @@ def build_sandboxed_command(
         "-D",
         f"SESSION_ROOT={root}",
         *tuple(provider_argv),
+    )
+
+
+@dataclass(frozen=True)
+class ObservedSandboxIdentity:
+    """Sandbox identity read from the filesystem, never asserted by a caller.
+
+    Every field here is observed at composition time: the resolved
+    ``sandbox-exec`` binary and its bytes, the resolved profile and the SHA256
+    of its actual bytes, the bound SESSION_ROOT, and the physical argv that
+    will really be executed.
+    """
+
+    sandbox_exec_path: str
+    sandbox_exec_realpath: str
+    sandbox_exec_sha256: str
+    sandbox_exec_device: int
+    sandbox_exec_inode: int
+    profile_path: str
+    profile_realpath: str
+    profile_sha256: str
+    session_root: str
+    physical_argv: tuple[str, ...]
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "sandbox_exec_path": self.sandbox_exec_path,
+            "sandbox_exec_realpath": self.sandbox_exec_realpath,
+            "sandbox_exec_sha256": self.sandbox_exec_sha256,
+            "sandbox_exec_device": self.sandbox_exec_device,
+            "sandbox_exec_inode": self.sandbox_exec_inode,
+            "profile_path": self.profile_path,
+            "profile_realpath": self.profile_realpath,
+            "profile_sha256": self.profile_sha256,
+            "session_root": self.session_root,
+            "physical_argv": list(self.physical_argv),
+            "physical_argv_authority": "epoch_controller.build_sandboxed_command",
+            "identity_source": "OBSERVED_FILESYSTEM_BYTES",
+        }
+
+
+def observe_sandboxed_command(
+    provider_argv: Sequence[str],
+    *,
+    session_root: str | os.PathLike[str],
+    profile_path: str | os.PathLike[str] = SANDBOX_PROFILE_PATH,
+    sandbox_exec_path: str | os.PathLike[str] = SANDBOX_EXEC_PATH,
+) -> ObservedSandboxIdentity:
+    """Build the physical command and observe the identity that will run it."""
+
+    physical_argv = build_sandboxed_command(
+        provider_argv,
+        session_root=session_root,
+        profile_path=profile_path,
+        sandbox_exec_path=sandbox_exec_path,
+    )
+    sandbox_exec = Path(sandbox_exec_path)
+    profile = Path(profile_path)
+    try:
+        sandbox_exec_realpath = sandbox_exec.resolve(strict=True)
+        profile_realpath = profile.resolve(strict=True)
+        sandbox_exec_stat = os.stat(sandbox_exec_realpath)
+        sandbox_exec_sha256 = sha256_file(sandbox_exec_realpath)
+        profile_sha256 = sha256_file(profile_realpath)
+    except OSError as exc:
+        raise SandboxPolicyError(
+            f"sandbox_identity_unobservable:{exc.errno}:{exc.strerror}"
+        ) from exc
+    return ObservedSandboxIdentity(
+        sandbox_exec_path=str(sandbox_exec),
+        sandbox_exec_realpath=str(sandbox_exec_realpath),
+        sandbox_exec_sha256=sandbox_exec_sha256,
+        sandbox_exec_device=sandbox_exec_stat.st_dev,
+        sandbox_exec_inode=sandbox_exec_stat.st_ino,
+        profile_path=str(profile),
+        profile_realpath=str(profile_realpath),
+        profile_sha256=profile_sha256,
+        session_root=str(validate_opaque_session_root(session_root)),
+        physical_argv=physical_argv,
     )
 
 
@@ -1274,6 +1440,11 @@ if __name__ == "__main__":
 
 __all__ = [
     "AMBIGUOUS_LEDGER",
+    "HISTORICAL_LEDGER_VERSION",
+    "LEDGER_WRITE_VERSION",
+    "OPAQUE_SESSION_TOKEN_HEX_WIDTH",
+    "ObservedSandboxIdentity",
+    "SUPPORTED_LEDGER_VERSIONS",
     "BudgetLedger",
     "EpochControllerError",
     "EpochLock",
@@ -1295,11 +1466,13 @@ __all__ = [
     "WriterLease",
     "acquire_before_authority",
     "build_sandboxed_command",
+    "canonical_amount_text",
     "capture_process_identity",
     "create_opaque_session_root",
     "current_boot_id",
     "decimal_text",
     "load_manifest_after_lock",
+    "observe_sandboxed_command",
     "process_identity_differences",
     "read_run_evidence",
     "reconcile_fresh_start",

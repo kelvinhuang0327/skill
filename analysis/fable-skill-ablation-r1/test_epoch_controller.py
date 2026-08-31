@@ -105,6 +105,45 @@ def stop_test_process(process: subprocess.Popen[str], *, crash: bool = False) ->
             stream.close()
 
 
+def write_v1_ledger(
+    path: Path, transitions: list[tuple[str, str, str]]
+) -> list[dict[str, Any]]:
+    """Write a genuine pre-remediation version 1 ledger, bytes and all.
+
+    The historical writer used ``decimal_text`` stripped decimals, so these
+    records are the exact shape that already exists on disk today.
+    """
+
+    records: list[dict[str, Any]] = []
+    previous_hash = "0" * 64
+    for sequence, (transition, slot_id, amount) in enumerate(transitions, start=1):
+        unsigned = {
+            "version": 1,
+            "sequence": sequence,
+            "transition": transition,
+            "slot_id": slot_id,
+            "amount": amount,
+            "previous_hash": previous_hash,
+        }
+        record = dict(unsigned)
+        record["entry_hash"] = hashlib.sha256(
+            json.dumps(
+                unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("ascii")
+        ).hexdigest()
+        records.append(record)
+        previous_hash = record["entry_hash"]
+    path.write_bytes(
+        b"".join(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode("ascii")
+            + b"\n"
+            for record in records
+        )
+    )
+    path.chmod(0o600)
+    return records
+
+
 def fake_stat(
     *,
     device: int = 10,
@@ -546,6 +585,131 @@ class LifecycleAndLedgerTests(unittest.TestCase):
                 with self.assertRaisesRegex(controller.LedgerError, "ledger_append_failed"):
                     ledger.reserve("slot-b", Decimal("1"))
             self.assertFalse(path.exists())
+
+
+    def test_33_new_ledger_writes_are_version_two_fixed_seven_usd(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.jsonl"
+            ledger = controller.BudgetLedger(path, Decimal("10"))
+            ledger.reserve("slot-a", Decimal("2"))
+            ledger.reserve("slot-b", Decimal("0"))
+            ledger.reserve("slot-c", controller._usd.CANONICAL_USD_QUANTUM)
+
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(
+                [record["version"] for record in records],
+                [controller.LEDGER_WRITE_VERSION] * 3,
+            )
+            self.assertEqual(
+                [record["amount"] for record in records],
+                ["2.0000000", "0.0000000", "0.0000001"],
+            )
+            # str(Decimal("0.0000001")) is "1E-7"; no persisted byte may be.
+            self.assertNotIn("1E-7", path.read_text())
+            self.assertEqual(str(Decimal("0.0000001")), "1E-7")
+            snapshot = ledger.load()
+            self.assertEqual(
+                snapshot.outstanding_reservations,
+                {
+                    "slot-a": Decimal("2"),
+                    "slot-b": Decimal("0"),
+                    "slot-c": Decimal("0.0000001"),
+                },
+            )
+
+    def test_34_sub_quantum_amounts_fail_closed_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.jsonl"
+            ledger = controller.BudgetLedger(path, Decimal("10"))
+            with self.assertRaisesRegex(
+                controller.LedgerError, "amount_not_representable_in_canonical_usd"
+            ):
+                ledger.reserve("slot-a", Decimal("0.00000001"))
+            self.assertFalse(path.exists())
+
+            ledger.reserve("slot-a", Decimal("1"))
+            before = path.read_bytes()
+            with self.assertRaisesRegex(
+                controller.LedgerError, "amount_not_representable_in_canonical_usd"
+            ):
+                ledger.reserve("slot-b", Decimal("0.123456789"))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(set(ledger.load().used_slots), {"slot-a"})
+
+            # Cap and representability are separate gates and both fail closed;
+            # an over-cap amount is refused for that stronger reason first.
+            tight = controller.BudgetLedger(Path(temporary) / "tight.jsonl", Decimal("0"))
+            with self.assertRaisesRegex(controller.LedgerError, "hard_cap"):
+                tight.reserve("slot-a", Decimal("0.00000001"))
+            self.assertFalse((Path(temporary) / "tight.jsonl").exists())
+
+    def test_35_historical_v1_entries_replay_and_are_never_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.jsonl"
+            historical = write_v1_ledger(
+                path,
+                [("reservation", "slot-a", "1"), ("provider-start-intent", "slot-a", "1")],
+            )
+            ledger = controller.BudgetLedger(path, Decimal("10"))
+            snapshot = ledger.load()
+
+            self.assertEqual([entry["version"] for entry in snapshot.entries], [1, 1])
+            # The stripped historical representation is preserved verbatim.
+            self.assertEqual([entry["amount"] for entry in snapshot.entries], ["1", "1"])
+            self.assertEqual(
+                [entry["entry_hash"] for entry in snapshot.entries],
+                [record["entry_hash"] for record in historical],
+            )
+            self.assertEqual(snapshot.started_unresolved, {"slot-a": Decimal("1")})
+
+            before = path.read_bytes()
+            ledger.settle("slot-a", Decimal("0.07"))
+            after = path.read_bytes()
+            self.assertTrue(after.startswith(before))
+            self.assertEqual(after[: len(before)], before)
+            self.assertEqual(ledger.load().lifetime_total_spend, Decimal("0.07"))
+
+    def test_36_v1_to_v2_chain_preserves_previous_hash_continuity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "ledger.jsonl"
+            historical = write_v1_ledger(
+                path,
+                [("reservation", "slot-a", "1"), ("reservation", "slot-b", "0.5")],
+            )
+            ledger = controller.BudgetLedger(path, Decimal("10"))
+            ledger.provider_start_intent("slot-a", Decimal("1"))
+            ledger.settle("slot-a", Decimal("0.25"))
+
+            entries = ledger.load().entries
+            self.assertEqual([entry["version"] for entry in entries], [1, 1, 2, 2])
+            self.assertEqual(
+                [entry["amount"] for entry in entries],
+                ["1", "0.5", "1.0000000", "0.2500000"],
+            )
+            self.assertEqual(entries[0]["previous_hash"], "0" * 64)
+            for previous, current in zip(entries, entries[1:]):
+                self.assertEqual(current["previous_hash"], previous["entry_hash"])
+            # The boundary entry chains onto the last historical hash exactly.
+            self.assertEqual(
+                entries[2]["previous_hash"], historical[-1]["entry_hash"]
+            )
+            snapshot = ledger.load()
+            self.assertEqual(snapshot.lifetime_total_spend, Decimal("0.25"))
+            self.assertEqual(snapshot.outstanding_reservations, {"slot-b": Decimal("0.5")})
+
+            corrupt = json.loads(path.read_text().splitlines()[-1])
+            corrupt["version"] = 3
+            path.write_bytes(
+                b"\n".join(
+                    line.encode()
+                    for line in path.read_text().splitlines()[:-1]
+                )
+                + b"\n"
+                + json.dumps(corrupt, sort_keys=True, separators=(",", ":")).encode()
+                + b"\n"
+            )
+            with self.assertRaisesRegex(controller.LedgerError, "line_4_version"):
+                ledger.load()
 
 
 class RecoveryGateTests(unittest.TestCase):
@@ -1017,6 +1181,169 @@ class WorkspaceAndSandboxTests(unittest.TestCase):
         self.assertIn("exec /usr/bin/env python3", launcher)
         self.assertNotIn("trap", launcher)
         self.assertNotIn("unlink", launcher)
+
+    def write_probe(self, parent: Path, name: str, body: str) -> Path:
+        probe = parent / name
+        probe.write_text(f"#!/usr/bin/env python3\n{body}", encoding="utf-8")
+        probe.chmod(0o700)
+        return probe
+
+    def sandboxed_output(self, session: Path, probe: Path) -> tuple[int, bytes, bytes, int]:
+        process = controller.spawn_sandboxed_provider(
+            [str(probe)],
+            session_root=session,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            profile_path=PROFILE_PATH,
+        )
+        stdout, stderr = process.communicate(timeout=30)
+        return process.returncode, stdout, stderr, process.pid
+
+    def test_37_fd9_stays_closed_inside_the_real_sandboxed_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            session = controller.create_opaque_session_root(parent, lambda: "5" * 32)
+            probe = self.write_probe(
+                parent,
+                "fd9-probe",
+                "import os, sys\n"
+                "try:\n"
+                "    os.fstat(9)\n"
+                "except OSError:\n"
+                "    sys.stdout.write('FD9_CLOSED')\n"
+                "else:\n"
+                "    sys.stdout.write('FD9_OPEN')\n",
+            )
+            marker = parent / "fd9-marker"
+            marker.write_bytes(b"lock-stand-in")
+
+            # Fail loudly rather than clobber a descriptor this process needs.
+            with self.assertRaises(OSError):
+                os.fstat(controller.LOCK_FD)
+
+            holder = os.open(marker, os.O_RDONLY)
+            installed = False
+            try:
+                if holder != controller.LOCK_FD:
+                    os.dup2(holder, controller.LOCK_FD, inheritable=True)
+                installed = True
+                os.fstat(controller.LOCK_FD)
+                returncode, stdout, stderr, _ = self.sandboxed_output(session, probe)
+            finally:
+                if installed:
+                    try:
+                        os.close(controller.LOCK_FD)
+                    except OSError:
+                        pass
+                if holder != controller.LOCK_FD:
+                    try:
+                        os.close(holder)
+                    except OSError:
+                        pass
+
+            self.assertEqual(returncode, 0, stderr)
+            self.assertEqual(stdout, b"FD9_CLOSED")
+
+    def test_38_pid_pgid_and_new_session_hold_through_sandbox_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            session = controller.create_opaque_session_root(parent, lambda: "6" * 32)
+            probe = self.write_probe(
+                parent,
+                "identity-probe",
+                "import os, sys\n"
+                "sys.stdout.write(f'{os.getpid()} {os.getpgid(0)} {os.getsid(0)}')\n",
+            )
+            returncode, stdout, stderr, spawned_pid = self.sandboxed_output(session, probe)
+
+            self.assertEqual(returncode, 0, stderr)
+            pid, pgid, sid = (int(value) for value in stdout.split())
+            # sandbox-exec execs the provider in place, so the PID the harness
+            # holds really is the provider's; the group-signal termination path
+            # depends on exactly this.
+            self.assertEqual(pid, spawned_pid)
+            self.assertEqual(pgid, spawned_pid)
+            self.assertEqual(sid, spawned_pid)
+            self.assertNotEqual(sid, os.getsid(0))
+            self.assertNotEqual(pgid, os.getpgid(0))
+
+    def test_39_sandbox_identity_is_observed_not_asserted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            session = controller.create_opaque_session_root(parent, lambda: "7" * 32)
+            provider_argv = ["/usr/bin/true"]
+            identity = controller.observe_sandboxed_command(
+                provider_argv, session_root=session, profile_path=PROFILE_PATH
+            )
+
+            self.assertEqual(
+                identity.profile_sha256,
+                hashlib.sha256(PROFILE_PATH.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(identity.profile_realpath, str(PROFILE_PATH.resolve()))
+            self.assertEqual(
+                identity.sandbox_exec_sha256,
+                controller.sha256_file(controller.SANDBOX_EXEC_PATH),
+            )
+            self.assertEqual(
+                identity.physical_argv,
+                controller.build_sandboxed_command(
+                    provider_argv, session_root=session, profile_path=PROFILE_PATH
+                ),
+            )
+            self.assertEqual(identity.session_root, str(session.resolve()))
+            record = identity.as_record()
+            self.assertEqual(record["identity_source"], "OBSERVED_FILESYSTEM_BYTES")
+            self.assertEqual(
+                record["physical_argv_authority"],
+                "epoch_controller.build_sandboxed_command",
+            )
+
+            # A different profile observes a different hash: the binding tracks
+            # bytes, so no caller-supplied label can stand in for them.
+            drifted = parent / "drifted-runtime.sb"
+            drifted.write_bytes(PROFILE_PATH.read_bytes() + b"\n;; drifted\n")
+            other = controller.observe_sandboxed_command(
+                provider_argv, session_root=session, profile_path=drifted
+            )
+            self.assertNotEqual(other.profile_sha256, identity.profile_sha256)
+
+            with self.assertRaisesRegex(
+                controller.SandboxPolicyError, "no_unsandboxed_fallback"
+            ):
+                controller.observe_sandboxed_command(
+                    provider_argv,
+                    session_root=session,
+                    profile_path=PROFILE_PATH,
+                    sandbox_exec_path=parent / "missing-sandbox-exec",
+                )
+
+    def test_40_session_token_width_is_exactly_thirty_two_lowercase_hex(self) -> None:
+        self.assertEqual(controller.OPAQUE_SESSION_TOKEN_HEX_WIDTH, 32)
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            for token in ("a" * 31, "a" * 33, "a" * 64, "A" * 32, "g" * 32, ""):
+                with self.subTest(token=token):
+                    with self.assertRaisesRegex(
+                        controller.OpaqueWorkspaceError, "32_lowercase_hex"
+                    ):
+                        controller.create_opaque_session_root(parent, lambda: token)
+            self.assertEqual(sorted(item.name for item in parent.iterdir()), [])
+
+            accepted = controller.create_opaque_session_root(parent, lambda: "8" * 32)
+            self.assertEqual(
+                controller.validate_opaque_session_root(accepted), accepted.resolve()
+            )
+            wide = parent / ("session-" + "a" * 64)
+            wide.mkdir(mode=0o700)
+            with self.assertRaisesRegex(
+                controller.SandboxPolicyError, "SESSION_ROOT_must_be_absolute_opaque_session"
+            ):
+                controller.validate_opaque_session_root(wide)
+            with self.assertRaises(controller.SandboxPolicyError):
+                controller.build_sandboxed_command(
+                    ["/usr/bin/true"], session_root=wide, profile_path=PROFILE_PATH
+                )
 
 
 if __name__ == "__main__":

@@ -5,14 +5,17 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+from unittest import mock
 
 
 sys.dont_write_bytecode = True
@@ -874,6 +877,137 @@ class ClaudeExecutorTests(unittest.TestCase):
         self.assertEqual(calls[0][0], [str(source), "--version"])
         self.assertEqual(calls[0][1]["timeout"], 10.0)
         self.assertEqual(calls[0][1]["env"], {})
+
+    def test_34_missing_process_factory_fails_before_any_spawn(self) -> None:
+        with mock.patch.object(claude.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(
+                runner.HarnessContractError, "explicit process factory"
+            ):
+                claude.execute_claude(self.invocation(), self.policy)
+            with self.assertRaisesRegex(
+                runner.HarnessContractError, "explicit process factory"
+            ):
+                claude.ClaudeExecutor(policy=self.policy)
+            popen.assert_not_called()
+
+        # The refusing sentinel is the default, not subprocess.Popen itself.
+        self.assertIsNot(claude.REQUIRED_PROCESS_FACTORY, claude.subprocess.Popen)
+        for target in (claude.execute_claude, claude.ClaudeExecutor.__init__):
+            with self.subTest(target=getattr(target, "__qualname__", target)):
+                defaults = inspect.signature(target).parameters
+                factory = defaults["popen_factory"].default
+                self.assertIs(factory, claude.REQUIRED_PROCESS_FACTORY)
+        with self.assertRaises(runner.HarnessContractError):
+            claude.REQUIRED_PROCESS_FACTORY(["provider-must-not-run"])
+
+        # An explicitly injected factory remains supported for composition.
+        recorder = PopenRecorder(FakeProcess(jsonl(successful_records())))
+        executor = claude.ClaudeExecutor(
+            policy=self.policy,
+            popen_factory=recorder,
+            binary_identity_resolver=lambda _: self.binary,
+            adapter_identity_resolver=lambda: self.policy.adapter_source,
+            group_signal=lambda _pgid, _sig: None,
+        )
+        execution = executor(self.invocation())
+        self.assertEqual(execution.validation_errors, ())
+        self.assertEqual(len(recorder.calls), 1)
+
+    def test_35_sandbox_policy_identity_must_bind_observed_profile_bytes(self) -> None:
+        expected = (
+            "sha256:"
+            + hashlib.sha256(claude.SANDBOX_PROFILE_PATH.read_bytes()).hexdigest()
+        )
+        self.assertEqual(claude.observed_sandbox_policy_identity(), expected)
+        self.assertEqual(self.policy.sandbox_policy_identity, expected)
+
+        for asserted in (
+            "opaque-session-workspace-v1",
+            "sha256:not-a-digest",
+            "a" * 64,
+            "",
+        ):
+            with self.subTest(identity=asserted):
+                with self.assertRaisesRegex(
+                    runner.HarnessContractError, "sandbox policy identity"
+                ):
+                    replace(self.policy, sandbox_policy_identity=asserted)
+
+        # Drifted profile bytes observe a different identity.
+        with tempfile.TemporaryDirectory() as temporary:
+            drifted = Path(temporary) / "drifted-runtime.sb"
+            drifted.write_bytes(claude.SANDBOX_PROFILE_PATH.read_bytes() + b"\n;; x\n")
+            self.assertNotEqual(
+                claude.observed_sandbox_policy_identity(drifted), expected
+            )
+            with self.assertRaises(runner.HarnessContractError):
+                claude.observed_sandbox_policy_identity(Path(temporary) / "absent.sb")
+
+    def test_36_logical_argv_lane_stays_unprefixed_and_still_preflights(self) -> None:
+        execution, recorder, _ = self.execute()
+        self.assertEqual(execution.validation_errors, ())
+        self.assertEqual(execution.invocation.argv, tuple(self.policy.argv_template))
+        self.assertEqual(recorder.calls[0][0][0], tuple(self.policy.argv_template))
+        self.assertEqual(execution.invocation.argv[0], self.binary.executable)
+        self.assertNotIn("/usr/bin/sandbox-exec", execution.invocation.argv)
+        self.assertNotIn("-D", execution.invocation.argv)
+        # Without a composition there is no physical lane to seal, and the
+        # evidence says so rather than pretending the logical lane is it.
+        self.assertIsNone(execution.physical_argv)
+        lanes = execution.as_record()["argv_lanes"]
+        self.assertEqual(tuple(lanes["logical"]), tuple(self.policy.argv_template))
+        self.assertIsNone(lanes["physical"])
+        self.assertFalse(lanes["physically_sandboxed"])
+
+        # Redefining the logical lane as the physical command is rejected, and
+        # nothing is spawned.
+        prefixed = (
+            "/usr/bin/sandbox-exec",
+            "-f",
+            str(claude.SANDBOX_PROFILE_PATH),
+            "-D",
+            "SESSION_ROOT=/opaque/session-" + OPAQUE_ID_A,
+            *self.policy.argv_template,
+        )
+        rejected, recorder, _ = self.execute(
+            invocation=self.invocation(argv=prefixed)
+        )
+        self.assertEqual(recorder.calls, [])
+        self.assertIn("invocation_argv_policy_mismatch", rejected.validation_errors)
+        self.assertEqual(rejected.process.status, "PREFLIGHT_REJECTED")
+        self.assertTrue(rejected.evidence_sealed)
+
+    def test_37_adapter_pins_session_width_and_canonical_persisted_usd(self) -> None:
+        self.assertEqual(runner.OPAQUE_SESSION_TOKEN_HEX_WIDTH, 32)
+        wide = "a" * 64
+        rejected, recorder, _ = self.execute(invocation=self.invocation(opaque_id=wide))
+        self.assertEqual(recorder.calls, [])
+        self.assertIn("cwd_is_not_opaque_session_workspace", rejected.validation_errors)
+
+        record = self.policy.as_record()
+        self.assertEqual(record["max_budget_usd"], "2.0000000")
+        self.assertIn("2.0000000", self.policy.argv_template)
+        self.assertNotIn("1E-7", json.dumps(record))
+
+        execution, _, _ = self.execute()
+        sealed = execution.as_record()
+        self.assertEqual(sealed["total_cost_usd"], "0.1250000")
+        self.assertEqual(sealed["total_cost_usd_representation"], "CANONICAL_USD")
+        self.assertEqual(sealed["provider_policy"]["max_budget_usd"], "2.0000000")
+
+        # A cost the canonical representation cannot hold is reported as such
+        # and is never countable, while the raw provider bytes stay intact.
+        raw = jsonl(successful_records()[:-1] + [result_record(total_cost_usd="0.12345678")])
+        unrepresentable, _, _ = self.execute(raw_stdout=raw)
+        record = unrepresentable.as_record()
+        self.assertIsNone(record["total_cost_usd"])
+        self.assertEqual(
+            record["total_cost_usd_representation"],
+            "NOT_REPRESENTABLE_IN_CANONICAL_USD",
+        )
+        self.assertIn(b"0.12345678", unrepresentable.raw_stdout)
+        self.assertFalse(unrepresentable.run_countable)
+        self.assertTrue(unrepresentable.evidence_sealed)
 
 
 if __name__ == "__main__":

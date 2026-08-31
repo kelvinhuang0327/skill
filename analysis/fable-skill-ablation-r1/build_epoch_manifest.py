@@ -17,7 +17,7 @@ import json
 import os
 import re
 import sys
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -68,8 +68,134 @@ S04_COST_STATE = "UNKNOWN_PERMANENTLY"
 _EPOCH_ID_RE = re.compile(r"[0-9a-f]{32}")
 _GIT_OID_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_MONEY_RE = re.compile(r"(?:0|[1-9][0-9]*)\.[0-9]{7}")
-_MONEY_QUANTUM = Decimal("0.0000001")
+
+# --- The one canonical persisted USD representation ------------------------
+#
+# Every module that persists a NEW USD amount -- manifests, ledger v2 records,
+# provider evidence, provider policy identity, and reservation/settlement
+# evidence -- imports this authority instead of formatting money locally.  The
+# representation is fixed point with exactly seven fractional digits, never an
+# exponent, never negative, and never derived from binary floating point.
+CANONICAL_USD_PATTERN = r"(?:0|[1-9][0-9]*)\.[0-9]{7}"
+CANONICAL_USD_FRACTIONAL_DIGITS = 7
+CANONICAL_USD_QUANTUM = Decimal("0.0000001")
+CANONICAL_USD_ZERO = "0.0000000"
+
+_MONEY_RE = re.compile(CANONICAL_USD_PATTERN)
+_MONEY_QUANTUM = CANONICAL_USD_QUANTUM
+
+# The runtime containment policy bytes this compiler binds by observation.
+RUNTIME_POLICY_FILENAME = "claude-runtime.sb"
+RUNTIME_POLICY_PATH = Path(__file__).with_name(RUNTIME_POLICY_FILENAME)
+
+# Truthful containment dimensions for the *current* claude-runtime.sb, which
+# denies file writes outside SESSION_ROOT and enforces nothing else.
+RUNTIME_FILESYSTEM_WRITE_POLICY = "SANDBOX_ENFORCED_CURRENT_SESSION_ROOT"
+RUNTIME_FILESYSTEM_READ_POLICY = "UNRESTRICTED_BY_SANDBOX_PROFILE"
+RUNTIME_PROCESS_POLICY = "UNRESTRICTED_BY_SANDBOX_PROFILE"
+RUNTIME_ENVIRONMENT_POLICY = "EXACT_CALLER_SUPPLIED_REPLACEMENT_MAPPING"
+RUNTIME_NETWORK_POLICY = "DECLARATIVE_ONLY"
+RUNTIME_NETWORK_ENFORCEMENT = "NONE"
+RUNTIME_PROVIDER_SUBPROCESS_COMPOSITION = "WIRED_THROUGH_SANDBOX_COMPOSITION"
+RUNTIME_CONTAINMENT_CLAIM_SCOPE = "PARTIAL_SANDBOX_FILESYSTEM_WRITE_ONLY"
+
+# Enforcement claims the pinned profile cannot support.  Naming one of these as
+# the network policy is an affirmative false statement, not a missing input.
+REJECTED_ENFORCED_NETWORK_CLAIMS = frozenset(
+    {
+        "PROVIDER_ADAPTER_ONLY",
+        "PROVIDER_ADAPTER_ONLY_ENFORCED",
+        "ENFORCED",
+        "SANDBOX_ENFORCED",
+        "DENY_ALL",
+        "BLOCKED",
+        "NO_NETWORK",
+    }
+)
+
+
+class CanonicalUsdError(ValueError):
+    """A value cannot be persisted in the one canonical USD representation."""
+
+
+def _usd_source_decimal(value: Any) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise CanonicalUsdError(
+            "persisted USD must not be derived from binary floating point"
+        )
+    if isinstance(value, Decimal):
+        parsed = value
+    elif isinstance(value, (str, int)):
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise CanonicalUsdError(f"value is not an exact decimal: {value!r}") from exc
+    else:
+        raise CanonicalUsdError(f"unsupported USD source type {type(value).__name__}")
+    if not parsed.is_finite():
+        raise CanonicalUsdError("persisted USD must be finite")
+    if parsed < 0:
+        raise CanonicalUsdError("persisted USD must be non-negative")
+    return parsed
+
+
+def canonical_usd_text(value: Decimal | str | int) -> str:
+    """Return the canonical fixed-seven persisted form of an exact amount.
+
+    A magnitude finer than the quantum, or wider than the decimal context, is
+    refused rather than rounded: a silently rounded debit is a false ledger.
+    """
+
+    parsed = _usd_source_decimal(value)
+    try:
+        quantized = parsed.quantize(CANONICAL_USD_QUANTUM)
+    except InvalidOperation as exc:
+        raise CanonicalUsdError(
+            f"value cannot be quantized to the canonical USD scale: {parsed}"
+        ) from exc
+    if quantized != parsed:
+        raise CanonicalUsdError(
+            "value is not representable at "
+            f"{CANONICAL_USD_FRACTIONAL_DIGITS} decimal places: {parsed}"
+        )
+    text = format(quantized, "f")
+    if _MONEY_RE.fullmatch(text) is None:
+        raise CanonicalUsdError(f"canonical USD serialization failed for {parsed}")
+    return text
+
+
+def canonical_usd_decimal(value: Decimal | str | int) -> Decimal:
+    """Return the exact Decimal denoted by the canonical form of ``value``."""
+
+    return Decimal(canonical_usd_text(value))
+
+
+def is_canonical_usd(text: Any) -> bool:
+    """Report whether ``text`` already is a canonical persisted USD string."""
+
+    return isinstance(text, str) and _MONEY_RE.fullmatch(text) is not None
+
+
+def parse_canonical_usd(text: Any) -> Decimal:
+    """Parse an already-canonical persisted USD string without coercion."""
+
+    if not is_canonical_usd(text):
+        raise CanonicalUsdError(
+            f"value is not a canonical persisted USD string: {text!r}"
+        )
+    return Decimal(text)
+
+
+def observed_runtime_policy_sha256(
+    path: str | os.PathLike[str] = RUNTIME_POLICY_PATH,
+) -> str | None:
+    """Hash the actual runtime policy bytes; unreadable bytes bind nothing."""
+
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest()
 
 _SCHEDULE_SPEC = (
     ("P01", "A01", ("OFF", "ON")),
@@ -203,15 +329,17 @@ def _validate_optional_hex(value: Any, pattern: re.Pattern[str], label: str) -> 
 
 
 def _money(value: Any, label: str) -> Decimal:
-    if not isinstance(value, str) or _MONEY_RE.fullmatch(value) is None:
+    if not is_canonical_usd(value):
         _fail(f"{label} must be a non-negative decimal string with seven places")
-    return Decimal(value)
+    return parse_canonical_usd(value)
 
 
 def _format_money(value: Decimal) -> str:
-    if value < 0:
-        _fail("internal monetary result must not be negative")
-    return format(value.quantize(_MONEY_QUANTUM), "f")
+    try:
+        return canonical_usd_text(value)
+    except CanonicalUsdError as exc:
+        _fail(f"internal monetary result is not canonical persisted USD: {exc}")
+    raise AssertionError("unreachable")
 
 
 def _schedule_records() -> list[dict[str, Any]]:
@@ -448,64 +576,140 @@ def _task_pins_input(tasks: Any) -> dict[str, Any]:
     return result
 
 
+_RUNTIME_CONTAINMENT_INPUT_KEYS = (
+    "policy_id",
+    "policy_sha256",
+    "epoch_write_scope",
+    "filesystem_write_policy",
+    "filesystem_read_policy",
+    "process_policy",
+    "environment_policy",
+    "network_policy",
+    "network_enforcement",
+    "provider_subprocess_composition",
+    "provider_subprocess_required",
+)
+_RUNTIME_CONTAINMENT_DERIVED_KEYS = (
+    "status",
+    "policy_sha256_binding",
+    "containment_claim_scope",
+)
+
+
 def _normalize_runtime_containment(value: Any) -> dict[str, Any]:
-    allowed = (
-        "policy_id",
-        "policy_sha256",
-        "epoch_write_scope",
-        "network_policy",
-        "provider_subprocess_required",
-    )
+    """Normalize containment truthfully for the *actual* pinned profile.
+
+    The current ``claude-runtime.sb`` denies file writes outside SESSION_ROOT
+    and enforces nothing else, so the compiler refuses an enforced-network
+    claim outright and binds ``policy_sha256`` to the observed policy bytes
+    rather than to whatever hash a caller supplies.
+    """
+
     if value is None:
         source: Mapping[str, Any] = {}
     else:
         source = _require_mapping(value, "runtime_containment")
-        _reject_unknown_keys(source, allowed, "runtime_containment")
+        _reject_unknown_keys(
+            source, _RUNTIME_CONTAINMENT_INPUT_KEYS, "runtime_containment"
+        )
     policy_id = source.get("policy_id")
     policy_sha256 = source.get("policy_sha256")
     epoch_write_scope = source.get("epoch_write_scope")
+    filesystem_write_policy = source.get("filesystem_write_policy")
+    filesystem_read_policy = source.get("filesystem_read_policy")
+    process_policy = source.get("process_policy")
+    environment_policy = source.get("environment_policy")
     network_policy = source.get("network_policy")
+    network_enforcement = source.get("network_enforcement")
+    provider_subprocess_composition = source.get("provider_subprocess_composition")
     subprocess_required = source.get("provider_subprocess_required")
+
     if policy_id is not None and (not isinstance(policy_id, str) or not policy_id.strip()):
         _fail("runtime_containment.policy_id must be a non-empty string")
     _validate_optional_hex(
         policy_sha256, _SHA256_RE, "runtime_containment.policy_sha256"
     )
-    if epoch_write_scope is not None and not isinstance(epoch_write_scope, str):
-        _fail("runtime_containment.epoch_write_scope must be a string")
-    if network_policy is not None and not isinstance(network_policy, str):
-        _fail("runtime_containment.network_policy must be a string")
+    for name, candidate in (
+        ("epoch_write_scope", epoch_write_scope),
+        ("filesystem_write_policy", filesystem_write_policy),
+        ("filesystem_read_policy", filesystem_read_policy),
+        ("process_policy", process_policy),
+        ("environment_policy", environment_policy),
+        ("network_policy", network_policy),
+        ("network_enforcement", network_enforcement),
+        ("provider_subprocess_composition", provider_subprocess_composition),
+    ):
+        if candidate is not None and not isinstance(candidate, str):
+            _fail(f"runtime_containment.{name} must be a string")
     if subprocess_required is not None and not isinstance(subprocess_required, bool):
         _fail("runtime_containment.provider_subprocess_required must be boolean")
+
+    if network_policy in REJECTED_ENFORCED_NETWORK_CLAIMS:
+        _fail(
+            "runtime_containment.network_policy must not claim enforced network "
+            "containment; the pinned runtime policy enforces no network rule"
+        )
+    if network_enforcement is not None and network_enforcement != RUNTIME_NETWORK_ENFORCEMENT:
+        _fail(
+            "runtime_containment.network_enforcement must be "
+            f"{RUNTIME_NETWORK_ENFORCEMENT} for the pinned runtime policy"
+        )
+
+    observed = observed_runtime_policy_sha256()
+    if policy_sha256 is not None:
+        if observed is None:
+            _fail(
+                "runtime_containment.policy_sha256 cannot be bound: the runtime "
+                "policy bytes are unreadable"
+            )
+        if policy_sha256 != observed:
+            _fail(
+                "runtime_containment.policy_sha256 does not bind the actual "
+                f"{RUNTIME_POLICY_FILENAME} bytes"
+            )
+    bound = policy_sha256 is not None and policy_sha256 == observed
+
     pinned = (
         policy_id is not None
-        and policy_sha256 is not None
+        and bound
         and epoch_write_scope == "PROSPECTIVE_EPOCH_ONLY"
-        and network_policy == "PROVIDER_ADAPTER_ONLY"
+        and filesystem_write_policy == RUNTIME_FILESYSTEM_WRITE_POLICY
+        and filesystem_read_policy == RUNTIME_FILESYSTEM_READ_POLICY
+        and process_policy == RUNTIME_PROCESS_POLICY
+        and environment_policy == RUNTIME_ENVIRONMENT_POLICY
+        and network_policy == RUNTIME_NETWORK_POLICY
+        and network_enforcement == RUNTIME_NETWORK_ENFORCEMENT
+        and provider_subprocess_composition == RUNTIME_PROVIDER_SUBPROCESS_COMPOSITION
         and subprocess_required is True
     )
     return {
         "status": "PINNED" if pinned else "UNRESOLVED",
         "policy_id": policy_id,
         "policy_sha256": policy_sha256,
+        "policy_sha256_binding": (
+            "OBSERVED_RUNTIME_POLICY_BYTES" if bound else "UNBOUND"
+        ),
         "epoch_write_scope": epoch_write_scope,
+        "filesystem_write_policy": filesystem_write_policy,
+        "filesystem_read_policy": filesystem_read_policy,
+        "process_policy": process_policy,
+        "environment_policy": environment_policy,
         "network_policy": network_policy,
+        "network_enforcement": network_enforcement,
+        "provider_subprocess_composition": provider_subprocess_composition,
         "provider_subprocess_required": subprocess_required,
+        "containment_claim_scope": RUNTIME_CONTAINMENT_CLAIM_SCOPE,
     }
 
 
 def _runtime_containment_input(value: Mapping[str, Any]) -> dict[str, Any]:
     source = _require_mapping(value, "runtime_containment")
     if set(source) != {
-        "status",
-        "policy_id",
-        "policy_sha256",
-        "epoch_write_scope",
-        "network_policy",
-        "provider_subprocess_required",
+        *_RUNTIME_CONTAINMENT_DERIVED_KEYS,
+        *_RUNTIME_CONTAINMENT_INPUT_KEYS,
     }:
         _fail("runtime_containment has an invalid normalized shape")
-    return {key: source[key] for key in source if key != "status"}
+    return {key: source[key] for key in _RUNTIME_CONTAINMENT_INPUT_KEYS}
 
 
 def _normalize_tool_identity(value: Any, label: str) -> dict[str, Any]:
@@ -1481,8 +1685,29 @@ __all__ = [
     "AUTHORITY_ROOT",
     "CANONICAL_FABLE",
     "CANONICAL_HARNESS",
+    "CANONICAL_USD_FRACTIONAL_DIGITS",
+    "CANONICAL_USD_PATTERN",
+    "CANONICAL_USD_QUANTUM",
+    "CANONICAL_USD_ZERO",
     "CTO_PROSPECTIVE_EPOCH_ID",
+    "CanonicalUsdError",
     "GATE_ORDER",
+    "REJECTED_ENFORCED_NETWORK_CLAIMS",
+    "RUNTIME_CONTAINMENT_CLAIM_SCOPE",
+    "RUNTIME_ENVIRONMENT_POLICY",
+    "RUNTIME_FILESYSTEM_READ_POLICY",
+    "RUNTIME_FILESYSTEM_WRITE_POLICY",
+    "RUNTIME_NETWORK_ENFORCEMENT",
+    "RUNTIME_NETWORK_POLICY",
+    "RUNTIME_POLICY_FILENAME",
+    "RUNTIME_POLICY_PATH",
+    "RUNTIME_PROCESS_POLICY",
+    "RUNTIME_PROVIDER_SUBPROCESS_COMPOSITION",
+    "canonical_usd_decimal",
+    "canonical_usd_text",
+    "is_canonical_usd",
+    "observed_runtime_policy_sha256",
+    "parse_canonical_usd",
     "HISTORICAL_FORENSIC_SPEND_USD",
     "LIFETIME_HARD_CAP_USD",
     "MANIFEST_SCHEMA",

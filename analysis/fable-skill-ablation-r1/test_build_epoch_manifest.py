@@ -56,6 +56,31 @@ def authorization_source(label: str) -> dict[str, str]:
     }
 
 
+def truthful_containment() -> dict[str, Any]:
+    """The containment contract the *current* claude-runtime.sb can support.
+
+    ``policy_sha256`` is the hash of the real profile bytes, because the
+    compiler now binds that field by observation rather than accepting any
+    well-shaped hash a caller supplies.
+    """
+
+    return {
+        "policy_id": "fable-prospective-epoch-containment-v1",
+        "policy_sha256": compiler.observed_runtime_policy_sha256(),
+        "epoch_write_scope": "PROSPECTIVE_EPOCH_ONLY",
+        "filesystem_write_policy": compiler.RUNTIME_FILESYSTEM_WRITE_POLICY,
+        "filesystem_read_policy": compiler.RUNTIME_FILESYSTEM_READ_POLICY,
+        "process_policy": compiler.RUNTIME_PROCESS_POLICY,
+        "environment_policy": compiler.RUNTIME_ENVIRONMENT_POLICY,
+        "network_policy": compiler.RUNTIME_NETWORK_POLICY,
+        "network_enforcement": compiler.RUNTIME_NETWORK_ENFORCEMENT,
+        "provider_subprocess_composition": (
+            compiler.RUNTIME_PROVIDER_SUBPROCESS_COMPOSITION
+        ),
+        "provider_subprocess_required": True,
+    }
+
+
 def complete_inputs() -> dict[str, Any]:
     task_pins = {
         task_id: {
@@ -76,13 +101,7 @@ def complete_inputs() -> dict[str, Any]:
         "provider_adapter": artifact("provider-adapter"),
         "provider_runtime": binary_identity("provider"),
         "task_pins": task_pins,
-        "runtime_containment": {
-            "policy_id": "fable-prospective-epoch-containment-v1",
-            "policy_sha256": sha256("containment-policy"),
-            "epoch_write_scope": "PROSPECTIVE_EPOCH_ONLY",
-            "network_policy": "PROVIDER_ADAPTER_ONLY",
-            "provider_subprocess_required": True,
-        },
+        "runtime_containment": truthful_containment(),
         "lock_tool_identities": {
             "lockf": binary_identity("lockf"),
             "lsof": binary_identity("lsof"),
@@ -470,6 +489,178 @@ class ProspectiveEpochManifestTests(unittest.TestCase):
         self.assertEqual(initial["run_count"], 1)
         self.assertNotIn("historical-secret-run-name", compiler.serialize_manifest(manifest).decode())
         self.assertEqual(manifest["status"], "DRAFT_UNSIGNABLE")
+
+    def test_26_canonical_usd_is_fixed_seven_and_never_exponent(self) -> None:
+        self.assertEqual(compiler.canonical_usd_text(Decimal("2")), "2.0000000")
+        self.assertEqual(compiler.canonical_usd_text("2.0000000"), "2.0000000")
+        self.assertEqual(compiler.canonical_usd_text(0), "0.0000000")
+        self.assertEqual(compiler.CANONICAL_USD_ZERO, "0.0000000")
+        # The quantum is the historical exponent trap: str(Decimal("0.0000001"))
+        # is "1E-7", which no persisted field may ever contain.
+        quantum = compiler.canonical_usd_text(compiler.CANONICAL_USD_QUANTUM)
+        self.assertEqual(quantum, "0.0000001")
+        self.assertNotIn("E", quantum)
+        self.assertNotIn("e", quantum)
+        self.assertEqual(str(Decimal("0.0000001")), "1E-7")
+
+        manifest = signable_manifest()
+        serialized = compiler.serialize_manifest(manifest).decode("utf-8")
+        self.assertNotIn("1E-7", serialized)
+        for value in (
+            manifest["budget"]["lifetime_hard_cap_usd"],
+            manifest["budget"]["new_epoch_spend_usd"],
+            manifest["budget"]["outstanding_reservations_usd"],
+            manifest["budget"]["per_invocation_cap_usd"],
+            manifest["budget"]["pair_reservation_usd"],
+            manifest["budget"]["max_additional_spend_usd"],
+            manifest["budget"]["pair_reservation_invariant_lhs_usd"],
+        ):
+            self.assertTrue(compiler.is_canonical_usd(value), value)
+        self.assertEqual(manifest["budget"]["new_epoch_spend_usd"], "0.0000000")
+        self.assertEqual(manifest["budget"]["per_invocation_cap_usd"], "2.0000000")
+
+    def test_27_sub_quantum_and_float_usd_fail_closed(self) -> None:
+        for rejected in (
+            Decimal("0.00000001"),
+            "0.00000001",
+            Decimal("0.12345678"),
+            Decimal("-0.0000001"),
+            "-1.0000000",
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            0.1,
+            True,
+            None,
+        ):
+            with self.subTest(value=rejected):
+                with self.assertRaises(compiler.CanonicalUsdError):
+                    compiler.canonical_usd_text(rejected)
+        # Refusal, never silent rounding to the nearest quantum.
+        self.assertFalse(compiler.is_canonical_usd("0.00000001"))
+        self.assertFalse(compiler.is_canonical_usd("1E-7"))
+        self.assertFalse(compiler.is_canonical_usd("2"))
+        self.assertFalse(compiler.is_canonical_usd(Decimal("2.0000000")))
+        self.assertEqual(
+            compiler.parse_canonical_usd("0.0000001"), compiler.CANONICAL_USD_QUANTUM
+        )
+
+        inputs = complete_inputs()
+        inputs["s04_budget_attestation"]["historical_charged_spend_usd"] = "0.26607580"
+        with self.assertRaises(compiler.ManifestValidationError):
+            compiler.build_manifest(EPOCH_ID, **inputs)
+
+    def test_28_policy_sha256_must_bind_the_actual_runtime_policy_bytes(self) -> None:
+        observed = compiler.observed_runtime_policy_sha256()
+        self.assertEqual(
+            observed,
+            hashlib.sha256(compiler.RUNTIME_POLICY_PATH.read_bytes()).hexdigest(),
+        )
+        inputs = complete_inputs()
+        inputs["runtime_containment"]["policy_sha256"] = sha256("not-the-real-policy")
+        with self.assertRaisesRegex(
+            compiler.ManifestValidationError, "does not bind the actual"
+        ):
+            compiler.build_manifest(EPOCH_ID, **inputs)
+
+        # A caller-supplied hash cannot be smuggled past validation either.
+        manifest = signable_manifest()
+        manifest["runtime_containment"]["policy_sha256"] = sha256("still-not-real")
+        with self.assertRaises(compiler.ManifestValidationError):
+            compiler.validate_manifest(manifest)
+
+        missing = complete_inputs()
+        missing["runtime_containment"]["policy_sha256"] = None
+        unbound = compiler.build_manifest(EPOCH_ID, **missing)
+        self.assertEqual(unbound["runtime_containment"]["status"], "UNRESOLVED")
+        self.assertEqual(
+            unbound["runtime_containment"]["policy_sha256_binding"], "UNBOUND"
+        )
+        self.assertEqual(unbound["status"], "DRAFT_UNSIGNABLE")
+        self.assertIn(
+            "MISSING_RUNTIME_CONTAINMENT_POLICY",
+            unbound["publication_gate"]["blockers"],
+        )
+
+    def test_29_enforced_network_containment_claims_are_rejected(self) -> None:
+        for claim in sorted(compiler.REJECTED_ENFORCED_NETWORK_CLAIMS):
+            with self.subTest(claim=claim):
+                inputs = complete_inputs()
+                inputs["runtime_containment"]["network_policy"] = claim
+                with self.assertRaisesRegex(
+                    compiler.ManifestValidationError, "enforced network"
+                ):
+                    compiler.build_manifest(EPOCH_ID, **inputs)
+        self.assertIn(
+            "PROVIDER_ADAPTER_ONLY", compiler.REJECTED_ENFORCED_NETWORK_CLAIMS
+        )
+
+        # An enforcement level other than NONE is equally untrue today.
+        inputs = complete_inputs()
+        inputs["runtime_containment"]["network_enforcement"] = "SANDBOX"
+        with self.assertRaisesRegex(
+            compiler.ManifestValidationError, "network_enforcement"
+        ):
+            compiler.build_manifest(EPOCH_ID, **inputs)
+
+    def test_30_truthful_declarative_network_contract_is_accepted(self) -> None:
+        manifest = signable_manifest()
+        containment = manifest["runtime_containment"]
+        self.assertEqual(containment["status"], "PINNED")
+        self.assertEqual(containment["network_policy"], "DECLARATIVE_ONLY")
+        self.assertEqual(containment["network_enforcement"], "NONE")
+        self.assertEqual(
+            containment["policy_sha256_binding"], "OBSERVED_RUNTIME_POLICY_BYTES"
+        )
+        # Each dimension is stated separately; the runtime is never described
+        # as fully contained.
+        self.assertEqual(
+            containment["filesystem_write_policy"],
+            "SANDBOX_ENFORCED_CURRENT_SESSION_ROOT",
+        )
+        self.assertEqual(
+            containment["filesystem_read_policy"], "UNRESTRICTED_BY_SANDBOX_PROFILE"
+        )
+        self.assertEqual(
+            containment["process_policy"], "UNRESTRICTED_BY_SANDBOX_PROFILE"
+        )
+        self.assertEqual(
+            containment["environment_policy"],
+            "EXACT_CALLER_SUPPLIED_REPLACEMENT_MAPPING",
+        )
+        self.assertEqual(
+            containment["provider_subprocess_composition"],
+            "WIRED_THROUGH_SANDBOX_COMPOSITION",
+        )
+        self.assertEqual(
+            containment["containment_claim_scope"],
+            "PARTIAL_SANDBOX_FILESYSTEM_WRITE_ONLY",
+        )
+        self.assertTrue(
+            manifest["publication_gate"]["gates"]["runtime_containment_policy"]["passed"]
+        )
+        self.assertEqual(manifest["status"], "SEALED_REQUIRES_EXTERNAL_OWNER_SIGNOFF")
+        # The declared profile really is the profile whose bytes were bound.
+        profile = compiler.RUNTIME_POLICY_PATH.read_text(encoding="utf-8")
+        self.assertIn("(deny file-write*)", profile)
+        self.assertNotIn("network", profile.casefold())
+
+    def test_31_compiler_provider_freedom_is_not_a_runtime_containment_claim(self) -> None:
+        manifest = signable_manifest()
+        self.assertFalse(manifest["provider_adapter"]["compiler_invokes_provider"])
+        self.assertFalse(manifest["provider_runtime"]["compiler_invokes_provider"])
+        self.assertIn("INVOKE_PROVIDER_IN_COMPILER", manifest["forbidden_actions"])
+        # That field describes the compiler only.  Runtime provider execution
+        # is a separate, affirmatively wired composition statement.
+        self.assertNotIn(
+            "compiler_invokes_provider", manifest["runtime_containment"]
+        )
+        self.assertTrue(
+            manifest["runtime_containment"]["provider_subprocess_required"]
+        )
+        self.assertEqual(
+            manifest["runtime_containment"]["provider_subprocess_composition"],
+            "WIRED_THROUGH_SANDBOX_COMPOSITION",
+        )
 
 
 if __name__ == "__main__":
