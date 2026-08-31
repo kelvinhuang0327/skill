@@ -472,5 +472,68 @@ class ProspectiveEpochManifestTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "DRAFT_UNSIGNABLE")
 
 
+    def test_26_canonical_harness_pin_is_historical_not_the_executed_runner(
+        self,
+    ) -> None:
+        """canonical_harness freezes the base scaffold; the epoch's executable
+        runner is bound by final_runtime_authority, which is what the
+        publication gate actually checks."""
+
+        manifest = signable_manifest()
+
+        # The historical pin is a fixed compiler constant, never a build input,
+        # and it carries no publication gate of its own.
+        self.assertEqual(manifest["canonical_harness"], compiler.CANONICAL_HARNESS)
+        self.assertNotIn("canonical_harness", complete_inputs())
+        self.assertNotIn("canonical_harness", compiler.GATE_ORDER)
+        self.assertNotIn(
+            "canonical_harness", manifest["publication_gate"]["gates"]
+        )
+
+        # The executable runner binding is a supplied identity that gates
+        # signability, and it is deliberately free to differ from the pin.
+        runner_binding = manifest["final_runtime_authority"]["components"]["runner"]
+        self.assertEqual(runner_binding["status"], "PINNED")
+        self.assertNotEqual(
+            runner_binding["sha256"], compiler.CANONICAL_HARNESS["runner"]["sha256"]
+        )
+        self.assertNotEqual(
+            manifest["final_runtime_authority"]["commit"],
+            compiler.CANONICAL_HARNESS["head"],
+        )
+        self.assertEqual(
+            manifest["final_runtime_authority"]["publication_state"],
+            "PUBLISHED_DESCENDANT_PINNED",
+        )
+        self.assertTrue(
+            manifest["publication_gate"]["gates"]["final_runtime_identity"]["passed"]
+        )
+        self.assertEqual(
+            manifest["status"], "SEALED_REQUIRES_EXTERNAL_OWNER_SIGNOFF"
+        )
+
+        # Dropping only the runner component un-binds the executable runner and
+        # blocks signability, while the historical pin stays untouched.
+        inputs = complete_inputs()
+        inputs["final_runtime_authority"]["runner"] = {
+            "blob_oid": None,
+            "sha256": None,
+        }
+        unbound = compiler.build_manifest(EPOCH_ID, **inputs)
+        self.assertEqual(
+            unbound["final_runtime_authority"]["components"]["runner"]["status"],
+            "UNRESOLVED",
+        )
+        self.assertFalse(
+            unbound["publication_gate"]["gates"]["final_runtime_identity"]["passed"]
+        )
+        self.assertIn(
+            "MISSING_FINAL_RUNTIME_IDENTITY",
+            unbound["publication_gate"]["blockers"],
+        )
+        self.assertEqual(unbound["status"], "DRAFT_UNSIGNABLE")
+        self.assertEqual(unbound["canonical_harness"], compiler.CANONICAL_HARNESS)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

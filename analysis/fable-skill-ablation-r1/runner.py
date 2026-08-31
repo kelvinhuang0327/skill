@@ -31,9 +31,21 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, Union
 FABLE_SKILL_IDENTITY = "fable-method"
 _OPAQUE_ID_RE = re.compile(r"[0-9a-f]{32,64}")
 _MISSING = object()
-_INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers"})
+_INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers", "plugins"})
 _DIMENSION_ALIASES = {
     "mcp_servers": ("mcp_servers", "mcpServers"),
+    "plugins": ("plugins", "plugin_inventory"),
+    "permission_mode": ("permission_mode", "permissionMode", "permission-mode"),
+    "output_style": ("output_style", "outputStyle"),
+    "host_version": ("host_version", "hostVersion", "claude_code_version"),
+    "hooks": ("hooks", "hook_surface", "lifecycle_hooks"),
+    "agents_md": ("agents_md", "agentsMd", "agent_instruction_files"),
+    "user_rules": ("user_rules", "userRules", "user_agent_rules"),
+    "instruction_sources": (
+        "instruction_sources",
+        "instructionSources",
+        "project_instruction_sources",
+    ),
 }
 _SEMANTIC_SKILL_PATHS = (
     ("skills",),
@@ -49,6 +61,52 @@ _SEMANTIC_SKILL_PATHS = (
     ("system_context", "loaded_skills"),
 )
 _SKILL_IDENTITY_KEYS = ("name", "id", "skill", "command")
+
+SKILL_INVENTORY_DIMENSION = "skills"
+
+# Observation states for one global instruction surface dimension.  Absence of
+# evidence is never equality: it is UNOBSERVABLE, and ambiguous, malformed, or
+# one-sided evidence is UNRESOLVED.
+SURFACE_EQUAL = "EQUAL"
+SURFACE_DIFFERENT = "DIFFERENT"
+SURFACE_UNOBSERVABLE = "UNOBSERVABLE"
+SURFACE_UNRESOLVED = "UNRESOLVED"
+SURFACE_ALLOWED_TREATMENT_DELTA = "ALLOWED_TREATMENT_DELTA"
+_SURFACE_OBSERVED = "OBSERVED"
+
+# The declared treatment either adds/removes a carrier identity or changes the
+# content carried by an identity present in both arms.
+TREATMENT_MODE_IDENTITY_PRESENCE = "IDENTITY_PRESENCE"
+TREATMENT_MODE_CONTENT_DELTA = "CONTENT_DELTA"
+TREATMENT_MODES = frozenset(
+    {TREATMENT_MODE_IDENTITY_PRESENCE, TREATMENT_MODE_CONTENT_DELTA}
+)
+
+TREATMENT_DELTA_NONE = "NONE"
+TREATMENT_DELTA_IDENTITY = "IDENTITY_DELTA"
+TREATMENT_DELTA_CONTENT = "CONTENT_DELTA"
+TREATMENT_DELTA_UNRESOLVED = "UNRESOLVED"
+
+# Every global/model-visible instruction surface this harness knows how to
+# classify from init evidence.  Membership here does not assert that a
+# dimension is observable in any particular runtime; an unobserved dimension is
+# reported as UNOBSERVABLE rather than assumed equal.  The harness deliberately
+# does not crawl the home directory to make an unobservable dimension look
+# resolved.
+GLOBAL_INSTRUCTION_SURFACE_DIMENSIONS = (
+    "tools",
+    "agents",
+    "mcp_servers",
+    "plugins",
+    "permission_mode",
+    "output_style",
+    "host_version",
+    SKILL_INVENTORY_DIMENSION,
+    "hooks",
+    "agents_md",
+    "user_rules",
+    "instruction_sources",
+)
 
 
 class HarnessContractError(ValueError):
@@ -66,6 +124,7 @@ class ManifestSlot:
     command: tuple[str, ...]
     expected_fable_engaged: bool
     frozen_dimensions: tuple[str, ...]
+    treatment_surface: TreatmentSurface
     source_run_path: str | None
     task_metadata: Mapping[str, Any]
     treatment_metadata: Mapping[str, Any]
@@ -503,6 +562,107 @@ class SurfaceAudit:
 
 
 @dataclass(frozen=True)
+class TreatmentSurface:
+    """The one declared surface on which the two arms are allowed to differ.
+
+    ``mode`` separates the two admissible designs.  ``IDENTITY_PRESENCE`` adds or
+    removes a carrier identity from the skill inventory.  ``CONTENT_DELTA`` keeps
+    the identity present in both arms and changes only the content that identity
+    carries, so identity equality and an allowed content delta stay distinct
+    facts.  ``identity`` is declared, never assumed, so no specific carrier is
+    hard-coded into the gate.
+    """
+
+    dimension: str
+    mode: str
+    identity: str
+    baseline_contains_identity: bool
+    expected_treatment_delta: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dimension, str) or not self.dimension:
+            raise HarnessContractError("treatment dimension must be a non-empty string")
+        if self.mode not in TREATMENT_MODES:
+            raise HarnessContractError(f"unknown treatment mode {self.mode!r}")
+        if not isinstance(self.identity, str) or not self.identity.strip():
+            raise HarnessContractError("treatment identity must be a non-empty string")
+        if not isinstance(self.baseline_contains_identity, bool) or not isinstance(
+            self.expected_treatment_delta, bool
+        ):
+            raise HarnessContractError("treatment presence and delta must be booleans")
+        object.__setattr__(self, "identity", _normalize_skill_identity(self.identity))
+        if self.mode == TREATMENT_MODE_IDENTITY_PRESENCE:
+            if self.dimension != SKILL_INVENTORY_DIMENSION:
+                raise HarnessContractError(
+                    "identity-presence treatment must act on the skill inventory"
+                )
+        else:
+            if self.dimension == SKILL_INVENTORY_DIMENSION:
+                raise HarnessContractError(
+                    "content-delta treatment must name a content dimension, not the "
+                    "skill inventory"
+                )
+            if not self.baseline_contains_identity:
+                raise HarnessContractError(
+                    "content-delta treatment requires the identity in both arms"
+                )
+
+    @property
+    def candidate_contains_identity(self) -> bool:
+        if self.mode == TREATMENT_MODE_IDENTITY_PRESENCE:
+            return self.baseline_contains_identity != self.expected_treatment_delta
+        return self.baseline_contains_identity
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "dimension": self.dimension,
+            "mode": self.mode,
+            "identity": self.identity,
+            "baseline_contains_identity": self.baseline_contains_identity,
+            "candidate_contains_identity": self.candidate_contains_identity,
+            "expected_treatment_delta": self.expected_treatment_delta,
+        }
+
+
+@dataclass(frozen=True)
+class GlobalSurfaceIdentity:
+    """Baseline/candidate equality across every classifiable instruction surface."""
+
+    passed: bool = False
+    treatment_surface: TreatmentSurface | None = None
+    dimension_states: Mapping[str, str] = field(default_factory=dict)
+    mandatory_dimensions: tuple[str, ...] = ()
+    observable_dimensions: tuple[str, ...] = ()
+    unobservable_dimensions: tuple[str, ...] = ()
+    unresolved_dimensions: tuple[str, ...] = ()
+    differing_dimensions: tuple[str, ...] = ()
+    identity_equality: bool | None = None
+    allowed_treatment_delta: bool = False
+    treatment_delta_kind: str = TREATMENT_DELTA_UNRESOLVED
+    reasons: tuple[str, ...] = ()
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "treatment_surface": (
+                None
+                if self.treatment_surface is None
+                else self.treatment_surface.as_record()
+            ),
+            "dimension_states": dict(self.dimension_states),
+            "mandatory_dimensions": list(self.mandatory_dimensions),
+            "observable_dimensions": list(self.observable_dimensions),
+            "unobservable_dimensions": list(self.unobservable_dimensions),
+            "unresolved_dimensions": list(self.unresolved_dimensions),
+            "differing_dimensions": list(self.differing_dimensions),
+            "identity_equality": self.identity_equality,
+            "allowed_treatment_delta": self.allowed_treatment_delta,
+            "treatment_delta_kind": self.treatment_delta_kind,
+            "reasons": list(self.reasons),
+        }
+
+
+@dataclass(frozen=True)
 class InitEvidence:
     init_event_found: bool = False
     valid: bool = False
@@ -511,13 +671,19 @@ class InitEvidence:
     inventories: Mapping[str, Any] = field(default_factory=dict)
     skill_identities: frozenset[str] = frozenset()
     skills_resolved: bool = False
+    skill_inventory_found: bool = False
     errors: tuple[str, ...] = ()
+
+    def contains_identity(self, identity: str) -> bool | None:
+        """Report carrier engagement for any declared identity, not just Fable."""
+
+        if not self.skills_resolved:
+            return None
+        return _normalize_skill_identity(identity) in self.skill_identities
 
     @property
     def fable_engaged(self) -> bool | None:
-        if not self.skills_resolved:
-            return None
-        return FABLE_SKILL_IDENTITY in self.skill_identities
+        return self.contains_identity(FABLE_SKILL_IDENTITY)
 
 
 @dataclass(frozen=True)
@@ -531,6 +697,7 @@ class PurityResult:
     reasons: tuple[str, ...] = ()
     purity_pass: bool = False
     run_countable: bool = False
+    global_surface: GlobalSurfaceIdentity | None = None
 
     def __post_init__(self) -> None:
         if self.purity_pass and not self.init_event_found:
@@ -549,6 +716,9 @@ class PurityResult:
             "reasons": list(self.reasons),
             "purity_pass": self.purity_pass,
             "run_countable": self.run_countable,
+            "global_surface": (
+                None if self.global_surface is None else self.global_surface.as_record()
+            ),
         }
 
 
@@ -757,6 +927,36 @@ def _treatment_for_condition(
     return matches[0]
 
 
+def _manifest_treatment_surface(
+    manifest: Mapping[str, Any], expected_treatment_delta: bool
+) -> TreatmentSurface:
+    """Resolve the declared treatment surface, defaulting to carrier presence."""
+
+    declared = manifest.get("treatment_surface")
+    if declared is None:
+        return default_treatment_surface(expected_treatment_delta)
+    if not isinstance(declared, Mapping):
+        raise HarnessContractError("manifest treatment_surface must be an object")
+    allowed = {"dimension", "mode", "identity", "baseline_contains_identity"}
+    unknown = sorted(set(declared) - allowed)
+    if unknown:
+        raise HarnessContractError(
+            f"manifest treatment_surface has unknown keys: {unknown}"
+        )
+    missing = sorted(allowed - set(declared))
+    if missing:
+        raise HarnessContractError(
+            f"manifest treatment_surface is missing keys: {missing}"
+        )
+    return TreatmentSurface(
+        dimension=declared["dimension"],
+        mode=declared["mode"],
+        identity=declared["identity"],
+        baseline_contains_identity=declared["baseline_contains_identity"],
+        expected_treatment_delta=expected_treatment_delta,
+    )
+
+
 def select_manifest_slot(
     manifest: Mapping[str, Any], orchestrator_run_id: str
 ) -> ManifestSlot:
@@ -866,6 +1066,7 @@ def select_manifest_slot(
         command=selected_command,
         expected_fable_engaged=expected,
         frozen_dimensions=tuple(dimensions),
+        treatment_surface=_manifest_treatment_surface(manifest, expected),
         source_run_path=source_run_path,
         task_metadata=copy.deepcopy(dict(task)),
         treatment_metadata=copy.deepcopy(dict(treatment)),
@@ -1040,7 +1241,9 @@ def _parse_skill_inventory(value: Any) -> tuple[set[str], list[str]]:
     return identities, errors
 
 
-def _semantic_skills(init_event: Mapping[str, Any]) -> tuple[frozenset[str], bool, list[str]]:
+def _semantic_skills(
+    init_event: Mapping[str, Any]
+) -> tuple[frozenset[str], bool, bool, list[str]]:
     identities: set[str] = set()
     found_inventory = False
     errors: list[str] = []
@@ -1052,7 +1255,7 @@ def _semantic_skills(init_event: Mapping[str, Any]) -> tuple[frozenset[str], boo
         parsed, parse_errors = _parse_skill_inventory(value)
         identities.update(parsed)
         errors.extend(f"{'.'.join(path)}:{error}" for error in parse_errors)
-    return frozenset(identities), found_inventory and not errors, errors
+    return frozenset(identities), found_inventory and not errors, found_inventory, errors
 
 
 def _dimension_value(init_event: Mapping[str, Any], dimension: str) -> tuple[Any, list[str]]:
@@ -1159,7 +1362,12 @@ def parse_init_events(
         if value is not _MISSING:
             inventories[dimension] = value
 
-    skill_identities, skills_resolved, skill_errors = _semantic_skills(event)
+    (
+        skill_identities,
+        skills_resolved,
+        skill_inventory_found,
+        skill_errors,
+    ) = _semantic_skills(event)
     errors.extend(skill_errors)
     return InitEvidence(
         init_event_found=actual_shape,
@@ -1169,7 +1377,304 @@ def parse_init_events(
         inventories=inventories,
         skill_identities=skill_identities,
         skills_resolved=skills_resolved,
+        skill_inventory_found=skill_inventory_found,
         errors=tuple(errors),
+    )
+
+
+def _surface_observation(evidence: InitEvidence, dimension: str) -> tuple[str, Any]:
+    """Classify one dimension for one arm without inventing a value."""
+
+    if evidence.event is None:
+        return SURFACE_UNOBSERVABLE, None
+    if dimension == SKILL_INVENTORY_DIMENSION:
+        if evidence.skills_resolved:
+            return _SURFACE_OBSERVED, frozenset(evidence.skill_identities)
+        if not evidence.skill_inventory_found:
+            return SURFACE_UNOBSERVABLE, None
+        return SURFACE_UNRESOLVED, None
+    value, errors = _dimension_value(evidence.event, dimension)
+    if value is not _MISSING:
+        return _SURFACE_OBSERVED, value
+    if errors and all(error.startswith("missing_inventory:") for error in errors):
+        return SURFACE_UNOBSERVABLE, None
+    return SURFACE_UNRESOLVED, None
+
+
+def _compare_observations(
+    baseline_state: str, baseline_value: Any, candidate_state: str, candidate_value: Any
+) -> str:
+    if SURFACE_UNRESOLVED in (baseline_state, candidate_state):
+        return SURFACE_UNRESOLVED
+    if baseline_state != candidate_state:
+        # Observable in exactly one arm.  One-sided evidence proves nothing about
+        # the other arm, so it can never be reported as equality.
+        return SURFACE_UNRESOLVED
+    if baseline_state == SURFACE_UNOBSERVABLE:
+        return SURFACE_UNOBSERVABLE
+    return SURFACE_EQUAL if baseline_value == candidate_value else SURFACE_DIFFERENT
+
+
+def _normalized_content_map(value: Any) -> dict[str, Any] | None:
+    """Normalize carrier-identity keys; an ambiguous map resolves to nothing."""
+
+    if not isinstance(value, Mapping):
+        return None
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key.strip():
+            return None
+        identity = _normalize_skill_identity(key)
+        if identity in normalized:
+            return None
+        normalized[identity] = item
+    return normalized
+
+
+def _identity_presence_verdict(
+    treatment: TreatmentSurface, baseline_value: Any, candidate_value: Any
+) -> tuple[str, bool, list[str]]:
+    """Only the declared identity may enter or leave the inventory."""
+
+    reasons: list[str] = []
+    baseline_identities = set(baseline_value)
+    candidate_identities = set(candidate_value)
+    if (treatment.identity in baseline_identities) != treatment.baseline_contains_identity:
+        reasons.append("baseline_treatment_identity_presence_mismatch")
+    if (
+        treatment.identity in candidate_identities
+    ) != treatment.candidate_contains_identity:
+        reasons.append("candidate_treatment_identity_presence_mismatch")
+    residual_baseline = baseline_identities - {treatment.identity}
+    residual_candidate = candidate_identities - {treatment.identity}
+    if residual_baseline != residual_candidate:
+        delta = sorted(residual_baseline.symmetric_difference(residual_candidate))
+        reasons.append("non_treatment_identity_delta:" + ",".join(delta))
+    equal = baseline_identities == candidate_identities
+    if reasons:
+        return (SURFACE_EQUAL if equal else SURFACE_DIFFERENT), False, reasons
+    if treatment.expected_treatment_delta:
+        return SURFACE_ALLOWED_TREATMENT_DELTA, True, reasons
+    return SURFACE_EQUAL, True, reasons
+
+
+def _content_delta_verdict(
+    treatment: TreatmentSurface,
+    baseline_map: Mapping[str, Any],
+    candidate_map: Mapping[str, Any],
+) -> tuple[str, bool, list[str]]:
+    """Only the declared identity's carried content may differ."""
+
+    reasons: list[str] = []
+    if (
+        treatment.identity not in baseline_map
+        or treatment.identity not in candidate_map
+    ):
+        reasons.append("treatment_identity_absent_from_content_dimension")
+    if set(baseline_map) != set(candidate_map):
+        delta = sorted(set(baseline_map).symmetric_difference(set(candidate_map)))
+        reasons.append("non_treatment_content_key_delta:" + ",".join(delta))
+    residual_baseline = {
+        key: value for key, value in baseline_map.items() if key != treatment.identity
+    }
+    residual_candidate = {
+        key: value for key, value in candidate_map.items() if key != treatment.identity
+    }
+    if residual_baseline != residual_candidate:
+        reasons.append("non_treatment_content_value_delta")
+    equal = baseline_map == candidate_map
+    if reasons:
+        return (SURFACE_EQUAL if equal else SURFACE_DIFFERENT), False, reasons
+    observed_delta = (
+        baseline_map[treatment.identity] != candidate_map[treatment.identity]
+    )
+    if observed_delta is not treatment.expected_treatment_delta:
+        reasons.append("treatment_content_delta_does_not_match_declaration")
+        return (SURFACE_DIFFERENT if observed_delta else SURFACE_EQUAL), False, reasons
+    if observed_delta:
+        return SURFACE_ALLOWED_TREATMENT_DELTA, True, reasons
+    return SURFACE_EQUAL, True, reasons
+
+
+def default_treatment_surface(expected_treatment_delta: bool) -> TreatmentSurface:
+    """The default contract: treatment adds the Fable carrier to the inventory."""
+
+    return TreatmentSurface(
+        dimension=SKILL_INVENTORY_DIMENSION,
+        mode=TREATMENT_MODE_IDENTITY_PRESENCE,
+        identity=FABLE_SKILL_IDENTITY,
+        baseline_contains_identity=False,
+        expected_treatment_delta=expected_treatment_delta,
+    )
+
+
+def evaluate_global_instruction_surface_identity(
+    baseline: InitEvidence,
+    candidate: InitEvidence,
+    *,
+    treatment_surface: TreatmentSurface,
+    mandatory_dimensions: Sequence[str] = (),
+) -> GlobalSurfaceIdentity:
+    """Fail closed unless only the declared treatment surface differs.
+
+    Every classifiable global/model-visible instruction surface is compared.  A
+    dimension this harness cannot observe is reported ``UNOBSERVABLE`` and a
+    dimension whose evidence is ambiguous, malformed, or present in only one arm
+    is reported ``UNRESOLVED``; neither is ever converted into equality.  A
+    mandatory dimension must be affirmatively equal (or be the declared treatment
+    surface); any other dimension may be unobservable but never different or
+    unresolved.
+    """
+
+    if not isinstance(treatment_surface, TreatmentSurface):
+        raise HarnessContractError("a declared TreatmentSurface is required")
+
+    dimensions: list[str] = []
+    for name in (
+        *GLOBAL_INSTRUCTION_SURFACE_DIMENSIONS,
+        *mandatory_dimensions,
+        SKILL_INVENTORY_DIMENSION,
+        treatment_surface.dimension,
+    ):
+        if not isinstance(name, str) or not name:
+            raise HarnessContractError("surface dimensions must be non-empty strings")
+        if name not in dimensions:
+            dimensions.append(name)
+
+    mandatory: list[str] = []
+    for name in (
+        *mandatory_dimensions,
+        SKILL_INVENTORY_DIMENSION,
+        treatment_surface.dimension,
+    ):
+        if name not in mandatory:
+            mandatory.append(name)
+
+    reasons: list[str] = []
+    if baseline.event is None:
+        reasons.append("baseline_init_event_absent")
+    if candidate.event is None:
+        reasons.append("candidate_init_event_absent")
+
+    observations: dict[str, tuple[str, Any, str, Any]] = {}
+    states: dict[str, str] = {}
+    for name in dimensions:
+        baseline_state, baseline_value = _surface_observation(baseline, name)
+        candidate_state, candidate_value = _surface_observation(candidate, name)
+        observations[name] = (
+            baseline_state,
+            baseline_value,
+            candidate_state,
+            candidate_value,
+        )
+        states[name] = _compare_observations(
+            baseline_state, baseline_value, candidate_state, candidate_value
+        )
+
+    skill_observation = observations[SKILL_INVENTORY_DIMENSION]
+    identity_equality: bool | None = None
+    if (
+        skill_observation[0] == _SURFACE_OBSERVED
+        and skill_observation[2] == _SURFACE_OBSERVED
+    ):
+        identity_equality = skill_observation[1] == skill_observation[3]
+
+    treatment_dimension = treatment_surface.dimension
+    baseline_state, baseline_value, candidate_state, candidate_value = observations[
+        treatment_dimension
+    ]
+    treatment_satisfied = False
+    if baseline_state != _SURFACE_OBSERVED or candidate_state != _SURFACE_OBSERVED:
+        reasons.append(f"treatment_surface_not_observed:{treatment_dimension}")
+    elif treatment_surface.mode == TREATMENT_MODE_IDENTITY_PRESENCE:
+        state, treatment_satisfied, treatment_reasons = _identity_presence_verdict(
+            treatment_surface, baseline_value, candidate_value
+        )
+        states[treatment_dimension] = state
+        reasons.extend(treatment_reasons)
+    else:
+        baseline_map = _normalized_content_map(baseline_value)
+        candidate_map = _normalized_content_map(candidate_value)
+        if baseline_map is None or candidate_map is None:
+            states[treatment_dimension] = SURFACE_UNRESOLVED
+            reasons.append("treatment_content_dimension_is_not_an_identity_map")
+        else:
+            state, treatment_satisfied, treatment_reasons = _content_delta_verdict(
+                treatment_surface, baseline_map, candidate_map
+            )
+            states[treatment_dimension] = state
+            reasons.extend(treatment_reasons)
+        # A content-delta design asserts identity equality; it is a separate,
+        # affirmatively required fact, not a by-product of the content check.
+        if states[SKILL_INVENTORY_DIMENSION] != SURFACE_EQUAL or identity_equality is not True:
+            treatment_satisfied = False
+            reasons.append("content_delta_requires_skill_identity_equality")
+        else:
+            for arm, evidence in (("baseline", baseline), ("candidate", candidate)):
+                if evidence.contains_identity(treatment_surface.identity) is not True:
+                    treatment_satisfied = False
+                    reasons.append(f"{arm}_missing_declared_treatment_identity")
+
+    for name in mandatory:
+        if states[name] not in (SURFACE_EQUAL, SURFACE_ALLOWED_TREATMENT_DELTA):
+            reasons.append(f"mandatory_dimension_not_equal:{name}:{states[name]}")
+    for name in dimensions:
+        if name in mandatory:
+            continue
+        if states[name] in (SURFACE_DIFFERENT, SURFACE_UNRESOLVED):
+            reasons.append(f"non_treatment_surface_delta:{name}:{states[name]}")
+
+    passed = (
+        treatment_satisfied
+        and all(
+            states[name] in (SURFACE_EQUAL, SURFACE_ALLOWED_TREATMENT_DELTA)
+            for name in mandatory
+        )
+        and all(
+            states[name]
+            in (SURFACE_EQUAL, SURFACE_UNOBSERVABLE, SURFACE_ALLOWED_TREATMENT_DELTA)
+            for name in dimensions
+        )
+    )
+
+    if not treatment_satisfied:
+        delta_kind = TREATMENT_DELTA_UNRESOLVED
+    elif states[treatment_dimension] == SURFACE_ALLOWED_TREATMENT_DELTA:
+        delta_kind = (
+            TREATMENT_DELTA_IDENTITY
+            if treatment_surface.mode == TREATMENT_MODE_IDENTITY_PRESENCE
+            else TREATMENT_DELTA_CONTENT
+        )
+    else:
+        delta_kind = TREATMENT_DELTA_NONE
+
+    return GlobalSurfaceIdentity(
+        passed=passed,
+        treatment_surface=treatment_surface,
+        dimension_states=dict(states),
+        mandatory_dimensions=tuple(mandatory),
+        observable_dimensions=tuple(
+            name
+            for name in dimensions
+            if states[name]
+            in (SURFACE_EQUAL, SURFACE_DIFFERENT, SURFACE_ALLOWED_TREATMENT_DELTA)
+        ),
+        unobservable_dimensions=tuple(
+            name for name in dimensions if states[name] == SURFACE_UNOBSERVABLE
+        ),
+        unresolved_dimensions=tuple(
+            name for name in dimensions if states[name] == SURFACE_UNRESOLVED
+        ),
+        differing_dimensions=tuple(
+            name for name in dimensions if states[name] == SURFACE_DIFFERENT
+        ),
+        identity_equality=identity_equality,
+        allowed_treatment_delta=(
+            treatment_satisfied
+            and states[treatment_dimension] == SURFACE_ALLOWED_TREATMENT_DELTA
+        ),
+        treatment_delta_kind=delta_kind,
+        reasons=tuple(dict.fromkeys(reasons)),
     )
 
 
@@ -1180,41 +1685,41 @@ def evaluate_purity(
     expected_fable_engaged: bool,
     frozen_dimensions: Sequence[str],
     surface_audit: SurfaceAudit | None,
+    treatment_surface: TreatmentSurface | None = None,
 ) -> PurityResult:
     """Evaluate every purity dimension affirmatively; absence never passes."""
 
     run = parse_init_events(run_events, frozen_dimensions)
     reference = parse_init_events(reference_events, frozen_dimensions)
+    treatment = (
+        default_treatment_surface(expected_fable_engaged)
+        if treatment_surface is None
+        else treatment_surface
+    )
+    if treatment.expected_treatment_delta is not expected_fable_engaged:
+        raise HarnessContractError(
+            "declared treatment surface contradicts the slot's expected treatment state"
+        )
+    global_surface = evaluate_global_instruction_surface_identity(
+        reference,
+        run,
+        treatment_surface=treatment,
+        mandatory_dimensions=frozen_dimensions,
+    )
     checks: dict[str, bool] = {
         "run_init_valid": run.valid,
         "reference_init_valid": reference.valid,
         "model_visible_condition_neutral": bool(surface_audit and surface_audit.passed),
         "run_semantic_skill_inventory_resolved": run.skills_resolved,
         "reference_semantic_skill_inventory_resolved": reference.skills_resolved,
+        "global_instruction_surface_identity": global_surface.passed,
     }
 
-    fable_engaged = run.fable_engaged
-    checks["intended_fable_state"] = (
-        fable_engaged is not None and fable_engaged is expected_fable_engaged
+    fable_engaged = run.contains_identity(treatment.identity)
+    checks["intended_treatment_state"] = (
+        fable_engaged is not None
+        and fable_engaged is treatment.candidate_contains_identity
     )
-
-    if run.skills_resolved and reference.skills_resolved:
-        reference_has_fable = FABLE_SKILL_IDENTITY in reference.skill_identities
-        if expected_fable_engaged:
-            expected_skills = set(reference.skill_identities)
-            expected_skills.add(FABLE_SKILL_IDENTITY)
-            skill_delta_matches = (
-                not reference_has_fable
-                and set(run.skill_identities) == expected_skills
-            )
-        else:
-            skill_delta_matches = (
-                not reference_has_fable
-                and set(run.skill_identities) == set(reference.skill_identities)
-            )
-    else:
-        skill_delta_matches = False
-    checks["skill_delta_is_exactly_treatment"] = skill_delta_matches
 
     dimension_matches: dict[str, bool] = {}
     for dimension in frozen_dimensions:
@@ -1237,6 +1742,7 @@ def evaluate_purity(
     else:
         reasons.extend(f"surface_leak:{leak}" for leak in surface_audit.leaks)
         reasons.extend(f"surface_error:{error}" for error in surface_audit.errors)
+    reasons.extend(f"global_surface:{reason}" for reason in global_surface.reasons)
     reasons.extend(name for name, passed in checks.items() if not passed)
 
     return PurityResult(
@@ -1249,6 +1755,7 @@ def evaluate_purity(
         reasons=tuple(dict.fromkeys(reasons)),
         purity_pass=purity_pass,
         run_countable=purity_pass,
+        global_surface=global_surface,
     )
 
 
@@ -1372,7 +1879,8 @@ def execute_manifest_slot(
     reference_preflight_pass = (
         reference.valid
         and reference.skills_resolved
-        and FABLE_SKILL_IDENTITY not in reference.skill_identities
+        and reference.contains_identity(slot.treatment_surface.identity)
+        is slot.treatment_surface.baseline_contains_identity
     )
 
     executor_called = False
@@ -1401,6 +1909,7 @@ def execute_manifest_slot(
         expected_fable_engaged=slot.expected_fable_engaged,
         frozen_dimensions=slot.frozen_dimensions,
         surface_audit=surface_audit,
+        treatment_surface=slot.treatment_surface,
     )
     git_state = capture_git_state(workspace)
     countable = (
@@ -1433,7 +1942,9 @@ __all__ = [
     "AdapterIdentity",
     "EnvironmentValueEvidence",
     "FABLE_SKILL_IDENTITY",
+    "GLOBAL_INSTRUCTION_SURFACE_DIMENSIONS",
     "GitState",
+    "GlobalSurfaceIdentity",
     "HarnessContractError",
     "InitEvidence",
     "ManifestSlot",
@@ -1445,12 +1956,23 @@ __all__ = [
     "ProviderInvocationEvidence",
     "PurityResult",
     "RunEvidence",
+    "SKILL_INVENTORY_DIMENSION",
+    "SURFACE_ALLOWED_TREATMENT_DELTA",
+    "SURFACE_DIFFERENT",
+    "SURFACE_EQUAL",
+    "SURFACE_UNOBSERVABLE",
+    "SURFACE_UNRESOLVED",
     "SurfaceAudit",
+    "TREATMENT_MODE_CONTENT_DELTA",
+    "TREATMENT_MODE_IDENTITY_PRESENCE",
+    "TreatmentSurface",
     "WorkspacePlan",
     "audit_model_visible_surfaces",
     "build_model_invocation",
     "capture_git_state",
     "create_condition_neutral_workspace",
+    "default_treatment_surface",
+    "evaluate_global_instruction_surface_identity",
     "evaluate_purity",
     "execute_manifest_slot",
     "load_manifest",

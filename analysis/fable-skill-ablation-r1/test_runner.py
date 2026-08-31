@@ -29,6 +29,42 @@ SPEC.loader.exec_module(runner)
 
 FROZEN_DIMENSIONS = ("tools", "agents", "mcp_servers")
 PASSING_AUDIT = runner.SurfaceAudit(passed=True)
+CONTENT_DIMENSION = "skill_carrier_digests"
+
+# Every non-treatment global instruction surface this harness can classify, set
+# to an identical value so any single-dimension delta is the only variable.
+GLOBAL_SURFACE: dict[str, Any] = {
+    "plugins": ["local-plugin"],
+    "permission_mode": "acceptEdits",
+    "output_style": "default",
+    "host_version": "offline-host-0",
+    "hooks": {"PreToolUse": [], "SessionStart": []},
+    "agents_md": [{"path": "AGENTS.md", "sha256": "a" * 64}],
+    "user_rules": [],
+    "instruction_sources": ["project", "user"],
+}
+NON_TREATMENT_DIMENSIONS = tuple(GLOBAL_SURFACE) + FROZEN_DIMENSIONS
+
+
+def global_surface_event(**overrides: Any) -> dict[str, Any]:
+    """An init event that resolves every classifiable global surface."""
+
+    surface = dict(GLOBAL_SURFACE)
+    skills = overrides.pop("skills", None)
+    surface.update(overrides)
+    return init_event(skills=skills, **surface)
+
+
+def content_delta_treatment(
+    expected_treatment_delta: bool, identity: str = "fable-method"
+) -> Any:
+    return runner.TreatmentSurface(
+        dimension=CONTENT_DIMENSION,
+        mode=runner.TREATMENT_MODE_CONTENT_DELTA,
+        identity=identity,
+        baseline_contains_identity=True,
+        expected_treatment_delta=expected_treatment_delta,
+    )
 
 
 def init_event(
@@ -57,14 +93,17 @@ def evaluate(
     *,
     expected_fable: bool = False,
     audit: Any = PASSING_AUDIT,
+    frozen_dimensions: Any = FROZEN_DIMENSIONS,
+    treatment_surface: Any = None,
 ) -> Any:
     reference = reference_events or [init_event()]
     return runner.evaluate_purity(
         run_events,
         reference,
         expected_fable_engaged=expected_fable,
-        frozen_dimensions=FROZEN_DIMENSIONS,
+        frozen_dimensions=frozen_dimensions,
         surface_audit=audit,
+        treatment_surface=treatment_surface,
     )
 
 
@@ -722,6 +761,376 @@ class CanonicalHarnessTests(unittest.TestCase):
             hashlib.sha256("\ud800".encode("utf-8", errors="surrogatepass")).hexdigest(),
         )
         json.dumps(evidence.as_record(), allow_nan=False)
+
+    def test_30_identical_non_treatment_surfaces_pass(self) -> None:
+        reference = global_surface_event(skills=["reference-skill"])
+        run = global_surface_event(skills=["reference-skill", {"name": "fable-method"}])
+        result = evaluate([run], [reference], expected_fable=True)
+        surface = result.global_surface
+
+        self.assertTrue(result.purity_pass, result.reasons)
+        self.assertTrue(result.run_countable)
+        self.assertTrue(surface.passed, surface.reasons)
+        self.assertEqual(
+            surface.dimension_states[runner.SKILL_INVENTORY_DIMENSION],
+            runner.SURFACE_ALLOWED_TREATMENT_DELTA,
+        )
+        self.assertEqual(surface.treatment_delta_kind, "IDENTITY_DELTA")
+        self.assertTrue(surface.allowed_treatment_delta)
+        self.assertFalse(surface.identity_equality)
+        for dimension in NON_TREATMENT_DIMENSIONS:
+            with self.subTest(dimension=dimension):
+                self.assertEqual(
+                    surface.dimension_states[dimension], runner.SURFACE_EQUAL
+                )
+        self.assertEqual(surface.differing_dimensions, ())
+        self.assertEqual(surface.unresolved_dimensions, ())
+        json.dumps(result.as_record(), allow_nan=False)
+
+    def test_31_unrelated_plugin_delta_fails_closed(self) -> None:
+        reference = global_surface_event(skills=["reference-skill"])
+        run = global_surface_event(
+            skills=["reference-skill", {"name": "fable-method"}],
+            plugins=["local-plugin", "unrelated-plugin"],
+        )
+        result = evaluate([run], [reference], expected_fable=True)
+        surface = result.global_surface
+
+        self.assertFalse(result.purity_pass)
+        self.assertFalse(result.run_countable)
+        self.assertFalse(surface.passed)
+        self.assertEqual(
+            surface.dimension_states["plugins"], runner.SURFACE_DIFFERENT
+        )
+        self.assertIn("plugins", surface.differing_dimensions)
+        self.assertIn(
+            "non_treatment_surface_delta:plugins:DIFFERENT", surface.reasons
+        )
+        # The treatment itself was applied exactly; only the unrelated surface
+        # is what makes the observation non-countable.
+        self.assertTrue(surface.allowed_treatment_delta)
+
+    def test_32_observable_hook_and_instruction_deltas_fail_closed(self) -> None:
+        deltas = {
+            "hooks": {"PreToolUse": [{"command": "audit.sh"}], "SessionStart": []},
+            "agents_md": [{"path": "AGENTS.md", "sha256": "b" * 64}],
+            "user_rules": ["always-use-tabs"],
+            "instruction_sources": ["project", "user", "enterprise"],
+            "permission_mode": "bypassPermissions",
+            "output_style": "explanatory",
+            "host_version": "offline-host-1",
+        }
+        reference = global_surface_event(skills=["reference-skill"])
+        for dimension, value in deltas.items():
+            with self.subTest(dimension=dimension):
+                run = global_surface_event(
+                    skills=["reference-skill", {"name": "fable-method"}],
+                    **{dimension: value},
+                )
+                result = evaluate([run], [reference], expected_fable=True)
+                surface = result.global_surface
+                self.assertFalse(result.purity_pass)
+                self.assertFalse(result.run_countable)
+                self.assertEqual(
+                    surface.dimension_states[dimension], runner.SURFACE_DIFFERENT
+                )
+                self.assertIn(
+                    f"non_treatment_surface_delta:{dimension}:DIFFERENT",
+                    surface.reasons,
+                )
+
+    def test_33_same_skill_identity_with_declared_content_delta_passes(self) -> None:
+        reference = global_surface_event(
+            skills=["reference-skill", "fable-method"],
+            **{
+                CONTENT_DIMENSION: {
+                    "fable-method": "a" * 64,
+                    "reference-skill": "b" * 64,
+                }
+            },
+        )
+        run = global_surface_event(
+            skills=["reference-skill", "fable-method"],
+            **{
+                CONTENT_DIMENSION: {
+                    "fable-method": "c" * 64,
+                    "reference-skill": "b" * 64,
+                }
+            },
+        )
+        result = evaluate(
+            [run],
+            [reference],
+            expected_fable=True,
+            treatment_surface=content_delta_treatment(True),
+        )
+        surface = result.global_surface
+
+        self.assertTrue(result.purity_pass, result.reasons)
+        self.assertTrue(result.run_countable)
+        self.assertTrue(surface.identity_equality)
+        self.assertTrue(surface.allowed_treatment_delta)
+        self.assertEqual(surface.treatment_delta_kind, "CONTENT_DELTA")
+        self.assertEqual(
+            surface.dimension_states[runner.SKILL_INVENTORY_DIMENSION],
+            runner.SURFACE_EQUAL,
+        )
+        self.assertEqual(
+            surface.dimension_states[CONTENT_DIMENSION],
+            runner.SURFACE_ALLOWED_TREATMENT_DELTA,
+        )
+
+        control = evaluate(
+            [reference],
+            [reference],
+            expected_fable=False,
+            treatment_surface=content_delta_treatment(False),
+        )
+        self.assertTrue(control.purity_pass, control.reasons)
+        self.assertTrue(control.global_surface.identity_equality)
+        self.assertFalse(control.global_surface.allowed_treatment_delta)
+        self.assertEqual(control.global_surface.treatment_delta_kind, "NONE")
+
+    def test_34_extra_unrelated_skill_or_content_key_fails_closed(self) -> None:
+        reference = global_surface_event(skills=["reference-skill"])
+        run = global_surface_event(
+            skills=["reference-skill", "fable-method", "unrelated-skill"]
+        )
+        result = evaluate([run], [reference], expected_fable=True)
+        surface = result.global_surface
+        self.assertFalse(result.purity_pass)
+        self.assertFalse(result.run_countable)
+        self.assertFalse(surface.allowed_treatment_delta)
+        self.assertIn(
+            "non_treatment_identity_delta:unrelated-skill", surface.reasons
+        )
+
+        content_reference = global_surface_event(
+            skills=["reference-skill", "fable-method"],
+            **{
+                CONTENT_DIMENSION: {
+                    "fable-method": "a" * 64,
+                    "reference-skill": "b" * 64,
+                }
+            },
+        )
+        content_run = global_surface_event(
+            skills=["reference-skill", "fable-method"],
+            **{
+                CONTENT_DIMENSION: {
+                    "fable-method": "c" * 64,
+                    "reference-skill": "b" * 64,
+                    "unrelated-skill": "d" * 64,
+                }
+            },
+        )
+        content = evaluate(
+            [content_run],
+            [content_reference],
+            expected_fable=True,
+            treatment_surface=content_delta_treatment(True),
+        )
+        self.assertFalse(content.purity_pass)
+        self.assertFalse(content.run_countable)
+        self.assertFalse(content.global_surface.allowed_treatment_delta)
+        self.assertIn(
+            "non_treatment_content_key_delta:unrelated-skill",
+            content.global_surface.reasons,
+        )
+
+    def test_35_unobservable_surfaces_never_become_equality(self) -> None:
+        mandatory = FROZEN_DIMENSIONS + ("plugins",)
+        reference = init_event(skills=["reference-skill"])
+        run = init_event(skills=["reference-skill", "fable-method"])
+        missing = evaluate(
+            [run], [reference], expected_fable=True, frozen_dimensions=mandatory
+        )
+        surface = missing.global_surface
+        self.assertFalse(missing.purity_pass)
+        self.assertFalse(missing.run_countable)
+        self.assertIn("plugins", surface.mandatory_dimensions)
+        self.assertIn("plugins", surface.unobservable_dimensions)
+        self.assertEqual(
+            surface.dimension_states["plugins"], runner.SURFACE_UNOBSERVABLE
+        )
+        self.assertIn(
+            "mandatory_dimension_not_equal:plugins:UNOBSERVABLE", surface.reasons
+        )
+
+        one_sided = evaluate(
+            [init_event(skills=["reference-skill", "fable-method"], hooks={"a": []})],
+            [reference],
+            expected_fable=True,
+        )
+        self.assertFalse(one_sided.purity_pass)
+        self.assertEqual(
+            one_sided.global_surface.dimension_states["hooks"],
+            runner.SURFACE_UNRESOLVED,
+        )
+        self.assertIn(
+            "non_treatment_surface_delta:hooks:UNRESOLVED",
+            one_sided.global_surface.reasons,
+        )
+
+        no_inventory = evaluate(
+            [{"type": "system", "subtype": "init"}],
+            [{"type": "system", "subtype": "init"}],
+            expected_fable=True,
+            frozen_dimensions=(),
+        )
+        self.assertFalse(no_inventory.purity_pass)
+        self.assertEqual(
+            no_inventory.global_surface.dimension_states[
+                runner.SKILL_INVENTORY_DIMENSION
+            ],
+            runner.SURFACE_UNOBSERVABLE,
+        )
+        self.assertIn(
+            "treatment_surface_not_observed:skills",
+            no_inventory.global_surface.reasons,
+        )
+        self.assertIsNone(no_inventory.global_surface.identity_equality)
+
+    def test_36_gate_is_generic_over_the_declared_carrier_identity(self) -> None:
+        treatment = runner.TreatmentSurface(
+            dimension=runner.SKILL_INVENTORY_DIMENSION,
+            mode=runner.TREATMENT_MODE_IDENTITY_PRESENCE,
+            identity="some-other-carrier",
+            baseline_contains_identity=False,
+            expected_treatment_delta=True,
+        )
+        reference = global_surface_event(skills=["reference-skill"])
+        declared = global_surface_event(
+            skills=["reference-skill", "some-other-carrier"]
+        )
+        result = evaluate(
+            [declared], [reference], expected_fable=True, treatment_surface=treatment
+        )
+        self.assertTrue(result.purity_pass, result.reasons)
+        self.assertTrue(result.fable_engaged)
+
+        undeclared = global_surface_event(skills=["reference-skill", "fable-method"])
+        wrong = evaluate(
+            [undeclared], [reference], expected_fable=True, treatment_surface=treatment
+        )
+        self.assertFalse(wrong.purity_pass)
+        self.assertFalse(wrong.run_countable)
+        self.assertFalse(wrong.global_surface.allowed_treatment_delta)
+        # The undeclared carrier is an ordinary non-treatment identity delta,
+        # and the declared carrier never arrived in the candidate arm.
+        self.assertIn(
+            "non_treatment_identity_delta:fable-method",
+            wrong.global_surface.reasons,
+        )
+        self.assertIn(
+            "candidate_treatment_identity_presence_mismatch",
+            wrong.global_surface.reasons,
+        )
+
+        with self.assertRaises(runner.HarnessContractError):
+            runner.TreatmentSurface(
+                dimension=runner.SKILL_INVENTORY_DIMENSION,
+                mode=runner.TREATMENT_MODE_CONTENT_DELTA,
+                identity="fable-method",
+                baseline_contains_identity=True,
+                expected_treatment_delta=True,
+            )
+
+    def test_37_manifest_declares_the_allowed_treatment_surface(self) -> None:
+        default_slot = runner.select_manifest_slot(
+            synthetic_manifest(), "s02-A01-r0-ON"
+        )
+        self.assertEqual(
+            default_slot.treatment_surface.dimension, runner.SKILL_INVENTORY_DIMENSION
+        )
+        self.assertEqual(
+            default_slot.treatment_surface.mode,
+            runner.TREATMENT_MODE_IDENTITY_PRESENCE,
+        )
+        self.assertFalse(default_slot.treatment_surface.baseline_contains_identity)
+        self.assertTrue(default_slot.treatment_surface.expected_treatment_delta)
+
+        manifest = synthetic_manifest("definitely-not-an-installed-provider")
+        manifest["treatment_surface"] = {
+            "dimension": CONTENT_DIMENSION,
+            "mode": runner.TREATMENT_MODE_CONTENT_DELTA,
+            "identity": "fable-method",
+            "baseline_contains_identity": True,
+        }
+        slot = runner.select_manifest_slot(manifest, "s02-A01-r0-ON")
+        self.assertEqual(slot.treatment_surface.dimension, CONTENT_DIMENSION)
+        self.assertTrue(slot.treatment_surface.baseline_contains_identity)
+        self.assertTrue(slot.treatment_surface.candidate_contains_identity)
+
+        rejected = synthetic_manifest()
+        rejected["treatment_surface"] = {"dimension": CONTENT_DIMENSION}
+        with self.assertRaises(runner.HarnessContractError):
+            runner.select_manifest_slot(rejected, "s02-A01-r0-ON")
+
+        reference = global_surface_event(
+            skills=["reference-skill", "fable-method"],
+            **{
+                CONTENT_DIMENSION: {
+                    "fable-method": "a" * 64,
+                    "reference-skill": "b" * 64,
+                }
+            },
+        )
+
+        def fake_executor(invocation: Any) -> Any:
+            return provider_execution(
+                invocation,
+                [
+                    global_surface_event(
+                        skills=["reference-skill", "fable-method"],
+                        session_id="offline-session",
+                        **{
+                            CONTENT_DIMENSION: {
+                                "fable-method": "c" * 64,
+                                "reference-skill": "b" * 64,
+                            }
+                        },
+                    ),
+                    {
+                        "type": "assistant",
+                        "session_id": "offline-session",
+                        "message": {"id": "msg-offline", "model": "offline-model"},
+                    },
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "session_id": "offline-session",
+                        "modelUsage": {"offline-model": {"input_tokens": 1}},
+                        "total_cost_usd": "0.0",
+                    },
+                ],
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = runner.execute_manifest_slot(
+                manifest,
+                "s02-A01-r0-ON",
+                workspace_parent=temporary,
+                reference_events=[reference],
+                materializer=lambda plan: make_git_repository(
+                    Path(plan.workspace_path)
+                ),
+                executor=fake_executor,
+                opaque_id_factory=lambda: "00112233445566778899aabbccddeeff",
+            )
+
+        # A baseline that already carries the Fable identity is now a legal
+        # reference arm; only the declared carrier content differs.
+        self.assertTrue(evidence.executor_called)
+        self.assertTrue(evidence.purity.purity_pass, evidence.purity.reasons)
+        self.assertTrue(evidence.run_countable)
+        self.assertTrue(evidence.purity.global_surface.identity_equality)
+        self.assertEqual(
+            evidence.purity.global_surface.treatment_delta_kind, "CONTENT_DELTA"
+        )
+        json.dumps(evidence.as_record(), allow_nan=False)
+
 
 
 if __name__ == "__main__":
