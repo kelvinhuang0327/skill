@@ -158,6 +158,35 @@ def decimal_text(value: Any, label: str = "decimal") -> str:
     return rendered
 
 
+def _validated_exact_cost_evidence(
+    cost_status: Any,
+    wrapper_exact_cost: Any,
+    provider_result: Any,
+    invocation_cap: Decimal,
+) -> str | None:
+    if (
+        cost_status != "KNOWN"
+        or wrapper_exact_cost is None
+        or not isinstance(provider_result, Mapping)
+        or "total_cost_usd" not in provider_result
+    ):
+        return None
+    try:
+        wrapper_cost = _decimal(wrapper_exact_cost, "wrapper_exact_cost")
+        provider_cost = _decimal(
+            provider_result["total_cost_usd"], "provider_total_cost_usd"
+        )
+    except AuthorityConflict:
+        return None
+    if (
+        wrapper_cost != provider_cost
+        or wrapper_cost > invocation_cap
+        or provider_cost > invocation_cap
+    ):
+        return None
+    return decimal_text(wrapper_cost)
+
+
 def _ledger_decimal(value: Any, label: str) -> Decimal:
     if not isinstance(value, str):
         raise LedgerError(f"{label}_not_string")
@@ -1740,9 +1769,6 @@ class ExecutionController:
             or raw_by_name["result.json"] != _canonical_json(result_record)
             or set(result_record)
             != {"provider_result", "outcome", "cost_status", "exact_cost"}
-            or not isinstance(result_record.get("provider_result"), Mapping)
-            or result_record.get("cost_status") != "KNOWN"
-            or not isinstance(result_record.get("exact_cost"), str)
         ):
             return None
         allowed_outcomes = set(
@@ -1757,13 +1783,12 @@ class ExecutionController:
             attempt["attempt_ordinal"] == 2 and outcome == "INFRA_ERROR"
         ):
             return None
-        try:
-            exact_cost = _ledger_decimal(result_record["exact_cost"], "exact_cost")
-        except LedgerError:
-            return None
-        if exact_cost > authority.invocation_cap:
-            return None
-        return decimal_text(exact_cost)
+        return _validated_exact_cost_evidence(
+            result_record.get("cost_status"),
+            result_record.get("exact_cost"),
+            result_record.get("provider_result"),
+            authority.invocation_cap,
+        )
 
     def _collect_crash_partial_attempt(
         self, authority: ManifestAuthority, attempt: Mapping[str, Any]
@@ -2385,20 +2410,15 @@ class ExecutionController:
             cost_status = "UNRESOLVED"
             exact_cost: str | None = None
         else:
-            cost_status = observation.cost_status
-            exact_cost = None
+            exact_cost = _validated_exact_cost_evidence(
+                observation.cost_status,
+                observation.exact_cost,
+                observation.result_record,
+                authority.invocation_cap,
+            )
+            cost_status = "KNOWN" if exact_cost is not None else "UNRESOLVED"
         if key.attempt_ordinal == 2 and outcome == "INFRA_ERROR":
             outcome = "INFRA_FAIL"
-        if cost_status == "KNOWN" and observation.exact_cost is not None:
-            parsed_cost = _decimal(observation.exact_cost, "provider_exact_cost")
-            if parsed_cost <= authority.invocation_cap:
-                exact_cost = decimal_text(parsed_cost)
-            else:
-                cost_status = "UNRESOLVED"
-        elif cost_status != "UNRESOLVED":
-            cost_status = "UNRESOLVED"
-        if cost_status == "UNRESOLVED":
-            exact_cost = None
 
         logical_attempt = (
             authority.runs_root / key.run_id / f"attempt-{key.attempt_ordinal}"

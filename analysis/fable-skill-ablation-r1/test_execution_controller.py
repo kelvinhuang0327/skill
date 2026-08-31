@@ -24,6 +24,8 @@ import runner  # noqa: E402
 
 LOGICAL_R2_ROOT = Path("/Users/kelvin/fable-ablation-r2")
 REAL_PROVIDER = "/Users/kelvin/.local/bin/claude"
+_MIRROR_PROVIDER_COST = object()
+_OMIT_PROVIDER_COST = object()
 
 
 class StaticExecutorProbe:
@@ -82,15 +84,21 @@ def provider_result(
     cost: str | None = "0.1",
     *,
     cost_status: str | None = None,
+    provider_cost: Any = _MIRROR_PROVIDER_COST,
 ) -> Any:
     resolved_status = cost_status or ("KNOWN" if cost is not None else "UNRESOLVED")
+    result_record = {"source": "offline-fake"}
+    if provider_cost is _MIRROR_PROVIDER_COST:
+        result_record["total_cost_usd"] = cost
+    elif provider_cost is not _OMIT_PROVIDER_COST:
+        result_record["total_cost_usd"] = provider_cost
     return controller.ProviderResult(
         outcome=outcome,
         cost_status=resolved_status,
         exact_cost=cost,
         raw_evidence=(f"offline:{outcome}:{cost}\n").encode("utf-8"),
         canonical_evidence={"offline": True, "outcome": outcome},
-        result_record={"total_cost_usd": cost, "source": "offline-fake"},
+        result_record=result_record,
     )
 
 
@@ -721,6 +729,181 @@ class ExecutionControllerOfflineTests(unittest.TestCase):
         )
         self.assertEqual(self.offline.state()["state"], "ABORTED")
         self.assertEqual(restart_provider.invocations, [])
+
+    def test_28_restart_rejects_contradictory_exact_cost_evidence(self) -> None:
+        def crash_after_evidence(event: str) -> None:
+            if event == "provider_evidence_persisted":
+                raise RuntimeError("simulated crash before provider settlement")
+
+        provider = FakeProvider(
+            self.offline.provider_version,
+            results=[provider_result("PASS", "0", provider_cost="0.25")],
+        )
+        active, _ = self.offline.new_controller(
+            provider=provider, event_sink=crash_after_evidence
+        )
+        active.start()
+        first, _ = active.reserve_pair(1)
+        with self.assertRaisesRegex(RuntimeError, "before provider settlement"):
+            active.invoke(first, self.offline.invocation(first.run_id))
+        active.close()
+        attempt_root = self.offline.root / "runs" / first.run_id / "attempt-1"
+        result_path = attempt_root / "result.json"
+        result_record = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(result_record["provider_result"]["total_cost_usd"], "0.25")
+        self.assertEqual(result_record["cost_status"], "UNRESOLVED")
+        self.assertIsNone(result_record["exact_cost"])
+        result_record["cost_status"] = "KNOWN"
+        result_record["exact_cost"] = "0"
+        result_path.write_bytes(controller._canonical_json(result_record))
+        preserved = {path.name: path.read_bytes() for path in attempt_root.iterdir()}
+        self.assertEqual(len(provider.invocations), 1)
+
+        restarted, restart_provider = self.offline.new_controller()
+        with self.assertRaisesRegex(controller.RecoveryAborted, "CRASH_CASE_3"):
+            restarted.start()
+
+        ledger = self.offline.ledger()
+        attempt = ledger["attempts"][0]
+        self.assertEqual(attempt["status"], "ORPHANED")
+        self.assertEqual(attempt["outcome"], "ORPHANED")
+        self.assertEqual(attempt["cost_status"], "UNRESOLVED")
+        self.assertIsNone(attempt["exact_cost"])
+        self.assertNotEqual(attempt["exact_cost"], "0")
+        self.assertEqual(attempt["unreleased_amount"], "2")
+        self.assertEqual(ledger["known_spend_usd"], "0")
+        self.assertEqual(ledger["unreleased_reservation_usd"], "4")
+        self.assertEqual(
+            ledger["unresolved_cost_items"],
+            [{"run_id": first.run_id, "attempt_ordinal": 1}],
+        )
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in attempt_root.iterdir()},
+            preserved,
+        )
+        self.assertEqual(self.offline.state()["state"], "ABORTED")
+        self.assertEqual(restart_provider.invocations, [])
+
+    def test_29_restart_rejects_missing_or_invalid_provider_cost(self) -> None:
+        for case, provider_cost in (
+            ("missing", _OMIT_PROVIDER_COST),
+            ("invalid", "not-a-decimal"),
+        ):
+            with self.subTest(case=case):
+                offline = OfflineR2()
+                try:
+                    def crash_after_evidence(event: str) -> None:
+                        if event == "provider_evidence_persisted":
+                            raise RuntimeError(
+                                "simulated crash before provider settlement"
+                            )
+
+                    provider = FakeProvider(
+                        offline.provider_version,
+                        results=[
+                            provider_result(
+                                "PASS", "0.25", provider_cost=provider_cost
+                            )
+                        ],
+                    )
+                    active, _ = offline.new_controller(
+                        provider=provider, event_sink=crash_after_evidence
+                    )
+                    active.start()
+                    first, _ = active.reserve_pair(1)
+                    with self.assertRaisesRegex(
+                        RuntimeError, "before provider settlement"
+                    ):
+                        active.invoke(first, offline.invocation(first.run_id))
+                    active.close()
+                    result_path = (
+                        offline.root
+                        / "runs"
+                        / first.run_id
+                        / "attempt-1"
+                        / "result.json"
+                    )
+                    result_record = json.loads(
+                        result_path.read_text(encoding="utf-8")
+                    )
+                    if provider_cost is _OMIT_PROVIDER_COST:
+                        self.assertNotIn(
+                            "total_cost_usd", result_record["provider_result"]
+                        )
+                    else:
+                        self.assertEqual(
+                            result_record["provider_result"]["total_cost_usd"],
+                            provider_cost,
+                        )
+                    self.assertEqual(result_record["cost_status"], "UNRESOLVED")
+                    self.assertIsNone(result_record["exact_cost"])
+                    result_record["cost_status"] = "KNOWN"
+                    result_record["exact_cost"] = "0.25"
+                    result_path.write_bytes(controller._canonical_json(result_record))
+                    preserved_result = result_path.read_bytes()
+                    self.assertEqual(len(provider.invocations), 1)
+
+                    restarted, restart_provider = offline.new_controller()
+                    with self.assertRaisesRegex(
+                        controller.RecoveryAborted, "CRASH_CASE_3"
+                    ):
+                        restarted.start()
+
+                    ledger = offline.ledger()
+                    attempt = ledger["attempts"][0]
+                    self.assertEqual(attempt["status"], "ORPHANED")
+                    self.assertEqual(attempt["cost_status"], "UNRESOLVED")
+                    self.assertIsNone(attempt["exact_cost"])
+                    self.assertNotEqual(attempt["exact_cost"], "0")
+                    self.assertEqual(attempt["unreleased_amount"], "2")
+                    self.assertEqual(ledger["known_spend_usd"], "0")
+                    self.assertEqual(ledger["unreleased_reservation_usd"], "4")
+                    self.assertEqual(result_path.read_bytes(), preserved_result)
+                    self.assertEqual(offline.state()["state"], "ABORTED")
+                    self.assertEqual(restart_provider.invocations, [])
+                finally:
+                    offline.close()
+
+    def test_30_matching_nonzero_cost_evidence_is_known(self) -> None:
+        provider = FakeProvider(
+            self.offline.provider_version,
+            results=[provider_result("PASS", "0.25", provider_cost="0.25")],
+        )
+        active, _ = self.offline.new_controller(provider=provider)
+        active.start()
+        first, _ = active.reserve_pair(1)
+
+        result = active.invoke(first, self.offline.invocation(first.run_id))
+
+        attempt = self.offline.ledger()["attempts"][0]
+        self.assertEqual(result.cost_status, "KNOWN")
+        self.assertEqual(result.exact_cost, "0.25")
+        self.assertEqual(attempt["cost_status"], "KNOWN")
+        self.assertEqual(attempt["exact_cost"], "0.25")
+        self.assertEqual(self.offline.ledger()["known_spend_usd"], "0.25")
+        self.assertEqual(len(provider.invocations), 1)
+
+    def test_31_matching_explicit_zero_cost_evidence_is_known(self) -> None:
+        provider = FakeProvider(
+            self.offline.provider_version,
+            results=[provider_result("PASS", "0", provider_cost="0")],
+        )
+        active, _ = self.offline.new_controller(provider=provider)
+        active.start()
+        first, _ = active.reserve_pair(1)
+
+        result = active.invoke(first, self.offline.invocation(first.run_id))
+
+        ledger = self.offline.ledger()
+        attempt = ledger["attempts"][0]
+        self.assertEqual(result.cost_status, "KNOWN")
+        self.assertEqual(result.exact_cost, "0")
+        self.assertEqual(attempt["cost_status"], "KNOWN")
+        self.assertEqual(attempt["exact_cost"], "0")
+        self.assertEqual(attempt["unreleased_amount"], "0")
+        self.assertEqual(ledger["known_spend_usd"], "0")
+        self.assertEqual(ledger["unresolved_cost_items"], [])
+        self.assertEqual(len(provider.invocations), 1)
 
 
 if __name__ == "__main__":
