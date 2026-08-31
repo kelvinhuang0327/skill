@@ -22,6 +22,7 @@ shared:
     - fable-method/shared/references/judge-handoff.md
     - fable-method/shared/references/reporting.md
     - fable-method/shared/references/task-checkpoint.md
+    - fable-method/shared/references/test-falsifiability.md
 
 platforms:
   - name: codex
