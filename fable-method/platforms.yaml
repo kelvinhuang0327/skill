@@ -17,6 +17,7 @@ shared:
     - fable-method/shared/references/examples.md
     - fable-method/shared/references/failure-modes.md
     - fable-method/shared/references/flowcharts.md
+    - fable-method/shared/references/generic-ranking.md
     - fable-method/shared/references/operational-gates.md
     - fable-method/shared/references/judge-handoff.md
     - fable-method/shared/references/reporting.md

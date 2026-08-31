@@ -427,6 +427,8 @@ Load only the directly relevant reference:
 - [operational gates](references/operational-gates.md) for runtime outputs,
   process termination, Git action tiers, worktrees, or detailed authority
   checks;
+- [generic ranking](references/generic-ranking.md) before ranking, scoring, or
+  comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [reporting](references/reporting.md) for compact outcome-first fields and
   lifecycle reporting;
