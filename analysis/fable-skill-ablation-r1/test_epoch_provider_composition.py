@@ -71,6 +71,11 @@ RECORDS = [
         "plugins": [],
         "permissionMode": "%(permission)s",
         "skills": ["reference-skill"],
+        "output_style": "default",
+        "hooks": [],
+        "agents_md": [],
+        "user_rules": [],
+        "instruction_sources": ["cli-default"],
     },
     {
         "type": "assistant",

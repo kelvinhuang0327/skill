@@ -75,6 +75,18 @@ _INVENTORY_ALIASES = {
     "plugins": ("plugins",),
 }
 _PERMISSION_ALIASES = ("permissionMode", "permission_mode", "permission-mode")
+# The model-visible instruction surfaces that carry no tool inventory.  An
+# ablation only isolates the carrier skill when every other instruction the
+# model can read is affirmatively observed to be identical on both arms, so
+# absence of evidence is never accepted here as evidence of sameness.
+_INSTRUCTION_SURFACE_ALIASES = {
+    "output_style": ("output_style", "outputStyle"),
+    "hooks": ("hooks",),
+    "agents_md": ("agents_md", "agentsMd"),
+    "user_rules": ("user_rules", "userRules"),
+    "instruction_sources": ("instruction_sources", "instructionSources"),
+}
+INSTRUCTION_SURFACES = tuple(_INSTRUCTION_SURFACE_ALIASES)
 
 
 def _sha256(value: bytes) -> str:
@@ -807,6 +819,27 @@ def _permission_from_init(init_record: Mapping[str, Any]) -> str | None:
     return found[0]
 
 
+def _instruction_surface_from_init(
+    init_record: Mapping[str, Any], surface: str
+) -> str | None:
+    """Digest one instruction surface, or None when it is unobservable.
+
+    Unobservable covers absent, null, ambiguous (more than one spelling
+    present, which is contradictory evidence rather than corroboration), and
+    not canonically serializable.  Callers must never treat two unobservable
+    surfaces as equal to each other.
+    """
+
+    aliases = _INSTRUCTION_SURFACE_ALIASES[surface]
+    found = [init_record[alias] for alias in aliases if alias in init_record]
+    if len(found) != 1 or found[0] is None:
+        return None
+    try:
+        return _sha256(_canonical_json(found[0]))
+    except (TypeError, ValueError):
+        return None
+
+
 def _main_loop_assistant(record: Mapping[str, Any]) -> bool:
     return (
         record.get("type") == "assistant"
@@ -1290,6 +1323,27 @@ def compare_condition_neutral_evidence(
         and left_permission == right_permission
     )
 
+    # Every remaining instruction surface must be observed on both arms and
+    # observed to be the same.  Two arms that merely fail to report a surface
+    # are exactly the shape a silent instruction drift takes, so unobservable
+    # never satisfies this gate.
+    for surface in INSTRUCTION_SURFACES:
+        left_surface = (
+            None
+            if left_init is None
+            else _instruction_surface_from_init(left_init, surface)
+        )
+        right_surface = (
+            None
+            if right_init is None
+            else _instruction_surface_from_init(right_init, surface)
+        )
+        checks[f"actual_init_{surface}_equal"] = (
+            left_surface is not None
+            and right_surface is not None
+            and left_surface == right_surface
+        )
+
     left_carriers = _carrier_inventory(left_init)
     right_carriers = _carrier_inventory(right_init)
     checks["only_allowed_fable_carrier_inventory_delta"] = (
@@ -1319,6 +1373,7 @@ __all__ = [
     "CTO_MODEL_ID",
     "CTO_PERMISSION_MODE",
     "CTO_TOOLSET",
+    "INSTRUCTION_SURFACES",
     "ClaudeExecutor",
     "ClaudeProviderPolicy",
     "ConditionNeutralityComparison",

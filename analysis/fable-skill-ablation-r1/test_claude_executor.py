@@ -44,6 +44,18 @@ OPAQUE_ID_A = "0123456789abcdef0123456789abcdef"
 OPAQUE_ID_B = "fedcba9876543210fedcba9876543210"
 
 
+# The reference arm's affirmatively observed instruction surfaces.  An empty
+# inventory here is a real observation -- "none configured" -- and is not the
+# same thing as the provider failing to report the surface at all.
+INSTRUCTION_SURFACE_EVIDENCE: dict[str, Any] = {
+    "output_style": "default",
+    "hooks": [],
+    "agents_md": [],
+    "user_rules": [],
+    "instruction_sources": ["cli-default"],
+}
+
+
 def init_record(
     *,
     skills: Sequence[str] = ("reference-skill",),
@@ -53,8 +65,15 @@ def init_record(
     plugins: Sequence[str] = (),
     session_id: str = PROVIDER_SESSION_ID,
     model: str = claude.CTO_MODEL_ID,
+    instruction_surfaces: Mapping[str, Any] | None = None,
+    omit_instruction_surfaces: Sequence[str] = (),
     **extra: Any,
 ) -> dict[str, Any]:
+    surfaces = dict(INSTRUCTION_SURFACE_EVIDENCE)
+    if instruction_surfaces:
+        surfaces.update(instruction_surfaces)
+    for surface in omit_instruction_surfaces:
+        surfaces.pop(surface, None)
     record: dict[str, Any] = {
         "type": "system",
         "subtype": "init",
@@ -67,6 +86,7 @@ def init_record(
         "plugins": list(plugins),
         "permissionMode": claude.CTO_PERMISSION_MODE,
         "skills": list(skills),
+        **surfaces,
     }
     record.update(extra)
     return record
@@ -121,9 +141,10 @@ def successful_records(
     *,
     skills: Sequence[str] = ("reference-skill",),
     tools: Sequence[str] = claude.CTO_TOOLSET,
+    **init_kwargs: Any,
 ) -> list[dict[str, Any]]:
     return [
-        init_record(skills=skills, tools=tools),
+        init_record(skills=skills, tools=tools, **init_kwargs),
         assistant_record(),
         result_record(),
     ]
@@ -1008,6 +1029,84 @@ class ClaudeExecutorTests(unittest.TestCase):
         self.assertIn(b"0.12345678", unrepresentable.raw_stdout)
         self.assertFalse(unrepresentable.run_countable)
         self.assertTrue(unrepresentable.evidence_sealed)
+
+    def test_38_instruction_surfaces_are_affirmatively_observed_and_equal(self) -> None:
+        left, _, _ = self.execute(records=successful_records())
+        right, _, _ = self.execute(
+            records=successful_records(),
+            invocation=self.invocation(opaque_id=OPAQUE_ID_B),
+        )
+        comparison = claude.compare_condition_neutral_evidence(left, right)
+        self.assertTrue(comparison.passed, comparison.errors)
+        self.assertEqual(
+            claude.INSTRUCTION_SURFACES,
+            ("output_style", "hooks", "agents_md", "user_rules", "instruction_sources"),
+        )
+        for surface in claude.INSTRUCTION_SURFACES:
+            with self.subTest(surface=surface):
+                self.assertTrue(comparison.checks[f"actual_init_{surface}_equal"])
+
+    def test_39_unobservable_instruction_surface_never_compares_equal(self) -> None:
+        # Absence on both arms is exactly the shape a silent instruction drift
+        # takes, so symmetric silence must fail rather than look neutral.
+        for surface in claude.INSTRUCTION_SURFACES:
+            for scope in ("one_arm", "both_arms"):
+                with self.subTest(surface=surface, scope=scope):
+                    left, _, _ = self.execute(
+                        records=successful_records(
+                            omit_instruction_surfaces=(
+                                (surface,) if scope == "both_arms" else ()
+                            )
+                        )
+                    )
+                    right, _, _ = self.execute(
+                        records=successful_records(
+                            omit_instruction_surfaces=(surface,)
+                        ),
+                        invocation=self.invocation(opaque_id=OPAQUE_ID_B),
+                    )
+                    comparison = claude.compare_condition_neutral_evidence(left, right)
+                    self.assertFalse(comparison.passed)
+                    self.assertFalse(comparison.checks[f"actual_init_{surface}_equal"])
+                    self.assertIn(f"actual_init_{surface}_equal", comparison.errors)
+
+    def test_40_instruction_surface_drift_and_ambiguity_fail_closed(self) -> None:
+        drifts: dict[str, Any] = {
+            "output_style": "explanatory",
+            "hooks": [{"name": "PreToolUse:audit"}],
+            "agents_md": ["<OPAQUE_ROOT>/AGENTS.md"],
+            "user_rules": ["always-answer-in-haiku"],
+            "instruction_sources": ["cli-default", "enterprise-policy"],
+        }
+        self.assertEqual(sorted(drifts), sorted(claude.INSTRUCTION_SURFACES))
+        for surface, drifted in drifts.items():
+            with self.subTest(surface=surface):
+                left, _, _ = self.execute(records=successful_records())
+                right, _, _ = self.execute(
+                    records=successful_records(
+                        instruction_surfaces={surface: drifted}
+                    ),
+                    invocation=self.invocation(opaque_id=OPAQUE_ID_B),
+                )
+                comparison = claude.compare_condition_neutral_evidence(left, right)
+                self.assertFalse(comparison.passed)
+                self.assertFalse(comparison.checks[f"actual_init_{surface}_equal"])
+
+        # Two spellings of one surface are contradictory evidence, not
+        # corroboration, so the surface stays unobservable on that arm even
+        # though both arms carry the identical pair of keys.
+        ambiguous_left, _, _ = self.execute(
+            records=successful_records(outputStyle="default")
+        )
+        ambiguous_right, _, _ = self.execute(
+            records=successful_records(outputStyle="default"),
+            invocation=self.invocation(opaque_id=OPAQUE_ID_B),
+        )
+        comparison = claude.compare_condition_neutral_evidence(
+            ambiguous_left, ambiguous_right
+        )
+        self.assertFalse(comparison.passed)
+        self.assertFalse(comparison.checks["actual_init_output_style_equal"])
 
 
 if __name__ == "__main__":
