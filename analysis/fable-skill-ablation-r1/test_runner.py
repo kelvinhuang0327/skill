@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import itertools
 import json
 import subprocess
 import sys
@@ -722,6 +723,149 @@ class CanonicalHarnessTests(unittest.TestCase):
             hashlib.sha256("\ud800".encode("utf-8", errors="surrogatepass")).hexdigest(),
         )
         json.dumps(evidence.as_record(), allow_nan=False)
+
+    def _manifest_with_dimensions(self, dimensions: Any) -> dict[str, Any]:
+        manifest = synthetic_manifest()
+        manifest["purity_gate"][
+            "must_be_exactly_equal_between_reference_and_run"
+        ] = dimensions
+        return manifest
+
+    def _assert_declaration_rejected(self, dimensions: Any) -> None:
+        with self.assertRaises(runner.HarnessContractError):
+            runner.select_manifest_slot(
+                self._manifest_with_dimensions(dimensions), "s01-A01-r0-OFF"
+            )
+
+    def test_30_required_purity_dimension_floor_is_code_owned(self) -> None:
+        # The floor is exactly the inventory the runner freezes in
+        # evaluate_purity, so the manifest can never narrow the comparison.
+        self.assertEqual(
+            runner.REQUIRED_PURITY_DIMENSIONS,
+            frozenset({"tools", "agents", "mcp_servers"}),
+        )
+        self.assertEqual(runner.REQUIRED_PURITY_DIMENSIONS, set(FROZEN_DIMENSIONS))
+        # The treatment delta surface must differ between arms, so freezing it
+        # would contradict skill_delta_is_exactly_treatment.
+        self.assertNotIn("skills", runner.REQUIRED_PURITY_DIMENSIONS)
+        # Surfaces owned by the executor condition-neutrality comparison are
+        # not restated as runner purity dimensions.
+        for owned_elsewhere in (
+            "plugins",
+            "permission_mode",
+            "output_style",
+            "hooks",
+            "agents_md",
+            "user_rules",
+            "instruction_sources",
+        ):
+            self.assertNotIn(owned_elsewhere, runner.REQUIRED_PURITY_DIMENSIONS)
+
+        slot = runner.select_manifest_slot(
+            self._manifest_with_dimensions(list(FROZEN_DIMENSIONS)), "s01-A01-r0-OFF"
+        )
+        self.assertEqual(slot.frozen_dimensions, FROZEN_DIMENSIONS)
+
+    def test_31_exact_floor_is_accepted_in_any_order(self) -> None:
+        for ordering in itertools.permutations(FROZEN_DIMENSIONS):
+            with self.subTest(ordering=ordering):
+                slot = runner.select_manifest_slot(
+                    self._manifest_with_dimensions(list(ordering)), "s01-A01-r0-OFF"
+                )
+                self.assertEqual(slot.frozen_dimensions, ordering)
+                self.assertEqual(
+                    set(slot.frozen_dimensions), runner.REQUIRED_PURITY_DIMENSIONS
+                )
+
+    def test_32_valid_superset_is_accepted_and_retained(self) -> None:
+        declared = list(FROZEN_DIMENSIONS) + ["plugins", "permission_mode"]
+        slot = runner.select_manifest_slot(
+            self._manifest_with_dimensions(declared), "s01-A01-r0-OFF"
+        )
+        self.assertEqual(slot.frozen_dimensions, tuple(declared))
+        self.assertTrue(
+            runner.REQUIRED_PURITY_DIMENSIONS.issubset(set(slot.frozen_dimensions))
+        )
+
+    def test_33_strict_subsets_of_the_floor_fail_closed(self) -> None:
+        subsets = [
+            list(combination)
+            for size in range(1, len(FROZEN_DIMENSIONS))
+            for combination in itertools.combinations(FROZEN_DIMENSIONS, size)
+        ]
+        # Every proper subset, including each floor member missing by exactly
+        # one, must be refused.
+        self.assertEqual(len(subsets), 6)
+        for declared in subsets:
+            with self.subTest(declared=tuple(declared)):
+                self._assert_declaration_rejected(declared)
+
+    def test_34_one_missing_dimension_names_only_what_is_missing(self) -> None:
+        for missing in FROZEN_DIMENSIONS:
+            declared = [item for item in FROZEN_DIMENSIONS if item != missing]
+            with self.subTest(missing=missing):
+                with self.assertRaises(runner.HarnessContractError) as raised:
+                    runner.select_manifest_slot(
+                        self._manifest_with_dimensions(declared), "s01-A01-r0-OFF"
+                    )
+                message = str(raised.exception)
+                self.assertIn("omit required runner dimensions", message)
+                self.assertIn(missing, message)
+                for retained in declared:
+                    self.assertNotIn(retained, message)
+
+    def test_35_under_declared_and_malformed_gates_stay_fail_closed(self) -> None:
+        # A demonstrably under-declared list, including one naming only the
+        # treatment delta surface, is never accepted.
+        for declared in (
+            ["skills"],
+            ["skills", "tools"],
+            ["plugins", "permission_mode", "output_style"],
+            [],
+            ["tools", "tools", "agents", "mcp_servers"],
+            ["tools", "agents", "mcp_servers", "tools"],
+        ):
+            with self.subTest(declared=tuple(declared)):
+                self._assert_declaration_rejected(declared)
+
+        # Absence of the gate, and a gate that carries no usable declaration,
+        # remain fail-closed.
+        without_gate = synthetic_manifest()
+        del without_gate["purity_gate"]
+        with self.assertRaises(runner.HarnessContractError):
+            runner.select_manifest_slot(without_gate, "s01-A01-r0-OFF")
+        for gate in ({}, {"must_be_exactly_equal_between_reference_and_run": None}, []):
+            with self.subTest(gate=repr(gate)):
+                manifest = synthetic_manifest()
+                manifest["purity_gate"] = gate
+                with self.assertRaises(runner.HarnessContractError):
+                    runner.select_manifest_slot(manifest, "s01-A01-r0-OFF")
+
+    def test_36_under_declaration_would_have_masked_a_real_asymmetry(self) -> None:
+        # Why the floor is load-bearing: a narrowed comparison marks a
+        # genuinely asymmetric run countable, so the manifest must not be able
+        # to choose the narrower set.
+        run = [init_event(mcp_servers=["local-test", "unexpected-mcp"])]
+        reference = [init_event()]
+        narrowed = runner.evaluate_purity(
+            run,
+            reference,
+            expected_fable_engaged=False,
+            frozen_dimensions=("tools",),
+            surface_audit=PASSING_AUDIT,
+        )
+        complete = runner.evaluate_purity(
+            run,
+            reference,
+            expected_fable_engaged=False,
+            frozen_dimensions=tuple(sorted(runner.REQUIRED_PURITY_DIMENSIONS)),
+            surface_audit=PASSING_AUDIT,
+        )
+        self.assertTrue(narrowed.run_countable)
+        self.assertFalse(complete.run_countable)
+        self.assertFalse(complete.dimension_matches["mcp_servers"])
+        # The narrowed declaration can no longer reach evaluate_purity at all.
+        self._assert_declaration_rejected(["tools"])
 
 
 if __name__ == "__main__":

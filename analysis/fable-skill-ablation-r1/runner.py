@@ -63,6 +63,17 @@ OPAQUE_SESSION_TOKEN_HEX_WIDTH = 32
 _OPAQUE_ID_RE = re.compile(r"[0-9a-f]{%d}" % OPAQUE_SESSION_TOKEN_HEX_WIDTH)
 _MISSING = object()
 _INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers"})
+# The one code-owned purity floor.  A manifest may declare exactly this set
+# or a superset, never fewer: omitting a dimension silently narrows the
+# reference/run comparison performed by :func:`evaluate_purity`.  The floor
+# is the inventory this runner itself knows how to read and freeze, so it
+# cannot drift away from the comparison it protects.  ``skills`` is
+# deliberately excluded: it is the treatment delta surface asserted by
+# ``skill_delta_is_exactly_treatment`` and must differ between arms.
+# ``plugins``, ``permission_mode`` and the model-visible instruction
+# surfaces stay owned by the executor condition-neutrality comparison and
+# are not restated here.
+REQUIRED_PURITY_DIMENSIONS = _INVENTORY_DIMENSIONS
 _DIMENSION_ALIASES = {
     "mcp_servers": ("mcp_servers", "mcpServers"),
 }
@@ -922,6 +933,12 @@ def select_manifest_slot(
         or len(set(dimensions)) != len(dimensions)
     ):
         raise HarnessContractError("purity dimensions must be a unique non-empty string list")
+    missing_dimensions = REQUIRED_PURITY_DIMENSIONS.difference(dimensions)
+    if missing_dimensions:
+        raise HarnessContractError(
+            "purity dimensions omit required runner dimensions: "
+            + ", ".join(sorted(missing_dimensions))
+        )
 
     forbidden: set[str] = set()
     for item in schedule:
@@ -1523,6 +1540,7 @@ __all__ = [
     "FABLE_SKILL_IDENTITY",
     "OPAQUE_SESSION_TOKEN_HEX_WIDTH",
     "RUN_EVIDENCE_SCHEMA",
+    "REQUIRED_PURITY_DIMENSIONS",
     "GitState",
     "HarnessContractError",
     "InitEvidence",
