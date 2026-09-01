@@ -856,7 +856,13 @@ class ProcessFailureDiagnosticTests(ReferenceCaptureTestCase):
         self.assertIsNone(exception.diagnostic)
 
     def test_27_diagnostic_serializes_no_environment_or_credentials(self) -> None:
-        secret = "tok-aaaaaaaaaaaaaaaaaaaaaaaa"
+        # Neither an isolation key (HOME/TMPDIR/CLAUDE_CONFIG_DIR/PATH) nor a
+        # secret-shaped key: those are rejected pre-flight by
+        # compose_isolated_environment (test_33/test_34) before the process
+        # boundary this test means to exercise is ever reached.  This fixture
+        # instead proves build_process_failure_diagnostic's closed allowlist
+        # holds for arbitrary *permitted* environment content too.
+        sensitive = "kelvin-real-machine-should-never-leak"
         exception = self.assert_aborts(
             "AMBIGUOUS_PROCESS_OUTCOME",
             boundary=RecordingBoundary(
@@ -865,7 +871,7 @@ class ProcessFailureDiagnosticTests(ReferenceCaptureTestCase):
                 returncode=1,
                 physical_argv=self.UNIQUE_ARGV,
             ),
-            environment={"ANTHROPIC_API_KEY": secret, "HOME": "/offline/home"},
+            environment={"OPERATOR_WORKSPACE_LABEL": sensitive},
         )
         diagnostic = exception.diagnostic
         self.assertEqual(
@@ -883,7 +889,7 @@ class ProcessFailureDiagnosticTests(ReferenceCaptureTestCase):
             msg="the diagnostic surface is a closed allowlist",
         )
         text = capture.canonical_diagnostic_text(diagnostic)
-        for forbidden in (secret, "ANTHROPIC_API_KEY", "environment", "/offline/home"):
+        for forbidden in (sensitive, "OPERATOR_WORKSPACE_LABEL", "environment"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
 
@@ -988,6 +994,88 @@ class ProcessFailureDiagnosticTests(ReferenceCaptureTestCase):
                 self.assertEqual(base64.b64decode(described["base64"]), raw)
                 self.assertEqual(described["sha256"], hashlib.sha256(raw).hexdigest())
         self.assertNotIn("\n", capture.canonical_diagnostic_text(diagnostic))
+
+
+class IsolatedRuntimeEnvironmentTests(ReferenceCaptureTestCase):
+    """The subprocess must never see the operator's real environment."""
+
+    def test_31_composed_environment_is_isolated_under_the_workspace(self) -> None:
+        boundary = RecordingBoundary()
+        outcome = self.run_capture(boundary=boundary)
+        environment = boundary.requests[0].environment
+        self.assertEqual(
+            sorted(environment),
+            ["CLAUDE_CONFIG_DIR", "HOME", "PATH", "TMPDIR"],
+            msg="no extra key beyond the mandatory isolation set was supplied",
+        )
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+        workspace = Path(outcome.workspace_path).resolve()
+        for key in ("HOME", "TMPDIR", "CLAUDE_CONFIG_DIR"):
+            with self.subTest(key=key):
+                resolved = Path(environment[key]).resolve()
+                self.assertTrue(
+                    resolved.is_relative_to(workspace),
+                    msg=f"{key}={resolved} escapes the sandboxed workspace {workspace}",
+                )
+                self.assertTrue(resolved.is_dir())
+
+    def test_32_empty_environment_never_falls_back_to_the_operator_home(self) -> None:
+        boundary = RecordingBoundary()
+        self.run_capture(boundary=boundary)
+        environment = boundary.requests[0].environment
+        self.assertNotEqual(
+            environment, {}, msg="env={} must be structurally unreachable"
+        )
+        self.assertNotEqual(
+            environment.get("HOME"),
+            str(Path.home()),
+            msg="an unset caller environment must not fall back to the real operator home",
+        )
+
+    def test_33_secret_shaped_environment_key_is_rejected_before_any_process_call(
+        self,
+    ) -> None:
+        for key in (
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+        ):
+            with self.subTest(key=key):
+                boundary = RecordingBoundary()
+                exception = self.assert_aborts(
+                    "ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET",
+                    boundary=boundary,
+                    environment={key: "should-never-reach-a-process"},
+                )
+                self.assertEqual(exception.detail, key)
+                self.assertEqual(
+                    boundary.requests,
+                    [],
+                    msg="a poisoned environment must never reach the process boundary",
+                )
+
+    def test_34_isolation_key_override_is_rejected_before_any_process_call(
+        self,
+    ) -> None:
+        boundary = RecordingBoundary()
+        exception = self.assert_aborts(
+            "ENVIRONMENT_OVERRIDES_ISOLATION_KEY",
+            boundary=boundary,
+            environment={"HOME": "/offline/operator-home"},
+        )
+        self.assertEqual(exception.detail, "HOME")
+        self.assertEqual(boundary.requests, [])
+
+    def test_35_isolated_runtime_directories_exist_and_pass_the_surface_audit(
+        self,
+    ) -> None:
+        outcome = self.run_capture()
+        self.assertTrue(outcome.surface_audit.passed)
+        runtime_root = Path(outcome.workspace_path) / capture._ISOLATED_RUNTIME_DIRNAME
+        self.assertTrue(runtime_root.is_dir())
+        for name in ("home", "tmp", "config"):
+            with self.subTest(name=name):
+                self.assertTrue((runtime_root / name).is_dir())
 
 
 if __name__ == "__main__":

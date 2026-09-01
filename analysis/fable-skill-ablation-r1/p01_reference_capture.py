@@ -199,6 +199,78 @@ def build_reference_invocation(
     return invocation
 
 
+# --- Isolated runtime environment -------------------------------------------
+#
+# The provider CLI itself writes runtime config (a fresh ``.claude.json`` and
+# a rotating backup) at startup regardless of task content.  With no HOME set,
+# Node resolves it via ``getpwuid()`` to the real operator home, so an absent
+# or empty environment would read and write the operator's actual
+# ``~/.claude.json``, MCP servers and settings -- destroying condition-
+# neutrality.  ``runner.audit_model_visible_surfaces`` requires the sandboxed
+# process's cwd to equal ``workspace`` exactly, and the sandbox profile's
+# SESSION_ROOT is bound to that same directory, so there is no writable
+# location outside the workspace to redirect runtime state to instead.
+
+
+_ISOLATED_RUNTIME_DIRNAME = ".p01-runtime"
+
+# Mirrors claude_executor.py's ``_SECRET_KEY_RE``: this module never imports a
+# private cross-module symbol, so the same key-shape guard is restated here
+# rather than reached into that module's internals.
+_SECRET_KEY_RE = re.compile(
+    r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|AUTHORIZATION)(?:$|_)",
+    re.IGNORECASE,
+)
+
+
+def _isolated_runtime_paths(workspace: Path) -> dict:
+    root = Path(workspace).resolve() / _ISOLATED_RUNTIME_DIRNAME
+    return {
+        "root": root,
+        "HOME": root / "home",
+        "TMPDIR": root / "tmp",
+        "CLAUDE_CONFIG_DIR": root / "config",
+    }
+
+
+def compose_isolated_environment(
+    workspace: Path, extra_environment: Mapping = None
+) -> dict:
+    """Build the only environment the reference-capture subprocess may see.
+
+    HOME, TMPDIR and CLAUDE_CONFIG_DIR are forced into a runtime-only
+    subdirectory of the workspace itself and created here, so the surface
+    audit that runs immediately afterward covers them.  Any caller-supplied
+    ``extra_environment`` is merged in only after it is proven to neither
+    override an isolation key nor look like a credential.
+    """
+
+    paths = _isolated_runtime_paths(workspace)
+    try:
+        for path in (paths["root"], paths["HOME"], paths["TMPDIR"], paths["CLAUDE_CONFIG_DIR"]):
+            path.mkdir(mode=0o700, exist_ok=False)
+    except OSError as exc:
+        raise ReferenceCaptureAbort(
+            "ISOLATED_RUNTIME_DIRECTORY_CREATE_FAILED", str(exc)
+        ) from exc
+
+    isolated = {
+        "HOME": str(paths["HOME"]),
+        "TMPDIR": str(paths["TMPDIR"]),
+        "CLAUDE_CONFIG_DIR": str(paths["CLAUDE_CONFIG_DIR"]),
+        "PATH": "/usr/bin:/bin",
+    }
+    for key, value in dict(extra_environment or {}).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ReferenceCaptureAbort("ENVIRONMENT_VALUE_MUST_BE_STRING", str(key))
+        if key in isolated:
+            raise ReferenceCaptureAbort("ENVIRONMENT_OVERRIDES_ISOLATION_KEY", key)
+        if _SECRET_KEY_RE.search(key) is not None:
+            raise ReferenceCaptureAbort("ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET", key)
+        isolated[key] = value
+    return isolated
+
+
 # --- Injected process boundary ---------------------------------------------
 
 
@@ -701,8 +773,9 @@ def capture_reference_init(
     )
     assert_reference_workspace_has_no_carrier(workspace)
 
+    isolated_environment = compose_isolated_environment(workspace, request.environment)
     invocation = build_reference_invocation(
-        slot, workspace, opaque_identity, environment=request.environment
+        slot, workspace, opaque_identity, environment=isolated_environment
     )
     audit = runner.audit_model_visible_surfaces(
         invocation, workspace, slot.forbidden_model_tokens
@@ -860,6 +933,7 @@ __all__ = [
     "canonical_diagnostic_text",
     "canonical_reference_bytes",
     "capture_reference_init",
+    "compose_isolated_environment",
     "init_event_sha256",
     "main",
     "parse_stream_records",
