@@ -30,6 +30,7 @@ provider call.
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import importlib.util
 import json
@@ -85,6 +86,14 @@ REFERENCE_MAX_TURNS = 0
 REFERENCE_PROMPT = ""
 REFERENCE_TIMEOUT_SECONDS = 120.0
 
+# A failed physical capture must stay fail-closed *and* stay explainable.  The
+# diagnostic below is deliberately a different schema from the reference-init
+# record and names its own non-authority, so a failure description can never be
+# read back as reference authority.
+CAPTURE_FAILURE_DIAGNOSTIC_SCHEMA = "FABLE_ABLATION_P01_CAPTURE_FAILURE_DIAGNOSTIC/v1"
+DIAGNOSTIC_AUTHORITY = "NON_AUTHORITATIVE"
+DIAGNOSTIC_STDERR_PREFIX = "P01_REFERENCE_CAPTURE_FAILURE_DIAGNOSTIC"
+
 _BUDGET_FLAG = "--max-budget-usd"
 _TURNS_FLAG = "--max-turns"
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -96,12 +105,20 @@ class ReferenceCaptureError(RuntimeError):
 
 
 class ReferenceCaptureAbort(ReferenceCaptureError):
-    """A capture precondition or observation failed; no artifact is written."""
+    """A capture precondition or observation failed; no artifact is written.
 
-    def __init__(self, reason: str, detail: str = "") -> None:
+    ``diagnostic`` carries an explicitly non-authoritative description of a
+    failed physical process when one is available.  It never affects the abort
+    itself: the message, reason and detail are unchanged by its presence.
+    """
+
+    def __init__(
+        self, reason: str, detail: str = "", diagnostic: Mapping = None
+    ) -> None:
         super().__init__(reason if not detail else f"{reason}:{detail}")
         self.reason = reason
         self.detail = detail
+        self.diagnostic = None if diagnostic is None else dict(diagnostic)
 
 
 # --- Zero-budget invocation surface ----------------------------------------
@@ -256,6 +273,67 @@ class SandboxedZeroBudgetCapture:
             stderr=completed.stderr or b"",
             timed_out=False,
             physical_argv=tuple(physical),
+        )
+
+
+def _diagnostic_stream(data: bytes) -> dict:
+    """Describe one captured stream reversibly, with no truncation.
+
+    Base64 keeps arbitrary bytes intact and newline-free, so a stream is
+    recoverable exactly and a multi-line provider error cannot corrupt the
+    single-line outer diagnostic.  The digest lets a reader prove the decode.
+    """
+
+    payload = b"" if data is None else bytes(data)
+    return {
+        "length": len(payload),
+        "sha256": driver._sha256(payload),
+        "base64": base64.b64encode(payload).decode("ascii"),
+    }
+
+
+def build_process_failure_diagnostic(result: CaptureProcessResult) -> dict:
+    """Preserve exactly why one physical capture process failed.
+
+    The record is intentionally limited to the process outcome the boundary
+    already returned: return code, timeout state, the physical argv, and the
+    two captured streams.  It carries no init event, no cost claim, and no
+    invocation environment, so it can explain a sandbox/provider startup
+    failure without ever being mistaken for reference authority.
+    """
+
+    return {
+        "schema": CAPTURE_FAILURE_DIAGNOSTIC_SCHEMA,
+        "authority": DIAGNOSTIC_AUTHORITY,
+        "is_reference_authority": False,
+        "returncode": result.returncode,
+        "timed_out": bool(result.timed_out),
+        "physical_argv": list(result.physical_argv),
+        "stdout": _diagnostic_stream(result.stdout),
+        "stderr": _diagnostic_stream(result.stderr),
+    }
+
+
+def canonical_diagnostic_text(diagnostic: Mapping) -> str:
+    """Serialize a failure diagnostic deterministically as one line."""
+
+    return json.dumps(dict(diagnostic), sort_keys=True, separators=(",", ":"))
+
+
+def write_abort_report(stream: Any, exc: BaseException) -> None:
+    """Write the unchanged abort line, then any failure diagnostic.
+
+    The abort line is always written first and is unaffected by the presence
+    of a diagnostic, so existing consumers of the outer stream keep reading
+    exactly the same first line.  A diagnostic, when the abort carries one,
+    is only ever an additional line.
+    """
+
+    stream.write(f"P01_REFERENCE_CAPTURE_ABORTED:{type(exc).__name__}:{exc}\n")
+    diagnostic = getattr(exc, "diagnostic", None)
+    if diagnostic is not None:
+        stream.write(
+            f"{DIAGNOSTIC_STDERR_PREFIX}:{canonical_diagnostic_text(diagnostic)}\n"
         )
 
 
@@ -652,6 +730,7 @@ def capture_reference_init(
         raise ReferenceCaptureAbort(
             "AMBIGUOUS_PROCESS_OUTCOME",
             f"timed_out={result.timed_out}:returncode={result.returncode}",
+            diagnostic=build_process_failure_diagnostic(result),
         )
 
     stream = analyze_zero_turn_stream(parse_stream_records(result.stdout))
@@ -740,7 +819,7 @@ def main(argv: Sequence[str] = None) -> int:
             process_boundary=SandboxedZeroBudgetCapture(),
         )
     except Exception as exc:  # a capture entrypoint always refuses, never half-runs
-        sys.stderr.write(f"P01_REFERENCE_CAPTURE_ABORTED:{type(exc).__name__}:{exc}\n")
+        write_abort_report(sys.stderr, exc)
         return 2
     sys.stdout.write(
         json.dumps(
@@ -754,9 +833,12 @@ def main(argv: Sequence[str] = None) -> int:
 
 
 __all__ = [
+    "CAPTURE_FAILURE_DIAGNOSTIC_SCHEMA",
     "CAPTURE_MODE",
     "CaptureProcessRequest",
     "CaptureProcessResult",
+    "DIAGNOSTIC_AUTHORITY",
+    "DIAGNOSTIC_STDERR_PREFIX",
     "REFERENCE_ARTIFACT_PATH",
     "REFERENCE_INIT_SCHEMA",
     "REFERENCE_MAX_BUDGET_USD",
@@ -771,9 +853,11 @@ __all__ = [
     "analyze_zero_turn_stream",
     "assert_reference_workspace_has_no_carrier",
     "assert_zero_budget_argv",
+    "build_process_failure_diagnostic",
     "build_reference_argv",
     "build_reference_invocation",
     "build_reference_record",
+    "canonical_diagnostic_text",
     "canonical_reference_bytes",
     "capture_reference_init",
     "init_event_sha256",
@@ -784,6 +868,7 @@ __all__ = [
     "validate_reference_record",
     "verify_provider_binary_identity",
     "verify_source_authority",
+    "write_abort_report",
     "write_reference_artifact",
 ]
 

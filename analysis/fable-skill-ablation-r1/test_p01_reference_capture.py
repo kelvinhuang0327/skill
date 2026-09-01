@@ -8,9 +8,11 @@ and no epoch, ledger, reservation or lock state is created anywhere.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -746,6 +748,246 @@ class ReferenceArtifactPresenceTests(unittest.TestCase):
         self.assertEqual(capture.REFERENCE_MAX_BUDGET_USD, "0.0000000")
         self.assertEqual(capture.REFERENCE_MAX_TURNS, 0)
         self.assertEqual(capture.REFERENCE_PROMPT, "")
+
+
+class ProcessFailureDiagnosticTests(ReferenceCaptureTestCase):
+    """A failed physical capture must stay fail-closed *and* stay explainable."""
+
+    UNIQUE_STDOUT = b"\x00unique-capture-stdout-\xff-bytes\n"
+    UNIQUE_STDERR = b"sandbox-exec: unique-capture-stderr-\xfe\ndeny file-write\n"
+    UNIQUE_ARGV = (
+        "/usr/bin/sandbox-exec",
+        "-f",
+        "/offline/claude-runtime.sb",
+        "-D",
+        "SESSION_ROOT=/offline/session-unique",
+        "/offline/claude",
+        "--max-budget-usd",
+        "0.0000000",
+        "--max-turns",
+        "0",
+    )
+
+    def assert_non_authoritative(self, diagnostic: Mapping) -> None:
+        self.assertEqual(diagnostic["authority"], "NON_AUTHORITATIVE")
+        self.assertIs(diagnostic["is_reference_authority"], False)
+        self.assertEqual(
+            diagnostic["schema"], "FABLE_ABLATION_P01_CAPTURE_FAILURE_DIAGNOSTIC/v1"
+        )
+        self.assertNotEqual(diagnostic["schema"], capture.REFERENCE_INIT_SCHEMA)
+        # A diagnostic must never satisfy the reference-record contract.
+        with self.assertRaises(Exception):
+            production.validate_reference_record(
+                dict(diagnostic), expected_sealed_manifest_sha256=SEALED_SHA256
+            )
+
+    def test_24_nonzero_exit_preserves_the_process_failure_evidence(self) -> None:
+        exception = self.assert_aborts(
+            "AMBIGUOUS_PROCESS_OUTCOME",
+            boundary=RecordingBoundary(
+                stdout=self.UNIQUE_STDOUT,
+                stderr=self.UNIQUE_STDERR,
+                returncode=1,
+                timed_out=False,
+                physical_argv=self.UNIQUE_ARGV,
+            ),
+        )
+        diagnostic = exception.diagnostic
+        self.assertIsNotNone(diagnostic)
+        self.assertEqual(diagnostic["returncode"], 1)
+        self.assertIs(diagnostic["timed_out"], False)
+        self.assertEqual(tuple(diagnostic["physical_argv"]), self.UNIQUE_ARGV)
+        for stream, raw in (
+            ("stdout", self.UNIQUE_STDOUT),
+            ("stderr", self.UNIQUE_STDERR),
+        ):
+            with self.subTest(stream=stream):
+                described = diagnostic[stream]
+                self.assertEqual(
+                    base64.b64decode(described["base64"]),
+                    raw,
+                    msg="captured stream must be exactly reversible",
+                )
+                self.assertEqual(described["length"], len(raw))
+                self.assertEqual(described["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assert_non_authoritative(diagnostic)
+        # The abort message itself is unchanged by the added evidence.
+        self.assertEqual(
+            str(exception),
+            "AMBIGUOUS_PROCESS_OUTCOME:timed_out=False:returncode=1",
+        )
+
+    def test_25_timeout_preserves_the_process_failure_evidence(self) -> None:
+        exception = self.assert_aborts(
+            "AMBIGUOUS_PROCESS_OUTCOME",
+            boundary=RecordingBoundary(
+                stdout=b"",
+                stderr=b"",
+                returncode=-1,
+                timed_out=True,
+                physical_argv=self.UNIQUE_ARGV,
+            ),
+        )
+        diagnostic = exception.diagnostic
+        self.assertIsNotNone(diagnostic)
+        self.assertIs(diagnostic["timed_out"], True)
+        self.assertEqual(diagnostic["returncode"], -1)
+        self.assertEqual(tuple(diagnostic["physical_argv"]), self.UNIQUE_ARGV)
+        self.assertEqual(diagnostic["stdout"]["length"], 0)
+        self.assertEqual(diagnostic["stderr"]["length"], 0)
+        self.assertEqual(diagnostic["stdout"]["base64"], "")
+        self.assert_non_authoritative(diagnostic)
+
+    def test_26_successful_and_post_process_paths_are_unchanged(self) -> None:
+        outcome = self.run_capture()
+        self.assertTrue(self.artifact.is_file())
+        self.assertEqual(outcome.record["schema"], capture.REFERENCE_INIT_SCHEMA)
+        self.assertEqual(outcome.record["observed_total_cost_usd"], "0.0000000")
+        for absent in ("authority", "is_reference_authority", "returncode", "timed_out"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, outcome.record)
+        self.artifact.unlink()
+        # A gate that fails *after* a healthy process is not a process failure
+        # and must not be reframed as one.
+        exception = self.assert_aborts(
+            "NONZERO_OBSERVED_COST",
+            boundary=RecordingBoundary(stdout=zero_turn_stdout(cost="1.0000000")),
+        )
+        self.assertIsNone(exception.diagnostic)
+
+    def test_27_diagnostic_serializes_no_environment_or_credentials(self) -> None:
+        secret = "tok-aaaaaaaaaaaaaaaaaaaaaaaa"
+        exception = self.assert_aborts(
+            "AMBIGUOUS_PROCESS_OUTCOME",
+            boundary=RecordingBoundary(
+                stdout=b"",
+                stderr=b"",
+                returncode=1,
+                physical_argv=self.UNIQUE_ARGV,
+            ),
+            environment={"ANTHROPIC_API_KEY": secret, "HOME": "/offline/home"},
+        )
+        diagnostic = exception.diagnostic
+        self.assertEqual(
+            sorted(diagnostic),
+            [
+                "authority",
+                "is_reference_authority",
+                "physical_argv",
+                "returncode",
+                "schema",
+                "stderr",
+                "stdout",
+                "timed_out",
+            ],
+            msg="the diagnostic surface is a closed allowlist",
+        )
+        text = capture.canonical_diagnostic_text(diagnostic)
+        for forbidden in (secret, "ANTHROPIC_API_KEY", "environment", "/offline/home"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
+    def test_28_diagnostic_text_is_one_deterministic_parseable_line(self) -> None:
+        exception = self.assert_aborts(
+            "AMBIGUOUS_PROCESS_OUTCOME",
+            boundary=RecordingBoundary(
+                stdout=self.UNIQUE_STDOUT,
+                stderr=self.UNIQUE_STDERR,
+                returncode=1,
+                physical_argv=self.UNIQUE_ARGV,
+            ),
+        )
+        diagnostic = exception.diagnostic
+        text = capture.canonical_diagnostic_text(diagnostic)
+        self.assertNotIn("\n", text, msg="multi-line streams must not break the line")
+        # Determinism must survive a different key insertion order, otherwise
+        # this assertion would hold trivially for any serializer.
+        shuffled = {key: diagnostic[key] for key in reversed(list(diagnostic))}
+        self.assertNotEqual(list(shuffled), list(diagnostic))
+        self.assertEqual(capture.canonical_diagnostic_text(shuffled), text)
+        parsed = json.loads(text)
+        self.assertEqual(
+            base64.b64decode(parsed["stdout"]["base64"]), self.UNIQUE_STDOUT
+        )
+        self.assertEqual(
+            base64.b64decode(parsed["stderr"]["base64"]), self.UNIQUE_STDERR
+        )
+        self.assertEqual(parsed["authority"], "NON_AUTHORITATIVE")
+
+    def test_29_abort_report_writes_the_diagnostic_after_the_abort_line(self) -> None:
+        exception = self.assert_aborts(
+            "AMBIGUOUS_PROCESS_OUTCOME",
+            boundary=RecordingBoundary(
+                stdout=self.UNIQUE_STDOUT,
+                stderr=self.UNIQUE_STDERR,
+                returncode=1,
+                physical_argv=self.UNIQUE_ARGV,
+            ),
+        )
+        stream = io.StringIO()
+        capture.write_abort_report(stream, exception)
+        lines = stream.getvalue().splitlines()
+        self.assertEqual(len(lines), 2, msg="exactly the abort line plus one diagnostic")
+        self.assertEqual(
+            lines[0],
+            "P01_REFERENCE_CAPTURE_ABORTED:ReferenceCaptureAbort:"
+            "AMBIGUOUS_PROCESS_OUTCOME:timed_out=False:returncode=1",
+            msg="the pre-existing abort line must stay byte-identical and first",
+        )
+        self.assertTrue(
+            lines[1].startswith("P01_REFERENCE_CAPTURE_FAILURE_DIAGNOSTIC:"),
+            msg="the diagnostic must follow the abort line, never precede it",
+        )
+        self.assertEqual(
+            json.loads(lines[1].split(":", 1)[1])["authority"], "NON_AUTHORITATIVE"
+        )
+
+        # An abort with no process diagnostic still writes exactly one line.
+        plain = io.StringIO()
+        capture.write_abort_report(
+            plain, capture.ReferenceCaptureAbort("SOME_REASON", "some_detail")
+        )
+        self.assertEqual(
+            plain.getvalue(),
+            "P01_REFERENCE_CAPTURE_ABORTED:ReferenceCaptureAbort:"
+            "SOME_REASON:some_detail\n",
+        )
+        # A foreign exception type must not crash the report.
+        foreign = io.StringIO()
+        capture.write_abort_report(foreign, RuntimeError("boom"))
+        self.assertEqual(
+            foreign.getvalue(), "P01_REFERENCE_CAPTURE_ABORTED:RuntimeError:boom\n"
+        )
+        # The entrypoint must route the report to stderr, never stdout.
+        self.assertIn(
+            "write_abort_report(sys.stderr, exc)",
+            MODULE_PATH.read_text(encoding="utf-8"),
+        )
+
+    def test_30_large_streams_are_preserved_without_truncation(self) -> None:
+        big_stdout = bytes((index * 7 + 11) % 256 for index in range(128 * 1024))
+        big_stderr = b"E" * (64 * 1024) + b"\n\xff\x00tail"
+        exception = self.assert_aborts(
+            "AMBIGUOUS_PROCESS_OUTCOME",
+            boundary=RecordingBoundary(
+                stdout=big_stdout,
+                stderr=big_stderr,
+                returncode=1,
+                physical_argv=self.UNIQUE_ARGV,
+            ),
+        )
+        diagnostic = exception.diagnostic
+        for stream, raw in (("stdout", big_stdout), ("stderr", big_stderr)):
+            with self.subTest(stream=stream):
+                described = diagnostic[stream]
+                self.assertEqual(
+                    described["length"],
+                    len(raw),
+                    msg="a truncating encoder must not pass this assertion",
+                )
+                self.assertEqual(base64.b64decode(described["base64"]), raw)
+                self.assertEqual(described["sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertNotIn("\n", capture.canonical_diagnostic_text(diagnostic))
 
 
 if __name__ == "__main__":
