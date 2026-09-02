@@ -17,8 +17,9 @@ The capture contract encoded here is hard:
     * no user task message and no model turn;
     * stream-json init capture only;
     * a physically omitted budget ceiling -- the CLI parser rejects a
-      literal ``--max-budget-usd 0`` -- with zero spend enforced instead
-      through a maximum of exactly zero turns;
+      literal ``--max-budget-usd 0`` -- plus a requested ``--max-turns 0``
+      setting; neither is an ex-ante zero-turn or zero-spend guarantee, so
+      acceptance is determined ex post from observed stream/terminal evidence;
     * explicit provider binary identity verification;
     * no treatment carrier, no canonical epoch materialization, no lock,
       no reservation, and no ledger mutation.
@@ -131,15 +132,16 @@ class ReferenceCaptureAbort(ReferenceCaptureError):
 
 def build_reference_argv(provider_executable: str) -> tuple:
     """Return the CTO argv with the budget ceiling physically omitted and the
-    turn ceiling driven to zero.
+    requested turn setting changed to zero.
 
     ``--max-budget-usd`` is removed outright rather than set to zero: the
     physical CLI parser rejects a literal zero budget, so the only argv that
     is both honest and acceptable to the real binary omits the flag entirely
-    and relies on ``--max-turns 0`` to make spend structurally impossible.
-    Every other element of the paid argv is preserved byte-for-byte so the
-    reference init reflects the same configuration surface the paid run will
-    later present.
+    and requests ``--max-turns 0``.  That request is not an ex-ante zero-turn
+    or zero-spend guarantee; acceptance is determined ex post from observed
+    stream and terminal evidence.  Every other element of the paid argv is
+    preserved byte-for-byte so the reference init reflects the same
+    configuration surface the paid run will later present.
     """
 
     if not isinstance(provider_executable, str) or not provider_executable:
@@ -176,12 +178,13 @@ def build_reference_argv(provider_executable: str) -> tuple:
 
 
 def assert_zero_spend_reference_argv(argv: Sequence[str]) -> None:
-    """Affirm the exact zero-spend reference argv contract.
+    """Validate the exact reference argv shape.
 
     The physical budget ceiling must be absent -- the CLI parser rejects a
-    literal zero -- so zero spend is asserted through the turn ceiling
-    alone.  A physically present budget ceiling never passes, regardless of
-    its value.
+    literal zero -- and the requested turn setting must be exactly zero.  This
+    validates argv shape only; zero-turn and zero-spend acceptance are
+    determined ex post from observed stream and terminal evidence.  A
+    physically present budget ceiling never passes, regardless of its value.
     """
 
     values = list(argv)

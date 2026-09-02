@@ -720,6 +720,24 @@ class P01ReferenceLoaderTests(unittest.TestCase):
         self.assertEqual(configuration["logical_reference_budget_usd"], "0.0000000")
         self.assertEqual(configuration["max_turns"], 0)
 
+    def test_18k_api_key_source_none_is_rejected_without_requiring_field(self) -> None:
+        none_event = reference_init_event()
+        none_event["apiKeySource"] = "none"
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "reference init event is not a capture: apiKeySource is none",
+        ):
+            production.validate_reference_record(reference_record(event=none_event))
+
+        absent = reference_record()
+        self.assertNotIn("apiKeySource", absent["init_event"])
+        self.assertIs(production.validate_reference_record(absent), absent)
+
+        non_none_event = reference_init_event()
+        non_none_event["apiKeySource"] = "ANTHROPIC_API_KEY"
+        non_none = reference_record(event=non_none_event)
+        self.assertIs(production.validate_reference_record(non_none), non_none)
+
     def test_21_on_delta_is_reference_plus_exactly_fable_method(self) -> None:
         loaded = self.load()
         delta = production.treatment_delta_expectation(loaded)

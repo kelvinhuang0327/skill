@@ -904,6 +904,10 @@ def validate_reference_record(
     event = record.get("init_event")
     _require(isinstance(event, Mapping), "reference init event must be an object")
     _require(
+        event.get("apiKeySource") != "none",
+        "reference init event is not a capture: apiKeySource is none",
+    )
+    _require(
         record.get("init_event_sha256") == init_event_sha256(event),
         "reference init event SHA256 does not bind the recorded event",
     )
