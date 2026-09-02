@@ -1078,5 +1078,127 @@ class IsolatedRuntimeEnvironmentTests(ReferenceCaptureTestCase):
                 self.assertTrue((runtime_root / name).is_dir())
 
 
+class CredentialAllowlistTests(unittest.TestCase):
+    """The declared per-run credential is the only secret-shaped key allowed.
+
+    These exercise ``compose_isolated_environment`` directly, because the
+    allowlist is a caller declaration and no capture entrypoint declares one
+    today.  Every credential value here is synthetic: no real credential, host
+    Claude config or Keychain state is read, written or required.
+    """
+
+    SYNTHETIC = "synthetic-not-a-real-credential"
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.counter = 0
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def workspace(self) -> Path:
+        """A fresh workspace each time: the runtime dirs are exist_ok=False."""
+
+        self.counter += 1
+        path = self.root / f"workspace-{self.counter}"
+        path.mkdir()
+        return path
+
+    def assert_aborts(self, reason: str, **overrides: Any):
+        workspace = self.workspace()
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.compose_isolated_environment(workspace, **overrides)
+        self.assertEqual(context.exception.reason, reason)
+        return context.exception
+
+    def test_36_declared_credential_key_reaches_the_isolated_environment(self) -> None:
+        workspace = self.workspace()
+        environment = capture.compose_isolated_environment(
+            workspace,
+            {"ANTHROPIC_API_KEY": self.SYNTHETIC},
+            credential_keys={"ANTHROPIC_API_KEY"},
+        )
+        self.assertEqual(environment["ANTHROPIC_API_KEY"], self.SYNTHETIC)
+        resolved = workspace.resolve()
+        for key in ("HOME", "TMPDIR", "CLAUDE_CONFIG_DIR"):
+            with self.subTest(key=key):
+                self.assertTrue(
+                    Path(environment[key]).resolve().is_relative_to(resolved),
+                    msg=f"declaring a credential must not relax {key} isolation",
+                )
+        self.assertEqual(environment["PATH"], "/usr/bin:/bin")
+
+    def test_37_undeclared_credential_key_is_still_rejected(self) -> None:
+        for overrides in (
+            {"extra_environment": {"ANTHROPIC_API_KEY": self.SYNTHETIC}},
+            {
+                "extra_environment": {"ANTHROPIC_API_KEY": self.SYNTHETIC},
+                "credential_keys": (),
+            },
+            {
+                "extra_environment": {"ANTHROPIC_API_KEY": self.SYNTHETIC},
+                "credential_keys": {"CLAUDE_CODE_OAUTH_TOKEN"},
+            },
+        ):
+            with self.subTest(overrides=sorted(overrides)):
+                exception = self.assert_aborts(
+                    "ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET", **overrides
+                )
+                self.assertEqual(exception.detail, "ANTHROPIC_API_KEY")
+
+    def test_38_declaring_one_key_does_not_admit_another_secret_shaped_key(
+        self,
+    ) -> None:
+        exception = self.assert_aborts(
+            "ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET",
+            extra_environment={
+                "ANTHROPIC_API_KEY": self.SYNTHETIC,
+                "AWS_SECRET_ACCESS_KEY": self.SYNTHETIC,
+            },
+            credential_keys={"ANTHROPIC_API_KEY"},
+        )
+        self.assertEqual(exception.detail, "AWS_SECRET_ACCESS_KEY")
+
+    def test_39_declaring_an_isolation_key_never_makes_it_overridable(self) -> None:
+        for key in ("HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "PATH"):
+            with self.subTest(key=key):
+                exception = self.assert_aborts(
+                    "ENVIRONMENT_OVERRIDES_ISOLATION_KEY",
+                    extra_environment={key: "/offline/operator-controlled"},
+                    credential_keys={key},
+                )
+                self.assertEqual(exception.detail, key)
+
+    def test_40_malformed_credential_declarations_fail_closed(self) -> None:
+        # A bare string must not degrade the exact-match test into a substring
+        # test: "API_KEY" is a substring of "ANTHROPIC_API_KEY" and would be
+        # admitted by `key in credential_keys` without normalization.
+        for declared, supplied in (
+            ("ANTHROPIC_API_KEY", "API_KEY"),
+            ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+        ):
+            with self.subTest(declared=declared, supplied=supplied):
+                exception = self.assert_aborts(
+                    "ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET",
+                    extra_environment={supplied: self.SYNTHETIC},
+                    credential_keys=declared,
+                )
+                self.assertEqual(exception.detail, supplied)
+
+        # A non-iterable declaration raises before any runtime directory exists.
+        workspace = self.workspace()
+        with self.assertRaises(TypeError):
+            capture.compose_isolated_environment(
+                workspace,
+                {"ANTHROPIC_API_KEY": self.SYNTHETIC},
+                credential_keys=None,
+            )
+        self.assertFalse(
+            (workspace / capture._ISOLATED_RUNTIME_DIRNAME).exists(),
+            msg="a malformed declaration must fail before any filesystem effect",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

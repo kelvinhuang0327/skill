@@ -41,7 +41,7 @@ import sys
 from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 
 def _load_sibling(module_name: str, filename: str, *aliases: str) -> Any:
@@ -234,7 +234,9 @@ def _isolated_runtime_paths(workspace: Path) -> dict:
 
 
 def compose_isolated_environment(
-    workspace: Path, extra_environment: Mapping = None
+    workspace: Path,
+    extra_environment: Mapping = None,
+    credential_keys: Collection = (),
 ) -> dict:
     """Build the only environment the reference-capture subprocess may see.
 
@@ -243,8 +245,20 @@ def compose_isolated_environment(
     audit that runs immediately afterward covers them.  Any caller-supplied
     ``extra_environment`` is merged in only after it is proven to neither
     override an isolation key nor look like a credential.
+
+    ``credential_keys`` names the exact keys the caller has explicitly
+    declared as the scoped per-run credential, and an explicit declaration is
+    the only way a secret-shaped key may reach the child.  Declaring a key
+    grants nothing else: the isolation keys stay non-overridable, the
+    secret-key regex is unchanged, no key is ever declared implicitly, and
+    the value itself is still never logged or described anywhere.  The
+    declaration is normalized to an exact-match set before the runtime
+    directories are created, so a malformed argument fails before any
+    filesystem effect and a bare string cannot degrade the membership test
+    into substring matching.
     """
 
+    declared_credentials = frozenset(credential_keys)
     paths = _isolated_runtime_paths(workspace)
     try:
         for path in (paths["root"], paths["HOME"], paths["TMPDIR"], paths["CLAUDE_CONFIG_DIR"]):
@@ -265,7 +279,7 @@ def compose_isolated_environment(
             raise ReferenceCaptureAbort("ENVIRONMENT_VALUE_MUST_BE_STRING", str(key))
         if key in isolated:
             raise ReferenceCaptureAbort("ENVIRONMENT_OVERRIDES_ISOLATION_KEY", key)
-        if _SECRET_KEY_RE.search(key) is not None:
+        if key not in declared_credentials and _SECRET_KEY_RE.search(key) is not None:
             raise ReferenceCaptureAbort("ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET", key)
         isolated[key] = value
     return isolated
