@@ -81,6 +81,7 @@ def init_event(
     tools=("Bash", "Read", "Edit"),
     agents=("general-purpose",),
     mcp_servers=("local-reference",),
+    api_key_source=_ABSENT,
     drop=(),
     empty=(),
 ) -> dict:
@@ -94,6 +95,8 @@ def init_event(
         "agents": list(agents),
         "mcp_servers": list(mcp_servers),
     }
+    if api_key_source is not _ABSENT:
+        event["apiKeySource"] = api_key_source
     for name in drop:
         event.pop(name, None)
     for name in empty:
@@ -377,6 +380,21 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
         self.assertEqual(invocation.prompt, "")
         self.assertNotEqual(invocation.prompt, slot.prompt)
 
+    def analyze(self, **overrides: Any) -> Any:
+        """Exercise analyze_zero_turn_stream directly: no manifest fixture,
+        no workspace, no process boundary -- just the stream-analysis gate.
+        """
+
+        return capture.analyze_zero_turn_stream(
+            capture.parse_stream_records(zero_turn_stdout(**overrides))
+        )
+
+    def assert_analyze_aborts(self, reason: str, **overrides: Any) -> Any:
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            self.analyze(**overrides)
+        self.assertEqual(context.exception.reason, reason)
+        return context.exception
+
     def test_04_model_turn_event_is_rejected(self) -> None:
         self.assert_aborts(
             "MODEL_TURN_OBSERVED",
@@ -386,10 +404,67 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
                 )
             ),
         )
-        self.assert_aborts(
+        self.assert_analyze_aborts(
             "MODEL_TURN_OBSERVED",
-            boundary=RecordingBoundary(stdout=zero_turn_stdout(num_turns=1)),
+            after=({"type": "tool_use", "session_id": "reference-session"},),
         )
+
+    def test_04b_terminal_num_turns_is_strictly_present_int_and_zero(self) -> None:
+        # The terminal result's own num_turns counter is a different
+        # observable from the stream-level user/tool_use gate above (tested
+        # in test_04), so a mismatch here must use its own, distinct reason.
+        self.assert_analyze_aborts("TERMINAL_NUM_TURNS_INVALID", num_turns=_ABSENT)
+        for bad in (True, False, "0", 0.0, None, 1, -1):
+            with self.subTest(num_turns=bad):
+                self.assert_analyze_aborts("TERMINAL_NUM_TURNS_INVALID", num_turns=bad)
+        # Positive control: the only accepted value still passes this gate.
+        stream = self.analyze(num_turns=0)
+        self.assertEqual(stream.model_turn_count, 0)
+
+    def test_04c_observed_counts_are_stream_derived(self) -> None:
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        for forbidden in ("model_turn_count=0,", "assistant_message_count=0,"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+        self.assertIn("model_turn_count=len(turns)", source)
+        self.assertIn("assistant_message_count=len(assistant)", source)
+
+        stream = self.analyze()
+        self.assertEqual(stream.model_turn_count, 0)
+        self.assertEqual(stream.assistant_message_count, 0)
+        self.assertIsInstance(stream.model_turn_count, int)
+        self.assertIsInstance(stream.assistant_message_count, int)
+
+    def test_04d_api_key_source_none_is_not_a_capture(self) -> None:
+        # Even an otherwise-flawless zero-turn, zero-cost stream must not
+        # pass this gate, and it must run before terminal/cost acceptance:
+        # a simultaneously bad cost/num_turns still surfaces this reason.
+        self.assert_analyze_aborts(
+            "NOT_A_CAPTURE_API_KEY_SOURCE_NONE",
+            init=init_event(api_key_source="none"),
+        )
+        self.assert_analyze_aborts(
+            "NOT_A_CAPTURE_API_KEY_SOURCE_NONE",
+            init=init_event(api_key_source="none"),
+            cost="1.0000000",
+            num_turns=1,
+        )
+
+    def test_04f_api_key_source_none_refuses_the_full_pipeline_too(self) -> None:
+        self.assert_aborts(
+            "NOT_A_CAPTURE_API_KEY_SOURCE_NONE",
+            boundary=RecordingBoundary(
+                stdout=zero_turn_stdout(init=init_event(api_key_source="none"))
+            ),
+        )
+
+    def test_04e_api_key_source_other_than_none_is_not_rejected_by_this_gate(
+        self,
+    ) -> None:
+        for source in ("user", "project", "org", "ANTHROPIC_API_KEY"):
+            with self.subTest(api_key_source=source):
+                stream = self.analyze(init=init_event(api_key_source=source))
+                self.assertEqual(stream.init_event["apiKeySource"], source)
 
     def test_05_assistant_message_is_rejected(self) -> None:
         assistant = {

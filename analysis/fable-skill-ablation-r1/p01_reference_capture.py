@@ -557,6 +557,9 @@ def analyze_zero_turn_stream(records: Sequence[Mapping]) -> ZeroTurnStream:
             "CONFLICTING_INIT_AUTHORITY",
             str(len(init_indices) + len(other_init_candidates)),
         )
+    init_event = records[init_indices[0]]
+    if init_event.get("apiKeySource") == "none":
+        raise ReferenceCaptureAbort("NOT_A_CAPTURE_API_KEY_SOURCE_NONE")
 
     result_indices = [
         index for index, record in enumerate(records) if record.get("type") == "result"
@@ -569,11 +572,14 @@ def analyze_zero_turn_stream(records: Sequence[Mapping]) -> ZeroTurnStream:
     if terminal.get("is_error", False) is not False:
         raise ReferenceCaptureAbort("AMBIGUOUS_PROCESS_OUTCOME", "result_reports_error")
 
+    # Distinct from MODEL_TURN_OBSERVED above: that gate covers stream-level
+    # user/tool_use records, while this is the terminal result's own counter
+    # -- a different observable that must fail closed on its own terms.
+    if "num_turns" not in terminal:
+        raise ReferenceCaptureAbort("TERMINAL_NUM_TURNS_INVALID", "absent")
     raw_turns = terminal.get("num_turns")
-    if "num_turns" in terminal:
-        if type(raw_turns) is not int or raw_turns != 0:
-            raise ReferenceCaptureAbort("MODEL_TURN_OBSERVED", str(raw_turns))
-    model_turn_count = 0
+    if type(raw_turns) is not int or raw_turns != 0:
+        raise ReferenceCaptureAbort("TERMINAL_NUM_TURNS_INVALID", str(raw_turns))
 
     if "total_cost_usd" not in terminal:
         raise ReferenceCaptureAbort("AMBIGUOUS_OBSERVED_COST", "absent")
@@ -591,10 +597,10 @@ def analyze_zero_turn_stream(records: Sequence[Mapping]) -> ZeroTurnStream:
 
     return ZeroTurnStream(
         records=tuple(records),
-        init_event=copy.deepcopy(dict(records[init_indices[0]])),
+        init_event=copy.deepcopy(dict(init_event)),
         terminal_result=copy.deepcopy(dict(terminal)),
-        model_turn_count=model_turn_count,
-        assistant_message_count=0,
+        model_turn_count=len(turns),
+        assistant_message_count=len(assistant),
         total_cost_usd=cost,
     )
 
