@@ -1208,11 +1208,41 @@ def _normalize_opaque_root(argv: Sequence[str], cwd: str) -> tuple[str, ...]:
 def _environment_fingerprints(
     execution: harness.ProviderExecution, *, redacted: bool
 ) -> dict[str, str]:
-    return {
-        item.key: item.sha256_fingerprint
-        for item in execution.invocation.environment
-        if item.redacted is redacted
-    }
+    """Comparable fingerprints for one execution's environment values.
+
+    Secret values are never compared by content, so that lane keeps the stored
+    fingerprint untouched.  Non-secret values are normalized against *this*
+    execution's own opaque root first, exactly as ``argv`` already is: two arms
+    isolated beneath different session roots are condition-neutral, not a
+    treatment difference.
+
+    Normalization is deliberately narrow.  A value that does not contain this
+    side's own root keeps its stored fingerprint bit-for-bit, so unrelated
+    non-secret values remain exact-equality compared and this cannot silently
+    widen equality.  Equality here is a condition-neutrality check on the
+    environment shape, not proof that either side is actually isolated: two
+    arms that both used the operator's real HOME would compare equal too.
+    """
+
+    if redacted:
+        return {
+            item.key: item.sha256_fingerprint
+            for item in execution.invocation.environment
+            if item.redacted
+        }
+
+    cwd = execution.invocation.cwd
+    fingerprints: dict[str, str] = {}
+    for item in execution.invocation.environment:
+        if item.redacted:
+            continue
+        (normalized,) = _normalize_opaque_root((item.value,), cwd)
+        fingerprints[item.key] = (
+            item.sha256_fingerprint
+            if normalized == item.value
+            else _sha256(normalized.encode("utf-8", errors="surrogatepass"))
+        )
+    return fingerprints
 
 
 def _observed_policy_sha256(execution: harness.ProviderExecution) -> str | None:

@@ -1108,6 +1108,74 @@ class ClaudeExecutorTests(unittest.TestCase):
         self.assertFalse(comparison.passed)
         self.assertFalse(comparison.checks["actual_init_output_style_equal"])
 
+    def isolated_environment(self, opaque_id: str, **overrides: str) -> dict:
+        """A P01-shaped isolated environment beneath that arm's own session root."""
+
+        root = f"/opaque/session-{opaque_id}/.p01-runtime"
+        environment = {
+            "PATH": "/offline/bin",
+            "ANTHROPIC_API_KEY": "fake-secret-value",
+            "HOME": f"{root}/home",
+            "TMPDIR": f"{root}/tmp",
+            "CLAUDE_CONFIG_DIR": f"{root}/config",
+        }
+        environment.update(overrides)
+        return environment
+
+    def isolated_pair(
+        self, left_extra: Mapping = None, right_extra: Mapping = None
+    ) -> Any:
+        left, _, _ = self.execute(
+            records=successful_records(),
+            invocation=self.invocation(
+                opaque_id=OPAQUE_ID_A,
+                environment=self.isolated_environment(
+                    OPAQUE_ID_A, **dict(left_extra or {})
+                ),
+            ),
+        )
+        right, _, _ = self.execute(
+            records=successful_records(),
+            invocation=self.invocation(
+                opaque_id=OPAQUE_ID_B,
+                environment=self.isolated_environment(
+                    OPAQUE_ID_B, **dict(right_extra or {})
+                ),
+            ),
+        )
+        return claude.compare_condition_neutral_evidence(left, right)
+
+    def test_41_distinct_session_roots_are_condition_neutral(self) -> None:
+        # OFF and ON isolate beneath different absolute session roots.  Their
+        # layout is identical relative to each own root, so this is isolation
+        # working, not a treatment difference.
+        comparison = self.isolated_pair()
+        self.assertTrue(comparison.checks["environment_keys_equal"])
+        self.assertTrue(
+            comparison.checks["nonsecret_environment_values_equal"],
+            "distinct session roots must not read as a treatment difference",
+        )
+        self.assertTrue(comparison.checks["secret_fingerprints_equal"])
+
+    def test_42_unrelated_nonsecret_value_difference_still_fails(self) -> None:
+        # Mandatory: proves own-root normalization did not widen generic
+        # equality.  LC_ALL contains no session root, so it must still be
+        # compared exactly and must still fail.
+        comparison = self.isolated_pair(
+            left_extra={"LC_ALL": "C"}, right_extra={"LC_ALL": "en_US.UTF-8"}
+        )
+        self.assertTrue(comparison.checks["environment_keys_equal"])
+        self.assertFalse(
+            comparison.checks["nonsecret_environment_values_equal"],
+            "normalization must not mask an unrelated non-secret difference",
+        )
+        self.assertFalse(comparison.passed)
+
+    def test_43_extra_environment_key_on_one_arm_fails(self) -> None:
+        comparison = self.isolated_pair(right_extra={"EXTRA_SURFACE": "1"})
+        self.assertFalse(comparison.checks["environment_keys_equal"])
+        self.assertFalse(comparison.passed)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
