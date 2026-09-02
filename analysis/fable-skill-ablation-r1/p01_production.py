@@ -110,7 +110,9 @@ PROVIDER_BINARY_KEYS = frozenset({"executable", "realpath", "sha256", "version"}
 CAPTURE_CONFIGURATION_KEYS = frozenset(
     {
         "argv",
+        "budget_ceiling_present",
         "max_budget_usd",
+        "logical_reference_budget_usd",
         "max_turns",
         "prompt_sha256",
         "prompt_length",
@@ -121,6 +123,12 @@ CAPTURE_CONFIGURATION_KEYS = frozenset(
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _GIT_OID_RE = re.compile(r"[0-9a-f]{40}")
+
+# Mirrors p01_reference_capture.py's own flag constants: this module never
+# imports a sibling's private symbols, so the same flag names are restated
+# here to derive the physical budget/turns evidence from argv independently.
+_BUDGET_FLAG = "--max-budget-usd"
+_TURNS_FLAG = "--max-turns"
 _GIT_TREE_ENTRY_RE = re.compile(r"^([0-7]{6}) (blob|tree|commit) ([0-9a-f]{40})\t(.*)$")
 
 # Deterministic, host-independent Git behaviour.  ``core.excludesFile`` and
@@ -749,6 +757,45 @@ def _require(condition: bool, reason: str) -> None:
         raise ReferenceArtifactError(reason)
 
 
+def _derive_budget_ceiling_from_argv(argv: Sequence[str]) -> tuple:
+    """Return ``(budget_ceiling_present, max_budget_usd)`` purely from argv.
+
+    Evidence of the physical CLI request only, never a standalone constant:
+    an absent flag means an absent physical ceiling.
+    """
+
+    values = list(argv)
+    if _BUDGET_FLAG not in values:
+        return False, None
+    if values.count(_BUDGET_FLAG) != 1:
+        raise ReferenceArtifactError("reference capture argv budget flag is ambiguous")
+    index = values.index(_BUDGET_FLAG)
+    if index + 1 >= len(values):
+        raise ReferenceArtifactError("reference capture argv budget flag has no value")
+    return True, values[index + 1]
+
+
+def _derive_configured_max_turns_from_argv(argv: Sequence[str]) -> int:
+    """Return the configured/requested max-turns value purely from argv.
+
+    Evidence of the CLI request only: not the terminal ``num_turns``, not an
+    observed turn count, and not an ex-ante zero-turn guarantee.
+    """
+
+    values = list(argv)
+    if values.count(_TURNS_FLAG) != 1:
+        raise ReferenceArtifactError("reference capture argv turns flag is not exactly one")
+    index = values.index(_TURNS_FLAG)
+    if index + 1 >= len(values):
+        raise ReferenceArtifactError("reference capture argv turns flag has no value")
+    try:
+        return int(values[index + 1])
+    except ValueError as exc:
+        raise ReferenceArtifactError(
+            "reference capture argv turns value is not an integer"
+        ) from exc
+
+
 def validate_reference_record(
     record: Mapping,
     *,
@@ -808,9 +855,28 @@ def validate_reference_record(
         and all(isinstance(part, str) and part for part in argv),
         "reference capture argv is invalid",
     )
+    budget_ceiling_present, derived_max_budget_usd = _derive_budget_ceiling_from_argv(argv)
     _require(
-        configuration.get("max_budget_usd") == REFERENCE_ZERO_USD,
-        "reference capture budget is not exactly 0.0000000",
+        configuration.get("budget_ceiling_present") is budget_ceiling_present,
+        "reference capture budget ceiling presence does not match argv",
+    )
+    _require(
+        configuration.get("max_budget_usd") == derived_max_budget_usd,
+        "reference capture max_budget_usd does not match argv",
+    )
+    _require(
+        budget_ceiling_present is False,
+        "reference capture argv must omit the physical budget ceiling",
+    )
+    _require(
+        configuration.get("logical_reference_budget_usd") == REFERENCE_ZERO_USD,
+        "reference capture logical budget is not exactly 0.0000000",
+    )
+    derived_max_turns = _derive_configured_max_turns_from_argv(argv)
+    _require(
+        type(configuration.get("max_turns")) is int
+        and configuration.get("max_turns") == derived_max_turns,
+        "reference capture max_turns does not match argv",
     )
     _require(configuration.get("max_turns") == 0, "reference capture max_turns is not 0")
     _require(

@@ -16,7 +16,9 @@ The capture contract encoded here is hard:
     * the same ``runner.build_model_invocation``-visible surface;
     * no user task message and no model turn;
     * stream-json init capture only;
-    * a maximum budget of exactly ``0.0000000``;
+    * a physically omitted budget ceiling -- the CLI parser rejects a
+      literal ``--max-budget-usd 0`` -- with zero spend enforced instead
+      through a maximum of exactly zero turns;
     * explicit provider binary identity verification;
     * no treatment carrier, no canonical epoch materialization, no lock,
       no reservation, and no ledger mutation.
@@ -81,6 +83,9 @@ reference_artifact_sha256 = production.reference_artifact_sha256
 init_event_sha256 = production.init_event_sha256
 validate_reference_record = production.validate_reference_record
 
+# The logical target only.  It is never written to argv: the physical
+# budget ceiling is omitted outright (see build_reference_argv) because the
+# CLI parser rejects a literal zero.
 REFERENCE_MAX_BUDGET_USD = production.REFERENCE_ZERO_USD
 REFERENCE_MAX_TURNS = 0
 REFERENCE_PROMPT = ""
@@ -125,8 +130,13 @@ class ReferenceCaptureAbort(ReferenceCaptureError):
 
 
 def build_reference_argv(provider_executable: str) -> tuple:
-    """Return the CTO argv with the budget and turn ceilings driven to zero.
+    """Return the CTO argv with the budget ceiling physically omitted and the
+    turn ceiling driven to zero.
 
+    ``--max-budget-usd`` is removed outright rather than set to zero: the
+    physical CLI parser rejects a literal zero budget, so the only argv that
+    is both honest and acceptable to the real binary omits the flag entirely
+    and relies on ``--max-turns 0`` to make spend structurally impossible.
     Every other element of the paid argv is preserved byte-for-byte so the
     reference init reflects the same configuration surface the paid run will
     later present.
@@ -135,41 +145,92 @@ def build_reference_argv(provider_executable: str) -> tuple:
     if not isinstance(provider_executable, str) or not provider_executable:
         raise ReferenceCaptureAbort("INVALID_PROVIDER_EXECUTABLE")
     paid = list(claude.build_cto_argv(provider_executable))
-    argv = list(paid)
-    for flag, value in ((_BUDGET_FLAG, REFERENCE_MAX_BUDGET_USD), (_TURNS_FLAG, str(REFERENCE_MAX_TURNS))):
-        if argv.count(flag) != 1:
-            raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", flag)
-        index = argv.index(flag)
-        if index + 1 >= len(argv):
-            raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", flag)
-        argv[index + 1] = value
-    if len(argv) != len(paid):
-        raise ReferenceCaptureAbort("REFERENCE_ARGV_SHAPE_CHANGED")
-    changed = [index for index, value in enumerate(argv) if value != paid[index]]
-    expected_changes = {argv.index(_BUDGET_FLAG) + 1, argv.index(_TURNS_FLAG) + 1}
-    if not set(changed).issubset(expected_changes):
+
+    if paid.count(_BUDGET_FLAG) != 1:
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _BUDGET_FLAG)
+    budget_index = paid.index(_BUDGET_FLAG)
+    if budget_index + 1 >= len(paid):
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _BUDGET_FLAG)
+
+    if paid.count(_TURNS_FLAG) != 1:
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _TURNS_FLAG)
+    turns_index = paid.index(_TURNS_FLAG)
+    if turns_index + 1 >= len(paid):
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _TURNS_FLAG)
+
+    if len({budget_index, budget_index + 1, turns_index, turns_index + 1}) != 4:
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", "flag_value_overlap")
+
+    zeroed = list(paid)
+    zeroed[turns_index + 1] = str(REFERENCE_MAX_TURNS)
+    changed = [index for index, value in enumerate(zeroed) if value != paid[index]]
+    if changed != [turns_index + 1]:
         raise ReferenceCaptureAbort("REFERENCE_ARGV_CHANGED_UNRELATED_SURFACE")
-    assert_zero_budget_argv(argv)
+
+    argv = zeroed[:budget_index] + zeroed[budget_index + 2 :]
+    if len(argv) != len(paid) - 2:
+        raise ReferenceCaptureAbort("REFERENCE_ARGV_SHAPE_CHANGED")
+
+    assert_zero_spend_reference_argv(argv)
     return tuple(argv)
 
 
-def assert_zero_budget_argv(argv: Sequence[str]) -> None:
-    """Affirm the exact zero-budget capture configuration; absence never passes."""
+def assert_zero_spend_reference_argv(argv: Sequence[str]) -> None:
+    """Affirm the exact zero-spend reference argv contract.
+
+    The physical budget ceiling must be absent -- the CLI parser rejects a
+    literal zero -- so zero spend is asserted through the turn ceiling
+    alone.  A physically present budget ceiling never passes, regardless of
+    its value.
+    """
 
     values = list(argv)
-    if values.count(_BUDGET_FLAG) != 1 or values.count(_TURNS_FLAG) != 1:
-        raise ReferenceCaptureAbort("ZERO_BUDGET_ARGV_AMBIGUOUS")
-    budget = values[values.index(_BUDGET_FLAG) + 1]
-    turns = values[values.index(_TURNS_FLAG) + 1]
-    if budget != REFERENCE_MAX_BUDGET_USD:
-        raise ReferenceCaptureAbort("MAX_BUDGET_NOT_EXACTLY_ZERO", budget)
-    try:
-        if Decimal(budget) != Decimal(0):
-            raise ReferenceCaptureAbort("MAX_BUDGET_NOT_EXACTLY_ZERO", budget)
-    except InvalidOperation as exc:
-        raise ReferenceCaptureAbort("MAX_BUDGET_NOT_EXACTLY_ZERO", budget) from exc
+    if _BUDGET_FLAG in values:
+        raise ReferenceCaptureAbort("BUDGET_CEILING_ARGUMENT_PRESENT")
+    if values.count(_TURNS_FLAG) != 1:
+        raise ReferenceCaptureAbort("TURNS_ARGV_AMBIGUOUS")
+    index = values.index(_TURNS_FLAG)
+    if index + 1 >= len(values):
+        raise ReferenceCaptureAbort("TURNS_ARGV_AMBIGUOUS")
+    turns = values[index + 1]
     if turns != str(REFERENCE_MAX_TURNS):
         raise ReferenceCaptureAbort("MAX_TURNS_NOT_ZERO", turns)
+
+
+def derive_budget_ceiling_from_argv(argv: Sequence[str]) -> tuple:
+    """Return ``(budget_ceiling_present, max_budget_usd)`` purely from argv.
+
+    This is evidence of the physical CLI request only, never a standalone
+    constant: an absent flag means an absent physical ceiling.
+    """
+
+    values = list(argv)
+    if _BUDGET_FLAG not in values:
+        return False, None
+    index = values.index(_BUDGET_FLAG)
+    if index + 1 >= len(values):
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _BUDGET_FLAG)
+    return True, values[index + 1]
+
+
+def derive_configured_max_turns_from_argv(argv: Sequence[str]) -> int:
+    """Return the configured/requested max-turns value purely from argv.
+
+    Evidence of the CLI request only: not the terminal ``num_turns``, not an
+    observed turn count, and not an ex-ante zero-turn guarantee.
+    """
+
+    values = list(argv)
+    if values.count(_TURNS_FLAG) != 1:
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _TURNS_FLAG)
+    index = values.index(_TURNS_FLAG)
+    if index + 1 >= len(values):
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _TURNS_FLAG)
+    raw = values[index + 1]
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _TURNS_FLAG) from exc
 
 
 def build_reference_invocation(
@@ -195,7 +256,7 @@ def build_reference_invocation(
         raise ReferenceCaptureAbort("USER_TASK_MESSAGE_WOULD_BE_SENT")
     if slot.prompt and invocation.prompt == slot.prompt:
         raise ReferenceCaptureAbort("USER_TASK_MESSAGE_WOULD_BE_SENT")
-    assert_zero_budget_argv(invocation.argv)
+    assert_zero_spend_reference_argv(invocation.argv)
     return invocation
 
 
@@ -682,6 +743,11 @@ def build_reference_record(
     if _SHA256_RE.fullmatch(profile_sha256) is None:
         raise ReferenceCaptureAbort("SANDBOX_POLICY_UNREADABLE", sandbox_identity)
 
+    budget_ceiling_present, max_budget_usd = derive_budget_ceiling_from_argv(
+        invocation.argv
+    )
+    configured_max_turns = derive_configured_max_turns_from_argv(invocation.argv)
+
     prompt_bytes = invocation.prompt.encode("utf-8")
     record = {
         "schema": REFERENCE_INIT_SCHEMA,
@@ -698,8 +764,10 @@ def build_reference_record(
         },
         "capture_configuration": {
             "argv": list(invocation.argv),
-            "max_budget_usd": REFERENCE_MAX_BUDGET_USD,
-            "max_turns": REFERENCE_MAX_TURNS,
+            "budget_ceiling_present": budget_ceiling_present,
+            "max_budget_usd": max_budget_usd,
+            "logical_reference_budget_usd": REFERENCE_MAX_BUDGET_USD,
+            "max_turns": configured_max_turns,
             "prompt_sha256": driver._sha256(prompt_bytes),
             "prompt_length": len(prompt_bytes),
             "environment_keys": sorted(invocation.environment),
@@ -939,7 +1007,7 @@ __all__ = [
     "ZeroTurnStream",
     "analyze_zero_turn_stream",
     "assert_reference_workspace_has_no_carrier",
-    "assert_zero_budget_argv",
+    "assert_zero_spend_reference_argv",
     "build_process_failure_diagnostic",
     "build_reference_argv",
     "build_reference_invocation",
@@ -948,6 +1016,8 @@ __all__ = [
     "canonical_reference_bytes",
     "capture_reference_init",
     "compose_isolated_environment",
+    "derive_budget_ceiling_from_argv",
+    "derive_configured_max_turns_from_argv",
     "init_event_sha256",
     "main",
     "parse_stream_records",

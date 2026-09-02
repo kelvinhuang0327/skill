@@ -118,8 +118,10 @@ def reference_record(event: Mapping = None, **overrides: Any) -> dict:
             "version": "2.1.245 (Claude Code)",
         },
         "capture_configuration": {
-            "argv": ["/offline/claude", "--max-budget-usd", "0.0000000"],
-            "max_budget_usd": "0.0000000",
+            "argv": ["/offline/claude", "--max-turns", "0"],
+            "budget_ceiling_present": False,
+            "max_budget_usd": None,
+            "logical_reference_budget_usd": "0.0000000",
             "max_turns": 0,
             "prompt_sha256": hashlib.sha256(b"").hexdigest(),
             "prompt_length": 0,
@@ -612,6 +614,111 @@ class P01ReferenceLoaderTests(unittest.TestCase):
             production.ReferenceArtifactError, "field set is invalid"
         ):
             self.load(extra)
+
+    def configuration(self, **overrides: Any) -> dict:
+        base = copy.deepcopy(reference_record()["capture_configuration"])
+        base.update(overrides)
+        return base
+
+    def test_18c_argv_omits_budget_but_record_claims_a_value_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError, "max_budget_usd does not match argv"
+        ):
+            self.load(
+                reference_record(
+                    capture_configuration=self.configuration(max_budget_usd="0.0000000")
+                )
+            )
+
+    def test_18d_argv_omits_budget_but_record_claims_presence_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "budget ceiling presence does not match argv",
+        ):
+            self.load(
+                reference_record(
+                    capture_configuration=self.configuration(budget_ceiling_present=True)
+                )
+            )
+
+    def test_18e_argv_with_a_present_budget_ceiling_is_still_rejected(self) -> None:
+        # Self-consistent with argv is not enough: the reference contract
+        # requires the physical ceiling to be omitted outright.
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError, "must omit the physical budget ceiling"
+        ):
+            self.load(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        argv=[
+                            "/offline/claude",
+                            "--max-budget-usd",
+                            "0.0000000",
+                            "--max-turns",
+                            "0",
+                        ],
+                        budget_ceiling_present=True,
+                        max_budget_usd="0.0000000",
+                    )
+                )
+            )
+
+    def test_18f_logical_reference_budget_mismatch_is_rejected(self) -> None:
+        for bad in ("0.0000001", "1.0000000", "", None, 0):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(
+                    production.ReferenceArtifactError,
+                    "logical budget is not exactly 0.0000000",
+                ):
+                    self.load(
+                        reference_record(
+                            capture_configuration=self.configuration(
+                                logical_reference_budget_usd=bad
+                            )
+                        )
+                    )
+
+    def test_18g_max_turns_mismatched_with_argv_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError, "max_turns does not match argv"
+        ):
+            self.load(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        argv=["/offline/claude", "--max-turns", "5"], max_turns=0
+                    )
+                )
+            )
+
+    def test_18h_max_turns_consistent_but_nonzero_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError, "max_turns is not 0"
+        ):
+            self.load(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        argv=["/offline/claude", "--max-turns", "5"], max_turns=5
+                    )
+                )
+            )
+
+    def test_18i_max_turns_boolean_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError, "max_turns does not match argv"
+        ):
+            self.load(
+                reference_record(capture_configuration=self.configuration(max_turns=False))
+            )
+
+    def test_18j_valid_omitted_budget_configuration_is_accepted(self) -> None:
+        loaded = self.load(
+            reference_record(capture_configuration=self.configuration())
+        )
+        configuration = loaded.record["capture_configuration"]
+        self.assertIs(configuration["budget_ceiling_present"], False)
+        self.assertIsNone(configuration["max_budget_usd"])
+        self.assertEqual(configuration["logical_reference_budget_usd"], "0.0000000")
+        self.assertEqual(configuration["max_turns"], 0)
 
     def test_21_on_delta_is_reference_plus_exactly_fable_method(self) -> None:
         loaded = self.load()

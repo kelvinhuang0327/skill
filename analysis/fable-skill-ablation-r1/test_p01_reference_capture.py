@@ -287,44 +287,73 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
             delta.reference_skill_identities | {runner.FABLE_SKILL_IDENTITY},
         )
 
-    def test_02_exact_max_budget_zero_is_enforced(self) -> None:
+    def test_02_budget_ceiling_is_physically_omitted_and_turns_zeroed(self) -> None:
         argv = capture.build_reference_argv(PROVIDER_BINARY_PATH)
-        self.assertEqual(argv[argv.index("--max-budget-usd") + 1], "0.0000000")
+        self.assertNotIn("--max-budget-usd", argv)
         self.assertEqual(argv[argv.index("--max-turns") + 1], "0")
-        paid = claude.build_cto_argv(PROVIDER_BINARY_PATH)
-        self.assertEqual(len(argv), len(paid))
-        differences = [
-            index for index, value in enumerate(argv) if value != paid[index]
-        ]
-        self.assertEqual(
-            sorted(differences),
-            sorted(
-                [
-                    list(argv).index("--max-budget-usd") + 1,
-                    list(argv).index("--max-turns") + 1,
-                ]
-            ),
-        )
+
+        paid = list(claude.build_cto_argv(PROVIDER_BINARY_PATH))
+        self.assertIn("--max-budget-usd", paid)
+        self.assertEqual(len(argv), len(paid) - 2)
+        # argv is exactly paid with the budget pair removed and the turns
+        # value zeroed; nothing else may differ.
+        budget_index = paid.index("--max-budget-usd")
+        without_budget = paid[:budget_index] + paid[budget_index + 2 :]
+        turns_index = without_budget.index("--max-turns")
+        expected = list(without_budget)
+        expected[turns_index + 1] = "0"
+        self.assertEqual(list(argv), expected)
 
         boundary = RecordingBoundary()
         self.run_capture(boundary=boundary)
         observed = list(boundary.requests[0].logical_argv)
-        self.assertEqual(observed[observed.index("--max-budget-usd") + 1], "0.0000000")
+        self.assertNotIn("--max-budget-usd", observed)
         self.assertEqual(observed[observed.index("--max-turns") + 1], "0")
 
-        for mutation in ("0.0000001", "2.0000000", "0", "0.00"):
-            with self.subTest(budget=mutation):
-                bad = list(argv)
-                bad[bad.index("--max-budget-usd") + 1] = mutation
-                with self.assertRaises(capture.ReferenceCaptureAbort) as context:
-                    capture.assert_zero_budget_argv(bad)
-                self.assertEqual(context.exception.reason, "MAX_BUDGET_NOT_EXACTLY_ZERO")
+        capture.assert_zero_spend_reference_argv(argv)
+
+        physically_present = list(argv[:1]) + ["--max-budget-usd", "0.0000000"] + list(
+            argv[1:]
+        )
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.assert_zero_spend_reference_argv(physically_present)
+        self.assertEqual(context.exception.reason, "BUDGET_CEILING_ARGUMENT_PRESENT")
 
         bad_turns = list(argv)
         bad_turns[bad_turns.index("--max-turns") + 1] = "1"
         with self.assertRaises(capture.ReferenceCaptureAbort) as context:
-            capture.assert_zero_budget_argv(bad_turns)
+            capture.assert_zero_spend_reference_argv(bad_turns)
         self.assertEqual(context.exception.reason, "MAX_TURNS_NOT_ZERO")
+
+    def test_02b_budget_and_turns_are_derived_from_argv_not_a_constant(self) -> None:
+        argv = capture.build_reference_argv(PROVIDER_BINARY_PATH)
+        self.assertEqual(
+            capture.derive_budget_ceiling_from_argv(argv), (False, None)
+        )
+        self.assertEqual(capture.derive_configured_max_turns_from_argv(argv), 0)
+
+        with_budget = list(argv) + ["--max-budget-usd", "3.5000000"]
+        self.assertEqual(
+            capture.derive_budget_ceiling_from_argv(with_budget), (True, "3.5000000")
+        )
+
+        with_other_turns = list(argv)
+        with_other_turns[with_other_turns.index("--max-turns") + 1] = "7"
+        self.assertEqual(
+            capture.derive_configured_max_turns_from_argv(with_other_turns), 7
+        )
+
+    def test_02c_reference_record_reports_omitted_budget_honestly(self) -> None:
+        outcome = self.run_capture()
+        configuration = outcome.record["capture_configuration"]
+        self.assertNotIn("--max-budget-usd", configuration["argv"])
+        self.assertIs(configuration["budget_ceiling_present"], False)
+        self.assertIsNone(configuration["max_budget_usd"])
+        self.assertEqual(configuration["logical_reference_budget_usd"], "0.0000000")
+        self.assertEqual(configuration["max_turns"], 0)
+        self.assertEqual(
+            set(configuration), set(production.CAPTURE_CONFIGURATION_KEYS)
+        )
 
     def test_03_user_task_prompt_is_not_sent(self) -> None:
         boundary = RecordingBoundary()
@@ -621,9 +650,9 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
         self.assertEqual(request.stdin_bytes, b"")
         self.assertEqual(request.cwd, request.session_root)
         self.assertTrue(Path(request.cwd).name.startswith("session-"))
-        self.assertIn("--max-budget-usd", boundary.observed_argv)
+        self.assertNotIn("--max-budget-usd", boundary.observed_argv)
         observed = list(boundary.observed_argv)
-        self.assertEqual(observed[observed.index("--max-budget-usd") + 1], "0.0000000")
+        self.assertEqual(observed[observed.index("--max-turns") + 1], "0")
         self.assertEqual(observed[0], str(script))
         self.assertEqual(outcome.record["observed_total_cost_usd"], "0.0000000")
 
