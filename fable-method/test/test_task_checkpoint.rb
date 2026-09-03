@@ -988,3 +988,202 @@ class TaskCheckpointTest < Minitest::Test
     )
   end
 end
+
+class DurableCommandCaptureTest < Minitest::Test
+  def setup
+    @tmpdir = Dir.mktmpdir('durable_capture_test_')
+  end
+
+  def teardown
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def capture_path(name)
+    File.join(@tmpdir, 'captures', "#{name}.json")
+  end
+
+  # E. Durable Judge success: exact command/stdout/stderr/exit 0/start/end.
+  def test_e_durable_success_capture_contains_all_required_fields
+    path = capture_path('success')
+    command = ['ruby', '-e', 'puts "ok"; exit 0']
+    run_result = DurableCommandCapture.run_and_capture(command, file_path: path)
+
+    assert File.file?(path)
+    reloaded = DurableCommandCapture.load(path)
+    assert_equal command, reloaded.command
+    assert_includes reloaded.stdout, 'ok'
+    assert_equal 0, reloaded.exit_status
+    refute_nil reloaded.started_at
+    refute_nil reloaded.ended_at
+    assert_equal DurableCommandCapture::VERDICT_PASS, reloaded.verdict
+    assert_equal run_result.exit_status, reloaded.exit_status
+  end
+
+  # F. Durable Judge failure: non-zero exit preserved, verdict can never be PASS.
+  def test_f_durable_failure_preserves_nonzero_exit_and_cannot_pass
+    path = capture_path('failure')
+    DurableCommandCapture.run_and_capture(['ruby', '-e', 'warn "boom"; exit 7'], file_path: path)
+
+    reloaded = DurableCommandCapture.load(path)
+    assert_equal 7, reloaded.exit_status
+    assert_includes reloaded.stderr, 'boom'
+    assert_equal DurableCommandCapture::VERDICT_FAIL, reloaded.verdict
+    refute_equal DurableCommandCapture::VERDICT_PASS, reloaded.verdict
+  end
+
+  # G. Interrupted / incomplete evidence: never fabricate PASS/FAIL; unaffected
+  # evidence stays reusable.
+  def test_g_incomplete_evidence_is_unknown_unverifiable_not_fabricated
+    incomplete_path = capture_path('incomplete')
+    FileUtils.mkdir_p(File.dirname(incomplete_path))
+    File.write(incomplete_path, JSON.generate('schema_version' => 1, 'command' => ['ruby', '-e', '1']))
+
+    assert_equal DurableCommandCapture::EVIDENCE_UNKNOWN_UNVERIFIABLE,
+                 DurableCommandCapture.classify_evidence(incomplete_path)
+    reloaded = DurableCommandCapture.load(incomplete_path)
+    assert_equal DurableCommandCapture::VERDICT_UNKNOWN_UNVERIFIABLE, reloaded.verdict
+    refute_equal DurableCommandCapture::VERDICT_PASS, reloaded.verdict
+    refute_equal DurableCommandCapture::VERDICT_FAIL, reloaded.verdict
+
+    missing_path = capture_path('does_not_exist')
+    assert_equal DurableCommandCapture::EVIDENCE_UNKNOWN_UNVERIFIABLE,
+                 DurableCommandCapture.classify_evidence(missing_path)
+
+    good_path = capture_path('unaffected')
+    DurableCommandCapture.run_and_capture(['ruby', '-e', 'exit 0'], file_path: good_path)
+    assert_equal DurableCommandCapture::EVIDENCE_COMPLETE, DurableCommandCapture.classify_evidence(good_path)
+  end
+
+  # H. Stream independence: the durable file alone reconstructs the result.
+  def test_h_durable_record_survives_discarding_in_memory_result
+    path = capture_path('stream_independence')
+    DurableCommandCapture.run_and_capture(['ruby', '-e', 'puts "durable"; exit 0'], file_path: path)
+
+    reloaded = DurableCommandCapture.load(path)
+    assert_equal 0, reloaded.exit_status
+    assert_includes reloaded.stdout, 'durable'
+  end
+
+  # I. Secret discipline: no automatic ENV capture.
+  def test_i_no_automatic_environment_capture
+    sentinel = "FABLE_TEST_SENTINEL_#{rand(1_000_000)}"
+    path = capture_path('secret_not_printed')
+    begin
+      ENV['FABLE_TEST_SECRET_SENTINEL'] = sentinel
+      DurableCommandCapture.run_and_capture(['ruby', '-e', 'puts "quiet"'], file_path: path)
+      refute_includes File.read(path), sentinel
+    ensure
+      ENV.delete('FABLE_TEST_SECRET_SENTINEL')
+    end
+  end
+
+  # I. Secret discipline: a command that deliberately prints a secret is
+  # captured verbatim, same as any other output — no new redaction system.
+  def test_i_secret_appears_only_when_command_deliberately_prints_it
+    sentinel = "FABLE_TEST_SENTINEL_#{rand(1_000_000)}"
+    path = capture_path('secret_printed')
+    begin
+      ENV['FABLE_TEST_SECRET_SENTINEL'] = sentinel
+      DurableCommandCapture.run_and_capture(['ruby', '-e', 'print ENV["FABLE_TEST_SECRET_SENTINEL"]'], file_path: path)
+      reloaded = DurableCommandCapture.load(path)
+      assert_includes reloaded.stdout, sentinel
+    ensure
+      ENV.delete('FABLE_TEST_SECRET_SENTINEL')
+    end
+  end
+end
+
+class ExecutionRecoveryTest < Minitest::Test
+  def setup
+    @tmpdir = Dir.mktmpdir('execution_recovery_test_')
+  end
+
+  def teardown
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def exec_path(name)
+    File.join(@tmpdir, 'executions', "#{name}.json")
+  end
+
+  # A. Active prior process: duplicate launch rejected.
+  def test_a_active_prior_process_blocks_duplicate_launch
+    path = exec_path('active')
+    pid = Process.spawn('sleep', '5')
+    begin
+      ExecutionRecord.start!(path, task_id: 'T_A', execution_id: 'active', pid: pid)
+      assert_raises(ExecutionRecord::DuplicateExecutionError) do
+        ExecutionRecord.recover_before_execution(path)
+      end
+    ensure
+      Process.kill('TERM', pid)
+      Process.wait(pid)
+    end
+  end
+
+  # B. Completed prior execution: result reused, upstream command not rerun.
+  def test_b_completed_prior_execution_is_reused_without_rerunning_upstream
+    counter_path = File.join(@tmpdir, 'run_counter')
+    File.write(counter_path, '0')
+    path = exec_path('completed')
+    capture_file = File.join(@tmpdir, 'captures', 'completed_capture.json')
+
+    bump = ['ruby', '-e', "n = File.read(#{counter_path.inspect}).to_i; File.write(#{counter_path.inspect}, (n + 1).to_s)"]
+    DurableCommandCapture.run_and_capture(bump, file_path: capture_file)
+    assert_equal '1', File.read(counter_path)
+
+    record = ExecutionRecord.start!(path, task_id: 'T_B', execution_id: 'completed', pid: Process.pid)
+    record.complete!(path, durable_capture_path: capture_file)
+
+    recovery = ExecutionRecord.recover_before_execution(path)
+    assert_equal ExecutionRecord::CLASSIFICATION_COMPLETED, recovery.classification
+    refute_nil recovery.durable_capture
+    assert_equal 0, recovery.durable_capture.exit_status
+    assert_equal '1', File.read(counter_path),
+                 'the upstream command must not be re-invoked when reusing a completed result'
+  end
+
+  # C. Incomplete prior execution: classified TERMINATED_INCOMPLETE; rerun
+  # eligibility is delegated to the original task authority, not decided here.
+  def test_c_terminated_incomplete_execution_delegates_rerun_eligibility
+    path = exec_path('terminated_incomplete')
+    pid = Process.spawn('ruby', '-e', 'exit 0')
+    Process.wait(pid)
+
+    ExecutionRecord.start!(path, task_id: 'T_C', execution_id: 'terminated_incomplete', pid: pid)
+
+    recovery = ExecutionRecord.recover_before_execution(path)
+    assert_equal ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE, recovery.classification
+    assert_nil recovery.durable_capture
+  end
+
+  # D. Unresolved overlap: fail closed, no duplicate execution.
+  def test_d_unresolved_liveness_fails_closed
+    path = exec_path('unresolved')
+    ExecutionRecord.start!(path, task_id: 'T_D', execution_id: 'unresolved', pid: 123_456)
+
+    ambiguous = ->(_pid) { raise 'liveness cannot be established in this sandbox' }
+    assert_raises(ExecutionRecord::UnresolvedExecutionStateError) do
+      ExecutionRecord.recover_before_execution(path, pid_alive: ambiguous)
+    end
+  end
+
+  # D. Unresolved overlap: a malformed record also fails closed.
+  def test_d_malformed_record_fails_closed
+    path = exec_path('malformed')
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, '{ this is not valid json')
+
+    assert_raises(ExecutionRecord::UnresolvedExecutionStateError) do
+      ExecutionRecord.recover_before_execution(path)
+    end
+  end
+
+  def test_no_prior_record_is_not_treated_as_failure
+    path = exec_path('never_started')
+    recovery = ExecutionRecord.recover_before_execution(path)
+    assert_nil recovery.classification
+    assert_nil recovery.execution_record
+    assert_nil recovery.durable_capture
+  end
+end

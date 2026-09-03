@@ -973,6 +973,322 @@ class TaskReconciler
   end
 end
 
+# DurableCommandCapture persists the exact terminal evidence of a task-owned
+# long-running command to one canonical task-owned location, so a Judge or a
+# resuming Worker never has to treat UI/subagent streaming as the sole
+# authority for a load-bearing result. It never captures the parent
+# environment; only the exact argv, exact stdout/stderr, exit status, and
+# start/end timestamps are persisted.
+class DurableCommandCapture
+  SCHEMA_VERSION = 1
+
+  VERDICT_PASS = 'PASS'
+  VERDICT_FAIL = 'FAIL'
+  VERDICT_UNKNOWN_UNVERIFIABLE = 'UNKNOWN_UNVERIFIABLE'
+
+  EVIDENCE_COMPLETE = 'EVIDENCE_COMPLETE'
+  EVIDENCE_UNKNOWN_UNVERIFIABLE = 'EVIDENCE_UNKNOWN_UNVERIFIABLE'
+
+  attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :started_at, :ended_at
+
+  def initialize(attrs = {})
+    @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
+    @command = Array(attrs[:command] || attrs['command']).map(&:to_s)
+    @stdout = (attrs[:stdout] || attrs['stdout']).to_s
+    @stderr = (attrs[:stderr] || attrs['stderr']).to_s
+    @exit_status = attrs.key?(:exit_status) ? attrs[:exit_status] : attrs['exit_status']
+    @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
+    @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
+  end
+
+  def complete?
+    !@command.empty? && !@exit_status.nil? &&
+      !@started_at.to_s.strip.empty? && !@ended_at.to_s.strip.empty?
+  end
+
+  def verdict
+    return VERDICT_UNKNOWN_UNVERIFIABLE unless complete?
+
+    @exit_status == 0 ? VERDICT_PASS : VERDICT_FAIL
+  end
+
+  def to_h
+    {
+      'schema_version' => @schema_version,
+      'command' => @command,
+      'stdout' => @stdout,
+      'stderr' => @stderr,
+      'exit_status' => @exit_status,
+      'started_at' => @started_at,
+      'ended_at' => @ended_at
+    }
+  end
+
+  def to_json(*args)
+    JSON.pretty_generate(to_h, *args)
+  end
+
+  def self.from_json(json_str)
+    data = JSON.parse(json_str)
+    raise ValidationError, 'durable capture JSON root must be an Object' unless data.is_a?(Hash)
+
+    new(data)
+  rescue JSON::ParserError => e
+    raise ValidationError, "Malformed durable capture JSON: #{e.message}"
+  end
+
+  def self.load(file_path)
+    raise LoadError, "Durable capture file does not exist: #{file_path}" unless File.file?(file_path)
+
+    from_json(File.read(file_path, encoding: 'UTF-8'))
+  end
+
+  def save(file_path)
+    dir = File.dirname(file_path)
+    FileUtils.mkdir_p(dir)
+    temp_path = "#{file_path}.tmp.#{Process.pid}.#{Time.now.to_i}"
+    File.open(temp_path, 'w:UTF-8') { |f| f.write(to_json) }
+    File.rename(temp_path, file_path)
+    true
+  end
+
+  def self.default_path(repo_root, task_id, capture_id)
+    File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'captures', "#{capture_id}.json")
+  end
+
+  # Classifies the evidence at file_path without inferring PASS/FAIL: missing,
+  # unreadable, malformed, or incomplete evidence is always
+  # EVIDENCE_UNKNOWN_UNVERIFIABLE rather than a guessed outcome.
+  def self.classify_evidence(file_path)
+    return EVIDENCE_UNKNOWN_UNVERIFIABLE unless File.file?(file_path)
+
+    begin
+      capture = load(file_path)
+    rescue ValidationError, LoadError
+      return EVIDENCE_UNKNOWN_UNVERIFIABLE
+    end
+
+    capture.complete? ? EVIDENCE_COMPLETE : EVIDENCE_UNKNOWN_UNVERIFIABLE
+  end
+
+  # Runs command (an argv array, never a shell string) to completion and
+  # persists the exact terminal evidence to file_path before returning, so
+  # the durable record exists before any caller can rely on it for a
+  # verdict. Never reads or persists ENV; stdout/stderr are captured exactly
+  # as the command produced them.
+  def self.run_and_capture(command, file_path:, chdir: nil)
+    command = Array(command).map(&:to_s)
+    raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
+
+    started_at = Time.now.utc.iso8601
+    spawn_opts = {}
+    spawn_opts[:chdir] = chdir if chdir
+    stdout_str, stderr_str, status = Open3.capture3(*command, **spawn_opts)
+    ended_at = Time.now.utc.iso8601
+
+    capture = new(
+      command: command,
+      stdout: stdout_str,
+      stderr: stderr_str,
+      exit_status: status.exitstatus.nil? ? "SIGNALED:#{status.termsig}" : status.exitstatus,
+      started_at: started_at,
+      ended_at: ended_at
+    )
+    capture.save(file_path)
+    capture
+  end
+
+  class ValidationError < StandardError; end
+  class LoadError < StandardError; end
+end
+
+# ExecutionRecord classifies a task-owned long-running execution that may
+# have outlived its originating session, so a resuming Worker can decide
+# whether to reuse a completed result, avoid launching a duplicate, or fail
+# closed rather than guess. It never scans the OS process table; it only
+# inspects the exact PID this task itself recorded.
+class ExecutionRecord
+  SCHEMA_VERSION = 1
+
+  STATUS_STARTED = 'STARTED'
+  STATUS_COMPLETED = 'COMPLETED'
+
+  CLASSIFICATION_ACTIVE = 'PRIOR_PROCESS_ACTIVE'
+  CLASSIFICATION_COMPLETED = 'PRIOR_PROCESS_COMPLETED'
+  CLASSIFICATION_TERMINATED_INCOMPLETE = 'PRIOR_PROCESS_TERMINATED_INCOMPLETE'
+  CLASSIFICATION_STATE_UNRESOLVED = 'PRIOR_PROCESS_STATE_UNRESOLVED'
+
+  attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
+                :durable_capture_path, :started_at, :ended_at
+
+  def initialize(attrs = {})
+    @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
+    @task_id = (attrs[:task_id] || attrs['task_id'])&.to_s
+    @execution_id = (attrs[:execution_id] || attrs['execution_id'])&.to_s
+    @pid = attrs.key?(:pid) ? attrs[:pid] : attrs['pid']
+    @status = (attrs[:status] || attrs['status'])&.to_s
+    @durable_capture_path = (attrs[:durable_capture_path] || attrs['durable_capture_path'])&.to_s
+    @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
+    @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
+  end
+
+  def to_h
+    {
+      'schema_version' => @schema_version,
+      'task_id' => @task_id,
+      'execution_id' => @execution_id,
+      'pid' => @pid,
+      'status' => @status,
+      'durable_capture_path' => @durable_capture_path,
+      'started_at' => @started_at,
+      'ended_at' => @ended_at
+    }
+  end
+
+  def to_json(*args)
+    JSON.pretty_generate(to_h, *args)
+  end
+
+  def self.from_json(json_str)
+    data = JSON.parse(json_str)
+    raise ValidationError, 'execution record JSON root must be an Object' unless data.is_a?(Hash)
+
+    new(data)
+  rescue JSON::ParserError => e
+    raise ValidationError, "Malformed execution record JSON: #{e.message}"
+  end
+
+  def self.load(file_path)
+    raise LoadError, "Execution record file does not exist: #{file_path}" unless File.file?(file_path)
+
+    from_json(File.read(file_path, encoding: 'UTF-8'))
+  end
+
+  def save(file_path)
+    dir = File.dirname(file_path)
+    FileUtils.mkdir_p(dir)
+    temp_path = "#{file_path}.tmp.#{Process.pid}.#{Time.now.to_i}"
+    File.open(temp_path, 'w:UTF-8') { |f| f.write(to_json) }
+    File.rename(temp_path, file_path)
+    true
+  end
+
+  def self.default_path(repo_root, task_id, execution_id)
+    File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'executions', "#{execution_id}.json")
+  end
+
+  def self.start!(file_path, task_id:, execution_id:, pid:)
+    record = new(
+      task_id: task_id,
+      execution_id: execution_id,
+      pid: pid,
+      status: STATUS_STARTED,
+      started_at: Time.now.utc.iso8601
+    )
+    record.save(file_path)
+    record
+  end
+
+  def complete!(file_path, durable_capture_path:)
+    @status = STATUS_COMPLETED
+    @durable_capture_path = durable_capture_path
+    @ended_at = Time.now.utc.iso8601
+    save(file_path)
+    self
+  end
+
+  def evidence_complete?
+    return false if @durable_capture_path.to_s.strip.empty?
+
+    DurableCommandCapture.classify_evidence(@durable_capture_path) == DurableCommandCapture::EVIDENCE_COMPLETE
+  end
+
+  # Classifies this record's prior execution without starting anything new.
+  # pid_alive is injectable so callers/tests can supply a deterministic or
+  # sandbox-safe liveness check instead of a real OS signal.
+  def classify(pid_alive: self.class.method(:pid_alive?))
+    case @status
+    when STATUS_STARTED
+      liveness = begin
+                   pid_alive.call(@pid)
+                 rescue StandardError
+                   nil
+                 end
+      case liveness
+      when true then CLASSIFICATION_ACTIVE
+      when false then CLASSIFICATION_TERMINATED_INCOMPLETE
+      else CLASSIFICATION_STATE_UNRESOLVED
+      end
+    when STATUS_COMPLETED
+      evidence_complete? ? CLASSIFICATION_COMPLETED : CLASSIFICATION_TERMINATED_INCOMPLETE
+    else
+      CLASSIFICATION_STATE_UNRESOLVED
+    end
+  end
+
+  # true = confirmed alive, false = confirmed dead, nil = ambiguous (e.g. no
+  # recorded pid, or a liveness check that could not be established) and
+  # must fail closed rather than guess.
+  def self.pid_alive?(pid)
+    return nil if pid.nil?
+
+    Process.kill(0, Integer(pid))
+    true
+  rescue Errno::ESRCH
+    false
+  rescue Errno::EPERM
+    nil
+  rescue ArgumentError, TypeError
+    nil
+  end
+
+  Recovery = Struct.new(:classification, :execution_record, :durable_capture, keyword_init: true)
+
+  # The Contract A guard: call this before starting a possibly-duplicate
+  # expensive execution. Raises for ACTIVE and STATE_UNRESOLVED so a caller
+  # cannot silently fall through into a duplicate launch; returns a Recovery
+  # for COMPLETED (carrying the reusable durable_capture) and for
+  # TERMINATED_INCOMPLETE (carrying no capture — rerun eligibility is left to
+  # the original task authority, not decided here). Returns a Recovery with a
+  # nil classification when no prior record exists at all, since a missing
+  # record is not itself evidence of failure.
+  def self.recover_before_execution(file_path, pid_alive: method(:pid_alive?))
+    return Recovery.new(classification: nil, execution_record: nil, durable_capture: nil) unless File.file?(file_path)
+
+    record = begin
+               load(file_path)
+             rescue ValidationError, LoadError
+               nil
+             end
+
+    classification = record.nil? ? CLASSIFICATION_STATE_UNRESOLVED : record.classify(pid_alive: pid_alive)
+
+    case classification
+    when CLASSIFICATION_ACTIVE
+      raise DuplicateExecutionError,
+            "prior execution '#{record.execution_id}' (pid=#{record.pid}) is still active; refusing duplicate launch"
+    when CLASSIFICATION_STATE_UNRESOLVED
+      raise UnresolvedExecutionStateError,
+            "prior execution state at '#{file_path}' could not be resolved; failing closed rather than risking a duplicate"
+    end
+
+    capture = if record && !record.durable_capture_path.to_s.strip.empty? && File.file?(record.durable_capture_path)
+                begin
+                  DurableCommandCapture.load(record.durable_capture_path)
+                rescue DurableCommandCapture::ValidationError, DurableCommandCapture::LoadError
+                  nil
+                end
+              end
+
+    Recovery.new(classification: classification, execution_record: record, durable_capture: capture)
+  end
+
+  class ValidationError < StandardError; end
+  class LoadError < StandardError; end
+  class DuplicateExecutionError < StandardError; end
+  class UnresolvedExecutionStateError < StandardError; end
+end
+
 # CLI interface when executed directly
 if __FILE__ == $PROGRAM_NAME
   require 'optparse'
