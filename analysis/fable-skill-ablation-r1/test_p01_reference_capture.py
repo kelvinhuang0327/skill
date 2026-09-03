@@ -1627,38 +1627,128 @@ class PerRunCredentialCallerTests(unittest.TestCase):
         self.assertEqual(code, 2)
         load.assert_not_called()
         spawn.assert_not_called()
-        text = stderr.getvalue()
-        self.assertIn("MISSING_PER_RUN_CREDENTIAL", text)
-        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, text)
+        self.assertIn("MISSING_PER_RUN_CREDENTIAL", stderr.getvalue())
 
-    def test_52_fake_secret_does_not_appear_in_argv_diagnostic_or_abort(self) -> None:
-        argv = capture.build_reference_argv(PROVIDER_BINARY_PATH)
-        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, argv)
-        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, " ".join(argv))
+    def _paid_slot(self):
+        return runner.ManifestSlot(
+            orchestrator_run_id="a" * 32,
+            condition="OFF",
+            task_id=execution_builder.TASK_ID,
+            prompt=execution_builder.recovered_a01_corpus().prompt,
+            command=tuple(claude.build_cto_argv(PROVIDER_BINARY_PATH)),
+            expected_fable_engaged=False,
+            frozen_dimensions=tuple(sorted(runner.REQUIRED_PURITY_DIMENSIONS)),
+            source_run_path=None,
+            task_metadata={},
+            treatment_metadata={},
+            forbidden_model_tokens=("OFF", "ON"),
+        )
+
+    def test_52_injected_fake_secret_does_not_leak_from_shipped_surfaces(self) -> None:
+        parent = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "ANTHROPIC_API_KEY"
+        }
+        parent["ANTHROPIC_API_KEY"] = FAKE_PER_RUN_CREDENTIAL
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, parent, clear=True):
+            with mock.patch.object(
+                capture.controller,
+                "load_manifest_after_lock",
+                side_effect=RuntimeError("stop-after-credential-accepted"),
+            ) as load:
+                with mock.patch.object(capture.subprocess, "run") as spawn:
+                    with mock.patch.object(sys, "stderr", stderr):
+                        code = capture.main(self.main_argv())
+        self.assertEqual(code, 2)
+        load.assert_called_once()
+        spawn.assert_not_called()
+        abort_text = stderr.getvalue()
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, abort_text)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, " ".join(self.main_argv()))
+
+        boundary = RecordingBoundary()
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.capture_reference_init(
+                self.dummy_request(per_run_credential=FAKE_PER_RUN_CREDENTIAL),
+                process_boundary=boundary,
+                provider_identity_resolver=FakeProviderIdentity,
+            )
+        self.assertNotEqual(context.exception.reason, "MISSING_PER_RUN_CREDENTIAL")
+        self.assertEqual(boundary.requests, [])
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, str(context.exception))
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, context.exception.detail or "")
+
+        secret = capture.per_run_credential_from_parent_context(
+            {"ANTHROPIC_API_KEY": FAKE_PER_RUN_CREDENTIAL}
+        )
+        opaque = "b" * 32
+        session = self.root / ("session-" + opaque)
+        session.mkdir()
+        child = capture.compose_reference_child_environment(
+            session, extra_environment={}, per_run_credential=secret
+        )
+        self.assertEqual(child["ANTHROPIC_API_KEY"], FAKE_PER_RUN_CREDENTIAL)
+        invocation = capture.build_reference_invocation(
+            self._paid_slot(), session, opaque, environment=child
+        )
+        self.assertEqual(invocation.environment["ANTHROPIC_API_KEY"], FAKE_PER_RUN_CREDENTIAL)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, invocation.argv)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, invocation.prompt)
+        process_request = capture.CaptureProcessRequest(
+            logical_argv=tuple(invocation.argv),
+            cwd=invocation.cwd,
+            stdin_bytes=invocation.prompt.encode("utf-8"),
+            environment=dict(invocation.environment),
+            timeout_seconds=1.0,
+            session_root=invocation.cwd,
+            profile_path=str(controller.SANDBOX_PROFILE_PATH),
+            sandbox_exec_path=str(controller.SANDBOX_EXEC_PATH),
+        )
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, process_request.logical_argv)
+        physical = controller.build_sandboxed_command(
+            process_request.logical_argv,
+            session_root=process_request.session_root,
+            profile_path=process_request.profile_path,
+            sandbox_exec_path=process_request.sandbox_exec_path,
+        )
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, physical)
         diagnostic = capture.build_process_failure_diagnostic(
             capture.CaptureProcessResult(
                 returncode=1,
                 stdout=b"",
                 stderr=b"",
                 timed_out=False,
-                physical_argv=tuple(argv),
+                physical_argv=tuple(physical),
             )
         )
-        text = capture.canonical_diagnostic_text(diagnostic)
-        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, text)
+        diagnostic_text = capture.canonical_diagnostic_text(diagnostic)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, diagnostic_text)
         self.assertNotIn("environment", diagnostic)
-        stream = io.StringIO()
-        capture.write_abort_report(
-            stream,
-            capture.ReferenceCaptureAbort(
-                "MISSING_PER_RUN_CREDENTIAL", capture.PER_RUN_CREDENTIAL_KEY
-            ),
+
+        class OfflineIdentity:
+            executable = "/offline/claude"
+            realpath = "/offline/claude"
+            sha256 = "a" * 64
+            version = "2.1.245 (Claude Code)"
+
+        stream = capture.analyze_zero_turn_stream(
+            capture.parse_stream_records(zero_turn_stdout())
         )
-        reported = stream.getvalue()
-        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, reported)
-        self.assertIn("MISSING_PER_RUN_CREDENTIAL", reported)
-        self.assertNotIn("prompt_secret", production.CAPTURE_CONFIGURATION_KEYS)
-        self.assertNotIn("ANTHROPIC_API_KEY", production.REFERENCE_RECORD_KEYS)
+        record = capture.build_reference_record(
+            provider_identity=OfflineIdentity(),
+            invocation=invocation,
+            stream=stream,
+            expected_manifest_sha256=SEALED_SHA256,
+            profile_path=controller.SANDBOX_PROFILE_PATH,
+        )
+        configuration = record["capture_configuration"]
+        self.assertIn("ANTHROPIC_API_KEY", configuration["environment_keys"])
+        serialized = production.canonical_reference_bytes(record).decode("utf-8")
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, serialized)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, json.dumps(configuration))
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, json.dumps(configuration["argv"]))
 
     def test_53_neutral_reference_input_remains_exact_x(self) -> None:
         self.assertEqual(capture.REFERENCE_PROMPT, "x")
