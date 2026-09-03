@@ -320,6 +320,10 @@ stop when scope, safety, authority, capability, proportionality, or
 discriminating evidence is exhausted. External credentials, permissions, missing
 runtimes, and unresolved authority remain blockers.
 
+Session, quota, shell, or handoff loss does not prove execution failure. Resolve the exact scope-qualified process/writer and canonical durable output, then classify the prior execution as exactly one of `ACTIVE`, `COMPLETE_VALID`, `TERMINATED_INCOMPLETE`, or `UNRESOLVED`. `ACTIVE`: wait, observe, or attach; never launch a duplicate. `COMPLETE_VALID`: reuse the existing output; do not rerun. File existence alone is not `COMPLETE_VALID`; the durable output must satisfy its task acceptance and available terminal evidence. `TERMINATED_INCOMPLETE`: rerun is permitted. `UNRESOLVED`: stop rather than risk concurrent or duplicate execution.
+
+When acceptance concerns serialization or artifact byte determinism, reuse the same already-computed semantic result, independently serialize or reconstruct the serialized bytes, and compare them. Do not rerun an expensive upstream computation solely for byte-level determinism. Independent algorithm/process replay is required only when the Packet explicitly makes replay part of acceptance. Do not weaken existing `NOT RUN`, retry-ledger, RCA, Judge, or evidence-honesty rules.
+
 ## Verification and Judge handoff
 
 Verify by observation: the named done criterion actually ran or rendered, the
@@ -418,28 +422,20 @@ Local-only commits use `COMMIT_LINK: NOT_APPLICABLE`.
 
 Load only the directly relevant reference:
 
-- [flowcharts](references/flowcharts.md) for route, gate-order, lifecycle, or
-  family-routing ambiguity;
-- [examples](references/examples.md) for a task shape, Packet fast path, or
-  report format;
-- [failure modes](references/failure-modes.md) for audit, retry diagnosis, or
-  unclear verification failure;
+- [flowcharts](references/flowcharts.md) for route, gate-order, lifecycle, or family-routing ambiguity;
+- [examples](references/examples.md) for a task shape, Packet fast path, or report format;
+- [failure modes](references/failure-modes.md) for audit, retry diagnosis, or unclear verification failure;
 - [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, or detailed authority checks;
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [test falsifiability](references/test-falsifiability.md) before citing newly-added test/check coverage as completion evidence;
-- [reporting](references/reporting.md) for compact outcome-first fields and
-  lifecycle reporting;
+- [reporting](references/reporting.md) for compact outcome-first fields and lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain:
-  [business ops](references/domains/business-ops.md),
-  [data analysis](references/domains/data-analysis.md),
-  [design and UX](references/domains/design-ux.md),
-  [devops](references/domains/devops.md),
-  [finance](references/domains/finance.md),
-  [legal and compliance](references/domains/legal-compliance.md),
-  [marketing](references/domains/marketing.md), or
-  [research](references/domains/research.md). `domains/TEMPLATE.md` is only
-  for creating or updating an adapter.
+  [business ops](references/domains/business-ops.md), [data analysis](references/domains/data-analysis.md),
+  [design and UX](references/domains/design-ux.md), [devops](references/domains/devops.md),
+  [finance](references/domains/finance.md), [legal and compliance](references/domains/legal-compliance.md),
+  [marketing](references/domains/marketing.md), or [research](references/domains/research.md).
+  `domains/TEMPLATE.md` is only for creating or updating an adapter.
 
 Preserve `/fable-method <task>`, `/fable-method plan <task>`,
 `/fable-method audit`, `/fable-method report`, `$fable-method`, and the sibling
@@ -448,9 +444,9 @@ direct completion review uses `fable-judge`, never a Worker route.
 
 ## Compact flow when no Packet exists
 
-1. Classify the ask: plan-first beats task; a mixed “why and fix” is a task;
-   a pure question changes nothing. Ask one pointed question only when
-   evidence cannot resolve materially different deliverables.
+1. Classify the ask: plan-first beats task; a mixed “why and fix” is a task; a
+   pure question changes nothing. Ask one pointed question only when evidence
+   cannot resolve materially different deliverables.
 2. Define done as an observable result and name its verification. Check
    assumptions instead of assuming them.
 3. Orient by enumerating files and sources, read primary sources, parallelize
