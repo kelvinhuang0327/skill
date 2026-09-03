@@ -24,6 +24,9 @@ RISKS: <remaining unknowns or caveats>
 
 Every `VERIFIED` claim must trace to an observed command or runtime result.
 Never replace evidence with “should work”, “looks correct”, or “likely passes”.
+Command execution alone is not `PASS`. A load-bearing `PASS` requires the
+exact observed result to satisfy acceptance. A non-zero `git diff --check`
+cannot be reported `PASS`.
 If a prescribed follow-up was deliberately not taken, name it as:
 
 ```text

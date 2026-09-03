@@ -311,8 +311,7 @@ A task framing such as “fix the code” is not a behavior spec. Never rely on
 recall: label an unverified fact `[Unknown]`. Use precise edits and never
 overwrite without looking first.
 
-A stop token is final for the current route: do not make further mutation until
-the named authority, capability, or decision changes.
+A stop token is final for the current task authority: no mutation, no equivalent command substitution, no metadata workaround, no upstream rewrite, and no retry under a different action class until a new authoritative Owner instruction or valid Continuation Delta.
 
 Documentation or task completion is not authorization.
 
@@ -335,7 +334,7 @@ runtimes, and unresolved authority remain blockers.
 Verify by observation: the named done criterion actually ran or rendered, the
 surrounding build/test/lint or equivalent remains healthy, and required
 runtime or external evidence exists. `NOT RUN` is never `PASS`, and source
-inspection is not runtime evidence.
+inspection is not runtime evidence. Command execution alone is not `PASS`; a load-bearing `PASS` requires the exact observed result to satisfy acceptance; a non-zero `git diff --check` cannot be reported `PASS`.
 
 `VERIFY_WORLD_NOT_SELF_REPORT`: prefer an external observation of the changed
 behavior over a textual claim whenever one is practical — call the endpoint,
