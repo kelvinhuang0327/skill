@@ -354,6 +354,11 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
         self.assertIsNone(configuration["max_budget_usd"])
         self.assertEqual(configuration["logical_reference_budget_usd"], "0.0000000")
         self.assertEqual(configuration["max_turns"], 0)
+        self.assertEqual(configuration["prompt_length"], 1)
+        self.assertEqual(
+            configuration["prompt_sha256"],
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        )
         self.assertEqual(
             set(configuration), set(production.CAPTURE_CONFIGURATION_KEYS)
         )
@@ -362,9 +367,10 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
         boundary = RecordingBoundary()
         self.run_capture(boundary=boundary)
         request = boundary.requests[0]
-        self.assertEqual(request.stdin_bytes, b"")
+        self.assertEqual(request.stdin_bytes, b"x")
         manifest = execution_manifest()
         task_prompt = manifest["tasks"][0]["prompt"]
+        self.assertNotEqual(task_prompt, "x")
         self.assertNotIn(task_prompt.encode("utf-8"), request.stdin_bytes)
         for value in request.logical_argv:
             self.assertNotIn(task_prompt, value)
@@ -373,11 +379,13 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
         off_id = execution_builder.p01_run_ids(SEALED_SHA256)[0]
         slot = runner.select_manifest_slot(manifest, off_id)
         self.assertTrue(slot.prompt)
+        self.assertNotEqual(slot.prompt, "x")
         workspace, opaque = runner.create_condition_neutral_workspace(
             self.workspaces, self.token
         )
         invocation = capture.build_reference_invocation(slot, workspace, opaque)
-        self.assertEqual(invocation.prompt, "")
+        self.assertEqual(invocation.prompt, "x")
+        self.assertEqual(invocation.prompt.encode("utf-8"), b"x")
         self.assertNotEqual(invocation.prompt, slot.prompt)
 
     def analyze(self, **overrides: Any) -> Any:
@@ -722,7 +730,7 @@ class ZeroTurnCaptureTests(ReferenceCaptureTestCase):
         outcome = self.run_capture(boundary=boundary)
         self.assertTrue(self.artifact.is_file())
         request = boundary.requests[0]
-        self.assertEqual(request.stdin_bytes, b"")
+        self.assertEqual(request.stdin_bytes, b"x")
         self.assertEqual(request.cwd, request.session_root)
         self.assertTrue(Path(request.cwd).name.startswith("session-"))
         self.assertNotIn("--max-budget-usd", boundary.observed_argv)
@@ -851,7 +859,170 @@ class ReferenceArtifactPresenceTests(unittest.TestCase):
         self.assertEqual(capture.CAPTURE_MODE, "ZERO_TURN_INIT_ONLY")
         self.assertEqual(capture.REFERENCE_MAX_BUDGET_USD, "0.0000000")
         self.assertEqual(capture.REFERENCE_MAX_TURNS, 0)
-        self.assertEqual(capture.REFERENCE_PROMPT, "")
+        self.assertEqual(capture.REFERENCE_PROMPT, "x")
+        self.assertEqual(capture.REFERENCE_PROMPT.encode("utf-8"), b"x")
+        self.assertEqual(list(capture.REFERENCE_PROMPT.encode("utf-8")), [0x78])
+        self.assertEqual(len(capture.REFERENCE_PROMPT.encode("utf-8")), 1)
+        self.assertFalse(capture.REFERENCE_PROMPT.endswith("\n"))
+        self.assertEqual(
+            hashlib.sha256(capture.REFERENCE_PROMPT.encode("utf-8")).hexdigest(),
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        )
+        self.assertNotEqual(
+            capture.REFERENCE_PROMPT, execution_builder.recovered_a01_corpus().prompt
+        )
+
+
+class NeutralReferenceCliInputTests(unittest.TestCase):
+    """Exact frozen REFERENCE_CLI_INPUT identity; no sealed-manifest load."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.workspace = Path(self.temporary.name) / "workspace"
+        self.workspace.mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def paid_prompt(self) -> str:
+        return execution_builder.recovered_a01_corpus().prompt
+
+    def slot(self, prompt: str = None):
+        return runner.ManifestSlot(
+            orchestrator_run_id="a" * 32,
+            condition="OFF",
+            task_id=execution_builder.TASK_ID,
+            prompt=self.paid_prompt() if prompt is None else prompt,
+            command=tuple(claude.build_cto_argv(PROVIDER_BINARY_PATH)),
+            expected_fable_engaged=False,
+            frozen_dimensions=tuple(sorted(runner.REQUIRED_PURITY_DIMENSIONS)),
+            source_run_path=None,
+            task_metadata={},
+            treatment_metadata={},
+            forbidden_model_tokens=("OFF", "ON"),
+        )
+
+    def test_41_exact_x_reference_cli_input_is_accepted(self) -> None:
+        self.assertEqual(capture.assert_reference_cli_input("x"), "x")
+        encoded = capture.REFERENCE_PROMPT.encode("utf-8")
+        self.assertEqual(encoded, b"x")
+        self.assertEqual(list(encoded), [0x78])
+        self.assertEqual(len(encoded), 1)
+        self.assertFalse(encoded.endswith(b"\n"))
+        self.assertNotIn(b"\n", encoded)
+        self.assertEqual(
+            hashlib.sha256(encoded).hexdigest(),
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        )
+        invocation = capture.build_reference_invocation(
+            self.slot(), self.workspace, "b" * 32
+        )
+        self.assertEqual(invocation.prompt, "x")
+        self.assertEqual(invocation.prompt.encode("utf-8"), b"x")
+        self.assertNotEqual(invocation.prompt, self.paid_prompt())
+        argv = list(invocation.argv)
+        self.assertNotIn("--max-budget-usd", argv)
+        self.assertEqual(argv[argv.index("--max-turns") + 1], "0")
+
+    def test_42_empty_reference_cli_input_is_rejected(self) -> None:
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.assert_reference_cli_input("")
+        self.assertEqual(
+            context.exception.reason, "REFERENCE_CLI_INPUT_IDENTITY_MISMATCH"
+        )
+        with mock.patch.object(capture, "REFERENCE_PROMPT", ""):
+            with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+                capture.build_reference_invocation(
+                    self.slot(), self.workspace, "b" * 32
+                )
+        self.assertEqual(
+            context.exception.reason, "REFERENCE_CLI_INPUT_IDENTITY_MISMATCH"
+        )
+
+    def test_43_trailing_newline_reference_cli_input_is_rejected(self) -> None:
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.assert_reference_cli_input("x\n")
+        self.assertEqual(
+            context.exception.reason, "REFERENCE_CLI_INPUT_IDENTITY_MISMATCH"
+        )
+        with mock.patch.object(capture, "REFERENCE_PROMPT", "x\n"):
+            with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+                capture.build_reference_invocation(
+                    self.slot(), self.workspace, "b" * 32
+                )
+        self.assertEqual(
+            context.exception.reason, "REFERENCE_CLI_INPUT_IDENTITY_MISMATCH"
+        )
+
+    def test_44_other_one_byte_reference_cli_input_is_rejected(self) -> None:
+        self.assertEqual(len("y".encode("utf-8")), 1)
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.assert_reference_cli_input("y")
+        self.assertEqual(
+            context.exception.reason, "REFERENCE_CLI_INPUT_IDENTITY_MISMATCH"
+        )
+        with mock.patch.object(capture, "REFERENCE_PROMPT", "y"):
+            with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+                capture.build_reference_invocation(
+                    self.slot(), self.workspace, "b" * 32
+                )
+        self.assertEqual(
+            context.exception.reason, "REFERENCE_CLI_INPUT_IDENTITY_MISMATCH"
+        )
+
+    def test_45_paid_task_prompt_substitution_is_rejected(self) -> None:
+        paid = self.paid_prompt()
+        self.assertNotEqual(paid, "x")
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.assert_reference_cli_input(paid, paid_prompt=paid)
+        self.assertEqual(context.exception.reason, "USER_TASK_MESSAGE_WOULD_BE_SENT")
+        with mock.patch.object(capture, "REFERENCE_PROMPT", paid):
+            with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+                capture.build_reference_invocation(
+                    self.slot(), self.workspace, "b" * 32
+                )
+        self.assertEqual(context.exception.reason, "USER_TASK_MESSAGE_WOULD_BE_SENT")
+
+    def test_46_frozen_ex_post_gates_and_user_record_acceptance_unchanged(self) -> None:
+        records = capture.parse_stream_records(
+            zero_turn_stdout(
+                after=({"type": "user", "session_id": "reference-session"},)
+            )
+        )
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(records)
+        self.assertEqual(context.exception.reason, "MODEL_TURN_OBSERVED")
+
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(zero_turn_stdout(num_turns=1))
+            )
+        self.assertEqual(context.exception.reason, "TERMINAL_NUM_TURNS_INVALID")
+
+        assistant = {
+            "type": "assistant",
+            "session_id": "reference-session",
+            "message": {"role": "assistant"},
+        }
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(zero_turn_stdout(after=(assistant,)))
+            )
+        self.assertEqual(context.exception.reason, "ASSISTANT_MESSAGE_OBSERVED")
+
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(zero_turn_stdout(cost="0.0000001"))
+            )
+        self.assertEqual(context.exception.reason, "NONZERO_OBSERVED_COST")
+
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(
+                    zero_turn_stdout(init=init_event(api_key_source="none"))
+                )
+            )
+        self.assertEqual(context.exception.reason, "NOT_A_CAPTURE_API_KEY_SOURCE_NONE")
 
 
 class ProcessFailureDiagnosticTests(ReferenceCaptureTestCase):

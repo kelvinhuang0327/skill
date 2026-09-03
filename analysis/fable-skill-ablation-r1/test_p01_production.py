@@ -123,8 +123,8 @@ def reference_record(event: Mapping = None, **overrides: Any) -> dict:
             "max_budget_usd": None,
             "logical_reference_budget_usd": "0.0000000",
             "max_turns": 0,
-            "prompt_sha256": hashlib.sha256(b"").hexdigest(),
-            "prompt_length": 0,
+            "prompt_sha256": hashlib.sha256(b"x").hexdigest(),
+            "prompt_length": 1,
             "environment_keys": [],
             "sandbox_profile_sha256": "b" * 64,
         },
@@ -719,6 +719,157 @@ class P01ReferenceLoaderTests(unittest.TestCase):
         self.assertIsNone(configuration["max_budget_usd"])
         self.assertEqual(configuration["logical_reference_budget_usd"], "0.0000000")
         self.assertEqual(configuration["max_turns"], 0)
+        self.assertEqual(configuration["prompt_length"], 1)
+        self.assertEqual(
+            configuration["prompt_sha256"],
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        )
+
+    def test_18l_frozen_reference_prompt_identity_is_accepted(self) -> None:
+        loaded = self.load(reference_record())
+        configuration = loaded.record["capture_configuration"]
+        self.assertEqual(configuration["prompt_length"], production.REFERENCE_PROMPT_LENGTH)
+        self.assertEqual(configuration["prompt_length"], 1)
+        self.assertEqual(
+            configuration["prompt_sha256"],
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        )
+        self.assertEqual(
+            configuration["prompt_sha256"], hashlib.sha256(b"x").hexdigest()
+        )
+        self.assertEqual(
+            production.REFERENCE_PROMPT_SHA256, hashlib.sha256(b"x").hexdigest()
+        )
+        paid = execution_builder.recovered_a01_corpus().prompt
+        self.assertNotEqual(paid, "x")
+        self.assertNotEqual(
+            hashlib.sha256(paid.encode("utf-8")).hexdigest(),
+            configuration["prompt_sha256"],
+        )
+        record = reference_record()
+        self.assertIs(production.validate_reference_record(record), record)
+
+    def test_18m_empty_reference_prompt_identity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "prompt length is not the frozen identity",
+        ):
+            production.validate_reference_record(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        prompt_length=0,
+                        prompt_sha256=hashlib.sha256(b"").hexdigest(),
+                    )
+                )
+            )
+
+    def test_18n_trailing_newline_reference_prompt_identity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "prompt length is not the frozen identity",
+        ):
+            production.validate_reference_record(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        prompt_length=2,
+                        prompt_sha256=hashlib.sha256(b"x\n").hexdigest(),
+                    )
+                )
+            )
+
+    def test_18o_other_one_byte_reference_prompt_identity_is_rejected(self) -> None:
+        self.assertEqual(len(b"y"), 1)
+        self.assertNotEqual(
+            hashlib.sha256(b"y").hexdigest(), production.REFERENCE_PROMPT_SHA256
+        )
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "prompt SHA256 is not the frozen identity",
+        ):
+            production.validate_reference_record(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        prompt_length=1,
+                        prompt_sha256=hashlib.sha256(b"y").hexdigest(),
+                    )
+                )
+            )
+
+    def test_18p_wrong_reference_prompt_length_is_rejected(self) -> None:
+        for bad in (0, 2, True, False, "1", 1.0, None):
+            with self.subTest(prompt_length=bad):
+                with self.assertRaisesRegex(
+                    production.ReferenceArtifactError,
+                    "prompt length is not the frozen identity",
+                ):
+                    production.validate_reference_record(
+                        reference_record(
+                            capture_configuration=self.configuration(
+                                prompt_length=bad,
+                                prompt_sha256=production.REFERENCE_PROMPT_SHA256,
+                            )
+                        )
+                    )
+
+    def test_18q_wrong_reference_prompt_hash_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "prompt SHA256 is not the frozen identity",
+        ):
+            production.validate_reference_record(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        prompt_length=1,
+                        prompt_sha256="0" * 64,
+                    )
+                )
+            )
+
+    def test_18r_paid_task_prompt_substitution_is_rejected(self) -> None:
+        paid = execution_builder.recovered_a01_corpus().prompt.encode("utf-8")
+        self.assertNotEqual(paid, b"x")
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "prompt (length|SHA256) is not the frozen identity",
+        ):
+            production.validate_reference_record(
+                reference_record(
+                    capture_configuration=self.configuration(
+                        prompt_length=len(paid),
+                        prompt_sha256=hashlib.sha256(paid).hexdigest(),
+                    )
+                )
+            )
+
+    def test_18s_frozen_ex_post_gates_remain_fail_closed(self) -> None:
+        configuration = reference_record()["capture_configuration"]
+        self.assertNotIn("--max-budget-usd", configuration["argv"])
+        self.assertEqual(configuration["logical_reference_budget_usd"], "0.0000000")
+        self.assertEqual(configuration["max_turns"], 0)
+        self.assertEqual(configuration["prompt_length"], 1)
+
+        cost = reference_record()
+        cost["observed_total_cost_usd"] = "0.0000001"
+        with self.assertRaises(production.ReferenceArtifactError):
+            production.validate_reference_record(cost)
+
+        turns = reference_record()
+        turns["observed_model_turn_count"] = 1
+        with self.assertRaises(production.ReferenceArtifactError):
+            production.validate_reference_record(turns)
+
+        assistant = reference_record()
+        assistant["observed_assistant_message_count"] = 1
+        with self.assertRaises(production.ReferenceArtifactError):
+            production.validate_reference_record(assistant)
+
+        none_event = reference_init_event()
+        none_event["apiKeySource"] = "none"
+        with self.assertRaisesRegex(
+            production.ReferenceArtifactError,
+            "apiKeySource is none",
+        ):
+            production.validate_reference_record(reference_record(event=none_event))
 
     def test_18k_api_key_source_none_is_rejected_without_requiring_field(self) -> None:
         none_event = reference_init_event()

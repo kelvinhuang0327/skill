@@ -14,7 +14,8 @@ The capture contract encoded here is hard:
     * an OFF-condition workspace built by the *same* canonical materializer
       the production pair uses;
     * the same ``runner.build_model_invocation``-visible surface;
-    * no user task message and no model turn;
+    * a byte-pinned neutral CLI input that is not the paid task prompt,
+      and no model turn;
     * stream-json init capture only;
     * a physically omitted budget ceiling -- the CLI parser rejects a
       literal ``--max-budget-usd 0`` -- plus a requested ``--max-turns 0``
@@ -89,7 +90,11 @@ validate_reference_record = production.validate_reference_record
 # CLI parser rejects a literal zero.
 REFERENCE_MAX_BUDGET_USD = production.REFERENCE_ZERO_USD
 REFERENCE_MAX_TURNS = 0
-REFERENCE_PROMPT = ""
+# REFERENCE_CLI_INPUT only.  Exact frozen identity "x" / 0x78 / length 1 /
+# no trailing newline.  Exists solely to satisfy the pinned CLI
+# non-empty-input precondition.  It is not PAID_TASK_PROMPT, not treatment
+# content, not a user objective, and not MODEL/ASSISTANT_OUTPUT.
+REFERENCE_PROMPT = "x"
 REFERENCE_TIMEOUT_SECONDS = 120.0
 
 # A failed physical capture must stay fail-closed *and* stay explainable.  The
@@ -236,6 +241,29 @@ def derive_configured_max_turns_from_argv(argv: Sequence[str]) -> int:
         raise ReferenceCaptureAbort("PAID_ARGV_SHAPE_UNEXPECTED", _TURNS_FLAG) from exc
 
 
+def assert_reference_cli_input(value: Any, *, paid_prompt: Any = None) -> str:
+    """Require the exact frozen reference CLI input identity.
+
+    The accepted value is the literal ``x`` (bytes ``0x78``, UTF-8 length 1,
+    no trailing newline, frozen SHA256).  Emptiness or any other one-byte
+    value is rejected.  Equality with the paid slot/task prompt is rejected
+    as a user-task substitution, independently of the identity check.
+    """
+
+    if paid_prompt is not None and value == paid_prompt:
+        raise ReferenceCaptureAbort("USER_TASK_MESSAGE_WOULD_BE_SENT")
+    if not isinstance(value, str) or value != "x":
+        raise ReferenceCaptureAbort("REFERENCE_CLI_INPUT_IDENTITY_MISMATCH")
+    encoded = value.encode("utf-8")
+    if encoded != b"x" or b"\n" in encoded:
+        raise ReferenceCaptureAbort("REFERENCE_CLI_INPUT_IDENTITY_MISMATCH")
+    if len(encoded) != production.REFERENCE_PROMPT_LENGTH:
+        raise ReferenceCaptureAbort("REFERENCE_CLI_INPUT_IDENTITY_MISMATCH")
+    if driver._sha256(encoded) != production.REFERENCE_PROMPT_SHA256:
+        raise ReferenceCaptureAbort("REFERENCE_CLI_INPUT_IDENTITY_MISMATCH")
+    return value
+
+
 def build_reference_invocation(
     slot: Any,
     workspace: Path,
@@ -246,19 +274,20 @@ def build_reference_invocation(
     """Build the reference request through ``runner.build_model_invocation``.
 
     The only differences from the paid surface are the zero-budget argv and
-    the deliberately empty prompt: no user task message is ever sent.
+    the byte-pinned neutral CLI input: it is not the paid task prompt and
+    is not a user objective.
     """
 
+    assert_reference_cli_input(REFERENCE_PROMPT, paid_prompt=getattr(slot, "prompt", None))
     reference_slot = replace(
         slot, prompt=REFERENCE_PROMPT, command=build_reference_argv(slot.command[0])
     )
     invocation = runner.build_model_invocation(
         reference_slot, workspace, opaque_identity, environment=dict(environment or {})
     )
-    if invocation.prompt != REFERENCE_PROMPT or invocation.prompt:
-        raise ReferenceCaptureAbort("USER_TASK_MESSAGE_WOULD_BE_SENT")
-    if slot.prompt and invocation.prompt == slot.prompt:
-        raise ReferenceCaptureAbort("USER_TASK_MESSAGE_WOULD_BE_SENT")
+    assert_reference_cli_input(invocation.prompt, paid_prompt=slot.prompt)
+    if invocation.prompt != REFERENCE_PROMPT:
+        raise ReferenceCaptureAbort("REFERENCE_CLI_INPUT_IDENTITY_MISMATCH")
     assert_zero_spend_reference_argv(invocation.argv)
     return invocation
 
@@ -1015,6 +1044,7 @@ __all__ = [
     "SandboxedZeroBudgetCapture",
     "ZeroTurnStream",
     "analyze_zero_turn_stream",
+    "assert_reference_cli_input",
     "assert_reference_workspace_has_no_carrier",
     "assert_zero_spend_reference_argv",
     "build_process_failure_diagnostic",

@@ -82,6 +82,16 @@ claude = _load_sibling(
 REFERENCE_INIT_SCHEMA = "FABLE_ABLATION_P01_REFERENCE_INIT/v1"
 REFERENCE_CAPTURE_MODE = "ZERO_TURN_INIT_ONLY"
 REFERENCE_ZERO_USD = "0.0000000"
+# Frozen identity of the reference CLI input, encoded in the existing
+# capture_configuration prompt_length / prompt_sha256 fields.  The persisted
+# record does not store the prompt string.  Length 1 plus this digest is the
+# only persisted encoding of exact "x" / 0x78.  This is REFERENCE_CLI_INPUT
+# only: not PAID_TASK_PROMPT, not treatment content, not a user objective,
+# and not MODEL/ASSISTANT_OUTPUT.
+REFERENCE_PROMPT_LENGTH = 1
+REFERENCE_PROMPT_SHA256 = (
+    "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+)
 REFERENCE_ARTIFACT_PATH = Path(__file__).with_name("p01_reference_init.json")
 
 CARRIER_DESTINATION = ".claude/skills/fable-method"
@@ -885,8 +895,13 @@ def validate_reference_record(
         "reference capture prompt SHA256 is invalid",
     )
     _require(
-        configuration.get("prompt_length") == 0,
-        "reference capture sent a user task message",
+        type(configuration.get("prompt_length")) is int
+        and configuration.get("prompt_length") == REFERENCE_PROMPT_LENGTH,
+        "reference capture prompt length is not the frozen identity",
+    )
+    _require(
+        configuration.get("prompt_sha256") == REFERENCE_PROMPT_SHA256,
+        "reference capture prompt SHA256 is not the frozen identity",
     )
     keys = configuration.get("environment_keys")
     _require(
@@ -1346,6 +1361,8 @@ __all__ = [
     "REFERENCE_ARTIFACT_PATH",
     "REFERENCE_CAPTURE_MODE",
     "REFERENCE_INIT_SCHEMA",
+    "REFERENCE_PROMPT_LENGTH",
+    "REFERENCE_PROMPT_SHA256",
     "REFERENCE_RECORD_KEYS",
     "REFERENCE_ZERO_USD",
     "ReferenceArtifactError",
