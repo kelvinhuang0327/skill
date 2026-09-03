@@ -12,7 +12,10 @@
 - [Continuity](#continuity)
 
 These are conditional details for the shared workflow. They do not broaden a
-Packet or authorize an action that the Packet forbids.
+Packet or authorize an action that the Packet forbids. An explicitly
+forbidden command, path, source, transcript, or evidence class must never be
+used as a fallback because preferred evidence is incomplete. Transcript is
+not an authority fallback by default.
 
 ## Packet and authority
 
@@ -268,6 +271,18 @@ dirty/untracked state exist on it, and the primary action's refusal is
 attributable only to expected Git ancestry/semantics rather than an
 unexplained state change. If any gate fails, stop or skip that target instead
 of falling back; a generic cleanup authorization never substitutes for this.
+
+`FORCE_FALLBACK_AUTHORIZED: NO` is the live NON_FORCE Git authorization.
+When it is `NO`, reject every Git force-family operation below. `-f` counts
+only on a `git` argv, not on unrelated tools:
+
+```text
+GIT_FORCE_FAMILY:
+--force
+-f
+--force-with-lease
+--force-if-includes
+```
 
 For a multi-target lifecycle bundle, default to skipping an unsafe or
 drifted target, recording the exact reason, and continuing the remaining

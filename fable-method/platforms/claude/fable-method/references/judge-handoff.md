@@ -5,6 +5,7 @@
 - [When the Judge gate fires](#when-the-judge-gate-fires)
 - [Depth and evidence reuse](#depth-and-evidence-reuse)
 - [Remediation limit](#remediation-limit)
+- [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
@@ -100,13 +101,36 @@ complete local suite once on the remediated tree. Then hand off a `DELTA`
 re-Judge. If the same finding is refuted again, stop with
 `BLOCKED_AFTER_JUDGE_REFUTATION`; do not start another cycle.
 
+## Durable terminal capture
+
+When a Judge-owned long-running command has a load-bearing terminal result,
+persist it with `DurableCommandCapture`
+(`fable-method/scripts/task_checkpoint.rb`) to
+`.fable/checkpoints/<task_id>/captures/<capture_id>.json` before that result
+is relied upon for the final verdict: exact argv, exact stdout, exact stderr,
+underlying process exit status, and start/end timestamps. The durable file,
+not UI or subagent streaming, is the sole authority for that result.
+
+`DurableCommandCapture#verdict` returns `PASS` only when the record is
+complete and the exit status is exactly `0`; a non-zero exit status is always
+`FAIL`, never `PASS`. Missing, unreadable, or incomplete evidence is always
+`UNKNOWN_UNVERIFIABLE` rather than an inferred `PASS` or a guessed failure
+class. Losing one command's evidence does not invalidate a sibling capture
+file; rerun only the specific unresolved load-bearing command.
+
+`DurableCommandCapture` never reads or persists the parent environment: it
+captures exactly the argv it was given and exactly the stdout/stderr the
+command produced, reusing this repository's existing lack of a broader
+redaction system rather than inventing a new one.
+
 ## Handoff payload
 
 Provide the original Packet and forbidden actions; repository, branch, HEAD,
 tree, worktree and status; actual diff; exact authorized scope; acceptance
 criteria; route and Judge mode/depth; commands, exit statuses, and raw
-summaries; runtime evidence; all unknowns and failed attempts; and the complete
-filesystem write/retained/deleted ledger.
+summaries (durable per [Durable terminal capture](#durable-terminal-capture)
+when load-bearing); runtime evidence; all unknowns and failed attempts; and
+the complete filesystem write/retained/deleted ledger.
 
 The Judge re-derives its verdict from the Packet, diff, and evidence. Do not
 pass internal reasoning or a persuasive summary as evidence.

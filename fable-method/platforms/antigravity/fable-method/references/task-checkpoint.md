@@ -8,6 +8,7 @@
 - [Update semantics and revision protection](#update-semantics-and-revision-protection)
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
+- [Long-running execution recovery](#long-running-execution-recovery)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
@@ -221,6 +222,36 @@ target path overlapping the exact worktree or owned surface counts; names such
 as `pytest`, `python`, or `Agent` without that path evidence do not. The exposed
 default observation value is five seconds, but callers may choose another
 bounded interval when the task requires it.
+
+## Long-running execution recovery
+
+`ExecutionRecord` (`fable-method/scripts/task_checkpoint.rb`) classifies a
+task-owned execution that may have outlived its originating session, so a
+resuming Worker never launches a silent duplicate of expensive or
+long-running work. It never scans the OS process table or maintains a
+registry; it inspects only the exact PID this task itself recorded.
+
+**Storage**: `.fable/checkpoints/<task_id>/executions/<execution_id>.json`,
+alongside the checkpoint's own `.fable/checkpoints/<task_id>.json`.
+
+Call `ExecutionRecord.recover_before_execution(file_path)` before starting a
+possibly-duplicate execution. It classifies exactly one:
+
+| Classification | Meaning | Behavior |
+|---|---|---|
+| `PRIOR_PROCESS_ACTIVE` | The recorded PID is still alive. | Raises `DuplicateExecutionError`; do not start a duplicate. |
+| `PRIOR_PROCESS_COMPLETED` | Status is `COMPLETED` with acceptance-complete durable evidence (see [Durable terminal capture](judge-handoff.md#durable-terminal-capture)). | Returns the existing durable capture for reuse; the upstream command is not rerun. |
+| `PRIOR_PROCESS_TERMINATED_INCOMPLETE` | The recorded PID is confirmed dead, or status is `COMPLETED` without acceptance-complete evidence. | Returns the classification only; rerun eligibility is left to the original task authority, not decided here. |
+| `PRIOR_PROCESS_STATE_UNRESOLVED` | Liveness could not be established, or the record exists but is unreadable/malformed. | Raises `UnresolvedExecutionStateError`; fail closed rather than risk an overlapping duplicate. |
+
+A record that was never created at all (nothing was ever started under this
+exact path — as opposed to a record that exists but fails to parse) returns a
+`Recovery` with a `nil` classification rather than any of the four states
+above: session or UI disappearance alone is never itself evidence of failure.
+
+`ExecutionRecord.start!` persists a `STARTED` record with the real PID before
+the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
+`durable_capture_path` once the work's durable terminal evidence exists.
 
 ## Bounded reconciliation algorithm
 
