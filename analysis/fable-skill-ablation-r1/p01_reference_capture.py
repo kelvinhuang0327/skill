@@ -306,6 +306,7 @@ def build_reference_invocation(
 
 
 _ISOLATED_RUNTIME_DIRNAME = ".p01-runtime"
+PER_RUN_CREDENTIAL_KEY = "ANTHROPIC_API_KEY"
 
 # Mirrors claude_executor.py's ``_SECRET_KEY_RE``: this module never imports a
 # private cross-module symbol, so the same key-shape guard is restated here
@@ -376,6 +377,50 @@ def compose_isolated_environment(
             raise ReferenceCaptureAbort("ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET", key)
         isolated[key] = value
     return isolated
+
+
+def require_per_run_credential(value: Any) -> str:
+    """Require the exact per-run ANTHROPIC_API_KEY execution input.
+
+    Absence, a non-string, or an empty string fail closed.  The value is
+    never written into the abort reason: only the key name is.
+    """
+
+    if not isinstance(value, str) or not value:
+        raise ReferenceCaptureAbort("MISSING_PER_RUN_CREDENTIAL", PER_RUN_CREDENTIAL_KEY)
+    return value
+
+
+def per_run_credential_from_parent_context(parent_environment: Mapping = None) -> str:
+    """Take exactly ``ANTHROPIC_API_KEY`` from the parent execution context.
+
+    The rest of the parent mapping is not copied.  This is not whole-environment
+    inheritance.
+    """
+
+    source = os.environ if parent_environment is None else parent_environment
+    if not isinstance(source, Mapping):
+        raise ReferenceCaptureAbort("MISSING_PER_RUN_CREDENTIAL", PER_RUN_CREDENTIAL_KEY)
+    return require_per_run_credential(source.get(PER_RUN_CREDENTIAL_KEY))
+
+
+def compose_reference_child_environment(
+    workspace: Path,
+    extra_environment: Mapping = None,
+    per_run_credential: Any = None,
+) -> dict:
+    """Build the isolated child env with the one declared per-run credential.
+
+    Reuses :func:`compose_isolated_environment` and its exact-key allowlist.
+    Does not invent a second composition framework.
+    """
+
+    secret = require_per_run_credential(per_run_credential)
+    extra = dict(extra_environment or {})
+    extra[PER_RUN_CREDENTIAL_KEY] = secret
+    return compose_isolated_environment(
+        workspace, extra, credential_keys=(PER_RUN_CREDENTIAL_KEY,)
+    )
 
 
 # --- Injected process boundary ---------------------------------------------
@@ -746,6 +791,7 @@ class ReferenceCaptureRequest:
     profile_path: Path = controller.SANDBOX_PROFILE_PATH
     sandbox_exec_path: Path = controller.SANDBOX_EXEC_PATH
     opaque_id_factory: Callable[[], str] = None
+    per_run_credential: str = None
 
 
 @dataclass(frozen=True)
@@ -848,6 +894,7 @@ def capture_reference_init(
 
     if process_boundary is None:
         raise ReferenceCaptureAbort("PROCESS_BOUNDARY_REQUIRED")
+    require_per_run_credential(request.per_run_credential)
     resolver = (
         claude.resolve_provider_binary_identity
         if provider_identity_resolver is None
@@ -893,7 +940,9 @@ def capture_reference_init(
     )
     assert_reference_workspace_has_no_carrier(workspace)
 
-    isolated_environment = compose_isolated_environment(workspace, request.environment)
+    isolated_environment = compose_reference_child_environment(
+        workspace, request.environment, request.per_run_credential
+    )
     invocation = build_reference_invocation(
         slot, workspace, opaque_identity, environment=isolated_environment
     )
@@ -982,6 +1031,7 @@ def main(argv: Sequence[str] = None) -> int:
         else arguments.source_repository
     )
     try:
+        per_run_credential = per_run_credential_from_parent_context(os.environ)
         # ``load_manifest_after_lock`` is the existing verified byte-snapshot
         # manifest reader.  The capture deliberately takes no epoch lock: it
         # mutates no epoch, ledger or reservation state, so the lock-ordering
@@ -1008,6 +1058,8 @@ def main(argv: Sequence[str] = None) -> int:
                 authorized_tree=arguments.authorized_tree,
                 artifact_path=arguments.artifact,
                 expected_manifest_sha256=arguments.expected_manifest_sha256,
+                environment={},
+                per_run_credential=per_run_credential,
             ),
             process_boundary=SandboxedZeroBudgetCapture(),
         )
@@ -1034,6 +1086,7 @@ __all__ = [
     "DIAGNOSTIC_STDERR_PREFIX",
     "REFERENCE_ARTIFACT_PATH",
     "REFERENCE_INIT_SCHEMA",
+    "PER_RUN_CREDENTIAL_KEY",
     "REFERENCE_MAX_BUDGET_USD",
     "REFERENCE_MAX_TURNS",
     "REFERENCE_PROMPT",
@@ -1055,12 +1108,15 @@ __all__ = [
     "canonical_reference_bytes",
     "capture_reference_init",
     "compose_isolated_environment",
+    "compose_reference_child_environment",
     "derive_budget_ceiling_from_argv",
     "derive_configured_max_turns_from_argv",
     "init_event_sha256",
     "main",
     "parse_stream_records",
+    "per_run_credential_from_parent_context",
     "reference_artifact_sha256",
+    "require_per_run_credential",
     "validate_reference_init_authority",
     "validate_reference_record",
     "verify_provider_binary_identity",

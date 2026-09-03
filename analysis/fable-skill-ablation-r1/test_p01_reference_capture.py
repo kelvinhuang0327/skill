@@ -14,6 +14,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,9 @@ SEALED_SHA256 = driver.SEALED_MANIFEST_SHA256
 PROVIDER_BINARY_PATH = "/Users/kelvin/.local/bin/claude"
 _ABSENT = object()
 _EXECUTION_MANIFEST: Mapping = {}
+FAKE_PER_RUN_CREDENTIAL = (
+    "synthetic-per-run-not-a-real-credential-fable-ablation-p01"
+)
 
 
 def execution_manifest() -> Mapping:
@@ -237,6 +241,7 @@ class ReferenceCaptureTestCase(unittest.TestCase):
             "authorized_tree": self.tree,
             "artifact_path": self.artifact,
             "opaque_id_factory": self.token,
+            "per_run_credential": FAKE_PER_RUN_CREDENTIAL,
         }
         values.update(overrides)
         return capture.ReferenceCaptureRequest(**values)
@@ -1280,9 +1285,16 @@ class IsolatedRuntimeEnvironmentTests(ReferenceCaptureTestCase):
         environment = boundary.requests[0].environment
         self.assertEqual(
             sorted(environment),
-            ["CLAUDE_CONFIG_DIR", "HOME", "PATH", "TMPDIR"],
-            msg="no extra key beyond the mandatory isolation set was supplied",
+            [
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CONFIG_DIR",
+                "HOME",
+                "PATH",
+                "TMPDIR",
+            ],
+            msg="isolation set plus the one declared per-run credential",
         )
+        self.assertEqual(environment["ANTHROPIC_API_KEY"], FAKE_PER_RUN_CREDENTIAL)
         self.assertEqual(environment["PATH"], "/usr/bin:/bin")
         workspace = Path(outcome.workspace_path).resolve()
         for key in ("HOME", "TMPDIR", "CLAUDE_CONFIG_DIR"):
@@ -1311,7 +1323,6 @@ class IsolatedRuntimeEnvironmentTests(ReferenceCaptureTestCase):
         self,
     ) -> None:
         for key in (
-            "ANTHROPIC_API_KEY",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "AWS_SECRET_ACCESS_KEY",
         ):
@@ -1473,6 +1484,230 @@ class CredentialAllowlistTests(unittest.TestCase):
             (workspace / capture._ISOLATED_RUNTIME_DIRNAME).exists(),
             msg="a malformed declaration must fail before any filesystem effect",
         )
+
+
+class PerRunCredentialCallerTests(unittest.TestCase):
+    """Wire the existing allowlist into the canonical reference caller.
+
+    Fake sentinel only.  These tests do not load sealed authority and do not
+    invoke a real provider.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.hold_out = self.root / "held-out"
+        self.hold_out.mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def dummy_request(self, **overrides: Any):
+        values = {
+            "execution_manifest": {},
+            "workspace_parent": self.root,
+            "hold_out_root": self.hold_out,
+            "carrier": None,
+            "source_repository": REPOSITORY_ROOT,
+            "authorized_head": "0" * 40,
+            "authorized_tree": "0" * 40,
+            "artifact_path": self.root / "p01_reference_init.json",
+        }
+        values.update(overrides)
+        return capture.ReferenceCaptureRequest(**values)
+
+    def main_argv(self) -> list:
+        return [
+            "--sealed-manifest",
+            str(self.root / "missing-manifest.json"),
+            "--workspace-parent",
+            str(self.root),
+            "--hold-out-root",
+            str(self.hold_out),
+            "--authorized-head",
+            "0" * 40,
+            "--authorized-tree",
+            "0" * 40,
+            "--artifact",
+            str(self.root / "p01_reference_init.json"),
+        ]
+
+    def test_47_fake_anthropic_key_reaches_child_through_existing_allowlist(self) -> None:
+        self.assertEqual(capture.PER_RUN_CREDENTIAL_KEY, "ANTHROPIC_API_KEY")
+        secret = capture.per_run_credential_from_parent_context(
+            {"ANTHROPIC_API_KEY": FAKE_PER_RUN_CREDENTIAL}
+        )
+        child = capture.compose_reference_child_environment(
+            self.workspace, extra_environment={}, per_run_credential=secret
+        )
+        self.assertEqual(child["ANTHROPIC_API_KEY"], FAKE_PER_RUN_CREDENTIAL)
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn("compose_reference_child_environment(", source)
+        self.assertIn("credential_keys=(PER_RUN_CREDENTIAL_KEY,)", source)
+        self.assertIn(
+            "isolated_environment = compose_reference_child_environment(",
+            source,
+        )
+
+    def test_48_unrelated_parent_environment_does_not_leak_into_child(self) -> None:
+        parent = {
+            "ANTHROPIC_API_KEY": FAKE_PER_RUN_CREDENTIAL,
+            "UNRELATED_PARENT_VAR": "must-not-leak",
+            "PATH": "/offline/parent-path",
+            "HOME": "/offline/operator-home",
+        }
+        secret = capture.per_run_credential_from_parent_context(parent)
+        child = capture.compose_reference_child_environment(
+            self.workspace, extra_environment={}, per_run_credential=secret
+        )
+        self.assertNotIn("UNRELATED_PARENT_VAR", child)
+        self.assertNotEqual(child["PATH"], parent["PATH"])
+        self.assertNotEqual(child["HOME"], parent["HOME"])
+        self.assertEqual(child["PATH"], "/usr/bin:/bin")
+        main_source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn("environment={},", main_source)
+        self.assertIn(
+            "per_run_credential = per_run_credential_from_parent_context(os.environ)",
+            main_source,
+        )
+
+    def test_49_other_secret_shaped_keys_remain_rejected(self) -> None:
+        for key, value in (
+            ("AWS_SECRET_ACCESS_KEY", "synthetic-other-secret"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-oauth"),
+        ):
+            with self.subTest(key=key):
+                workspace = self.root / ("ws-" + key)
+                workspace.mkdir()
+                with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+                    capture.compose_reference_child_environment(
+                        workspace,
+                        extra_environment={key: value},
+                        per_run_credential=FAKE_PER_RUN_CREDENTIAL,
+                    )
+                self.assertEqual(
+                    context.exception.reason, "ENVIRONMENT_KEY_LOOKS_LIKE_A_SECRET"
+                )
+                self.assertEqual(context.exception.detail, key)
+
+    def test_50_missing_credential_fails_before_process_boundary(self) -> None:
+        boundary = RecordingBoundary()
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.capture_reference_init(
+                self.dummy_request(),
+                process_boundary=boundary,
+                provider_identity_resolver=FakeProviderIdentity,
+            )
+        self.assertEqual(context.exception.reason, "MISSING_PER_RUN_CREDENTIAL")
+        self.assertEqual(context.exception.detail, "ANTHROPIC_API_KEY")
+        self.assertEqual(boundary.requests, [])
+        self.assertFalse((self.root / "p01_reference_init.json").exists())
+        for bad in (None, "", 0, False):
+            with self.subTest(bad=bad):
+                with self.assertRaises(capture.ReferenceCaptureAbort) as inner:
+                    capture.require_per_run_credential(bad)
+                self.assertEqual(inner.exception.reason, "MISSING_PER_RUN_CREDENTIAL")
+
+    def test_51_main_missing_credential_does_not_load_manifest_or_spawn(self) -> None:
+        cleaned = {
+            key: value
+            for key, value in os.environ.items()
+            if key != "ANTHROPIC_API_KEY"
+        }
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, cleaned, clear=True):
+            with mock.patch.object(
+                capture.controller, "load_manifest_after_lock"
+            ) as load:
+                with mock.patch.object(capture.subprocess, "run") as spawn:
+                    with mock.patch.object(sys, "stderr", stderr):
+                        code = capture.main(self.main_argv())
+        self.assertEqual(code, 2)
+        load.assert_not_called()
+        spawn.assert_not_called()
+        text = stderr.getvalue()
+        self.assertIn("MISSING_PER_RUN_CREDENTIAL", text)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, text)
+
+    def test_52_fake_secret_does_not_appear_in_argv_diagnostic_or_abort(self) -> None:
+        argv = capture.build_reference_argv(PROVIDER_BINARY_PATH)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, argv)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, " ".join(argv))
+        diagnostic = capture.build_process_failure_diagnostic(
+            capture.CaptureProcessResult(
+                returncode=1,
+                stdout=b"",
+                stderr=b"",
+                timed_out=False,
+                physical_argv=tuple(argv),
+            )
+        )
+        text = capture.canonical_diagnostic_text(diagnostic)
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, text)
+        self.assertNotIn("environment", diagnostic)
+        stream = io.StringIO()
+        capture.write_abort_report(
+            stream,
+            capture.ReferenceCaptureAbort(
+                "MISSING_PER_RUN_CREDENTIAL", capture.PER_RUN_CREDENTIAL_KEY
+            ),
+        )
+        reported = stream.getvalue()
+        self.assertNotIn(FAKE_PER_RUN_CREDENTIAL, reported)
+        self.assertIn("MISSING_PER_RUN_CREDENTIAL", reported)
+        self.assertNotIn("prompt_secret", production.CAPTURE_CONFIGURATION_KEYS)
+        self.assertNotIn("ANTHROPIC_API_KEY", production.REFERENCE_RECORD_KEYS)
+
+    def test_53_neutral_reference_input_remains_exact_x(self) -> None:
+        self.assertEqual(capture.REFERENCE_PROMPT, "x")
+        encoded = capture.REFERENCE_PROMPT.encode("utf-8")
+        self.assertEqual(encoded, b"x")
+        self.assertEqual(list(encoded), [0x78])
+        self.assertEqual(len(encoded), 1)
+        self.assertFalse(encoded.endswith(b"\n"))
+        self.assertEqual(
+            hashlib.sha256(encoded).hexdigest(),
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+        )
+
+    def test_54_frozen_ex_post_acceptance_gates_remain_unchanged(self) -> None:
+        records = capture.parse_stream_records(
+            zero_turn_stdout(
+                after=({"type": "user", "session_id": "reference-session"},)
+            )
+        )
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(records)
+        self.assertEqual(context.exception.reason, "MODEL_TURN_OBSERVED")
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(zero_turn_stdout(num_turns=1))
+            )
+        self.assertEqual(context.exception.reason, "TERMINAL_NUM_TURNS_INVALID")
+        assistant = {
+            "type": "assistant",
+            "session_id": "reference-session",
+            "message": {"role": "assistant"},
+        }
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(zero_turn_stdout(after=(assistant,)))
+            )
+        self.assertEqual(context.exception.reason, "ASSISTANT_MESSAGE_OBSERVED")
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(zero_turn_stdout(cost="0.0000001"))
+            )
+        self.assertEqual(context.exception.reason, "NONZERO_OBSERVED_COST")
+        with self.assertRaises(capture.ReferenceCaptureAbort) as context:
+            capture.analyze_zero_turn_stream(
+                capture.parse_stream_records(
+                    zero_turn_stdout(init=init_event(api_key_source="none"))
+                )
+            )
+        self.assertEqual(context.exception.reason, "NOT_A_CAPTURE_API_KEY_SOURCE_NONE")
 
 
 if __name__ == "__main__":
