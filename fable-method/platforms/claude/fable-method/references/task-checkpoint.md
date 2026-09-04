@@ -9,6 +9,7 @@
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
 - [Long-running execution recovery](#long-running-execution-recovery)
+- [Publication live-state classifier](#publication-live-state-classifier)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
@@ -252,6 +253,89 @@ above: session or UI disappearance alone is never itself evidence of failure.
 `ExecutionRecord.start!` persists a `STARTED` record with the real PID before
 the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
 `durable_capture_path` once the work's durable terminal evidence exists.
+
+## Publication live-state classifier
+
+`PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
+resolves what is already true about a task's Git publication lifecycle from
+freshly-queried remote facts, so a stale checkpoint or Packet cannot cause an
+already-completed Ready/Merge/postmerge action to be replayed, nor a
+genuinely pending one to be silently skipped.
+
+It is a **derived live view only**: it holds no `save`/`load`, adds no
+lifecycle enum, and does not replace `PR_PUBLICATION_STATUS`,
+`POSTMERGE_LIFECYCLE_STATUS`, `BRANCH_CLEANUP_STATUS`, or
+`FULL_PR_LIFECYCLE_CLOSED`, which remain the authoritative reporting axes.
+Every call re-resolves remote branch existence and PR state at classification
+time; `checkpoint.pr_state` may be passed in as the identity to look up (via
+`named_pr_number`) but is never itself treated as live truth. The classifier
+determines **what is already true**; it never performs or authorizes a new
+external action, and the Git action tiers and standalone Owner authorization
+rules above are unchanged by its output.
+
+### Derived states
+
+| State | Meaning |
+|---|---|
+| `LOCAL_ONLY` | No remote branch and no associated pull request. |
+| `REMOTE_BRANCH_ONLY` | Remote branch exists; no open or merged pull request claims it. |
+| `DRAFT_PR_OPEN` | An open pull request exists and is still a draft. |
+| `READY_PR_OPEN` | An open, non-draft pull request already exists. |
+| `MERGED_POSTMERGE_PENDING` | The pull request is merged; no exact-identity verified postmerge evidence is present. |
+| `MERGED_POSTMERGE_COMPLETE` | The pull request is merged and verified postmerge evidence matches this exact identity (PR number and, when both sides have one, merge commit SHA). |
+| `IDENTITY_CONFLICT` | Live state cannot be trusted or safely attributed to this task (see below). Fails closed. |
+
+### Short-circuit contract
+
+| State | Ready | Merge | Postmerge | Terminal |
+|---|---|---|---|---|
+| `READY_PR_OPEN` | `SKIP_ALREADY_COMPLETE` | — | — | — |
+| `MERGED_POSTMERGE_PENDING` | `SKIP_ALREADY_COMPLETE` | `SKIP_ALREADY_COMPLETE` | `VERIFY_OR_COMPLETE_MISSING_POSTMERGE` | — |
+| `MERGED_POSTMERGE_COMPLETE` | `SKIP_ALREADY_COMPLETE` | `SKIP_ALREADY_COMPLETE` | `REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING` | `COMPLETION_HANDOFF` |
+| `IDENTITY_CONFLICT` | `STOP_UNRESOLVED` | `STOP_UNRESOLVED` | `STOP_UNRESOLVED` | — |
+
+`LOCAL_ONLY`, `REMOTE_BRANCH_ONLY`, and `DRAFT_PR_OPEN` carry no short-circuit
+(a `—` cell is `nil`, not an implied action): the caller proceeds with its
+Packet-defined flow normally.
+
+### Identity conflict (fail closed)
+
+Identity conflict is evaluated before any normal lifecycle state is assigned.
+At minimum, the classifier fails closed to `IDENTITY_CONFLICT` when:
+
+- the Packet-named PR (`named_pr_number`) does not exist;
+- the Packet-named PR's head branch does not match the task branch;
+- more than one *open* pull request claims the same task branch;
+- a resolved pull request's live head SHA is inconsistent with an explicitly
+  supplied `expected_head_sha` (skipped once the PR is `MERGED`, since its
+  head SHA is then historical rather than a live lineage signal);
+- live remote branch or PR state cannot be independently resolved at all
+  (the injected fetcher raises `PublicationLiveStateClassifier::PrLookupError`
+  — for example the `gh`/`git` call itself failed) rather than confidently
+  returning a negative result.
+
+This reuses the existing `STOP_UNRESOLVED` shape rather than inventing a
+second global conflict framework: `IDENTITY_CONFLICT`'s short-circuit actions
+are all `STOP_UNRESOLVED`, matching `TaskReconciler`'s own verdict vocabulary.
+
+### Fetchers and freshness
+
+Remote branch existence and PR facts are each resolved through an injectable
+fetcher (`remote_branch_exists_fetcher`, `pr_by_number_fetcher`,
+`prs_by_branch_fetcher`), mirroring `ExecutionRecord`'s injectable
+`pid_alive:` check. The default fetchers are real and network-backed
+(`git ls-remote --exit-code --heads` for branch existence,
+`gh pr view`/`gh pr list --state all` for PR facts) so the classifier is
+genuinely live by default; tests and other callers inject deterministic
+fetchers instead of exercising the network.
+
+Postmerge evidence reuse (`postmerge_evidence:`) is likewise identity-bound,
+not blind: it is only treated as satisfying `MERGED_POSTMERGE_COMPLETE` when
+its `pr_number` (and `merge_commit_sha`, when known on both sides) match the
+live merged PR exactly, and `verified` is exactly `true`. A caller integrating
+this classifier — for example to strengthen `TaskReconciler`'s existing
+`pr_state`-based terminal-status guard — decides how to source and act on
+that evidence; the classifier only reports whether the exact identity matches.
 
 ## Bounded reconciliation algorithm
 

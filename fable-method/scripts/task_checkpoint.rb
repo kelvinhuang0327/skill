@@ -973,6 +973,317 @@ class TaskReconciler
   end
 end
 
+# PublicationLiveStateClassifier resolves what is already true about a task's
+# Git publication lifecycle from freshly-queried remote facts. It is a
+# DERIVED LIVE VIEW only: every call re-resolves remote branch and PR state
+# at classification time rather than trusting a checkpoint's recorded
+# pr_state, and it persists nothing (no save/load, no new lifecycle store).
+# The canonical lifecycle axes (PR_PUBLICATION_STATUS, POSTMERGE_LIFECYCLE_STATUS,
+# BRANCH_CLEANUP_STATUS, FULL_PR_LIFECYCLE_CLOSED) and the Git action tiers in
+# operational-gates.md remain authoritative; this classifier only tells a
+# caller what is already true so it can avoid replaying or incorrectly
+# skipping a Ready/Merge/postmerge action. It never performs or authorizes a
+# new external action.
+class PublicationLiveStateClassifier
+  STATE_LOCAL_ONLY = 'LOCAL_ONLY'
+  STATE_REMOTE_BRANCH_ONLY = 'REMOTE_BRANCH_ONLY'
+  STATE_DRAFT_PR_OPEN = 'DRAFT_PR_OPEN'
+  STATE_READY_PR_OPEN = 'READY_PR_OPEN'
+  STATE_MERGED_POSTMERGE_PENDING = 'MERGED_POSTMERGE_PENDING'
+  STATE_MERGED_POSTMERGE_COMPLETE = 'MERGED_POSTMERGE_COMPLETE'
+  STATE_IDENTITY_CONFLICT = 'IDENTITY_CONFLICT'
+
+  VALID_STATES = [
+    STATE_LOCAL_ONLY, STATE_REMOTE_BRANCH_ONLY, STATE_DRAFT_PR_OPEN,
+    STATE_READY_PR_OPEN, STATE_MERGED_POSTMERGE_PENDING,
+    STATE_MERGED_POSTMERGE_COMPLETE, STATE_IDENTITY_CONFLICT
+  ].freeze
+
+  ACTION_SKIP_ALREADY_COMPLETE = 'SKIP_ALREADY_COMPLETE'
+  ACTION_VERIFY_OR_COMPLETE_MISSING_POSTMERGE = 'VERIFY_OR_COMPLETE_MISSING_POSTMERGE'
+  ACTION_REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING = 'REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING'
+  ACTION_COMPLETION_HANDOFF = 'COMPLETION_HANDOFF'
+  ACTION_STOP_UNRESOLVED = 'STOP_UNRESOLVED'
+
+  GH_PR_FIELDS = 'number,url,state,isDraft,headRefName,baseRefName,headRefOid,mergeCommit,mergedAt'
+
+  Classification = Struct.new(
+    :state, :reason, :ready_action, :merge_action, :postmerge_action,
+    :terminal_action, :resolved_pr, :remote_branch_exists, keyword_init: true
+  ) do
+    def conflict?
+      state == PublicationLiveStateClassifier::STATE_IDENTITY_CONFLICT
+    end
+  end
+
+  def initialize(branch:, repository: nil, worktree: nil, remote_name: 'origin',
+                 named_pr_number: nil, expected_head_sha: nil, postmerge_evidence: nil,
+                 remote_branch_exists_fetcher: nil, pr_by_number_fetcher: nil,
+                 prs_by_branch_fetcher: nil)
+    raise ArgumentError, 'branch must be a non-empty string' if branch.to_s.strip.empty?
+
+    @branch = branch.to_s.strip
+    @repository = repository
+    @worktree = worktree || repository
+    @remote_name = (remote_name || 'origin').to_s
+    @named_pr_number = named_pr_number
+    @expected_head_sha = expected_head_sha
+    @postmerge_evidence = postmerge_evidence
+    @remote_branch_exists_fetcher = remote_branch_exists_fetcher || method(:default_remote_branch_exists)
+    @pr_by_number_fetcher = pr_by_number_fetcher || method(:default_pr_by_number)
+    @prs_by_branch_fetcher = prs_by_branch_fetcher || method(:default_prs_by_branch)
+  end
+
+  def classify
+    remote_branch_exists = begin
+      @remote_branch_exists_fetcher.call(@branch)
+    rescue PrLookupError => e
+      return conflict_result("live remote branch state could not be independently resolved: #{e.message}")
+    end
+
+    prs = begin
+      lookup_prs
+    rescue PrLookupError => e
+      return conflict_result("live PR state could not be independently resolved: #{e.message}")
+    end
+
+    resolved_pr, conflict = resolve_identity(prs)
+    return conflict if conflict
+
+    build_classification(resolved_pr, remote_branch_exists)
+  end
+
+  # Real, network-backed default fetchers (LIVE_PR_FETCH_IMPLEMENTED). Tests
+  # and other callers inject deterministic fetchers instead of exercising
+  # these directly; they are exposed as class methods so they stay
+  # independently inspectable and reusable outside this class.
+  def self.fetch_remote_branch_exists_via_git(branch, remote_name:, worktree: nil)
+    _stdout, stderr, status = Open3.capture3(
+      'git', 'ls-remote', '--exit-code', '--heads', remote_name, branch, chdir: worktree || Dir.pwd
+    )
+    return true if status.success?
+    return false if status.exitstatus == 2
+
+    raise PrLookupError, "git ls-remote failed: #{stderr.strip}"
+  rescue Errno::ENOENT => e
+    raise PrLookupError, "git executable unavailable: #{e.message}"
+  end
+
+  def self.fetch_pr_by_number_via_gh(number, repo_slug: nil, worktree: nil)
+    args = ['gh', 'pr', 'view', number.to_s, '--json', GH_PR_FIELDS]
+    args += ['--repo', repo_slug] if repo_slug
+    stdout, stderr, status = Open3.capture3(*args, chdir: worktree || Dir.pwd)
+    if !status.success?
+      return nil if stderr.to_s =~ /could not resolve to a pullrequest|no pull requests found|not found/i
+
+      raise PrLookupError, "gh pr view failed: #{stderr.strip}"
+    end
+    normalize_gh_pr(JSON.parse(stdout))
+  rescue Errno::ENOENT => e
+    raise PrLookupError, "gh executable unavailable: #{e.message}"
+  rescue JSON::ParserError => e
+    raise PrLookupError, "gh pr view returned malformed JSON: #{e.message}"
+  end
+
+  def self.fetch_prs_by_branch_via_gh(branch, repo_slug: nil, worktree: nil)
+    args = ['gh', 'pr', 'list', '--head', branch, '--state', 'all', '--json', GH_PR_FIELDS]
+    args += ['--repo', repo_slug] if repo_slug
+    stdout, stderr, status = Open3.capture3(*args, chdir: worktree || Dir.pwd)
+    raise PrLookupError, "gh pr list failed: #{stderr.strip}" unless status.success?
+
+    JSON.parse(stdout).map { |pr_data| normalize_gh_pr(pr_data) }
+  rescue Errno::ENOENT => e
+    raise PrLookupError, "gh executable unavailable: #{e.message}"
+  rescue JSON::ParserError => e
+    raise PrLookupError, "gh pr list returned malformed JSON: #{e.message}"
+  end
+
+  def self.detect_repo_slug(worktree)
+    stdout, _stderr, status = Open3.capture3('git', 'remote', 'get-url', 'origin', chdir: worktree || Dir.pwd)
+    return nil unless status.success?
+
+    match = %r{github\.com[:/]([^/]+)/(.+?)(?:\.git)?\z}.match(stdout.strip)
+    match ? "#{match[1]}/#{match[2]}" : nil
+  rescue StandardError
+    nil
+  end
+
+  def self.normalize_gh_pr(data)
+    {
+      number: data['number'],
+      url: data['url'],
+      state: data['state'],
+      draft: data['isDraft'] == true,
+      head_ref: data['headRefName'],
+      base_ref: data['baseRefName'],
+      head_sha: data['headRefOid'],
+      merge_commit_sha: data.dig('mergeCommit', 'oid'),
+      merged_at: data['mergedAt']
+    }
+  end
+
+  private_class_method :normalize_gh_pr
+
+  private
+
+  def default_remote_branch_exists(branch)
+    self.class.fetch_remote_branch_exists_via_git(branch, remote_name: @remote_name, worktree: @worktree)
+  end
+
+  def default_pr_by_number(number)
+    self.class.fetch_pr_by_number_via_gh(number, repo_slug: repo_slug, worktree: @worktree)
+  end
+
+  def default_prs_by_branch(branch)
+    self.class.fetch_prs_by_branch_via_gh(branch, repo_slug: repo_slug, worktree: @worktree)
+  end
+
+  def repo_slug
+    @repo_slug ||= self.class.detect_repo_slug(@worktree)
+  end
+
+  def lookup_prs
+    if @named_pr_number
+      pr = @pr_by_number_fetcher.call(@named_pr_number)
+      pr.nil? ? [] : [pr]
+    else
+      Array(@prs_by_branch_fetcher.call(@branch))
+    end
+  end
+
+  def resolve_identity(prs)
+    if @named_pr_number
+      resolve_named_identity(prs)
+    else
+      resolve_branch_identity(prs)
+    end
+  end
+
+  def resolve_named_identity(prs)
+    target = prs.first
+    return [nil, conflict_result("Packet-named PR ##{@named_pr_number} does not exist")] if target.nil?
+
+    if target[:head_ref] != @branch
+      return [nil, conflict_result(
+        "Packet-named PR ##{@named_pr_number} points to branch '#{target[:head_ref]}', not the task branch '#{@branch}'"
+      )]
+    end
+    return [nil, conflict_result(lineage_conflict_reason(target))] if lineage_mismatch?(target)
+
+    [target, nil]
+  end
+
+  def resolve_branch_identity(prs)
+    open_candidates = prs.select { |candidate| candidate[:state] == 'OPEN' }
+    if open_candidates.size > 1
+      numbers = open_candidates.map { |candidate| "##{candidate[:number]}" }.join(', ')
+      return [nil, conflict_result("more than one open PR ambiguously claims task branch '#{@branch}': #{numbers}")]
+    end
+
+    resolved = open_candidates.first || prs.find { |candidate| candidate[:state] == 'MERGED' } || prs.first
+    return [nil, conflict_result(lineage_conflict_reason(resolved))] if resolved && lineage_mismatch?(resolved)
+
+    [resolved, nil]
+  end
+
+  def lineage_mismatch?(pr)
+    return false if @expected_head_sha.to_s.strip.empty?
+    return false if pr[:state] == 'MERGED'
+    return false if pr[:head_sha].to_s.strip.empty?
+
+    pr[:head_sha] != @expected_head_sha
+  end
+
+  def lineage_conflict_reason(pr)
+    "live PR ##{pr[:number]} head #{pr[:head_sha]} is inconsistent with expected task lineage #{@expected_head_sha}"
+  end
+
+  def build_classification(resolved_pr, remote_branch_exists)
+    return no_pr_classification(remote_branch_exists) if resolved_pr.nil?
+
+    case resolved_pr[:state]
+    when 'MERGED'
+      merged_classification(resolved_pr, remote_branch_exists)
+    when 'OPEN'
+      open_classification(resolved_pr, remote_branch_exists)
+    else
+      no_pr_classification(remote_branch_exists, closed_pr: resolved_pr)
+    end
+  end
+
+  def no_pr_classification(remote_branch_exists, closed_pr: nil)
+    if remote_branch_exists
+      reason = closed_pr ? "prior PR ##{closed_pr[:number]} was closed without merging; remote branch '#{@branch}' still exists" : "remote branch '#{@branch}' exists with no associated pull request"
+      Classification.new(state: STATE_REMOTE_BRANCH_ONLY, reason: reason, resolved_pr: closed_pr, remote_branch_exists: true)
+    else
+      reason = closed_pr ? "prior PR ##{closed_pr[:number]} was closed without merging and remote branch '#{@branch}' no longer exists" : "no remote branch '#{@branch}' and no associated pull request"
+      Classification.new(state: STATE_LOCAL_ONLY, reason: reason, resolved_pr: closed_pr, remote_branch_exists: false)
+    end
+  end
+
+  def open_classification(pr, remote_branch_exists)
+    if pr[:draft]
+      Classification.new(
+        state: STATE_DRAFT_PR_OPEN, reason: "PR ##{pr[:number]} is open as a draft",
+        resolved_pr: pr, remote_branch_exists: remote_branch_exists
+      )
+    else
+      Classification.new(
+        state: STATE_READY_PR_OPEN, reason: "PR ##{pr[:number]} is open and already marked ready",
+        ready_action: ACTION_SKIP_ALREADY_COMPLETE,
+        resolved_pr: pr, remote_branch_exists: remote_branch_exists
+      )
+    end
+  end
+
+  def merged_classification(pr, remote_branch_exists)
+    if postmerge_evidence_matches?(pr)
+      Classification.new(
+        state: STATE_MERGED_POSTMERGE_COMPLETE,
+        reason: "PR ##{pr[:number]} is merged and verified postmerge evidence matches this exact identity",
+        ready_action: ACTION_SKIP_ALREADY_COMPLETE, merge_action: ACTION_SKIP_ALREADY_COMPLETE,
+        postmerge_action: ACTION_REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING,
+        terminal_action: ACTION_COMPLETION_HANDOFF,
+        resolved_pr: pr, remote_branch_exists: remote_branch_exists
+      )
+    else
+      Classification.new(
+        state: STATE_MERGED_POSTMERGE_PENDING,
+        reason: "PR ##{pr[:number]} is merged but no exact-identity verified postmerge evidence is present",
+        ready_action: ACTION_SKIP_ALREADY_COMPLETE, merge_action: ACTION_SKIP_ALREADY_COMPLETE,
+        postmerge_action: ACTION_VERIFY_OR_COMPLETE_MISSING_POSTMERGE,
+        resolved_pr: pr, remote_branch_exists: remote_branch_exists
+      )
+    end
+  end
+
+  def postmerge_evidence_matches?(pr)
+    return false if @postmerge_evidence.nil?
+
+    evidence = @postmerge_evidence
+    verified = evidence.key?(:verified) ? evidence[:verified] : evidence['verified']
+    return false unless verified == true
+
+    evidence_number = evidence[:pr_number] || evidence['pr_number']
+    return false if evidence_number.nil? || evidence_number.to_s != pr[:number].to_s
+
+    evidence_sha = evidence[:merge_commit_sha] || evidence['merge_commit_sha']
+    return true if evidence_sha.to_s.strip.empty? || pr[:merge_commit_sha].to_s.strip.empty?
+
+    evidence_sha.to_s == pr[:merge_commit_sha].to_s
+  end
+
+  def conflict_result(reason)
+    Classification.new(
+      state: STATE_IDENTITY_CONFLICT, reason: reason,
+      ready_action: ACTION_STOP_UNRESOLVED, merge_action: ACTION_STOP_UNRESOLVED,
+      postmerge_action: ACTION_STOP_UNRESOLVED
+    )
+  end
+
+  class PrLookupError < StandardError; end
+end
+
 # DurableCommandCapture persists the exact terminal evidence of a task-owned
 # long-running command to one canonical task-owned location, so a Judge or a
 # resuming Worker never has to treat UI/subagent streaming as the sole

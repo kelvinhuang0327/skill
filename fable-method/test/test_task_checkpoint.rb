@@ -989,6 +989,235 @@ class TaskCheckpointTest < Minitest::Test
   end
 end
 
+class PublicationLiveStateClassifierTest < Minitest::Test
+  Classifier = PublicationLiveStateClassifier
+
+  def pr(number:, state:, head_ref:, draft: false, head_sha: nil, merge_commit_sha: nil, base_ref: 'master')
+    {
+      number: number,
+      url: "https://github.com/kelvinhuang0327/skill/pull/#{number}",
+      state: state,
+      draft: draft,
+      head_ref: head_ref,
+      base_ref: base_ref,
+      head_sha: head_sha,
+      merge_commit_sha: merge_commit_sha,
+      merged_at: state == 'MERGED' ? Time.now.utc.iso8601 : nil
+    }
+  end
+
+  # A. Draft open -> state DRAFT_PR_OPEN.
+  def test_a_draft_pr_open_state
+    classifier = Classifier.new(
+      branch: 'agent/task-a',
+      remote_branch_exists_fetcher: ->(_branch) { true },
+      prs_by_branch_fetcher: ->(_branch) { [pr(number: 10, state: 'OPEN', draft: true, head_ref: 'agent/task-a')] }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_DRAFT_PR_OPEN, result.state
+    assert_nil result.ready_action
+    refute result.conflict?
+  end
+
+  # B. Ready open -> state READY_PR_OPEN and Ready short-circuits.
+  def test_b_ready_pr_open_short_circuits_ready_action
+    classifier = Classifier.new(
+      branch: 'agent/task-b',
+      remote_branch_exists_fetcher: ->(_branch) { true },
+      prs_by_branch_fetcher: ->(_branch) { [pr(number: 11, state: 'OPEN', draft: false, head_ref: 'agent/task-b')] }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_READY_PR_OPEN, result.state
+    assert_equal Classifier::ACTION_SKIP_ALREADY_COMPLETE, result.ready_action
+  end
+
+  # C. Merged + postmerge pending -> Ready/Merge skip; postmerge remains required.
+  def test_c_merged_postmerge_pending_requires_postmerge
+    classifier = Classifier.new(
+      branch: 'agent/task-c',
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      prs_by_branch_fetcher: lambda { |_branch|
+        [pr(number: 12, state: 'MERGED', head_ref: 'agent/task-c', merge_commit_sha: 'mergedsha12')]
+      }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_MERGED_POSTMERGE_PENDING, result.state
+    assert_equal Classifier::ACTION_SKIP_ALREADY_COMPLETE, result.ready_action
+    assert_equal Classifier::ACTION_SKIP_ALREADY_COMPLETE, result.merge_action
+    assert_equal Classifier::ACTION_VERIFY_OR_COMPLETE_MISSING_POSTMERGE, result.postmerge_action
+    assert_nil result.terminal_action
+  end
+
+  # D. Merged + postmerge complete -> Ready/Merge skip; terminal completion.
+  def test_d_merged_postmerge_complete_reuses_evidence_and_reaches_terminal
+    classifier = Classifier.new(
+      branch: 'agent/task-d',
+      postmerge_evidence: { pr_number: 13, merge_commit_sha: 'mergedsha13', verified: true },
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      prs_by_branch_fetcher: lambda { |_branch|
+        [pr(number: 13, state: 'MERGED', head_ref: 'agent/task-d', merge_commit_sha: 'mergedsha13')]
+      }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_MERGED_POSTMERGE_COMPLETE, result.state
+    assert_equal Classifier::ACTION_SKIP_ALREADY_COMPLETE, result.ready_action
+    assert_equal Classifier::ACTION_SKIP_ALREADY_COMPLETE, result.merge_action
+    assert_equal Classifier::ACTION_REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING, result.postmerge_action
+    assert_equal Classifier::ACTION_COMPLETION_HANDOFF, result.terminal_action
+  end
+
+  # E. Remote branch exists / no PR -> REMOTE_BRANCH_ONLY.
+  def test_e_remote_branch_only_when_no_pr_exists
+    classifier = Classifier.new(
+      branch: 'agent/task-e',
+      remote_branch_exists_fetcher: ->(_branch) { true },
+      prs_by_branch_fetcher: ->(_branch) { [] }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_REMOTE_BRANCH_ONLY, result.state
+    assert_nil result.ready_action
+  end
+
+  # F. No remote task branch -> LOCAL_ONLY.
+  def test_f_local_only_when_no_remote_branch_or_pr
+    classifier = Classifier.new(
+      branch: 'agent/task-f',
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      prs_by_branch_fetcher: ->(_branch) { [] }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_LOCAL_ONLY, result.state
+    assert_nil result.ready_action
+  end
+
+  # G. Checkpoint says Draft but live PR is Merged -> live Merged state wins.
+  def test_g_stale_checkpoint_draft_but_live_merged_state_wins
+    stale_checkpoint = TaskCheckpoint.new(
+      task_id: 'TASK_G', repository: '/tmp/repo', worktree: '/tmp/repo',
+      authoritative_packet_ref: 'prompt/packet.md#task-g', branch: 'agent/task-g',
+      current_head: 'a' * 40, current_tree: 'b' * 40, task_lifecycle_state: 'IN_PROGRESS',
+      next_action: 'WAIT_FOR_CI', authorization_boundary: 'NONE',
+      pr_state: 'DRAFT_OPEN', pr_number: 14, updated_at: Time.now.utc.iso8601, revision: 1
+    )
+    assert_equal 'DRAFT_OPEN', stale_checkpoint.pr_state
+
+    classifier = Classifier.new(
+      branch: stale_checkpoint.branch,
+      named_pr_number: stale_checkpoint.pr_number,
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      pr_by_number_fetcher: lambda { |_number|
+        pr(number: 14, state: 'MERGED', head_ref: 'agent/task-g', merge_commit_sha: 'mergedsha14')
+      }
+    )
+    result = classifier.classify
+
+    refute_equal stale_checkpoint.pr_state, result.state
+    assert_equal Classifier::STATE_MERGED_POSTMERGE_PENDING, result.state
+    assert_equal Classifier::ACTION_SKIP_ALREADY_COMPLETE, result.ready_action
+  end
+
+  # H. Named PR belongs to wrong branch -> IDENTITY_CONFLICT / STOP_UNRESOLVED.
+  def test_h_named_pr_wrong_branch_is_identity_conflict
+    classifier = Classifier.new(
+      branch: 'agent/task-h',
+      named_pr_number: 15,
+      remote_branch_exists_fetcher: ->(_branch) { true },
+      pr_by_number_fetcher: ->(_number) { pr(number: 15, state: 'OPEN', head_ref: 'agent/some-other-task') }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_IDENTITY_CONFLICT, result.state
+    assert result.conflict?
+    assert_equal Classifier::ACTION_STOP_UNRESOLVED, result.ready_action
+    assert_match(/points to branch/i, result.reason)
+  end
+
+  # I. Two ambiguous open PRs on same task branch -> IDENTITY_CONFLICT.
+  def test_i_ambiguous_open_prs_is_identity_conflict
+    classifier = Classifier.new(
+      branch: 'agent/task-i',
+      remote_branch_exists_fetcher: ->(_branch) { true },
+      prs_by_branch_fetcher: lambda { |_branch|
+        [
+          pr(number: 16, state: 'OPEN', head_ref: 'agent/task-i'),
+          pr(number: 17, state: 'OPEN', head_ref: 'agent/task-i')
+        ]
+      }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_IDENTITY_CONFLICT, result.state
+    assert_match(/more than one open PR/i, result.reason)
+    assert_match(/#16/, result.reason)
+    assert_match(/#17/, result.reason)
+  end
+
+  # J. Exact already-verified postmerge evidence at same identity is reused
+  # rather than rerun; mismatched identity is not silently reused.
+  def test_j_postmerge_evidence_reused_only_at_exact_identity
+    live_pr = -> { pr(number: 18, state: 'MERGED', head_ref: 'agent/task-j', merge_commit_sha: 'mergedsha18') }
+
+    matching = Classifier.new(
+      branch: 'agent/task-j',
+      postmerge_evidence: { pr_number: 18, merge_commit_sha: 'mergedsha18', verified: true },
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      prs_by_branch_fetcher: ->(_branch) { [live_pr.call] }
+    ).classify
+    assert_equal Classifier::STATE_MERGED_POSTMERGE_COMPLETE, matching.state
+    assert_equal Classifier::ACTION_REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING, matching.postmerge_action
+
+    mismatched = Classifier.new(
+      branch: 'agent/task-j',
+      postmerge_evidence: { pr_number: 18, merge_commit_sha: 'DIFFERENT_SHA', verified: true },
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      prs_by_branch_fetcher: ->(_branch) { [live_pr.call] }
+    ).classify
+    assert_equal Classifier::STATE_MERGED_POSTMERGE_PENDING, mismatched.state
+    assert_equal Classifier::ACTION_VERIFY_OR_COMPLETE_MISSING_POSTMERGE, mismatched.postmerge_action
+
+    unverified = Classifier.new(
+      branch: 'agent/task-j',
+      postmerge_evidence: { pr_number: 18, merge_commit_sha: 'mergedsha18', verified: false },
+      remote_branch_exists_fetcher: ->(_branch) { false },
+      prs_by_branch_fetcher: ->(_branch) { [live_pr.call] }
+    ).classify
+    assert_equal Classifier::STATE_MERGED_POSTMERGE_PENDING, unverified.state
+  end
+
+  # K. Live PR head inconsistent with expected task lineage -> IDENTITY_CONFLICT.
+  def test_k_open_pr_head_sha_inconsistent_with_expected_lineage_is_conflict
+    classifier = Classifier.new(
+      branch: 'agent/task-k',
+      expected_head_sha: 'expectedsha000',
+      remote_branch_exists_fetcher: ->(_branch) { true },
+      prs_by_branch_fetcher: lambda { |_branch|
+        [pr(number: 19, state: 'OPEN', head_ref: 'agent/task-k', head_sha: 'unexpectedsha999')]
+      }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_IDENTITY_CONFLICT, result.state
+    assert_match(/inconsistent with expected task lineage/i, result.reason)
+  end
+
+  def test_live_lookup_failure_fails_closed_as_identity_conflict
+    classifier = Classifier.new(
+      branch: 'agent/task-unresolvable',
+      remote_branch_exists_fetcher: ->(_branch) { raise Classifier::PrLookupError, 'network unreachable' }
+    )
+    result = classifier.classify
+    assert_equal Classifier::STATE_IDENTITY_CONFLICT, result.state
+    assert_match(/could not be independently resolved/i, result.reason)
+  end
+
+  def test_classifier_adds_no_new_persistent_lifecycle_state_or_store
+    assert_equal %w[IN_PROGRESS BLOCKED COMPLETED ABORTED], TaskCheckpoint::VALID_LIFECYCLE_STATES
+    refute_includes TaskCheckpoint::VALID_LIFECYCLE_STATES, PublicationLiveStateClassifier::STATE_MERGED_POSTMERGE_COMPLETE
+
+    classifier = Classifier.new(branch: 'agent/no-op', remote_branch_exists_fetcher: ->(_b) { false },
+                                 prs_by_branch_fetcher: ->(_b) { [] })
+    refute_respond_to classifier, :save
+    refute_respond_to Classifier::Classification.new, :save
+  end
+end
+
 class DurableCommandCaptureTest < Minitest::Test
   def setup
     @tmpdir = Dir.mktmpdir('durable_capture_test_')
