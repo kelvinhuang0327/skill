@@ -437,6 +437,7 @@ Load only the directly relevant reference:
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [test falsifiability](references/test-falsifiability.md) before citing newly-added test/check coverage as completion evidence;
+- [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
 - [reporting](references/reporting.md) for compact outcome-first fields and
   lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain:

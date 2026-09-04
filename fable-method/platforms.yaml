@@ -20,6 +20,7 @@ shared:
     - fable-method/shared/references/generic-ranking.md
     - fable-method/shared/references/operational-gates.md
     - fable-method/shared/references/judge-handoff.md
+    - fable-method/shared/references/property-based-verification.md
     - fable-method/shared/references/reporting.md
     - fable-method/shared/references/task-checkpoint.md
     - fable-method/shared/references/test-falsifiability.md
