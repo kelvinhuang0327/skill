@@ -440,6 +440,49 @@ Worker 應持續 evidence-progressing RCA。
 
 ---
 
+### 5.1A Runtime write-surface preflight
+
+Distinct from capability preflight:
+
+~~~text
+CAPABILITY PREFLIGHT: Can the harness execute the real action?
+WRITE-SURFACE PREFLIGHT: What load-bearing durable/runtime writes will that action cause?
+~~~
+
+Applies only when the task performs a real production/runtime mutation and the
+exact write surface materially determines authorization, production safety,
+data safety, or rollback semantics. Does not apply to ordinary local unit
+tests, read-only reviews, pure QA, documentation-only tasks, or routine local
+implementation where runtime write authorization is irrelevant.
+
+Before standalone authorization for the real mutation is requested or
+consumed, resolve the exact runtime entrypoint's load-bearing writes and
+include the complete relevant write surface in the authorization synthesis:
+
+RUNTIME_WRITE_SURFACE_REQUIRED: YES | NO
+EXACT_RUNTIME_ENTRYPOINT: <exact | NOT_APPLICABLE>
+DIRECT_WRITES: <exact | NOT_APPLICABLE>
+TRANSITIVE_AUTOMATIC_WRITES: <exact | NONE>
+AUTHORIZED_RUNTIME_WRITE_SURFACE: <union of load-bearing direct + transitive writes | NOT_APPLICABLE>
+RUNTIME_WRITE_SURFACE_STATUS: RESOLVED | UNRESOLVED | NOT_APPLICABLE
+
+Bounded discovery only: inspect the directly invoked persistence/output chain
+required to identify load-bearing writes. Do not require repo-wide call-graph
+analysis, a broad architecture audit, tracing every temporary/internal write,
+or a new write registry. Only authorization- or safety-relevant durable/
+runtime writes are load-bearing.
+
+若 RUNTIME_WRITE_SURFACE_REQUIRED = YES 且 mutation 前無法讓
+RUNTIME_WRITE_SURFACE_STATUS 達到 RESOLVED：
+
+STOP:
+RUNTIME_WRITE_SURFACE_UNRESOLVED
+
+Do not discover the missing write surface by executing the production
+mutation first.
+
+---
+
 ### 5.2 Scope
 
 列出 exact expected paths。

@@ -458,3 +458,106 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
     assert_includes PLANNER, '不為本 revision 建立 v5.5 或第二 authority；'
   end
 end
+
+# Regression for the runtime write-surface preflight (Planner §5.1A): before
+# standalone authorization for a real production/runtime mutation is
+# requested or consumed, the exact entrypoint's load-bearing direct writes
+# and transitive automatic writes must both be resolved into the authorized
+# write surface. Origin: B649 scheduler cutover authorized direct production
+# writes but omitted the automatic reporting rebuilds (performance.jsonl,
+# research-summary.json, head_to_head.jsonl) reached transitively from
+# prediction persistence, forcing a fail-safe bootout.
+class PlannerRuntimeWriteSurfacePreflightTest < Minitest::Test
+  REPOSITORY_ROOT = File.expand_path('../..', __dir__)
+  PLANNER = File.read(
+    File.join(REPOSITORY_ROOT, 'prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
+    encoding: 'UTF-8'
+  )
+
+  # Model of the Planner runtime write-surface synthesis rule: the authorized
+  # surface is the union of load-bearing direct + transitive writes, and is
+  # only ever RESOLVED once both are known.
+  def synthesize_runtime_write_surface(direct_writes:, transitive_writes:, resolved:)
+    return { status: :UNRESOLVED, authorized_surface: nil } unless resolved
+
+    { status: :RESOLVED, authorized_surface: (direct_writes + transitive_writes).uniq }
+  end
+
+  # Model of the trigger boundary: only a real production/runtime mutation
+  # receives the gate.
+  def runtime_write_surface_required?(task_type)
+    task_type == :production_runtime_mutation
+  end
+
+  # 1+2 — B649 shape: direct writes alone omit the automatic reporting
+  # rebuilds the scheduler entrypoint actually triggers; the authorized
+  # surface must be the union, not direct writes alone.
+  def test_transitive_writes_required_in_authorized_surface
+    direct = ['prediction persistence store']
+    transitive = %w[performance.jsonl research-summary.json head_to_head.jsonl]
+
+    full = synthesize_runtime_write_surface(direct_writes: direct, transitive_writes: transitive, resolved: true)
+    direct_only = synthesize_runtime_write_surface(direct_writes: direct, transitive_writes: [], resolved: true)
+
+    assert_equal direct + transitive, full[:authorized_surface]
+    transitive.each { |w| refute_includes direct_only[:authorized_surface], w }
+
+    assert_includes PLANNER, 'DIRECT_WRITES: <exact | NOT_APPLICABLE>'
+    assert_includes PLANNER, 'TRANSITIVE_AUTOMATIC_WRITES: <exact | NONE>'
+    assert_includes PLANNER, 'AUTHORIZED_RUNTIME_WRITE_SURFACE: <union of load-bearing direct + transitive writes | NOT_APPLICABLE>'
+  end
+
+  # 3 — bounded exact-entrypoint tracing is required, not a repo-wide audit.
+  def test_bounded_entrypoint_trace_not_repo_wide_audit
+    assert_includes PLANNER, 'Bounded discovery only: inspect the directly invoked persistence/output chain'
+    assert_includes PLANNER, 'Do not require repo-wide call-graph'
+    assert_includes PLANNER, 'analysis, a broad architecture audit, tracing every temporary/internal write,'
+    assert_includes PLANNER, 'or a new write registry.'
+  end
+
+  # 4 — an unresolved load-bearing write surface stops before mutation, and
+  # the missing surface must not be discovered by executing the mutation.
+  def test_unresolved_write_surface_stops_before_mutation
+    result = synthesize_runtime_write_surface(direct_writes: ['x'], transitive_writes: [], resolved: false)
+    assert_equal :UNRESOLVED, result[:status]
+    assert_nil result[:authorized_surface]
+
+    assert_includes PLANNER, "STOP:\nRUNTIME_WRITE_SURFACE_UNRESOLVED"
+    assert_includes PLANNER, 'Do not discover the missing write surface by executing the production'
+  end
+
+  # 5 — ordinary local/read-only/QA/documentation tasks do not receive this
+  # extra gate.
+  def test_ordinary_local_and_read_only_tasks_unburdened
+    refute runtime_write_surface_required?(:ordinary_local_unit_test)
+    refute runtime_write_surface_required?(:read_only_review)
+    refute runtime_write_surface_required?(:pure_qa)
+    refute runtime_write_surface_required?(:documentation_only)
+    assert runtime_write_surface_required?(:production_runtime_mutation)
+
+    assert_includes PLANNER, 'Does not apply to ordinary local unit'
+    assert_includes PLANNER, 'tests, read-only reviews, pure QA, documentation-only tasks, or routine local'
+    assert_includes PLANNER, 'implementation where runtime write authorization is irrelevant.'
+  end
+
+  # 6 — existing execution-capability preflight semantics are unchanged, and
+  # the two preflights remain explicitly distinct.
+  def test_execution_capability_preflight_preserved_and_distinct
+    assert_includes PLANNER, 'EXECUTION_CAPABILITY_REQUIRED: YES | NO'
+    assert_includes PLANNER, "STOP:\nHARNESS_EXECUTION_PERMISSION_BLOCKED"
+    assert_includes PLANNER, 'CAPABILITY PREFLIGHT: Can the harness execute the real action?'
+    assert_includes PLANNER, 'WRITE-SURFACE PREFLIGHT: What load-bearing durable/runtime writes will that action cause?'
+  end
+
+  # 7 — no new Planner version and no second authority framework; the rule
+  # lives as a subsection of the existing §5 Packet-specific gates.
+  def test_no_new_planner_version_or_second_authority
+    assert_includes PLANNER, '### 5.1A Runtime write-surface preflight'
+    assert_includes PLANNER, '# Personal Planner Handoff Prompt — Implementation-First v5.4 Lean Final'
+    refute_includes PLANNER, 'Implementation-First v5.5'
+    refute_includes PLANNER, 'RUNTIME_WRITE_SURFACE_AUTHORITY'
+    refute_includes PLANNER, 'WRITE_SURFACE_REGISTRY'
+    assert_includes PLANNER, 'v5.4 remains the successor / canonical current Planner line'
+    assert_includes PLANNER, '不為本 revision 建立 v5.5 或第二 authority；'
+  end
+end
