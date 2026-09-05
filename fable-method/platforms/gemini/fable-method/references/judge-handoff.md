@@ -4,6 +4,7 @@
 
 - [When the Judge gate fires](#when-the-judge-gate-fires)
 - [Depth and evidence reuse](#depth-and-evidence-reuse)
+  - [Verification temp isolation](#verification-temp-isolation)
 - [Depth reconciliation](#depth-reconciliation)
 - [Remediation limit](#remediation-limit)
 - [Durable terminal capture](#durable-terminal-capture)
@@ -82,6 +83,23 @@ impacted regression slice before the initial bounded Judge; run the complete
 suite after the Judge or permitted remediation. A load-bearing edit after a
 full suite invalidates it. `FULL` does not mean rerunning an already-valid
 same-final-tree full suite a second time.
+
+### Verification temp isolation
+
+Before a Judge-authoritative full suite or otherwise one-shot expensive
+verification:
+
+1. freeze the judged source HEAD/tree;
+2. resolve the verification temp/scratch root;
+3. if in-tree temp state could affect judged tree/evidence identity:
+   require temp root outside the judged source worktree;
+4. classify that temp resource:
+   TEMPORARY_DELETE;
+5. only then consume the expensive verification run.
+
+Do not require external temp roots for every ordinary focused test. A preflight
+failure on temp placement stops execution before running the expensive suite,
+leaving the verification run unconsumed and the source tree uncontaminated.
 
 Before handoff, state:
 
