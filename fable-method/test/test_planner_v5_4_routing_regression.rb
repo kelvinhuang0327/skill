@@ -212,3 +212,249 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     end
   end
 end
+
+class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
+  REPOSITORY_ROOT = File.expand_path('../..', __dir__)
+  PLANNER = File.read(
+    File.join(REPOSITORY_ROOT, 'prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
+    encoding: 'UTF-8'
+  )
+
+  # Model of the Planner canonical authority resolution rule:
+  # canonical remote or exact pinned ref > local main > current checkout
+  def resolve_authority(canonical_remote:, local_main:, current_checkout:, pinned_ref: nil)
+    if pinned_ref && !pinned_ref.strip.empty?
+      { authority: pinned_ref, source: :pinned_ref, is_canonical: true, description: 'explicitly pinned canonical ref' }
+    elsif canonical_remote && !canonical_remote.strip.empty?
+      { authority: canonical_remote, source: :canonical_remote, is_canonical: true, description: 'canonical remote ref' }
+    elsif local_main && !local_main.strip.empty?
+      { authority: local_main, source: :local_main, is_canonical: false, informational_only: true, description: 'local main (informational only)' }
+    else
+      { authority: current_checkout, source: :current_checkout, is_canonical: false, description: 'current checkout' }
+    end
+  end
+
+  # Model of REUSED_COMPLETION_EVIDENCE_DIFF:
+  def diff_reused_evidence(current_acceptance:, prior_evidence:, tree_matches: true)
+    unless tree_matches
+      return {
+        covered_items: [],
+        missing_items: current_acceptance,
+        rerun: :FULL,
+        rerun_scope: :ALL,
+        reason: :identity_mismatch
+      }
+    end
+
+    covered = current_acceptance.select { |item| prior_evidence.include?(item) }
+    missing = current_acceptance - covered
+
+    if missing.empty?
+      {
+        covered_items: covered,
+        missing_items: [],
+        rerun: :NO,
+        rerun_scope: :NONE
+      }
+    else
+      {
+        covered_items: covered,
+        missing_items: missing,
+        rerun: :MISSING_ONLY,
+        rerun_scope: missing
+      }
+    end
+  end
+
+  # Model of Cross-lane exact authority locator:
+  def resolve_upstream_locator(locator:, status:)
+    if locator && !locator.strip.empty? && status == 'READY'
+      {
+        status: 'READY',
+        locator: locator,
+        proceed: true,
+        broad_discovery_required: false
+      }
+    else
+      {
+        status: 'UPSTREAM_AUTHORITY_NOT_READY',
+        locator: nil,
+        proceed: false,
+        broad_discovery_required: false
+      }
+    end
+  end
+
+  # A1 — stale local main
+  # Given origin/main = NEW, local main = OLD, current checkout = unrelated feature branch:
+  # Planner must identify canonical authority as origin/main = NEW and must not describe local main as canonical.
+  def test_a1_stale_local_main
+    res = resolve_authority(
+      canonical_remote: 'origin/main (commit_new)',
+      local_main: 'main (commit_old)',
+      current_checkout: 'feature/unrelated'
+    )
+    assert_equal 'origin/main (commit_new)', res[:authority]
+    assert res[:is_canonical]
+    refute_equal 'main (commit_old)', res[:authority]
+
+    assert_includes PLANNER, 'canonical remote or exact pinned ref > local main > current checkout'
+    assert_includes PLANNER, 'CANONICAL_REPOSITORY_AUTHORITY'
+    assert_includes PLANNER, 'LOCAL_MAIN'
+    assert_includes PLANNER, '絕不得描述為 canonical authority，亦不得替代 canonical remote authority'
+    assert_includes PLANNER, 'bounded fetch/resolve'
+  end
+
+  # A2 — explicit pinned ref
+  # When Packet explicitly pins an allowed canonical ref/object, resolution remains
+  # bound to that exact authority rather than silently replacing it with current checkout state.
+  def test_a2_pinned_authority
+    res = resolve_authority(
+      canonical_remote: 'origin/master',
+      local_main: 'master',
+      current_checkout: 'agent/unrelated-branch',
+      pinned_ref: 'af981404d11ab5a8f28e1bcb4d9a06a1e0f3d06c'
+    )
+    assert_equal 'af981404d11ab5a8f28e1bcb4d9a06a1e0f3d06c', res[:authority]
+    assert_equal :pinned_ref, res[:source]
+    assert res[:is_canonical]
+    refute_equal 'agent/unrelated-branch', res[:authority]
+
+    assert_includes PLANNER, '當 Packet 明確 pin 住 allowed canonical ref/object 時，解析必須維持綁定於該 exact authority'
+    assert_includes PLANNER, '不得靜默替換為 current checkout 狀態'
+  end
+
+  # B1 — evidence fully covered
+  # Current acceptance: A / B / C
+  # Prior exact-tree evidence: A / B / C
+  # Expected: COVERED_ITEMS: A,B,C; MISSING_ITEMS: NONE; RERUN: NO
+  def test_b1_all_covered_reuse
+    res = diff_reused_evidence(
+      current_acceptance: %w[A B C],
+      prior_evidence: %w[A B C],
+      tree_matches: true
+    )
+    assert_equal %w[A B C], res[:covered_items]
+    assert_empty res[:missing_items]
+    assert_equal :NO, res[:rerun]
+    assert_equal :NONE, res[:rerun_scope]
+
+    assert_includes PLANNER, 'REUSED_COMPLETION_EVIDENCE_DIFF'
+    assert_includes PLANNER, 'COVERED_ITEMS'
+    assert_includes PLANNER, 'MISSING_ITEMS'
+    assert_includes PLANNER, '若 MISSING_ITEMS = NONE：'
+    assert_includes PLANNER, 'RERUN: NO'
+  end
+
+  # B2 — one new acceptance item
+  # Current acceptance: A / B / C / D
+  # Prior exact-tree evidence: A / B / C
+  # Expected: COVERED_ITEMS: A,B,C; MISSING_ITEMS: D; RERUN_SCOPE: D_ONLY
+  def test_b2_missing_item_only
+    res = diff_reused_evidence(
+      current_acceptance: %w[A B C D],
+      prior_evidence: %w[A B C],
+      tree_matches: true
+    )
+    assert_equal %w[A B C], res[:covered_items]
+    assert_equal %w[D], res[:missing_items]
+    assert_equal :MISSING_ONLY, res[:rerun]
+    assert_equal %w[D], res[:rerun_scope]
+
+    assert_includes PLANNER, '若 MISSING_ITEMS != NONE：'
+    assert_includes PLANNER, 'RERUN_SCOPE: <MISSING_ITEMS_ONLY>'
+  end
+
+  # B3 — identity mismatch
+  # Prior evidence from a different load-bearing tree/artifact must not be reused
+  # as covered merely because labels match.
+  def test_b3_identity_mismatch_reuse_prevented
+    res = diff_reused_evidence(
+      current_acceptance: %w[A B C],
+      prior_evidence: %w[A B C],
+      tree_matches: false
+    )
+    assert_empty res[:covered_items]
+    assert_equal %w[A B C], res[:missing_items]
+    assert_equal :identity_mismatch, res[:reason]
+
+    assert_includes PLANNER, 'Prior evidence 來自不同 load-bearing tree/artifact 時（identity mismatch），不得僅因 label 相符就當作 covered 重用。'
+  end
+
+  # C1 — cross-lane locator present
+  # Producer supplies exact locator and READY status.
+  # Consumer proceeds using that locator without broad discovery.
+  def test_c1_cross_lane_ready
+    res = resolve_upstream_locator(
+      locator: 'artifacts/lane-4/upstream_result.json',
+      status: 'READY'
+    )
+    assert_equal 'READY', res[:status]
+    assert_equal 'artifacts/lane-4/upstream_result.json', res[:locator]
+    assert res[:proceed]
+    refute res[:broad_discovery_required]
+
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_LOCATOR'
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_STATUS'
+    assert_includes PLANNER, 'READY | NOT_READY'
+    assert_includes PLANNER, 'consumer 直接依該 locator 存取，不進行廣泛搜尋（broad discovery）'
+  end
+
+  # C2 — cross-lane locator missing
+  # Expected: UPSTREAM_AUTHORITY_NOT_READY and no workspace-wide/worktree-wide reconstruction search.
+  def test_c2_upstream_authority_not_ready
+    res_missing = resolve_upstream_locator(locator: nil, status: 'READY')
+    assert_equal 'UPSTREAM_AUTHORITY_NOT_READY', res_missing[:status]
+    refute res_missing[:proceed]
+    refute res_missing[:broad_discovery_required]
+
+    res_not_ready = resolve_upstream_locator(locator: 'artifacts/lane-4/upstream.json', status: 'NOT_READY')
+    assert_equal 'UPSTREAM_AUTHORITY_NOT_READY', res_not_ready[:status]
+    refute res_not_ready[:proceed]
+    refute res_not_ready[:broad_discovery_required]
+
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_NOT_READY'
+    assert_includes PLANNER, 'Consumer 絕不得藉由廣泛掃描以下路徑自行重構（reconstruct）另一個 lane 的 deliverable'
+    assert_includes PLANNER, 'all worktrees；'
+    assert_includes PLANNER, 'all branches；'
+    assert_includes PLANNER, 'all `.task-data` roots；'
+    assert_includes PLANNER, 'historical scratch directories。'
+  end
+
+  def test_regression_existing_judge_depth_preserved
+    assert_includes PLANNER, 'JUDGE_DEPTH 不由 Planner 自行猜測。以本輪 acceptance criteria 對照 /fable-method'
+    assert_includes PLANNER, 'references/judge-handoff.md'
+    assert_includes PLANNER, 'JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES'
+  end
+
+  def test_regression_existing_publication_classifier_preserved
+    assert_includes PLANNER, 'PR_PUBLICATION_STATUS: NOT_APPLICABLE | NOT_CREATED | DRAFT_OPEN | READY_OPEN | MERGED | BLOCKED'
+    assert_includes PLANNER, 'FULL_PR_LIFECYCLE_CLOSED: YES | NO'
+  end
+
+  def test_regression_existing_temp_isolation_preserved
+    assert_includes PLANNER, '一般任務不建立未知'
+    assert_includes PLANNER, 'scratch script、tee log、generic /tmp output 或 evidence package'
+  end
+
+  def test_regression_planner_cto_signal_preserved
+    assert_includes PLANNER, 'CTO_REVIEW_NEEDED: YES | NO'
+    assert_includes PLANNER, 'CTO_REVIEW_REASON: <ONE_LOAD_BEARING_REASON | NONE>'
+    assert_includes PLANNER, 'CTO_REVIEW_SCOPE: <MINIMUM_TECHNICAL_DECISION_SCOPE | NOT_APPLICABLE>'
+    assert_includes PLANNER, 'PLANNER_NEXT_ROLE: CTO | WORKER | PLANNER'
+  end
+
+  def test_regression_worktree_reuse_and_project_path_preserved
+    assert_includes PLANNER, '為下一個 Worker 指定一個確定的 repo/worktree path 與 mode。'
+    assert_includes PLANNER, 'WORKTREE_MODE_SELECTED: YES'
+  end
+
+  def test_regression_no_second_governance_authority_created
+    refute_includes PLANNER, 'governance framework'
+    refute_includes PLANNER, 'evidence registry'
+    refute_includes PLANNER, 'cross-lane registry'
+    refute_includes PLANNER, 'path registry'
+    assert_includes PLANNER, 'Do not create conditional profiles, new governance files, unused artifacts or a'
+    assert_includes PLANNER, 'second authority layer.'
+  end
+end
