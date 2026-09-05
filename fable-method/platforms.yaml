@@ -14,6 +14,7 @@ shared:
     - fable-method/shared/references/domains/legal-compliance.md
     - fable-method/shared/references/domains/marketing.md
     - fable-method/shared/references/domains/research.md
+    - fable-method/shared/references/diff-coverage.md
     - fable-method/shared/references/examples.md
     - fable-method/shared/references/failure-modes.md
     - fable-method/shared/references/flowcharts.md

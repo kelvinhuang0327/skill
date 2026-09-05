@@ -420,14 +420,14 @@ Load only the directly relevant reference:
   family-routing ambiguity;
 - [examples](references/examples.md) for a task shape, Packet fast path, or
   report format;
-- [failure modes](references/failure-modes.md) for audit, retry diagnosis, or
-  unclear verification failure;
+- [failure modes](references/failure-modes.md) for audit, retry diagnosis, or unclear verification failure;
 - [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, or detailed authority checks;
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [test falsifiability](references/test-falsifiability.md) before citing newly-added test/check coverage as completion evidence;
 - [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
 - [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;
+- [diff coverage](references/diff-coverage.md) for on-demand changed-line execution-adequacy measurement against an already-configured coverage run;
 - [reporting](references/reporting.md) for compact outcome-first fields and
   lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain:
