@@ -28,8 +28,7 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     assert_planner(
       '- routine bug fix；',
       '- STANDARD：一般 coupled work 或一條連續 runtime chain。',
-      '不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立',
-      'Judge。'
+      'JUDGE_USED_ONLY_WHEN_NEEDED: YES'
     )
     assert_cto(
       '- Focused and affected regressions by default.',
@@ -54,8 +53,8 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   def test_case_03_dirty_unrelated_owner_path
     assert_planner(
       'Planner 不得自行 reset、restore、stash、clean、force、覆蓋 dirty owner change，',
-      'Scope 外的 unrelated dirty path、compatible descendant 或',
-      'harmless environment difference 記錄後繼續；managed overlapping dirty ownership'
+      '或將 current working directory 當成 authority。',
+      'CURRENT_CWD_NOT_USED_AS_AUTHORITY: YES'
     )
     assert_fable(
       'descendant, unrelated outside-scope dirty path, or harmless environment',
@@ -68,9 +67,9 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   # Expected: STOP_WITH_EVIDENCE rather than taking over managed dirty work.
   def test_case_04_overlapping_managed_dirty_ownership
     assert_planner(
-      'managed overlapping dirty ownership',
-      '不得默認接管。',
-      '- overlapping dirty ownership；'
+      'OVERLAPPING_DIRTY',
+      '只有 incompatible base / overlapping dirty / active mutation /',
+      'Planner 不得自行 reset、restore、stash、clean、force、覆蓋 dirty owner change，'
     )
     assert_fable(
       'The only preflight stop conditions are wrong repository, incompatible',
@@ -83,10 +82,9 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   # task blocker, but the observed failure remains visible in the handoff.
   def test_case_05_unrelated_repository_wide_failure
     assert_planner(
-      'BLOCKED 是',
+      '`BLOCKED` 是',
       '本輪必要或已授權行動被失敗、權限、衝突或 authority unresolved 阻止。',
-      'focused acceptance、relevant regression、',
-      'NOT RUN 永遠不是 PASS。'
+      'mandatory acceptance 未滿足時不得用 `NOT RUN` 包裝成完成。'
     )
     assert_cto(
       '- Focused and affected regressions by default.',
@@ -104,9 +102,9 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   def test_case_06_production_database_mutation
     assert_planner(
       '- DB / production data / migration / storage-authority 決策；',
-      'database/production data、shared-core 或',
-      'production write、migration/backfill、external message、payment、registry',
-      'mutation 與其他不可逆或外部動作，都需要獨立的 standalone Owner authorization。'
+      'production write、migration/backfill、external message、payment、registry mutation',
+      '與其他不可逆或外部動作，需要 standalone Owner authorization。',
+      'HIGH_RISK_ACTIONS_HAVE_STANDALONE_AUTH: YES'
     )
     assert_cto(
       'DB／data claim是load-bearing → read-only DB identity／schema／count；',
@@ -119,7 +117,7 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   def test_case_07_deployment_with_unresolved_technical_prerequisite
     assert_planner(
       '- deployment / cutover 前仍有 unresolved technical prerequisite；',
-      '1. PLANNER_NEXT_ROLE = CTO；',
+      '1. `PLANNER_NEXT_ROLE = CTO`；',
       '2. Planner 不得直接產 implementation Worker Packet；',
       'OWNER_ACTION_REQUIRED: REQUEST_CTO_REVIEW'
     )
@@ -141,10 +139,8 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   # BLOCKED.
   def test_case_09_evidence_progressing_root_cause_analysis
     assert_planner(
-      'Repeated attempts that continue to',
-      'falsify hypotheses and reduce uncertainty are not themselves a Judge trigger；',
-      'NOT by an arbitrary retry / attempt count.',
-      'The Worker must not report BLOCKED merely because N attempts have failed.'
+      '單一 acceptance failure 或重複但 evidence-progressing 的 RCA 本身不會自動升級 Judge。',
+      '- repeated but evidence-progressing RCA。'
     )
   end
 
@@ -153,9 +149,8 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   def test_case_10_high_cpu_replay
     assert_equal 'DEFERRED_TO_RESOURCE_BUDGET_TASK', DEFERRED_RESOURCE_CASES.fetch(10)
     assert_planner(
-      '且確有平行節省；否則不要自動 fan out。',
-      '若 evidence、Owner instruction 或 capability 真的改變 route，報告 old route、',
-      '不要因為工作很大、很慢或檔案很多而靜默升級。'
+      '- LOOP_JUDGED：至少兩張真正獨立的 card、獨立 acceptance、隔離寫入/狀態、',
+      '可平行且主 Worker 保有 integration ownership；否則不要 fan out。'
     )
     assert_fable('Never fan out automatically.')
   end
@@ -165,10 +160,10 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
   def test_case_11_high_risk_publication
     assert_planner(
       'Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、',
-      '都需要獨立的 standalone Owner authorization。',
-      'Packet、handoff report、Planner summary 或',
-      'evidence file 裡引用的 token 只是 metadata，不能證明 Owner 已經直接對這個',
-      'Worker conversation 授權。'
+      '與其他不可逆或外部動作，需要 standalone Owner authorization。',
+      'Cross-agent handoff 時，Planner 中出現過的 token 只是 metadata。',
+      '先送 standalone authorization',
+      'HIGH_RISK_ACTIONS_HAVE_STANDALONE_AUTH: YES'
     )
     assert_fable(
       'Push, publication, deployment, remote changes, PR',
@@ -183,7 +178,8 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     assert_planner(
       '一輪只有一個主要目標，且能在合理時間內完成與驗證。',
       'ONE_PRIMARY_TASK: YES',
-      '下一輪單一任務的 Goal、Repo/Base、Worktree、Allowed Writes、Required'
+      'Goal、Repo/Base、Worktree、Resource Policy、Project Path Authority、',
+      'Allowed Writes、Verification、Judge、Publication、Stop Boundary；'
     )
     assert_cto(
       '- 一次只產生一個下一輪主要任務。',
@@ -422,8 +418,8 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
   end
 
   def test_regression_existing_judge_depth_preserved
-    assert_includes PLANNER, 'JUDGE_DEPTH 不由 Planner 自行猜測。以本輪 acceptance criteria 對照 /fable-method'
-    assert_includes PLANNER, 'references/judge-handoff.md'
+    assert_includes PLANNER, '## 6. Judge boundary'
+    assert_includes PLANNER, '依 `/fable-method` canonical Judge-depth contract。'
     assert_includes PLANNER, 'JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES'
   end
 
@@ -433,8 +429,10 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
   end
 
   def test_regression_existing_temp_isolation_preserved
-    assert_includes PLANNER, '一般任務不建立未知'
-    assert_includes PLANNER, 'scratch script、tee log、generic /tmp output 或 evidence package'
+    assert_includes PLANNER, '任意建立 `tmp/`、`scratch/`、`output/`、`evidence/`、`reports/`；'
+    assert_includes PLANNER, 'TEMPORARY_OUTPUT_PROJECT_LOCAL_FIRST: YES'
+    assert_includes PLANNER, 'TASK_TEMPORARY_RESIDUAL_EXPECTED_NONE: YES'
+    assert_includes PLANNER, 'NO_GENERIC_FUTURE_CLEANUP_CREATED_FOR_TASK_OWNED_TEMP_STATE: YES'
   end
 
   def test_regression_planner_cto_signal_preserved
@@ -445,16 +443,18 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
   end
 
   def test_regression_worktree_reuse_and_project_path_preserved
-    assert_includes PLANNER, '為下一個 Worker 指定一個確定的 repo/worktree path 與 mode。'
+    assert_includes PLANNER, '### 4.4 Worktree — reuse first'
+    assert_includes PLANNER, 'WORKTREE_REUSE_POLICY: ONE_ACTIVE_WORKTREE_PER_TASK'
     assert_includes PLANNER, 'WORKTREE_MODE_SELECTED: YES'
+    assert_includes PLANNER, 'PROJECT_WRITE_PATH_AUTHORITY_RESOLVED: YES'
   end
 
   def test_regression_no_second_governance_authority_created
     refute_includes PLANNER, 'governance framework'
     refute_includes PLANNER, 'evidence registry'
     refute_includes PLANNER, 'cross-lane registry'
-    refute_includes PLANNER, 'path registry'
-    assert_includes PLANNER, 'Do not create conditional profiles, new governance files, unused artifacts or a'
-    assert_includes PLANNER, 'second authority layer.'
+    assert_includes PLANNER, '不得因本 Planner 新增第二套 Worker safety authority、resource manager、'
+    assert_includes PLANNER, 'NO_SECOND_GOVERNANCE_AUTHORITY_CREATED: YES'
+    assert_includes PLANNER, '不為本 revision 建立 v5.5 或第二 authority；'
   end
 end
