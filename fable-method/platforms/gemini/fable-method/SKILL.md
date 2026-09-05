@@ -56,8 +56,7 @@ Judge-trigger rules unchanged.
 
 ## First output and task class
 
-Before any external tool call, repository read, or filesystem inspection, emit
-exactly one routing block:
+Before any external tool call, repository read, or filesystem inspection, emit exactly one routing block:
 
 ```text
 TASK_CLASS: STATE_CHANGING_IMPLEMENTATION | READ_ONLY_COMPLETION_REVIEW | PLANNING_ONLY | PURE_QA
@@ -429,6 +428,7 @@ Load only the directly relevant reference:
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [test falsifiability](references/test-falsifiability.md) before citing newly-added test/check coverage as completion evidence;
 - [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
+- [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;
 - [reporting](references/reporting.md) for compact outcome-first fields and
   lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain:
