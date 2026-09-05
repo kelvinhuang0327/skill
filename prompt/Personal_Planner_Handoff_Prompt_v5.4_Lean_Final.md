@@ -230,6 +230,45 @@ cwd 代替 authority。Scope 外的 unrelated dirty path、compatible descendant
 harmless environment difference 記錄後繼續；managed overlapping dirty ownership
 不得默認接管。
 
+### 4.5 Canonical remote and pinned authority precedence
+
+當 repository authority 為 remote 或 pinned 時，authority 解析優先順序為：
+
+~~~text
+canonical remote or exact pinned ref > local main > current checkout
+~~~
+
+- CANONICAL_REPOSITORY_AUTHORITY：explicitly pinned canonical ref 或 canonical remote ref（例如 `origin/master`、`origin/main`）。
+- LOCAL_MAIN：當與 canonical authority 不同時，僅具 informational 參考性質，絕不得描述為 canonical authority，亦不得替代 canonical remote authority。
+- CURRENT_CHECKOUT：當前 checkout / branch 狀態不得默認替代 pinned 或 remote authority。
+
+當 Packet 明確 pin 住 allowed canonical ref/object 時，解析必須維持綁定於該 exact authority，不得靜默替換為 current checkout 狀態。
+解析時只需對 task 的 canonical ref 進行 bounded fetch/resolve，不得要求 repo-wide branch audit。
+
+### 4.6 Cross-lane exact authority locator
+
+當下一個 task 消費另一個 lane 的 deliverable（cross-lane producer→consumer dependency）時，handoff 必須攜帶明確的 producer→consumer 契約：
+
+~~~text
+UPSTREAM_AUTHORITY_LOCATOR: <exact artifact / path / ref / sealed root>
+UPSTREAM_AUTHORITY_STATUS: READY | NOT_READY
+~~~
+
+- 若 producer 提供 exact locator 且 UPSTREAM_AUTHORITY_STATUS 為 READY：consumer 直接依該 locator 存取，不進行廣泛搜尋（broad discovery）。
+- 若 locator 缺失或 producer 尚未標記完成（NOT_READY）：consumer 必須立即停止或 defer，輸出：
+
+~~~text
+UPSTREAM_AUTHORITY_NOT_READY
+~~~
+
+Consumer 絕不得藉由廣泛掃描以下路徑自行重構（reconstruct）另一個 lane 的 deliverable：
+- all worktrees；
+- all branches；
+- all `.task-data` roots；
+- historical scratch directories。
+
+此規則僅適用於真實 cross-lane producer→consumer 依賴關係，不得施加於同一任務內的一般 repository source lookup。
+
 ## 5. Packet-specific gates
 
 ### 5.1 Phase 0
@@ -316,6 +355,32 @@ repository/toolchain output 必須能在 final handoff 中分類。未授權 run
 Packet 指定 repository 中已確認存在的 focused acceptance、relevant regression、
 lint/typecheck/build、git diff --check、changed-path review，以及需要時的
 exact-head CI。不要發明 command、fixture 或 final count。NOT RUN 永遠不是 PASS。
+
+REUSED_COMPLETION_EVIDENCE_DIFF：
+
+在決定是否重跑 verification 前，Planner 與 Worker 依 exact-tree / artifact 進行 acceptance-to-evidence 差異比對：
+
+1. enumerate current explicit acceptance items；
+2. map prior exact-tree/artifact test/command evidence to those items；
+3. classify：
+   - COVERED_ITEMS
+   - MISSING_ITEMS
+
+若 MISSING_ITEMS = NONE：
+→ reuse existing evidence；
+→ do not rerun merely for process completeness（RERUN: NO）。
+
+若 MISSING_ITEMS != NONE：
+→ run only the missing checks needed to close those items（RERUN_SCOPE: <MISSING_ITEMS_ONLY>）。
+
+Do not：
+- reopen already-covered acceptance；
+- automatically run the full suite；
+- turn the comparison into a new persistent evidence package；
+- require historical metadata not needed to prove coverage。
+
+Prior evidence 來自不同 load-bearing tree/artifact 時（identity mismatch），不得僅因 label 相符就當作 covered 重用。
+此為 planning / verification selection 邏輯，非新的 Judge gate。
 
 ### 5.5 Lifecycle closure bundle（僅限 Git/PR/worktree/artifact 收尾任務）
 
@@ -596,7 +661,11 @@ Judge pending 時 integration、push、publish、merge 或 cleanup。
 移植行為的 legacy code migration，同樣在 Task-specific contract 後插入 §5.6
 的 bundle 欄位與 provenance override，並把 §5.6 的 stop values 併入下方
 Stop conditions。若任務明確符合 Deferred Queue，僅插入 §5.7 的 queue-specific
-values；不得複製 runtime/reconciliation mechanics。若任務需要 standalone
+values；不得複製 runtime/reconciliation mechanics。若任務消費另一個
+lane 的 deliverable，在 Task-specific contract 加入 §4.6 的
+UPSTREAM_AUTHORITY_LOCATOR 與 UPSTREAM_AUTHORITY_STATUS 欄位，並把
+UPSTREAM_AUTHORITY_NOT_READY 納入 Stop conditions；若 locator 缺失或 NOT_READY，
+consumer 立即停止，不得 broad scan。若任務需要 standalone
 authorization，且下一個 Worker 不保證與
 本輪同一個 conversation，在 Commit/publication 區塊填入 §4.3 的
 AUTHORIZATION_HANDOFF_MODE 等欄位，並依 §4.3 準備兩則獨立訊息；下一個 Worker
@@ -678,7 +747,7 @@ This field does not authorize a commit.
 
 ## Stop conditions
 <WRONG_REPO | INCOMPATIBLE_BASE | OVERLAPPING_DIRTY | ACTIVE_MUTATION |
- MISSING_CAPABILITY | EXPLICIT_SAFETY_RESTRICTION>
+ MISSING_CAPABILITY | EXPLICIT_SAFETY_RESTRICTION | UPSTREAM_AUTHORITY_NOT_READY>
 
 ## Handoff
 Return actual state, changed paths, command exit statuses/raw summaries, runtime
@@ -786,6 +855,9 @@ LEGACY_MIGRATION_BUNDLE_APPLIED_IF_APPLICABLE: YES
 CTO_NEED_ASSESSED_BEFORE_TASK_SYNTHESIS: YES
 CTO_REQUIRED_TASK_NOT_SENT_DIRECTLY_TO_WORKER: YES
 CTO_TEMPLATE_NOT_MISTAKEN_FOR_CTO_CONCLUSION: YES
+CANONICAL_REMOTE_AUTHORITY_PRECEDENCE_RESPECTED: YES
+REUSED_EVIDENCE_DIFF_APPLIED_IF_EXACT_TREE: YES
+CROSS_LANE_LOCATOR_PRESENT_IF_DEPENDENT: YES
 ~~~
 
 Preserve the existing version convention: v5.3.3 remains historical and immutable,
