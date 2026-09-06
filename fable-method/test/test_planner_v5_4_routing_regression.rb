@@ -285,6 +285,56 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
     end
   end
 
+  # Model of Planner-side input completeness validator:
+  def validate_packet_input_completeness(required_inputs: [], provided_inputs: {})
+    if required_inputs.nil? || required_inputs.empty?
+      return {
+        input_completeness_check: 'PASS',
+        consumer_launch_ready: 'YES',
+        missing_inputs: [],
+        missing_input: nil,
+        unburdened: true
+      }
+    end
+
+    missing = []
+    required_inputs.each do |input_name|
+      provided = provided_inputs[input_name]
+      if provided.nil?
+        missing << input_name
+        next
+      end
+
+      status = provided[:status] || provided['STATUS']
+      locator = provided[:locator] || provided['LOCATOR']
+
+      is_ready = (status == 'READY')
+      has_exact_locator = locator && !locator.to_s.strip.empty? && locator != 'MISSING'
+
+      unless is_ready && has_exact_locator
+        missing << input_name
+      end
+    end
+
+    if missing.empty?
+      {
+        input_completeness_check: 'PASS',
+        consumer_launch_ready: 'YES',
+        missing_inputs: [],
+        missing_input: nil,
+        unburdened: false
+      }
+    else
+      {
+        input_completeness_check: 'FAIL',
+        consumer_launch_ready: 'NO',
+        missing_inputs: missing,
+        missing_input: missing.first,
+        unburdened: false
+      }
+    end
+  end
+
   # A1 — stale local main
   # Given origin/main = NEW, local main = OLD, current checkout = unrelated feature branch:
   # Planner must identify canonical authority as origin/main = NEW and must not describe local main as canonical.
@@ -419,6 +469,91 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
     assert_includes PLANNER, 'all branches；'
     assert_includes PLANNER, 'all `.task-data` roots；'
     assert_includes PLANNER, 'historical scratch directories。'
+  end
+
+  # C3 — missing required input blocks consumer launch (Lane6 regression scenario)
+  # Task requires RECENT, K10, K2/K3/K5.
+  # Packet provides RECENT READY + locator, K10 READY + locator, K2/K3/K5 missing.
+  # Expected: INPUT_COMPLETENESS_CHECK: FAIL, CONSUMER_LAUNCH_READY: NO, MISSING_INPUT: K2_K3_K5_DRAW_LEVEL_EVIDENCE.
+  def test_c3_missing_required_input_blocks_launch
+    required = ['RECENT', 'K10', 'K2_K3_K5_DRAW_LEVEL_EVIDENCE']
+    provided = {
+      'RECENT' => { status: 'READY', locator: 'artifacts/lane6/recent_draws.json' },
+      'K10' => { status: 'READY', locator: 'artifacts/lane6/k10_evidence.json' }
+    }
+
+    res = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided)
+    assert_equal 'FAIL', res[:input_completeness_check]
+    assert_equal 'NO', res[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res[:missing_input]
+
+    # Also test when K2/K3/K5 is present in provided but NOT_READY or locator is MISSING
+    provided_not_ready = provided.merge('K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'NOT_READY', locator: 'artifacts/lane6/k2_k3_k5.json' })
+    res_nr = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided_not_ready)
+    assert_equal 'FAIL', res_nr[:input_completeness_check]
+    assert_equal 'NO', res_nr[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res_nr[:missing_input]
+
+    provided_unknown = provided.merge('K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'UNKNOWN', locator: 'artifacts/lane6/k2_k3_k5.json' })
+    res_unk = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided_unknown)
+    assert_equal 'FAIL', res_unk[:input_completeness_check]
+    assert_equal 'NO', res_unk[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res_unk[:missing_input]
+
+    provided_missing_loc = provided.merge('K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'READY', locator: 'MISSING' })
+    res_ml = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided_missing_loc)
+    assert_equal 'FAIL', res_ml[:input_completeness_check]
+    assert_equal 'NO', res_ml[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res_ml[:missing_input]
+
+    assert_includes PLANNER, 'REQUIRED_INPUTS:'
+    assert_includes PLANNER, 'STATUS:'
+    assert_includes PLANNER, 'READY | NOT_READY | UNKNOWN'
+    assert_includes PLANNER, 'LOCATOR:'
+    assert_includes PLANNER, '<exact | MISSING>'
+    assert_includes PLANNER, 'INPUT_COMPLETENESS_CHECK:'
+    assert_includes PLANNER, 'PASS | FAIL'
+    assert_includes PLANNER, 'CONSUMER_LAUNCH_READY:'
+    assert_includes PLANNER, 'YES | NO'
+    assert_includes PLANNER, 'MISSING_INPUT:'
+    assert_includes PLANNER, 'do not synthesize an executable consumer launch Packet as ready-to-run'
+  end
+
+  # C4 — all required inputs ready with exact locators allows consumer launch
+  # Task requires RECENT, K10, K2/K3/K5. All three READY + exact locator.
+  # Expected: INPUT_COMPLETENESS_CHECK: PASS, CONSUMER_LAUNCH_READY: YES, MISSING_INPUT: nil.
+  def test_c4_all_ready_inputs_allow_launch
+    required = ['RECENT', 'K10', 'K2_K3_K5_DRAW_LEVEL_EVIDENCE']
+    provided = {
+      'RECENT' => { status: 'READY', locator: 'artifacts/lane6/recent_draws.json' },
+      'K10' => { status: 'READY', locator: 'artifacts/lane6/k10_evidence.json' },
+      'K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'READY', locator: 'artifacts/lane6/k2_k3_k5_draw_level_evidence.json' }
+    }
+
+    res = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided)
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_empty res[:missing_inputs]
+  end
+
+  # C5 — tasks without upstream dependencies remain unburdened
+  # No cross-lane dependency -> no required inputs -> unburdened launch PASS.
+  def test_c5_no_upstream_dependencies_unburdened
+    res_empty = validate_packet_input_completeness(required_inputs: [], provided_inputs: {})
+    assert_equal 'PASS', res_empty[:input_completeness_check]
+    assert_equal 'YES', res_empty[:consumer_launch_ready]
+    assert res_empty[:unburdened]
+    assert_nil res_empty[:missing_input]
+
+    res_nil = validate_packet_input_completeness(required_inputs: nil, provided_inputs: {})
+    assert_equal 'PASS', res_nil[:input_completeness_check]
+    assert_equal 'YES', res_nil[:consumer_launch_ready]
+    assert res_nil[:unburdened]
+
+    assert_includes PLANNER, '無 cross-lane dependency 的一般任務不要求 upstream inputs，維持 unburdened'
+    assert_includes PLANNER, '依賴清單必須直接來自 actual task steps / task-specific authority'
+    assert_includes PLANNER, 'INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES'
   end
 
   def test_regression_existing_judge_depth_preserved
