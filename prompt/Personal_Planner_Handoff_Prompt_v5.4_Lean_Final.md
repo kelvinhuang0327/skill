@@ -269,6 +269,51 @@ Consumer 絕不得藉由廣泛掃描以下路徑自行重構（reconstruct）另
 
 此規則僅適用於真實 cross-lane producer→consumer 依賴關係，不得施加於同一任務內的一般 repository source lookup。
 
+### 4.7 Planner-side input completeness validation before consumer launch
+
+在啟動 consumer Worker Packet 前（BEFORE consumer launch），若 task 具有明確的 upstream dependencies（cross-lane producer→consumer dependency），Planner 必須衍生並驗證所有 load-bearing required inputs：
+
+~~~text
+REQUIRED_INPUTS:
+* <input_1>
+* <input_2>
+...
+~~~
+
+針對每一個 required input：
+
+~~~text
+STATUS:
+READY | NOT_READY | UNKNOWN
+
+LOCATOR:
+<exact | MISSING>
+~~~
+
+接著執行輸入完整性檢查：
+
+~~~text
+INPUT_COMPLETENESS_CHECK:
+PASS | FAIL
+
+CONSUMER_LAUNCH_READY:
+YES | NO
+~~~
+
+- **PASS**：只有當每一個 load-bearing required input 同時具備 `STATUS = READY` 且 `LOCATOR = <exact>` 時，`INPUT_COMPLETENESS_CHECK` 為 `PASS`，`CONSUMER_LAUNCH_READY: YES`。Planner 方可將 consumer launch Packet 合成為 ready-to-run。
+- **FAIL**：若有任一 required input 為 `NOT_READY`、`UNKNOWN` 或 `MISSING`，`INPUT_COMPLETENESS_CHECK` 為 `FAIL`，`CONSUMER_LAUNCH_READY: NO`。Planner 絕不得將 executable consumer launch Packet 合成為 ready-to-run（do not synthesize an executable consumer launch Packet as ready-to-run），而必須停止並明確回傳 exact missing input：
+
+~~~text
+MISSING_INPUT:
+<EXACT_MISSING_INPUT>
+~~~
+
+重要邊界（Important boundary）：
+- 無 cross-lane dependency 的一般任務不要求 upstream inputs，維持 unburdened；
+- 依賴清單必須直接來自 actual task steps / task-specific authority，不得透過推測掃描（speculative scanning）；
+- 嚴禁建立 global artifact registry、dependency registry 或 repo-wide discovery 機制；
+- 既有 cross-lane 存取規則維持不變：producer READY + exact locator 允許 consumer 讀取；missing / NOT_READY 則維持 `UPSTREAM_AUTHORITY_NOT_READY`，且 consumer 廣泛搜尋（broad discovery）維持嚴格禁止。
+
 ## 5. Packet-specific gates
 
 ### 5.1 Phase 0
@@ -858,6 +903,7 @@ CTO_TEMPLATE_NOT_MISTAKEN_FOR_CTO_CONCLUSION: YES
 CANONICAL_REMOTE_AUTHORITY_PRECEDENCE_RESPECTED: YES
 REUSED_EVIDENCE_DIFF_APPLIED_IF_EXACT_TREE: YES
 CROSS_LANE_LOCATOR_PRESENT_IF_DEPENDENT: YES
+INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES
 ~~~
 
 Preserve the existing version convention: v5.3.3 remains historical and immutable,
