@@ -309,7 +309,8 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
       locator = provided[:locator] || provided['LOCATOR']
 
       is_ready = (status == 'READY')
-      has_exact_locator = locator && !locator.to_s.strip.empty? && locator != 'MISSING'
+      is_placeholder = locator && (locator.to_s.strip =~ /\A<.*>\z/ || locator.to_s.strip =~ /placeholder/i)
+      has_exact_locator = locator && !locator.to_s.strip.empty? && locator != 'MISSING' && !is_placeholder
 
       unless is_ready && has_exact_locator
         missing << input_name
@@ -333,6 +334,79 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
         unburdened: false
       }
     end
+  end
+
+  # Model of authority typing access evaluation:
+  def evaluate_authority_access(authority_type:, access_surface:)
+    if authority_type == :run_artifact && access_surface == :git
+      {
+        allowed: false,
+        status: 'FORBIDDEN',
+        reason: 'Worker searching Git for runtime artifact is forbidden by authority typing contract'
+      }
+    elsif authority_type == :source && access_surface == :git
+      {
+        allowed: true,
+        status: 'ALLOWED',
+        reason: 'Git source authority resolved via Git'
+      }
+    elsif authority_type == :run_artifact && access_surface == :filesystem
+      {
+        allowed: true,
+        status: 'ALLOWED',
+        reason: 'Run artifact authority resolved via literal locator'
+      }
+    else
+      {
+        allowed: false,
+        status: 'UNKNOWN',
+        reason: 'Unrecognized authority access'
+      }
+    end
+  end
+
+  # Model of typed authority resolution for cross-lane tasks:
+  def resolve_typed_task_authority(
+    canonical_source_authority: nil,
+    run_artifact_authority_locator: nil,
+    upstream_authority_status: 'READY',
+    required_types: [:source, :run_artifact]
+  )
+    required_types = Array(required_types)
+    provided = {}
+    required_inputs = []
+
+    if required_types.include?(:source)
+      required_inputs << 'CANONICAL_SOURCE_AUTHORITY'
+      if canonical_source_authority
+        provided['CANONICAL_SOURCE_AUTHORITY'] = {
+          status: 'READY',
+          locator: canonical_source_authority
+        }
+      end
+    end
+
+    if required_types.include?(:run_artifact)
+      required_inputs << 'RUN_ARTIFACT_AUTHORITY_LOCATOR'
+      if run_artifact_authority_locator
+        provided['RUN_ARTIFACT_AUTHORITY_LOCATOR'] = {
+          status: upstream_authority_status,
+          locator: run_artifact_authority_locator
+        }
+      end
+    end
+
+    completeness = validate_packet_input_completeness(
+      required_inputs: required_inputs,
+      provided_inputs: provided
+    )
+
+    completeness.merge(
+      canonical_source_authority: canonical_source_authority,
+      run_artifact_authority_locator: run_artifact_authority_locator,
+      upstream_authority_status: upstream_authority_status,
+      required_types: required_types
+    )
   end
 
   # A1 — stale local main
@@ -554,6 +628,108 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
     assert_includes PLANNER, '無 cross-lane dependency 的一般任務不要求 upstream inputs，維持 unburdened'
     assert_includes PLANNER, '依賴清單必須直接來自 actual task steps / task-specific authority'
     assert_includes PLANNER, 'INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES'
+  end
+
+  # D1 — source ref exact + run artifact locator exact -> PASS (Case A)
+  def test_d1_source_and_run_artifact_exact_pass
+    res = resolve_typed_task_authority(
+      canonical_source_authority: 'origin/master',
+      run_artifact_authority_locator: 'artifacts/lane6/k10_evidence.json',
+      upstream_authority_status: 'READY',
+      required_types: [:source, :run_artifact]
+    )
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_empty res[:missing_inputs]
+
+    assert_includes PLANNER, 'CANONICAL_SOURCE_AUTHORITY:'
+    assert_includes PLANNER, '<exact Git/ref authority>'
+    assert_includes PLANNER, 'RUN_ARTIFACT_AUTHORITY_LOCATOR:'
+    assert_includes PLANNER, '<exact literal artifact locator>'
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_STATUS:'
+    assert_includes PLANNER, 'READY | NOT_READY'
+    assert_includes PLANNER, 'Do not use the generic phrase "canonical authority" where source vs runtime'
+    assert_includes PLANNER, 'AUTHORITY_TYPING_DISTINGUISHED_IF_DEPENDENT: YES'
+  end
+
+  # D2 — source ref exact but required run artifact locator placeholder -> INPUT_COMPLETENESS_CHECK FAIL (Case B)
+  def test_d2_source_exact_but_run_artifact_placeholder_fails
+    res = resolve_typed_task_authority(
+      canonical_source_authority: 'origin/master',
+      run_artifact_authority_locator: '<exact path>',
+      upstream_authority_status: 'READY',
+      required_types: [:source, :run_artifact]
+    )
+    assert_equal 'FAIL', res[:input_completeness_check]
+    assert_equal 'NO', res[:consumer_launch_ready]
+    assert_equal 'RUN_ARTIFACT_AUTHORITY_LOCATOR', res[:missing_input]
+
+    # Test other placeholder variations
+    ['<exact>', '<exact literal artifact locator>', '<path>'].each do |placeholder|
+      res_ph = resolve_typed_task_authority(
+        canonical_source_authority: 'origin/master',
+        run_artifact_authority_locator: placeholder,
+        upstream_authority_status: 'READY',
+        required_types: [:source, :run_artifact]
+      )
+      assert_equal 'FAIL', res_ph[:input_completeness_check]
+      assert_equal 'NO', res_ph[:consumer_launch_ready]
+      assert_equal 'RUN_ARTIFACT_AUTHORITY_LOCATOR', res_ph[:missing_input]
+    end
+
+    assert_includes PLANNER, 'RUN_ARTIFACT_AUTHORITY_LOCATOR: <exact path>'
+    assert_includes PLANNER, 'executable Packet MUST contain the literal value'
+    assert_includes PLANNER, 'Forbidden executable placeholder'
+    assert_includes PLANNER, 'Do not launch consumer'
+  end
+
+  # D3 — run artifact locator exact but Worker searches Git for artifact -> forbidden by authority typing contract (Case C)
+  def test_d3_run_artifact_exact_worker_git_search_forbidden
+    access = evaluate_authority_access(authority_type: :run_artifact, access_surface: :git)
+    refute access[:allowed]
+    assert_equal 'FORBIDDEN', access[:status]
+    assert_match(/Worker searching Git for runtime artifact is forbidden by authority typing contract/, access[:reason])
+
+    fs_access = evaluate_authority_access(authority_type: :run_artifact, access_surface: :filesystem)
+    assert fs_access[:allowed]
+    assert_equal 'ALLOWED', fs_access[:status]
+
+    assert_includes PLANNER, 'Worker searching Git for runtime artifact is forbidden by authority typing contract'
+    assert_includes PLANNER, '絕不得在 Git 中搜尋 artifact'
+  end
+
+  # D4 — task with source-only dependency -> does not require run artifact locator (Case D)
+  def test_d4_source_only_task_unburdened
+    res = resolve_typed_task_authority(
+      canonical_source_authority: 'origin/master',
+      run_artifact_authority_locator: nil,
+      required_types: [:source]
+    )
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_nil res[:run_artifact_authority_locator]
+
+    assert_includes PLANNER, 'Source-only dependency'
+    assert_includes PLANNER, '不要求 `RUN_ARTIFACT_AUTHORITY_LOCATOR`，維持 unburdened'
+  end
+
+  # D5 — task with runtime-artifact-only dependency -> does not require a fake Git source locator (Case E)
+  def test_d5_artifact_only_task_unburdened
+    res = resolve_typed_task_authority(
+      canonical_source_authority: nil,
+      run_artifact_authority_locator: 'artifacts/lane6/k10_evidence.json',
+      upstream_authority_status: 'READY',
+      required_types: [:run_artifact]
+    )
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_nil res[:canonical_source_authority]
+
+    assert_includes PLANNER, 'Runtime-artifact-only dependency'
+    assert_includes PLANNER, '不要求捏造假 Git source locator'
   end
 
   def test_regression_existing_judge_depth_preserved
