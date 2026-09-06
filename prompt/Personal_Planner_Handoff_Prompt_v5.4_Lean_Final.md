@@ -245,17 +245,55 @@ canonical remote or exact pinned ref > local main > current checkout
 當 Packet 明確 pin 住 allowed canonical ref/object 時，解析必須維持綁定於該 exact authority，不得靜默替換為 current checkout 狀態。
 解析時只需對 task 的 canonical ref 進行 bounded fetch/resolve，不得要求 repo-wide branch audit。
 
-### 4.6 Cross-lane exact authority locator
+### 4.6 Cross-lane exact authority locator and authority typing
 
-當下一個 task 消費另一個 lane 的 deliverable（cross-lane producer→consumer dependency）時，handoff 必須攜帶明確的 producer→consumer 契約：
+當下一個 task 消費另一個 lane 的 deliverable（cross-lane producer→consumer dependency）時，handoff 必須攜帶明確的 producer→consumer 契約。
+
+為防止 source authority 與 run-artifact authority 混淆（避免 Worker 將 generic "canonical authority" 誤解為 Git source authority 而在 Git 中搜尋 runtime artifact），跨 lane 任務必須區分權威類型（authority typing）：
 
 ~~~text
-UPSTREAM_AUTHORITY_LOCATOR: <exact artifact / path / ref / sealed root>
-UPSTREAM_AUTHORITY_STATUS: READY | NOT_READY
+CANONICAL_SOURCE_AUTHORITY:
+<exact Git/ref authority>
+
+RUN_ARTIFACT_AUTHORITY_LOCATOR:
+<exact literal artifact locator>
+
+UPSTREAM_AUTHORITY_STATUS:
+READY | NOT_READY
 ~~~
 
+任務可能需要其中之一或兩者皆需要（A task may require one or both）：
+- **Source-only dependency**：僅依賴 Git/source 的任務只需 `CANONICAL_SOURCE_AUTHORITY`，不要求 `RUN_ARTIFACT_AUTHORITY_LOCATOR`，維持 unburdened。
+- **Runtime-artifact-only dependency**：僅依賴 runtime artifact 的任務只需 `RUN_ARTIFACT_AUTHORITY_LOCATOR`，不要求捏造假 Git source locator（does not require a fake Git source locator），維持 unburdened。
+- **Both dependencies**：同時需要 source 與 runtime artifact 的任務，兩者皆須明確指定 exact 值。
+
+在 source vs runtime artifact 的區分具 load-bearing 意義之處，嚴禁使用模糊的泛稱 "canonical authority"（Do not use the generic phrase "canonical authority" where source vs runtime artifact distinction is load-bearing）。
+
+權威類型契約（Authority typing contract）：
+- 若任務依賴 `RUN_ARTIFACT_AUTHORITY_LOCATOR`，Worker 依該 literal locator 直接存取 task-data / artifact，絕不得在 Git 中搜尋 artifact（Worker searching Git for runtime artifact is forbidden by authority typing contract）。
+- 通用 locator 語意維持 `UPSTREAM_AUTHORITY_LOCATOR: <exact artifact / path / ref / sealed root>`，狀態維持 `UPSTREAM_AUTHORITY_STATUS: READY | NOT_READY`。
+
+#### Exact-locator literal rule（精確定位字面值規則）
+
+當 producer / Planner 已知 artifact locator 時，可執行的 Packet 必須包含 literal 值（executable Packet MUST contain the literal value）。
+
+嚴格禁止在可執行的 Packet 中使用 unresolved placeholder（Forbidden executable placeholder）：
+
+~~~text
+RUN_ARTIFACT_AUTHORITY_LOCATOR: <exact path>
+~~~
+
+或任何同等的 `<...>` 未解析佔位符（例如 `<exact>`、`<path>`、`<exact literal artifact locator>`）。
+
+若所需的 locator 尚未確定或已知為 placeholder：
+- `STATUS: NOT_READY`
+- `INPUT_COMPLETENESS_CHECK: FAIL`
+- `CONSUMER_LAUNCH_READY: NO`
+- 絕不得啟動 consumer（Do not launch consumer）。
+
+既有存取與停止規則：
 - 若 producer 提供 exact locator 且 UPSTREAM_AUTHORITY_STATUS 為 READY：consumer 直接依該 locator 存取，不進行廣泛搜尋（broad discovery）。
-- 若 locator 缺失或 producer 尚未標記完成（NOT_READY）：consumer 必須立即停止或 defer，輸出：
+- 若 locator 缺失、為 placeholder、或 producer 尚未標記完成（NOT_READY）：consumer 必須立即停止或 defer，輸出：
 
 ~~~text
 UPSTREAM_AUTHORITY_NOT_READY
@@ -300,8 +338,8 @@ CONSUMER_LAUNCH_READY:
 YES | NO
 ~~~
 
-- **PASS**：只有當每一個 load-bearing required input 同時具備 `STATUS = READY` 且 `LOCATOR = <exact>` 時，`INPUT_COMPLETENESS_CHECK` 為 `PASS`，`CONSUMER_LAUNCH_READY: YES`。Planner 方可將 consumer launch Packet 合成為 ready-to-run。
-- **FAIL**：若有任一 required input 為 `NOT_READY`、`UNKNOWN` 或 `MISSING`，`INPUT_COMPLETENESS_CHECK` 為 `FAIL`，`CONSUMER_LAUNCH_READY: NO`。Planner 絕不得將 executable consumer launch Packet 合成為 ready-to-run（do not synthesize an executable consumer launch Packet as ready-to-run），而必須停止並明確回傳 exact missing input：
+- **PASS**：只有當每一個 load-bearing required input 同時具備 `STATUS = READY` 且 `LOCATOR = <exact>`（且 LOCATOR 為 literal value，絕非 `<exact path>` 等 placeholder）時，`INPUT_COMPLETENESS_CHECK` 為 `PASS`，`CONSUMER_LAUNCH_READY: YES`。Planner 方可將 consumer launch Packet 合成為 ready-to-run。
+- **FAIL**：若有任一 required input 為 `NOT_READY`、`UNKNOWN`、`MISSING` 或含有 `<...>` 佔位符（placeholder），`INPUT_COMPLETENESS_CHECK` 為 `FAIL`，`CONSUMER_LAUNCH_READY: NO`。Planner 絕不得將 executable consumer launch Packet 合成為 ready-to-run（do not synthesize an executable consumer launch Packet as ready-to-run），而必須停止並明確回傳 exact missing input：
 
 ~~~text
 MISSING_INPUT:
@@ -904,6 +942,7 @@ CANONICAL_REMOTE_AUTHORITY_PRECEDENCE_RESPECTED: YES
 REUSED_EVIDENCE_DIFF_APPLIED_IF_EXACT_TREE: YES
 CROSS_LANE_LOCATOR_PRESENT_IF_DEPENDENT: YES
 INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES
+AUTHORITY_TYPING_DISTINGUISHED_IF_DEPENDENT: YES
 ~~~
 
 Preserve the existing version convention: v5.3.3 remains historical and immutable,
