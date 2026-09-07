@@ -177,4 +177,45 @@ class ExplicitContractFailClosedTest < Minitest::Test
     refute Parser.enum_accepted?('WORKER_ROUTE', 'AUTO')
     refute Parser.enum_accepted?('TASK_CLASS', 'WHATEVER')
   end
+
+  # Text-only regression against the real shared Skill; no runtime enforcement.
+  def test_exact_locator_first_and_absence_contract
+    assert_exact_locator_contract(Parser.skill)
+  end
+
+  def test_exact_locator_contract_rejects_broad_discovery_weakening
+    live = Parser.skill
+    assert_exact_locator_contract(live)
+    weakened = live.sub(
+      'use it directly and stop broad discovery for the same authority.',
+      'use it directly and allow broad discovery for the same authority.'
+    )
+    refute_equal live, weakened, 'negative control must change the live clause'
+    error = assert_raises(Minitest::Assertion) { assert_exact_locator_contract(weakened) }
+    assert_includes error.message, 'stop broad discovery for the same authority'
+    assert_exact_locator_contract(Parser.skill)
+  end
+
+  private
+
+  def assert_exact_locator_contract(text)
+    authority = text.split('## Authority and Packet fast path', 2).last
+                    .to_s.split('## Bounded preflight and write boundary', 2).first
+                    .to_s.gsub(/\s+/, ' ')
+    [
+      'After required routing, authorization, and repository identity confirmation, the first content lookup for a Packet-specified input must directly use its exact locator.',
+      'Existing safety rules and required project-guidance reads still apply.',
+      'If the exact locator is readable and its identity matches, use it directly and stop broad discovery for the same authority.',
+      'Do not scan the workspace, all worktrees/branches, or historical transcripts to reconstruct that supplied authority.',
+      'This does not prohibit scoped ordinary source lookup required by the task.',
+      'If the locator is unreadable or mismatched, distinguish `ABSENT`, permission denied, network/read error, and identity mismatch.',
+      'Only bounded adjacent resolution already supported by the original Packet is allowed; do not guess another path as substitute authority or bypass an existing STOP.',
+      'Missing required cross-lane input returns `UPSTREAM_AUTHORITY_NOT_READY`; do not replan another task.',
+      'Only for exact targets already in cleanup scope: a worktree is `ALREADY_ABSENT` only when both its filesystem path and Git registration are confirmed absent;',
+      'an exact local branch ref confirmed absent makes that branch `ALREADY_ABSENT`.',
+      'For a confirmed-absent target, stop searching and do not call delete.',
+      'One absent branch does not imply another worktree is absent.',
+      'Read errors or insufficient permissions are not absence.'
+    ].each { |clause| assert_includes authority, clause }
+  end
 end

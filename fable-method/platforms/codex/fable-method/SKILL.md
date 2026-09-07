@@ -99,17 +99,17 @@ Writer evidence must be qualified to the exact worktree/task-owned surface or to
 
 ## Authority and Packet fast path
 
-An `AUTHORITATIVE_PACKET_PRESENT` contains a Goal, Owner/authority, allowed
-scope, acceptance criteria, and forbidden actions or stop conditions. After
-verifying live repository state, its task class, route, scope, acceptance,
-deliverable format, and decisions are authoritative. Do not create a second
-plan, broaden scope, or re-litigate an approved architecture.
+An `AUTHORITATIVE_PACKET_PRESENT` contains a Goal, Owner/authority, allowed scope, acceptance criteria, and forbidden actions or stop conditions. After verifying live repository state, its task class, route, scope, acceptance, deliverable format, and decisions are authoritative. Do not create a second plan, broaden scope, or re-litigate an approved architecture.
 
-The executable Packet itself is Worker authority. The Planner resolves the
-authority chain before handoff. The Worker may verify at most one pinned
-supporting locator named by the Packet, but must not rerun a generic
-multi-level authority search. Treat authority as unresolved only when the
-Packet is incomplete or the one locator is missing or contradictory.
+The executable Packet itself is Worker authority. The Planner resolves the authority chain before handoff. The Worker may verify at most one pinned supporting locator named by the Packet, but must not rerun a generic multi-level authority search. Treat authority as unresolved only when the Packet is incomplete or the one locator is missing or contradictory.
+
+After required routing, authorization, and repository identity confirmation, the first content lookup for a Packet-specified input must directly use its exact locator. Existing safety rules and required project-guidance reads still apply.
+
+If the exact locator is readable and its identity matches, use it directly and stop broad discovery for the same authority. Do not scan the workspace, all worktrees/branches, or historical transcripts to reconstruct that supplied authority. This does not prohibit scoped ordinary source lookup required by the task.
+
+If the locator is unreadable or mismatched, distinguish `ABSENT`, permission denied, network/read error, and identity mismatch. Only bounded adjacent resolution already supported by the original Packet is allowed; do not guess another path as substitute authority or bypass an existing STOP. Missing required cross-lane input returns `UPSTREAM_AUTHORITY_NOT_READY`; do not replan another task.
+
+Only for exact targets already in cleanup scope: a worktree is `ALREADY_ABSENT` only when both its filesystem path and Git registration are confirmed absent; an exact local branch ref confirmed absent makes that branch `ALREADY_ABSENT`. For a confirmed-absent target, stop searching and do not call delete. One absent branch does not imply another worktree is absent. Read errors or insufficient permissions are not absence.
 
 For `AUTHORITATIVE_PACKET_PARTIAL`, derive only the smallest
 machine-checkable acceptance already supported by repository behavior and mark
