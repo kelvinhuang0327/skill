@@ -320,10 +320,10 @@ runtimes, and unresolved authority remain blockers.
 
 ## Verification and Judge handoff
 
-Verify by observation: the named done criterion actually ran or rendered, the
-surrounding build/test/lint or equivalent remains healthy, and required
-runtime or external evidence exists. `NOT RUN` is never `PASS`, and source
-inspection is not runtime evidence. Command execution alone is not `PASS`; a load-bearing `PASS` requires the exact observed result to satisfy acceptance; a non-zero `git diff --check` cannot be reported `PASS`.
+Verify by observation: the named done criterion actually ran or rendered, the surrounding build/test/lint or equivalent remains healthy, and required runtime or external evidence exists. `NOT RUN` is never `PASS`, and source inspection is not runtime evidence. Command execution alone is not `PASS`; a load-bearing `PASS` requires the exact observed result to satisfy acceptance; a non-zero `git diff --check` cannot be reported `PASS`.
+
+Label verification provenance as `RUN_THIS_TASK` for checks actually executed during the current task/current execution phase, or `REUSED_EXACT_TREE_EVIDENCE` for prior verification reused because the exact load-bearing tree/artifact identity remains valid.
+Reused evidence must never be reported as a check rerun this task or labeled `RUN_THIS_TASK`. Reuse does not require rerunning a check merely to obtain a fresh `PASS` label. Keep `NOT RUN` distinct from `PASS`; provenance accuracy does not increase verification volume.
 
 `VERIFY_WORLD_NOT_SELF_REPORT`: prefer an external observation of the changed
 behavior over a textual claim whenever one is practical — call the endpoint,
