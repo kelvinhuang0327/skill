@@ -252,6 +252,33 @@ resuming Worker never launches a silent duplicate of expensive or
 long-running work. It never scans the OS process table or maintains a
 registry; it inspects only the exact PID this task itself recorded.
 
+For long-running / sealed-evaluation recovery, distinguish
+`LOAD_BEARING_INPUT_IDENTITY` (logical input identity) from
+`CONTAINER_FILE_IDENTITY` (container/file identity) when the Packet defines
+them separately. The Packet owns the exact load-bearing input scope, the
+hash / identity definition, and whether whole-container identity is
+authoritative. The Worker must never decide for itself that the container is
+non-authoritative.
+
+When the Packet defines container/file identity as informational, a container
+file SHA/size/mtime change must not automatically invalidate or replay
+completed expensive computation if the Packet-authoritative logical input
+identity is unchanged. If the Packet makes whole-container identity
+authoritative, that identity remains binding. This is not a global rule that
+DB/container identity never matters.
+
+`EVALUATION_COMPLETE_UNSEALED` is a conditional evidence milestone for an
+expensive evaluation whose main computation completed but sealing/final
+aggregation/closure did not. On takeover, if compatible durable evidence
+confirms that milestone, reuse the completed computation and continue only
+the remaining authorized seal/finalization work. Do not claim this milestone
+unless evidence actually proves that the expensive evaluation portion
+completed.
+
+This milestone is not a new global lifecycle enum and does not mean the whole
+task is `COMPLETE`. It does not bypass existing checkpoint storage authority,
+protected execution, identity validation, recovery or STOP rules.
+
 **Storage**: `.fable/checkpoints/<task_id>/executions/<execution_id>.json`,
 alongside the checkpoint's own `.fable/checkpoints/<task_id>.json`.
 

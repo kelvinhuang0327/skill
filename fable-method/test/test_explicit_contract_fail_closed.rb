@@ -196,7 +196,116 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_exact_locator_contract(Parser.skill)
   end
 
+  # Text-only A/B/C regressions; all negative controls are in-memory copies.
+  # These bind the canonical guidance, not TaskCheckpoint runtime behavior.
+  def test_canonical_input_identity_contract
+    clauses = [
+      'For long-running / sealed-evaluation recovery, distinguish `LOAD_BEARING_INPUT_IDENTITY` (logical input identity) from `CONTAINER_FILE_IDENTITY` (container/file identity) when the Packet defines them separately.',
+      'The Packet owns the exact load-bearing input scope, the hash / identity definition, and whether whole-container identity is authoritative.',
+      'The Worker must never decide for itself that the container is non-authoritative.',
+      'When the Packet defines container/file identity as informational, a container file SHA/size/mtime change must not automatically invalidate or replay completed expensive computation if the Packet-authoritative logical input identity is unchanged.',
+      'If the Packet makes whole-container identity authoritative, that identity remains binding.',
+      'This is not a global rule that DB/container identity never matters.'
+    ]
+    weakenings = {
+      'when the Packet defines them separately' => 'whenever the Worker prefers',
+      'The Packet owns the exact load-bearing input scope' => 'The Worker owns the exact load-bearing input scope',
+      'the hash / identity definition, and whether whole-container identity is authoritative' => 'the hash / identity definition; the Worker decides whether whole-container identity is authoritative',
+      'must never decide for itself' => 'may decide for itself',
+      'When the Packet defines container/file identity as informational' => 'Regardless of Packet-defined container authority',
+      'must not automatically invalidate or replay' => 'must automatically invalidate and replay',
+      'logical input identity is unchanged' => 'logical input identity has changed',
+      'that identity remains binding' => 'the Worker may ignore that identity',
+      'This is not a global rule' => 'This is a global rule'
+    }
+    assert_canonical_contract_controls(
+      'references/task-checkpoint.md', 'Long-running execution recovery', clauses, weakenings
+    )
+  end
+
+  def test_canonical_unsealed_evaluation_contract
+    clauses = [
+      '`EVALUATION_COMPLETE_UNSEALED` is a conditional evidence milestone for an expensive evaluation whose main computation completed but sealing/final aggregation/closure did not.',
+      'On takeover, if compatible durable evidence confirms that milestone, reuse the completed computation and continue only the remaining authorized seal/finalization work.',
+      'Do not claim this milestone unless evidence actually proves that the expensive evaluation portion completed.',
+      'This milestone is not a new global lifecycle enum and does not mean the whole task is `COMPLETE`.',
+      'It does not bypass existing checkpoint storage authority, protected execution, identity validation, recovery or STOP rules.'
+    ]
+    weakenings = {
+      'a conditional evidence milestone' => 'an unconditional completion label',
+      'whose main computation completed' => 'whose main computation merely started',
+      'if compatible durable evidence confirms that milestone' => 'even without evidence confirming that milestone',
+      'compatible durable evidence' => 'compatible session recollection',
+      'compatible durable evidence confirms' => 'incompatible durable evidence confirms',
+      'reuse the completed computation' => 'rerun the completed computation',
+      'only the remaining authorized seal/finalization work' => 'any additional seal/finalization work',
+      'Do not claim this milestone unless evidence actually proves' => 'Claim this milestone even if no evidence proves',
+      'is not a new global lifecycle enum' => 'is a new global lifecycle enum',
+      'does not mean the whole task is `COMPLETE`' => 'means the whole task is `COMPLETE`',
+      'does not bypass existing checkpoint storage authority' => 'bypasses existing checkpoint storage authority',
+      'protected execution, ' => '',
+      'identity validation, ' => '',
+      'recovery or STOP rules' => 'recovery rules only'
+    }
+    assert_canonical_contract_controls(
+      'references/task-checkpoint.md', 'Long-running execution recovery', clauses, weakenings
+    )
+  end
+
+  def test_canonical_verification_provenance_contract
+    clauses = [
+      '`RUN_THIS_TASK` for checks actually executed during the current task/current execution phase',
+      '`REUSED_EXACT_TREE_EVIDENCE` for prior verification reused because the exact load-bearing tree/artifact identity remains valid.',
+      'Reused evidence must never be reported as a check rerun this task or labeled `RUN_THIS_TASK`.',
+      'Reuse does not require rerunning a check merely to obtain a fresh `PASS` label.',
+      'Keep `NOT RUN` distinct from `PASS`;',
+      'provenance accuracy does not increase verification volume.',
+      '`NOT RUN` is never `PASS`'
+    ]
+    weakenings = {
+      'checks actually executed during the current task/current execution phase' => 'checks executed during any previous task',
+      'the exact load-bearing tree/artifact identity remains valid' => 'a similar tree/artifact identity seems valid',
+      'must never be reported as a check rerun this task or labeled `RUN_THIS_TASK`' => 'may be reported as a check rerun this task or labeled `RUN_THIS_TASK`',
+      'Reuse does not require rerunning' => 'Reuse requires rerunning',
+      'Keep `NOT RUN` distinct from `PASS`' => 'Report `NOT RUN` as `PASS`',
+      'does not increase verification volume' => 'requires increased verification volume',
+      '`NOT RUN` is never `PASS`' => '`NOT RUN` may be `PASS`'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, weakenings)
+  end
+
   private
+
+  def canonical_contract_section(relative_path, heading)
+    path = File.expand_path("../shared/#{relative_path}", __dir__)
+    text = File.read(path, encoding: 'UTF-8')
+    section = text.split("## #{heading}\n", 2)[1]
+    refute_nil section, "missing canonical section: #{relative_path} / #{heading}"
+    section.split(/^## /, 2).first.gsub(/\s+/, ' ')
+  end
+
+  def assert_contract_clauses(text, clauses)
+    clauses.each { |clause| assert_includes text, clause }
+  end
+
+  def assert_canonical_contract_controls(relative_path, heading, clauses, weakenings)
+    live = canonical_contract_section(relative_path, heading)
+    assert_contract_clauses(live, clauses)
+    # Delete every protected clause, then materially weaken selected semantics.
+    mutations = clauses.map { |clause| [clause, ''] } + weakenings.to_a
+    mutations.each do |original, replacement|
+      mutated = live.sub(original, replacement)
+      refute_equal live, mutated, "negative control must change the clause: #{original}"
+      guarded_clause = clauses.find { |clause| clause.include?(original) }
+      refute_nil guarded_clause, "mutation must target an asserted protection: #{original}"
+      error = assert_raises(Minitest::Assertion) { assert_contract_clauses(mutated, clauses) }
+      assert_includes error.message, guarded_clause
+    end
+    # Re-read canonical source: no negative control may alter the real file.
+    restored = canonical_contract_section(relative_path, heading)
+    assert_equal live, restored
+    assert_contract_clauses(restored, clauses)
+  end
 
   def assert_exact_locator_contract(text)
     authority = text.split('## Authority and Packet fast path', 2).last
