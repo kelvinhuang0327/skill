@@ -769,3 +769,83 @@ class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
     assert_includes PLANNER, 'second authority layer.'
   end
 end
+
+# These checks bind reporting semantics to the actual prompt, not a duplicate
+# Ruby decision model. Whitespace normalization permits harmless line wrapping.
+class PlannerReportingVocabularyTest < Minitest::Test
+  PLANNER = File.read(
+    File.expand_path('../../prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md', __dir__),
+    encoding: 'UTF-8'
+  )
+
+  def test_terminal_locator_distinguishes_external_and_inline_evidence
+    assert_section_contract('### 2.1 Terminal evidence locator', '## 3.',
+      'TERMINAL_EVIDENCE_LOCATOR: <exact locator | NONE>',
+      '依賴外部 load-bearing terminal evidence 時，提供 exact locator。',
+      'fully inline terminal result 且無 external evidence dependency 時，填 NONE。',
+      '無需 external evidence 時，NONE 本身不是 blocker。',
+      '只傳遞必要 locator，不新增 registry、indexer 或 evidence DB。'
+    )
+    assert_section_contract('## 7. Copyable Worker Packet', '## 8.',
+      'TERMINAL_EVIDENCE_LOCATOR: <exact locator | NONE> (apply §2.1).'
+    )
+  end
+
+  def test_terminal_continuation_stops_on_required_stale_or_missing_locator
+    assert_section_contract('### 2.1 Terminal evidence locator', '## 3.',
+      'Continuation 直接消費 exact locator，不進行 broad discovery。',
+      'stale locator 回報 STALE_LOCATOR。若 stale / missing locator 是下一個 ' \
+        'load-bearing decision 所必需，必須停止，不得透過 broad transcript/workspace ' \
+        'search 重構證據。'
+    )
+  end
+
+  def test_candidate_evidence_and_publication_do_not_imply_canonical_coverage
+    assert_section_contract('### 5.4 Verification', '### 5.5',
+      'CANDIDATE_REGRESSION_COVERAGE: <candidate identity + cited evidence + covered/missing checks>',
+      'CANONICAL_REGRESSION_COVERAGE: <canonical identity + cited evidence + covered/missing checks>',
+      'Candidate evidence、publication/containment 與 canonical evidence coverage 必須分開報告。',
+      'PR merged 或 containment 已確認，不會把 candidate test result 自動升格為 canonical coverage。'
+    )
+  end
+
+  def test_canonical_coverage_requires_identity_bound_evidence
+    assert_section_contract('### 5.4 Verification', '### 5.5',
+      '只有 cited evidence 實際覆蓋 load-bearing canonical content identity，才可宣告 ' \
+        'canonical coverage：可用合法的 exact identity reuse，或明確重新驗證該 canonical ' \
+        'content 的 evidence。'
+    )
+  end
+
+  def test_baseline_red_requires_comparable_failure_signatures_and_is_not_pass
+    assert_section_contract('### 5.4 Verification', '### 5.5',
+      'CHECK_STATUS: PASS | FAIL | BASELINE_RED_NO_REGRESSION',
+      'BASELINE_RED_NO_REGRESSION 只適用於 baseline 與 current 均 red、baseline/current ' \
+        'evidence 可比，且沒有新增 failure identity/signature 的情況。',
+      '相同 aggregate error counts 本身不足以證明 no regression；baseline-red check 不得稱為 PASS。'
+    )
+  end
+
+  def test_branch_cleanup_preserves_enum_and_reports_observed_state_without_authorizing_deletion
+    assert_section_contract('## 2. Evidence and state', '### 2.1',
+      'BRANCH_CLEANUP_STATUS: NOT_APPLICABLE | RETAINED_WHILE_PR_OPEN | DELETED | ALREADY_ABSENT | BLOCKED',
+      'open PR + retained branch → RETAINED_WHILE_PR_OPEN；',
+      'merged + cleanup out of scope / not requested → NOT_APPLICABLE；',
+      'successfully deleted → DELETED；',
+      'already absent → ALREADY_ABSENT；',
+      'cleanup required / authorized but unable to complete → BLOCKED。',
+      'Cleanup status never grants deletion authority；刪除仍需既有授權。'
+    )
+    assert_match(/\A# Personal Planner Handoff Prompt — Implementation-First v5\.4 Lean Final$/, PLANNER.lines.first.chomp)
+  end
+
+  private
+
+  def assert_section_contract(heading, next_heading, *snippets)
+    assert_includes PLANNER, heading
+    section = PLANNER.split(heading, 2).last.split(next_heading, 2).first.gsub(/\s+/, ' ')
+    snippets.each do |snippet|
+      assert_includes section, snippet, "#{heading} no longer contains #{snippet.inspect}"
+    end
+  end
+end

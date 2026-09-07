@@ -121,6 +121,35 @@ NOT RUN 是未授權、out of scope、not applicable 或留待後續 lifecycle�
 本輪必要或已授權行動被失敗、權限、衝突或 authority unresolved 阻止。mandatory
 acceptance 或 final-tree gate 未滿足時，不得用 NOT RUN 包裝成完成。
 
+BRANCH_CLEANUP_STATUS 依 observed state 填寫，保留上述 enum：
+
+- open PR + retained branch → RETAINED_WHILE_PR_OPEN；
+- merged + cleanup out of scope / not requested → NOT_APPLICABLE；
+- successfully deleted → DELETED；
+- already absent → ALREADY_ABSENT；
+- cleanup required / authorized but unable to complete → BLOCKED。
+
+Cleanup status never grants deletion authority；刪除仍需既有授權。
+
+### 2.1 Terminal evidence locator
+
+Terminal handoff 必須帶入：
+
+~~~text
+TERMINAL_EVIDENCE_LOCATOR:
+<exact locator | NONE>
+~~~
+
+- 依賴外部 load-bearing terminal evidence 時，提供 exact locator。
+- fully inline terminal result 且無 external evidence dependency 時，填 NONE。
+- Continuation 直接消費 exact locator，不進行 broad discovery。
+- stale locator 回報 STALE_LOCATOR。若 stale / missing locator 是下一個
+  load-bearing decision 所必需，必須停止，不得透過 broad transcript/workspace
+  search 重構證據。
+- 無需 external evidence 時，NONE 本身不是 blocker。
+
+只傳遞必要 locator，不新增 registry、indexer 或 evidence DB。
+
 ## 3. Task class and route
 
 只使用這些值：
@@ -438,6 +467,30 @@ repository/toolchain output 必須能在 final handoff 中分類。未授權 run
 Packet 指定 repository 中已確認存在的 focused acceptance、relevant regression、
 lint/typecheck/build、git diff --check、changed-path review，以及需要時的
 exact-head CI。不要發明 command、fixture 或 final count。NOT RUN 永遠不是 PASS。
+
+對實際執行的 check，報告：
+
+~~~text
+CHECK_STATUS:
+PASS | FAIL | BASELINE_RED_NO_REGRESSION
+~~~
+
+BASELINE_RED_NO_REGRESSION 只適用於 baseline 與 current 均 red、baseline/current
+evidence 可比，且沒有新增 failure identity/signature 的情況。相同 aggregate
+error counts 本身不足以證明 no regression；baseline-red check 不得稱為 PASS。
+
+Regression coverage 分開報告：
+
+~~~text
+CANDIDATE_REGRESSION_COVERAGE: <candidate identity + cited evidence + covered/missing checks>
+CANONICAL_REGRESSION_COVERAGE: <canonical identity + cited evidence + covered/missing checks>
+~~~
+
+Candidate evidence、publication/containment 與 canonical evidence coverage 必須分開報告。
+PR merged 或 containment 已確認，不會把 candidate test result 自動升格為 canonical coverage。
+只有 cited evidence 實際覆蓋 load-bearing canonical content identity，才可宣告
+canonical coverage：可用合法的 exact identity reuse，或明確重新驗證該 canonical
+content 的 evidence。
 
 REUSED_COMPLETION_EVIDENCE_DIFF：
 
@@ -836,6 +889,7 @@ This field does not authorize a commit.
 Return actual state, changed paths, command exit statuses/raw summaries, runtime
 evidence, actual final HEAD/tree, commit/publication/lifecycle state, NOT RUN,
 BLOCKED and remaining risk. Do not claim a future state.
+TERMINAL_EVIDENCE_LOCATOR: <exact locator | NONE> (apply §2.1).
 ~~~
 
 The Packet must not weaken /fable-method. If it needs a new outcome, unrelated
