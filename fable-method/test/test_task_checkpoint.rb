@@ -1322,6 +1322,279 @@ class DurableCommandCaptureTest < Minitest::Test
   end
 end
 
+class TaskCheckpointRunTest < Minitest::Test
+  CLI = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+  TASK_ID = 'CLI_TASK'
+  UPSTREAM = <<~'RUBY'
+    launches, release, result = ARGV
+    File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    STDOUT.write("out\0尾\n")
+    STDERR.write("err\0尾\n")
+    STDOUT.flush
+    STDERR.flush
+    unless release == '-'
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
+      until File.file?(release)
+        abort 'upstream barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+    end
+    result == 'TERM' ? Process.kill('TERM', Process.pid) : exit(Integer(result))
+  RUBY
+
+  def setup
+    @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
+    @repo = File.join(@tmpdir, 'stable-record-root')
+    @worktree = File.join(@tmpdir, 'upstream-cwd')
+    @caller = File.join(@tmpdir, 'caller-cwd')
+    [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
+    @launches = File.join(@tmpdir, 'launches')
+    @release = File.join(@tmpdir, 'release')
+    @children = []
+  end
+
+  def teardown
+    # Every CLI gets a test-owned process group. This also stops the tiny
+    # upstream left behind by the intentional foreground-termination test.
+    @children.each do |child|
+      begin
+        Process.kill('TERM', -child[:wait].pid)
+      rescue Errno::ESRCH
+        # The complete test-owned group has already exited.
+      end
+      assert child[:wait].join(5), 'test-owned CLI did not terminate'
+      child[:readers].each { |reader| assert reader.join(5), 'test pipe did not close' }
+    end
+    launch_records.each do |line|
+      pid = Integer(line.split(':').first)
+      wait_until('test-owned upstream did not terminate') { ExecutionRecord.pid_alive?(pid) == false }
+    end
+    FileUtils.remove_entry(@tmpdir)
+    refute File.exist?(@tmpdir), 'test temporary state must be deleted'
+  end
+
+  def wait_until(message)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+    until yield
+      flunk message if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep 0.01
+    end
+  end
+
+  def upstream(result: '0', barrier: false)
+    [RbConfig.ruby, '-e', UPSTREAM, @launches, barrier ? @release : '-', result]
+  end
+
+  def cli_args(identity, command = upstream)
+    ['--run', '--repo', @repo, '--worktree', @worktree,
+     '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
+  end
+
+  def start_cli(args, cwd: @caller)
+    stdin, stdout, stderr, wait = Open3.popen3(RbConfig.ruby, CLI, *args, chdir: cwd, pgroup: true)
+    stdin.close
+    readers = [stdout, stderr].map { |io| Thread.new { begin; io.read; ensure; io.close; end } }
+    child = { wait: wait, readers: readers }
+    @children << child
+    child
+  end
+
+  def finish_cli(child)
+    assert child[:wait].join(5), 'CLI timed out'
+    child[:readers].each { |reader| assert reader.join(5), 'CLI output timed out' }
+    [*child[:readers].map(&:value), child[:wait].value]
+  end
+
+  def run_cli(args, **options)
+    finish_cli(start_cli(args, **options))
+  end
+
+  def record_path(identity)
+    ExecutionRecord.default_path(@repo, TASK_ID, identity)
+  end
+
+  def capture_path(identity)
+    DurableCommandCapture.default_path(@repo, TASK_ID, identity)
+  end
+
+  def launch_records
+    File.file?(@launches) ? File.readlines(@launches) : []
+  end
+
+  def assert_output(result, exit_status)
+    assert_equal "out\0尾\n", result[0]
+    assert_equal "err\0尾\n", result[1]
+    assert_equal exit_status, result[2].exitstatus
+  end
+
+  def test_run_real_cli_two_contenders_and_completed_replay
+    identity = 'concurrent'
+    command = upstream(barrier: true)
+    contenders = 2.times.map { start_cli(cli_args(identity, command)) }
+    wait_until('upstream did not start') { !launch_records.empty? }
+    wait_until('loser did not stop while winner was active') do
+      launch_records.size > 1 || contenders.any? { |child| !child[:wait].alive? }
+    end
+    assert_equal 1, launch_records.size, 'only one contender may invoke upstream'
+    loser = contenders.find { |child| !child[:wait].alive? }
+    winner = (contenders - [loser]).first
+    lost = finish_cli(loser)
+    assert_equal '', lost[0]
+    assert_equal 1, lost[2].exitstatus
+    assert_includes lost[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    record = ExecutionRecord.load(record_path(identity))
+    assert_equal winner[:wait].pid, record.pid, 'foreground CLI must own the record'
+    assert_equal record.pid, Integer(launch_records.first.split(':').last), 'upstream must be a child of the owner'
+    assert_equal ExecutionRecord::STATUS_STARTED, record.status
+    refute File.exist?(capture_path(identity)), 'capture is not terminal while upstream waits'
+
+    File.write(@release, 'go')
+    original = finish_cli(winner)
+    assert_output(original, 0)
+    record = ExecutionRecord.load(record_path(identity))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal capture_path(identity), record.durable_capture_path
+    capture = DurableCommandCapture.load(record.durable_capture_path)
+    assert capture.complete?
+    assert_equal command, capture.command
+    assert_equal original[0, 2], [capture.stdout, capture.stderr]
+    before = [File.binread(record_path(identity)), File.binread(capture_path(identity))]
+    replay = run_cli(cli_args(identity, command), cwd: @worktree)
+    assert_output(replay, 0)
+    assert_equal original[0, 2], replay[0, 2]
+    assert_equal 1, launch_records.size, 'third invocation must reuse the durable result'
+    assert_equal before, [File.binread(record_path(identity)), File.binread(capture_path(identity))]
+    [@caller, @worktree].each { |path| refute File.exist?(File.join(path, '.fable')) }
+  end
+
+  def test_run_nonzero_result_replay_does_not_launch_again
+    args = cli_args('nonzero', upstream(result: '7'))
+    original = run_cli(args)
+    replay = run_cli(args)
+    assert_output(original, 7)
+    assert_output(replay, 7)
+    assert_equal original[0, 2], replay[0, 2]
+    assert_equal 7, DurableCommandCapture.load(capture_path('nonzero')).exit_status
+    assert_equal 1, launch_records.size
+  end
+
+  def test_run_signaled_result_replays_the_signal_and_output
+    args = cli_args('signaled', upstream(result: 'TERM'))
+    results = [run_cli(args), run_cli(args)]
+    results.each do |result|
+      assert_equal "out\0尾\n", result[0]
+      assert_equal "err\0尾\n", result[1]
+      assert result[2].signaled?
+      assert_equal Signal.list.fetch('TERM'), result[2].termsig
+    end
+    assert_equal "SIGNALED:#{Signal.list.fetch('TERM')}", DurableCommandCapture.load(capture_path('signaled')).exit_status
+    assert_equal 1, launch_records.size
+  end
+
+  def test_run_terminated_foreground_retains_incomplete_record_without_rerun
+    identity = 'terminated'
+    args = cli_args(identity, upstream(barrier: true))
+    owner = start_cli(args)
+    wait_until('test upstream did not start') { !launch_records.empty? }
+    before = File.binread(record_path(identity))
+    # Abrupt loss must bypass Open3's TERM ensure, which waits for upstream.
+    # Only this test-owned foreground PID is killed; teardown stops its child.
+    Process.kill('KILL', owner[:wait].pid)
+    result = finish_cli(owner)
+    assert result[2].signaled?
+    assert_equal Signal.list.fetch('KILL'), result[2].termsig
+    retry_result = run_cli(args)
+    assert_equal '', retry_result[0]
+    assert_equal 1, retry_result[2].exitstatus
+    assert_includes retry_result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    assert_equal before, File.binread(record_path(identity))
+    assert_equal ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE, ExecutionRecord.load(record_path(identity)).classify
+    assert_equal 1, launch_records.size
+    refute File.exist?(capture_path(identity))
+    assert_equal [record_path(identity)], Dir.glob(File.join(@repo, '**', '*'), File::FNM_DOTMATCH).select { |path| File.file?(path) }
+  end
+
+  def test_run_unresolved_and_malformed_states_fail_closed
+    states = ['{invalid json', '[]', JSON.generate('status' => 'UNKNOWN')]
+    unresolved = ExecutionRecord.new(task_id: TASK_ID, execution_id: 'unresolved', status: 'STARTED', pid: nil)
+    cases = states.each_with_index.map { |state, index| ["malformed_#{index}", state] }
+    cases << ['unresolved', unresolved.to_json]
+    cases.each do |identity, raw|
+      path = record_path(identity)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, raw)
+      result = run_cli(cli_args(identity))
+      assert_equal '', result[0]
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+      assert_equal raw, File.read(path), 'malformed state must not be replaced or deleted'
+      refute File.exist?(capture_path(identity))
+    end
+    assert_empty launch_records
+  end
+
+  def test_run_malformed_completed_result_is_not_replayed_or_rerun
+    identity = 'malformed_result'
+    capture = DurableCommandCapture.new(command: ['test'], stdout: 'must not replay', exit_status: 'bogus',
+                                        started_at: Time.now.utc.iso8601, ended_at: Time.now.utc.iso8601)
+    capture.save(capture_path(identity))
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+    before = File.binread(record_path(identity))
+    result = run_cli(cli_args(identity))
+    assert_equal '', result[0]
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    assert_equal before, File.binread(record_path(identity))
+    assert_empty launch_records
+  end
+
+  def test_run_preserves_argv_and_uses_worktree_only_for_upstream_cwd
+    payload = ['a b', '$(touch forbidden)', '; touch forbidden', '--repo', '', '繁體']
+    command = [RbConfig.ruby, '-rjson', '-e', 'print JSON.generate([Dir.pwd, ARGV])', *payload]
+    result = run_cli(cli_args('argv', command))
+    assert_equal 0, result[2].exitstatus, result[1]
+    assert_equal '', result[1]
+    assert_equal [File.realpath(@worktree), payload], JSON.parse(result[0])
+    assert_equal command, DurableCommandCapture.load(capture_path('argv')).command
+    assert_empty Dir.children(@worktree)
+    assert_empty Dir.children(@caller)
+  end
+
+  def test_run_single_executable_argument_never_uses_shell_parsing
+    executable = File.join(@tmpdir, 'upstream ; literal')
+    File.write(executable, "#!#{RbConfig.ruby}\nSTDOUT.write('literal executable')\n")
+    FileUtils.chmod(0o700, executable)
+    result = run_cli(cli_args('single_argv', [executable]))
+    assert_equal 0, result[2].exitstatus, result[1]
+    assert_equal 'literal executable', result[0]
+    assert_equal '', result[1]
+    assert_equal [executable], DurableCommandCapture.load(capture_path('single_argv')).command
+  end
+
+  def test_run_requires_explicit_roots_stable_ids_and_argv_delimiter
+    valid = cli_args('invalid')
+    cases = %w[--repo --worktree --task-id --execution-id].map do |flag|
+      args = valid.dup
+      args.slice!(args.index(flag), 2)
+      args
+    end
+    cases += [valid.reject { |arg| arg == '--' }, valid.take(valid.index('--') + 1), ['--show', *valid]]
+    { '--repo' => '.', '--worktree' => '.', '--task-id' => '../escape', '--execution-id' => '' }.each do |flag, value|
+      args = valid.dup
+      args[args.index(flag) + 1] = value
+      cases << args
+    end
+    cases.each do |args|
+      result = run_cli(args)
+      assert_equal 2, result[2].exitstatus, result[1]
+      assert_equal '', result[0]
+    end
+    assert_empty launch_records
+    [@repo, @worktree, @caller].each { |path| assert_empty Dir.children(path) }
+  end
+end
+
 class ExecutionRecoveryTest < Minitest::Test
   # A contender process: waits for a shared go-file, then races to acquire
   # the exact same execution identity. ARGV: lib_path, go_file, exec_path,
