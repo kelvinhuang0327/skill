@@ -334,9 +334,9 @@ A Worker stating that it works is not verification by itself, but this does
 not add an automatic requirement for a browser, database, full suite, or
 Judge when none is otherwise relevant to the change.
 
-When a fixed defect came from a construct
-that could plausibly recur elsewhere, search the safe project for it and
-report; skip the search for a one-off or locally scoped defect:
+`DONOR_CHARACTERIZATION_PROBE`: before frozen behavior semantics are finalized for a legacy-donor migration, one small executable characterization probe is `REQUIRED_BY_DEFAULT` when donor execution is cheap, bounded, safe, and dependency-feasible — all four, or the default does not apply. Run exactly one minimum probe sufficient to test the load-bearing observed behavior, because source-only reading has already mistaken a dead path for a live operator and a degenerate parameter for deterministic behavior. The probe is characterization, not benchmarking: it never requires a full donor replay, exhaustive parameter sweep, performance benchmark, production mutation, external spend, or broad historical reconstruction. `SOURCE_ONLY` stays acceptable when the probe is `BLOCKED`, `DISPROPORTIONATE`, `UNSAFE`, or `DEPENDENCY_INFEASIBLE`, and the limitation must be reported. This sets the default characterization discipline only; `LEGACY_DONOR_AUTHORITY_MODE`, `DONOR_EXECUTION_STATUS`, and the existing frozen-semantics and provenance rules stay Planner-owned and unchanged.
+
+When a fixed defect came from a construct that could plausibly recur elsewhere, search the safe project for it and report; skip the search for a one-off or locally scoped defect:
 
 ```text
 TWINS: searched <pattern> - found <N> other sites: <files or none>
