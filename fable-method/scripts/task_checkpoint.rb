@@ -1484,6 +1484,24 @@ class ExecutionRecord
     true
   end
 
+  # Persists this record to file_path only if no file exists there yet, using
+  # create-temp-then-hardlink so file_path never becomes visible in a
+  # partially written state. Raises Errno::EEXIST when file_path already
+  # exists; the caller (see .acquire!) decides how to proceed rather than
+  # silently overwriting a record another contender may have just won.
+  def save_if_absent!(file_path)
+    dir = File.dirname(file_path)
+    FileUtils.mkdir_p(dir)
+    temp_path = "#{file_path}.tmp.#{Process.pid}.#{Time.now.to_i}"
+    File.open(temp_path, 'w:UTF-8') { |f| f.write(to_json) }
+    begin
+      File.link(temp_path, file_path)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
+    true
+  end
+
   def self.default_path(repo_root, task_id, execution_id)
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'executions', "#{execution_id}.json")
   end
@@ -1592,6 +1610,41 @@ class ExecutionRecord
               end
 
     Recovery.new(classification: classification, execution_record: record, durable_capture: capture)
+  end
+
+  # The atomic acquisition boundary: combines the recover_before_execution
+  # classification with execution-ownership acquisition into a single atomic
+  # filesystem operation for the exact task_id + execution_id identity, so
+  # two contenders that both observe no existing record cannot both receive
+  # permission to invoke the upstream long-running command.
+  # save_if_absent! uses create-temp-then-hardlink, which the OS resolves
+  # atomically across concurrent callers and which never exposes a partially
+  # written record to a losing contender.
+  #
+  # Returns the same Recovery shape as recover_before_execution. A nil
+  # classification means this exact call just won the race: the STARTED
+  # record is already durably persisted and returned as
+  # recovery.execution_record, and the caller should proceed to invoke the
+  # upstream command. Any other classification, or a raised
+  # DuplicateExecutionError / UnresolvedExecutionStateError, means a record
+  # already existed (a concurrent winner or an earlier session); the losing
+  # caller must not proceed, under the exact same rules
+  # recover_before_execution already applies to that existing record.
+  def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?))
+    record = new(
+      task_id: task_id,
+      execution_id: execution_id,
+      pid: pid,
+      status: STATUS_STARTED,
+      started_at: Time.now.utc.iso8601
+    )
+
+    begin
+      record.save_if_absent!(file_path)
+      return Recovery.new(classification: nil, execution_record: record, durable_capture: nil)
+    rescue Errno::EEXIST
+      recover_before_execution(file_path, pid_alive: pid_alive)
+    end
   end
 
   class ValidationError < StandardError; end

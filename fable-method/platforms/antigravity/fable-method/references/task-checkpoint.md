@@ -254,6 +254,35 @@ above: session or UI disappearance alone is never itself evidence of failure.
 the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
 `durable_capture_path` once the work's durable terminal evidence exists.
 
+### Atomic acquisition boundary
+
+`recover_before_execution` (a check) and `start!` (a write) are two separate
+calls. Two independent contenders that both call `recover_before_execution`
+before either has called `start!` will both observe the `nil`-classification
+"no prior record" case and, without further coordination, could both proceed
+to invoke the upstream long-running command.
+
+`ExecutionRecord.acquire!(file_path, task_id:, execution_id:, pid:)` closes
+this gap: it is the canonical, atomic combination of the check and the write
+for one exact `task_id` + `execution_id`. It attempts to durably persist a
+`STARTED` record using create-temp-then-hardlink
+(`ExecutionRecord#save_if_absent!`), which the filesystem resolves atomically
+across concurrent callers and which never exposes a partially written record
+to a losing contender — unlike a separate existence check followed by a
+write.
+
+`acquire!` returns the same `Recovery` shape as `recover_before_execution`. A
+`nil` classification means this exact call won the race: the `STARTED`
+record is already durably persisted and returned as
+`recovery.execution_record`, and the caller should proceed to invoke the
+upstream command. Any other classification, or a raised
+`DuplicateExecutionError` / `UnresolvedExecutionStateError`, means a record
+already existed — a concurrent winner or an earlier session — and the losing
+caller must not proceed, under the exact same rules `recover_before_execution`
+already applies to that existing record. Worker call sites starting a
+possibly-duplicate long-running execution should call `acquire!` rather than
+`recover_before_execution` followed by a separate `start!`.
+
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)

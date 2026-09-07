@@ -1323,6 +1323,35 @@ class DurableCommandCaptureTest < Minitest::Test
 end
 
 class ExecutionRecoveryTest < Minitest::Test
+  # A contender process: waits for a shared go-file, then races to acquire
+  # the exact same execution identity. ARGV: lib_path, go_file, exec_path,
+  # side_effect_path, result_path. Single-quoted heredoc so #{...} below is
+  # evaluated by the spawned child, never by the parent test process.
+  CONTENDER_SCRIPT = <<~'RUBY'
+    lib_path, go_file, exec_path, side_effect_path, result_path = ARGV
+    require lib_path
+
+    until File.exist?(go_file)
+      sleep 0.001
+    end
+
+    begin
+      recovery = ExecutionRecord.acquire!(
+        exec_path, task_id: 'RACE_TASK', execution_id: 'race_exec', pid: Process.pid
+      )
+      if recovery.classification.nil?
+        current = File.file?(side_effect_path) ? File.read(side_effect_path).to_i : 0
+        File.write(side_effect_path, (current + 1).to_s)
+        sleep 0.3
+        File.write(result_path, 'RAN_UPSTREAM')
+      else
+        File.write(result_path, "DID_NOT_RUN:#{recovery.classification}")
+      end
+    rescue ExecutionRecord::DuplicateExecutionError => e
+      File.write(result_path, "DID_NOT_RUN:RAISED_DUPLICATE:#{e.message}")
+    end
+  RUBY
+
   def setup
     @tmpdir = Dir.mktmpdir('execution_recovery_test_')
   end
@@ -1414,5 +1443,74 @@ class ExecutionRecoveryTest < Minitest::Test
     assert_nil recovery.classification
     assert_nil recovery.execution_record
     assert_nil recovery.durable_capture
+  end
+
+  # E. .acquire! is the atomic combination of recover_before_execution and
+  # start! for one exact identity. A nil classification means this call
+  # itself won: the STARTED record is already durably persisted.
+  def test_e_acquire_wins_when_no_prior_record_exists
+    path = exec_path('acquire_wins')
+    recovery = ExecutionRecord.acquire!(path, task_id: 'T_E', execution_id: 'acquire_wins', pid: Process.pid)
+
+    assert_nil recovery.classification
+    refute_nil recovery.execution_record
+    assert_equal ExecutionRecord::STATUS_STARTED, recovery.execution_record.status
+    assert File.file?(path), 'acquire! must durably persist the STARTED record before returning'
+  end
+
+  # E. Once acquired, a second acquire! against the same identity while the
+  # first pid is still alive must be rejected exactly like
+  # recover_before_execution rejects an active prior process, never silently
+  # re-acquired.
+  def test_e_acquire_rejects_second_contender_once_first_is_recorded_active
+    path = exec_path('acquire_rejects_duplicate')
+    pid = Process.spawn('sleep', '5')
+    begin
+      first = ExecutionRecord.acquire!(path, task_id: 'T_F', execution_id: 'acquire_rejects_duplicate', pid: pid)
+      assert_nil first.classification
+
+      assert_raises(ExecutionRecord::DuplicateExecutionError) do
+        ExecutionRecord.acquire!(path, task_id: 'T_F', execution_id: 'acquire_rejects_duplicate', pid: Process.pid)
+      end
+    ensure
+      Process.kill('TERM', pid)
+      Process.wait(pid)
+    end
+  end
+
+  # E. The concurrency regression: two independent contenders (real OS
+  # processes, not threads) race to acquire the exact same execution
+  # identity from no prior record, synchronized via a shared go-file so the
+  # acquisition race is genuinely exercised. Exactly one may reach the
+  # upstream side effect; the other must not, whether it is rejected
+  # outright (ACTIVE) or classified TERMINATED_INCOMPLETE if it happens to
+  # observe the winner only after the winner's own process has exited.
+  def test_e_concurrent_contenders_grant_execution_ownership_to_exactly_one
+    lib_path = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+    go_file = File.join(@tmpdir, 'go')
+    path = exec_path('race')
+    side_effect_path = File.join(@tmpdir, 'side_effect_counter')
+    result_a = File.join(@tmpdir, 'result_a.txt')
+    result_b = File.join(@tmpdir, 'result_b.txt')
+    script_path = File.join(@tmpdir, 'contender.rb')
+    File.write(script_path, CONTENDER_SCRIPT)
+
+    pid_a = Process.spawn('ruby', script_path, lib_path, go_file, path, side_effect_path, result_a)
+    pid_b = Process.spawn('ruby', script_path, lib_path, go_file, path, side_effect_path, result_b)
+
+    sleep 0.2 # let both contenders reach their busy-wait before releasing them together
+    File.write(go_file, 'go')
+
+    Process.wait(pid_a)
+    Process.wait(pid_b)
+
+    outcomes = [File.read(result_a), File.read(result_b)]
+
+    assert_equal '1', File.read(side_effect_path),
+                 "exactly one contender may perform the upstream side effect, got outcomes: #{outcomes.inspect}"
+    assert_equal 1, outcomes.count { |o| o == 'RAN_UPSTREAM' },
+                 "expected exactly one winner, got: #{outcomes.inspect}"
+    assert outcomes.any? { |o| o.start_with?('DID_NOT_RUN') },
+           "expected the losing contender to not run the upstream command, got: #{outcomes.inspect}"
   end
 end
