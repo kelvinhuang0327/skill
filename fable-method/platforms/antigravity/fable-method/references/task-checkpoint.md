@@ -134,8 +134,28 @@ not add a lifecycle state. `SCHEMA_VERSION` remains `1`.
   - task completed or blocked.
 - Do **not** write a checkpoint on every command or shell execution.
 - Do **not** store command transcripts inside the checkpoint.
-- Updates require incrementing `revision` by 1. A write attempting to update a
-  stale revision fails closed to prevent silent overwrites.
+- Every `TaskCheckpoint#save` opens the fixed `#{file_path}.lock` sidecar without
+  truncation and acquires `File#flock(File::LOCK_EX)` after creating the parent
+  directory, before any checkpoint existence/read/revision decision. Failure to
+  acquire raises; there is no unlocked fallback. The sidecar is never deleted
+  by save, so conforming processes continue to lock the same pathname/inode.
+- The lock covers existence, read, parse, expected-revision comparison, revision
+  calculation, and the complete same-directory temporary write, close, and
+  atomic rename. Successful rename is the commit point. No subprocess is
+  launched while holding this lock.
+- With `expected_revision`, a matching stored revision increments by 1 and a
+  stale revision raises `ConcurrencyError`. Without it, an incoming revision
+  less than or equal to the stored revision advances to stored revision + 1;
+  a higher incoming revision is retained. An absent checkpoint retains the
+  incoming revision, even with `expected_revision`. Malformed existing JSON
+  remains overwriteable, including with `expected_revision`.
+- An ordinary exception before rename closes/releases the lock and cleans this
+  invocation's uncommitted temporary file, preserving the previous checkpoint.
+  Process termination releases the OS lock; before rename the old checkpoint
+  remains authoritative and an orphan temporary file may remain. After rename
+  the new revision is committed even if the caller never receives success.
+  Readers use only the checkpoint path; `.lock` and temporary files are not
+  checkpoint state. This does not add fsync or power-loss durability guarantees.
 
 ## Deferred blocked-task queue
 

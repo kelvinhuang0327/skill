@@ -6,6 +6,7 @@ require 'tmpdir'
 require 'json'
 require 'open3'
 require 'rbconfig'
+require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
 class TaskCheckpointTest < Minitest::Test
@@ -47,6 +48,12 @@ class TaskCheckpointTest < Minitest::Test
   end
 
   def teardown
+    (@save_children || []).each do |child|
+      Process.kill('TERM', child[:wait].pid) if child[:wait].alive?
+      assert child[:wait].join(5), 'test-owned save process did not terminate'
+      child[:input].close unless child[:input].closed?
+      child[:readers].each { |reader| assert reader.join(5), 'save pipe did not close' }
+    end
     FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
   end
 
@@ -203,6 +210,272 @@ class TaskCheckpointTest < Minitest::Test
     assert_raises(TaskCheckpoint::ConcurrencyError) do
       stale.save(cp_path, expected_revision: 1)
     end
+  end
+
+  # Interposition lives only in freshly exec'd test processes. All processes
+  # start before save takes a lock, so no production lock descriptor is inherited.
+  SAVE_PROCESS = <<~'RUBY'
+    lib, path, writer, mode = ARGV
+    require lib
+    STDOUT.sync = true
+    emit = ->(event, data = nil) { puts JSON.generate([event, data]) }
+    release = -> { raise 'IPC closed' unless STDIN.gets == "go\n" }
+    cp = TaskCheckpoint.load(path)
+    revision = cp.revision
+    cp.next_action = "writer_#{writer}"
+    cp.current_blocker = "complete payload #{writer}"
+    cp.branch = "branch_#{writer}"
+
+    File.prepend(Module.new do
+      define_method(:flock) do |operation|
+        if self.path == "#{path}.lock" && operation == File::LOCK_EX
+          return false if mode == 'lock_false'
+          raise IOError, 'injected flock failure' if mode == 'lock_raise'
+          # Report actual contention, not merely that a writer was started.
+          acquired = super(operation | File::LOCK_NB)
+          return acquired if acquired
+          emit.call('contended')
+        end
+        super(operation)
+      end
+    end)
+
+    if %w[race no_expected].include?(mode)
+      cp.define_singleton_method(:to_json) do |*args|
+        raw = super(*args)
+        # Revision decisions are complete and no replacement has committed.
+        emit.call('prepared', JSON.parse(raw))
+        release.call
+        raw
+      end
+    end
+
+    if %w[crash exception after_commit].include?(mode)
+      File.singleton_class.prepend(Module.new do
+        define_method(:rename) do |source, destination|
+          if destination == path
+            raise IOError, 'injected pre-commit failure' if mode == 'exception'
+            if mode == 'crash'
+              emit.call('before_rename', source)
+              release.call
+            end
+          end
+          result = super(source, destination)
+          if destination == path && mode == 'after_commit'
+            emit.call('after_rename')
+            release.call
+          end
+          result
+        end
+      end)
+    end
+
+    emit.call('ready', revision)
+    release.call
+    begin
+      cp.save(path, expected_revision: mode == 'no_expected' ? nil : revision)
+      emit.call('success', cp.to_h)
+    rescue TaskCheckpoint::ConcurrencyError
+      emit.call('concurrency_error')
+    rescue IOError => error
+      emit.call('io_error', error.message)
+    end
+  RUBY
+
+  def start_save_process(path, writer, mode)
+    @save_events ||= Queue.new
+    input, output, error, wait = Open3.popen3(
+      RbConfig.ruby, '-e', SAVE_PROCESS,
+      File.expand_path('../scripts/task_checkpoint.rb', __dir__), path, writer.to_s, mode
+    )
+    child = { id: writer, input: input, wait: wait }
+    child[:readers] = [
+      Thread.new do
+        begin
+          output.each_line { |line| @save_events << [writer, *JSON.parse(line)] }
+        ensure
+          output.close
+        end
+      end,
+      Thread.new { begin; error.read; ensure; error.close; end }
+    ]
+    (@save_children ||= []) << child
+    child
+  end
+
+  def save_event
+    Timeout.timeout(5) { @save_events.pop }
+  end
+
+  def release_save(child)
+    child[:input].puts('go')
+    child[:input].flush
+  end
+
+  def finish_save(child, signal: nil)
+    assert child[:wait].join(5), 'save timed out (not concurrency evidence)'
+    child[:readers].each { |reader| assert reader.join(5), 'save output timed out' }
+    assert_equal '', child[:readers].last.value
+    status = child[:wait].value
+    signal ? assert_equal(Signal.list.fetch(signal), status.termsig) : assert_equal(0, status.exitstatus)
+  end
+
+  def checkpoint_for_save_test
+    path = File.join(@tmpdir, 'atomic', 'checkpoint.json')
+    TaskCheckpoint.new(@valid_attrs).save(path)
+    path
+  end
+
+  def assert_save_lock_available(path)
+    File.open("#{path}.lock", File::RDWR) do |lock|
+      assert_equal 0, lock.flock(File::LOCK_EX | File::LOCK_NB)
+    end
+  end
+
+  def run_save_race(mode)
+    path = checkpoint_for_save_test
+    children = 2.times.map { |writer| start_save_process(path, writer, mode) }
+    ready = 2.times.map { save_event }
+    assert_equal [0, 1], ready.map(&:first).sort
+    ready.each { |event| assert_equal ['ready', 1], event[1, 2] }
+    children.each { |child| release_save(child) }
+
+    # With the lock, one writer prepares and the other demonstrably contends.
+    # With the lock bypassed, BOTH must prepare before either may commit. The
+    # same assertions below then expose double success, never a timeout proof.
+    rendezvous = 2.times.map { save_event }
+    assert_equal [0, 1], rendezvous.map(&:first).sort
+    assert_includes [%w[contended prepared], %w[prepared prepared]], rendezvous.map { |e| e[1] }.sort
+    prepared = rendezvous.select { |event| event[1] == 'prepared' }
+    prepared.each { |event| release_save(children.fetch(event[0])) }
+    outcomes = []
+    until outcomes.length == 2
+      event = save_event
+      if event[1] == 'prepared' && mode == 'no_expected'
+        release_save(children.fetch(event[0]))
+      else
+        assert_includes %w[success concurrency_error], event[1]
+        outcomes << event
+      end
+    end
+    children.each { |child| finish_save(child) }
+    successes = outcomes.select { |event| event[1] == 'success' }
+    expected_successes = mode == 'race' ? 1 : 2
+    assert_equal expected_successes, successes.length, "lost update: #{outcomes.inspect}"
+    assert_equal 2 - expected_successes, outcomes.count { |event| event[1] == 'concurrency_error' }
+    final = JSON.parse(File.read(path))
+    assert_equal 1 + expected_successes, final.fetch('revision')
+    assert_equal successes.max_by { |event| event[2].fetch('revision') }[2], final
+    assert TaskCheckpoint.load(path).valid?
+    assert_empty Dir.glob("#{path}.tmp.*")
+    assert_save_lock_available(path)
+  end
+
+  def test_atomic_save_two_processes_reject_one_stale_writer
+    run_save_race('race')
+  end
+
+  def test_atomic_save_without_expected_revision_serializes_both_updates
+    run_save_race('no_expected')
+  end
+
+  def test_atomic_save_sequential_absent_and_malformed_compatibility
+    path = File.join(@tmpdir, 'checkpoint.json')
+    cp = TaskCheckpoint.new(@valid_attrs.merge(revision: 4))
+    cp.save(path, expected_revision: 99)
+    assert_equal cp.to_h, TaskCheckpoint.load(path).to_h
+    cp.save(path)
+    assert_equal 5, TaskCheckpoint.load(path).revision
+    cp.revision = 10
+    cp.save(path)
+    assert_equal 10, TaskCheckpoint.load(path).revision
+    ['{broken', '[]'].each do |malformed|
+      [nil, 999].each do |expected|
+        File.write(path, malformed)
+        fresh = TaskCheckpoint.new(@valid_attrs)
+        fresh.save(path, expected_revision: expected)
+        assert_equal fresh.to_h, TaskCheckpoint.load(path).to_h
+        assert_equal 1, fresh.revision
+      end
+    end
+    assert_empty Dir.glob("#{path}.tmp.*")
+  end
+
+  def test_atomic_save_precommit_crash_releases_lock_and_preserves_authority
+    path = checkpoint_for_save_test
+    before = File.binread(path)
+    child = start_save_process(path, 0, 'crash')
+    assert_equal [0, 'ready', 1], save_event
+    release_save(child)
+    event = save_event
+    assert_equal [0, 'before_rename'], event.take(2)
+    assert_equal 2, JSON.parse(File.read(event[2])).fetch('revision')
+    File.open("#{path}.lock", File::RDWR) do |lock|
+      assert_equal false, lock.flock(File::LOCK_EX | File::LOCK_NB)
+    end
+    # Only this test-owned process is terminated; no subprocess exists under it.
+    Process.kill('KILL', child[:wait].pid)
+    finish_save(child, signal: 'KILL')
+    assert_equal before, File.binread(path)
+    assert_equal 1, TaskCheckpoint.load(path).revision
+    assert File.file?(event[2]), 'crash temp is deliberately left for reader-authority check'
+    assert_save_lock_available(path)
+    cp = TaskCheckpoint.load(path)
+    cp.save(path, expected_revision: 1)
+    assert_equal 2, TaskCheckpoint.load(path).revision
+    assert File.file?("#{path}.lock")
+  end
+
+  def test_atomic_save_postcommit_crash_keeps_committed_revision
+    path = checkpoint_for_save_test
+    child = start_save_process(path, 0, 'after_commit')
+    assert_equal [0, 'ready', 1], save_event
+    release_save(child)
+    assert_equal [0, 'after_rename', nil], save_event
+    Process.kill('KILL', child[:wait].pid)
+    finish_save(child, signal: 'KILL')
+    cp = TaskCheckpoint.load(path)
+    assert_equal 2, cp.revision
+    assert_equal 'writer_0', cp.next_action
+    assert_save_lock_available(path)
+    cp.save(path, expected_revision: 2)
+    assert_equal 3, TaskCheckpoint.load(path).revision
+  end
+
+  def test_atomic_save_exception_cleans_temp_and_persistent_sidecar_is_reusable
+    path = checkpoint_for_save_test
+    before = File.binread(path)
+    File.write("#{path}.lock", 'persistent sidecar')
+    inode = File.stat("#{path}.lock").ino
+    child = start_save_process(path, 0, 'exception')
+    assert_equal [0, 'ready', 1], save_event
+    release_save(child)
+    assert_equal [0, 'io_error', 'injected pre-commit failure'], save_event
+    finish_save(child)
+    assert_equal before, File.binread(path)
+    assert_empty Dir.glob("#{path}.tmp.*")
+    assert_save_lock_available(path)
+    TaskCheckpoint.load(path).save(path, expected_revision: 1)
+    assert_equal 2, TaskCheckpoint.load(path).revision
+    assert_equal inode, File.stat("#{path}.lock").ino
+    assert_equal 'persistent sidecar', File.read("#{path}.lock")
+  end
+
+  def test_atomic_save_flock_failure_never_writes_unlocked
+    path = checkpoint_for_save_test
+    before = File.binread(path)
+    %w[lock_false lock_raise].each do |mode|
+      child = start_save_process(path, 0, mode)
+      assert_equal [0, 'ready', 1], save_event
+      release_save(child)
+      assert_equal [0, 'io_error'], save_event.take(2)
+      finish_save(child)
+      assert_equal before, File.binread(path)
+      assert_empty Dir.glob("#{path}.tmp.*")
+      assert_save_lock_available(path)
+    end
+    TaskCheckpoint.load(path).save(path, expected_revision: 1)
+    assert_equal 2, TaskCheckpoint.load(path).revision
   end
 
   # =========================================================================
