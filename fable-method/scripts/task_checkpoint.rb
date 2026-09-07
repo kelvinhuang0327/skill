@@ -7,6 +7,7 @@ require 'open3'
 require 'pathname'
 require 'time'
 require 'digest'
+require 'tempfile'
 
 # TaskCheckpoint encapsulates the minimal, durable, authoritative continuation state
 # for Fable Worker execution across sessions and model boundaries.
@@ -190,28 +191,36 @@ class TaskCheckpoint
     dir = File.dirname(file_path)
     FileUtils.mkdir_p(dir)
 
-    if File.exist?(file_path)
-      existing_raw = File.read(file_path, encoding: 'UTF-8')
-      begin
-        existing = self.class.from_json(existing_raw)
-        if expected_revision
-          if existing.revision != expected_revision
-            raise ConcurrencyError,
-                  "Revision mismatch: expected #{expected_revision}, but stored revision is #{existing.revision}"
+    # Keep this fixed sidecar: unlinking it could give waiting writers distinct
+    # lock inodes. Closing the descriptor releases the lock on every exit path.
+    File.open("#{file_path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
+      raise IOError, 'Could not acquire checkpoint lock' unless lock.flock(File::LOCK_EX)
+
+      if File.exist?(file_path)
+        existing_raw = File.read(file_path, encoding: 'UTF-8')
+        begin
+          existing = self.class.from_json(existing_raw)
+          if expected_revision
+            if existing.revision != expected_revision
+              raise ConcurrencyError,
+                    "Revision mismatch: expected #{expected_revision}, but stored revision is #{existing.revision}"
+            end
+            @revision = existing.revision + 1
+          elsif @revision <= existing.revision
+            @revision = existing.revision + 1
           end
-          @revision = existing.revision + 1
-        elsif @revision <= existing.revision
-          @revision = existing.revision + 1
+        rescue JSON::ParserError, ValidationError
+          # Overwrite corrupt file if explicitly directed
         end
-      rescue JSON::ParserError, ValidationError
-        # Overwrite corrupt file if explicitly directed
+      end
+
+      @updated_at = Time.now.utc.iso8601
+      Tempfile.create(["#{File.basename(file_path)}.tmp.", ''], dir, encoding: 'UTF-8') do |temp|
+        temp.write(to_json)
+        temp.close
+        File.rename(temp.path, file_path) # Commit point; no power-loss durability claim.
       end
     end
-
-    @updated_at = Time.now.utc.iso8601
-    temp_path = "#{file_path}.tmp.#{Process.pid}.#{Time.now.to_i}"
-    File.open(temp_path, 'w:UTF-8') { |f| f.write(to_json) }
-    File.rename(temp_path, file_path)
     true
   end
 
