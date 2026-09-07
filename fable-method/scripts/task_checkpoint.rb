@@ -1394,7 +1394,9 @@ class DurableCommandCapture
     started_at = Time.now.utc.iso8601
     spawn_opts = {}
     spawn_opts[:chdir] = chdir if chdir
-    stdout_str, stderr_str, status = Open3.capture3(*command, **spawn_opts)
+    # The executable/argv0 pair also prevents Ruby's single-string shell
+    # fallback when the upstream argv contains only an executable name.
+    stdout_str, stderr_str, status = Open3.capture3([command.first, command.first], *command.drop(1), **spawn_opts)
     ended_at = Time.now.utc.iso8601
 
     capture = new(
@@ -1481,6 +1483,24 @@ class ExecutionRecord
     temp_path = "#{file_path}.tmp.#{Process.pid}.#{Time.now.to_i}"
     File.open(temp_path, 'w:UTF-8') { |f| f.write(to_json) }
     File.rename(temp_path, file_path)
+    true
+  end
+
+  # Persists this record to file_path only if no file exists there yet, using
+  # create-temp-then-hardlink so file_path never becomes visible in a
+  # partially written state. Raises Errno::EEXIST when file_path already
+  # exists; the caller (see .acquire!) decides how to proceed rather than
+  # silently overwriting a record another contender may have just won.
+  def save_if_absent!(file_path)
+    dir = File.dirname(file_path)
+    FileUtils.mkdir_p(dir)
+    temp_path = "#{file_path}.tmp.#{Process.pid}.#{Time.now.to_i}"
+    File.open(temp_path, 'w:UTF-8') { |f| f.write(to_json) }
+    begin
+      File.link(temp_path, file_path)
+    ensure
+      File.delete(temp_path) if File.exist?(temp_path)
+    end
     true
   end
 
@@ -1594,6 +1614,41 @@ class ExecutionRecord
     Recovery.new(classification: classification, execution_record: record, durable_capture: capture)
   end
 
+  # The atomic acquisition boundary: combines the recover_before_execution
+  # classification with execution-ownership acquisition into a single atomic
+  # filesystem operation for the exact task_id + execution_id identity, so
+  # two contenders that both observe no existing record cannot both receive
+  # permission to invoke the upstream long-running command.
+  # save_if_absent! uses create-temp-then-hardlink, which the OS resolves
+  # atomically across concurrent callers and which never exposes a partially
+  # written record to a losing contender.
+  #
+  # Returns the same Recovery shape as recover_before_execution. A nil
+  # classification means this exact call just won the race: the STARTED
+  # record is already durably persisted and returned as
+  # recovery.execution_record, and the caller should proceed to invoke the
+  # upstream command. Any other classification, or a raised
+  # DuplicateExecutionError / UnresolvedExecutionStateError, means a record
+  # already existed (a concurrent winner or an earlier session); the losing
+  # caller must not proceed, under the exact same rules
+  # recover_before_execution already applies to that existing record.
+  def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?))
+    record = new(
+      task_id: task_id,
+      execution_id: execution_id,
+      pid: pid,
+      status: STATUS_STARTED,
+      started_at: Time.now.utc.iso8601
+    )
+
+    begin
+      record.save_if_absent!(file_path)
+      return Recovery.new(classification: nil, execution_record: record, durable_capture: nil)
+    rescue Errno::EEXIST
+      recover_before_execution(file_path, pid_alive: pid_alive)
+    end
+  end
+
   class ValidationError < StandardError; end
   class LoadError < StandardError; end
   class DuplicateExecutionError < StandardError; end
@@ -1606,16 +1661,23 @@ if __FILE__ == $PROGRAM_NAME
 
   options = {}
   mode = :reconcile
+  selected_modes = []
+  separator = ARGV.index('--')
+  upstream_argv = ARGV.drop(separator + 1) if separator
 
   parser = OptionParser.new do |opts|
     opts.banner = 'Usage: task_checkpoint.rb [options] <checkpoint_file_or_task_id>'
 
-    opts.on('--reconcile', 'Reconcile live state against checkpoint (default)') { mode = :reconcile }
-    opts.on('--show', 'Display checkpoint contents') { mode = :show }
-    opts.on('--save', 'Save/update checkpoint') { mode = :save }
+    opts.separator '   or: task_checkpoint.rb --run --repo PATH --worktree PATH --task-id ID --execution-id ID -- <argv...>'
+    opts.on('--reconcile', 'Reconcile live state against checkpoint (default)') { selected_modes << (mode = :reconcile) }
+    opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
+    opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
+    opts.on('--run', 'Acquire, capture, and complete a task-owned execution, or reuse its result') { selected_modes << (mode = :run) }
 
-    opts.on('--repo PATH', 'Override live repository path') { |v| options[:repository] = v }
-    opts.on('--worktree PATH', 'Override live worktree path') { |v| options[:worktree] = v }
+    opts.on('--repo PATH', 'Live repository path; --run requires the absolute stable record root') { |v| options[:repository] = v }
+    opts.on('--worktree PATH', 'Live worktree path; --run uses only this absolute upstream cwd') { |v| options[:worktree] = v }
+    opts.on('--task-id ID', 'Caller-supplied stable task identity for --run') { |v| options[:task_id] = v }
+    opts.on('--execution-id ID', 'Caller-supplied stable execution identity for --run') { |v| options[:execution_id] = v }
     opts.on('--head SHA', 'Override live git HEAD SHA') { |v| options[:head] = v }
     opts.on('--tree SHA', 'Override live git tree SHA') { |v| options[:tree] = v }
     opts.on('--branch NAME', 'Override live git branch') { |v| options[:branch] = v }
@@ -1628,7 +1690,89 @@ if __FILE__ == $PROGRAM_NAME
     end
   end
 
-  parser.parse!
+  begin
+    parser.parse!
+    if selected_modes.include?(:run) && selected_modes != [:run]
+      raise OptionParser::InvalidArgument, '--run cannot be combined with another mode'
+    end
+    if mode == :run
+      unless upstream_argv && !upstream_argv.empty? && ARGV == upstream_argv && !upstream_argv.first.empty?
+        raise OptionParser::InvalidArgument, '--run requires upstream argv after -- and no positional arguments before it'
+      end
+      %i[repository worktree].each do |key|
+        value = options[key]
+        unless value && Pathname.new(value).absolute? && File.directory?(value)
+          flag = key == :repository ? 'repo' : 'worktree'
+          raise OptionParser::InvalidArgument, "--#{flag} must explicitly name an existing absolute directory"
+        end
+      end
+      %i[task_id execution_id].each do |key|
+        value = options[key]
+        if value.to_s.strip.empty? || %w[. ..].include?(value) || value.match?(/[\/\\\x00]/)
+          raise OptionParser::InvalidArgument, "--#{key.to_s.tr('_', '-')} must supply a stable non-empty path component"
+        end
+      end
+    end
+  rescue OptionParser::ParseError => e
+    warn "ERROR: #{e.message}"
+    warn parser
+    exit 2
+  end
+
+  if mode == :run
+    begin
+      record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
+      capture_path = DurableCommandCapture.default_path(options[:repository], options[:task_id], options[:execution_id])
+      recovery = ExecutionRecord.acquire!(
+        record_path, task_id: options[:task_id], execution_id: options[:execution_id], pid: Process.pid
+      )
+      record = recovery.execution_record
+      unless record && record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
+             record.task_id == options[:task_id] && record.execution_id == options[:execution_id]
+        raise ExecutionRecord::UnresolvedExecutionStateError, 'execution record identity or schema is malformed'
+      end
+
+      case recovery.classification
+      when nil
+        capture = DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path, chdir: options[:worktree])
+        record.complete!(record_path, durable_capture_path: capture_path)
+      when ExecutionRecord::CLASSIFICATION_COMPLETED
+        capture = recovery.durable_capture
+      when ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+        warn "#{recovery.classification}: original task authority must resolve rerun eligibility; record retained"
+        exit 1
+      else
+        raise ExecutionRecord::UnresolvedExecutionStateError, 'acquisition did not grant execution ownership'
+      end
+
+      unless capture && capture.schema_version == DurableCommandCapture::SCHEMA_VERSION && capture.complete?
+        raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture is malformed or incomplete'
+      end
+      result = capture.exit_status
+      signal = result.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(result)
+      signal = signal[1].to_i if signal
+      unless (result.is_a?(Integer) && (0..255).cover?(result)) ||
+             (signal && Signal.list.value?(signal) && !%w[STOP CONT].any? { |name| Signal.list[name] == signal })
+        raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture exit result is malformed'
+      end
+      $stdout.binmode.write(capture.stdout)
+      $stderr.binmode.write(capture.stderr)
+      $stdout.flush
+      $stderr.flush
+      if signal
+        Signal.trap(signal, 'DEFAULT') unless signal == Signal.list['KILL']
+        Process.kill(signal, Process.pid)
+        exit(128 + signal)
+      end
+      exit result
+    rescue ExecutionRecord::DuplicateExecutionError => e
+      warn "#{ExecutionRecord::CLASSIFICATION_ACTIVE}: #{e.message}"
+      exit 1
+    rescue StandardError => e
+      warn "#{ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED}: #{e.message}"
+      exit 1
+    end
+  end
 
   target = ARGV.first
   if target.nil? || target.empty?

@@ -223,9 +223,9 @@ deleted temporary files, checkout materialization, Git metadata, and harness
 metadata. Do not create a handoff, report, log, or scratch file outside an
 explicitly allowlisted path.
 
-CPU-heavy work uses the `SHARED_WORKSTATION` budget in [operational gates](references/operational-gates.md):
-two workers by default and at most two without direct Owner authorization; the Worker may
-reduce to one but never auto-scale, use all cores, or saturate the workstation.
+For task-owned expensive / long-running launches, Workers MUST use `ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb --run --repo <original-stable-record-root> --worktree <upstream-cwd> --task-id <stable-task-id> --execution-id <stable-execution-id> -- <upstream argv...>`; follow [protected execution](references/task-checkpoint.md#protected-run-entrypoint) for recovery and exit behavior. Resolve a Fable checkout containing this Ruby CLI; installed SKILL text alone is insufficient. Keep the original task's stable record root and caller-supplied IDs across sessions; never derive them from cwd, PID, timestamp, session, or model. Only launches routed through `--run` receive technical duplicate-execution protection; arbitrary direct shell bypasses remain outside that boundary. Do not manually compose acquire/run/complete or silently fall back to a direct launch when the CLI is unavailable.
+
+CPU-heavy work uses the `SHARED_WORKSTATION` budget in [operational gates](references/operational-gates.md): two workers by default and at most two without direct Owner authorization; the Worker may reduce to one but never auto-scale, use all cores, or saturate the workstation.
 
 Non-Git source roots remain supported: do not run `git init`, create a nested
 repository, or turn a non-Git source root into a Git authority merely to make a

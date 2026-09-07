@@ -235,8 +235,9 @@ registry; it inspects only the exact PID this task itself recorded.
 **Storage**: `.fable/checkpoints/<task_id>/executions/<execution_id>.json`,
 alongside the checkpoint's own `.fable/checkpoints/<task_id>.json`.
 
-Call `ExecutionRecord.recover_before_execution(file_path)` before starting a
-possibly-duplicate execution. It classifies exactly one:
+Workers launch applicable task-owned expensive / long-running commands through
+the [protected run entrypoint](#protected-run-entrypoint). The underlying
+`ExecutionRecord.recover_before_execution(file_path)` classifies exactly one:
 
 | Classification | Meaning | Behavior |
 |---|---|---|
@@ -253,6 +254,98 @@ above: session or UI disappearance alone is never itself evidence of failure.
 `ExecutionRecord.start!` persists a `STARTED` record with the real PID before
 the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
 `durable_capture_path` once the work's durable terminal evidence exists.
+
+### Atomic acquisition boundary
+
+`recover_before_execution` (a check) and `start!` (a write) are two separate
+calls. Two independent contenders that both call `recover_before_execution`
+before either has called `start!` will both observe the `nil`-classification
+"no prior record" case and, without further coordination, could both proceed
+to invoke the upstream long-running command.
+
+`ExecutionRecord.acquire!(file_path, task_id:, execution_id:, pid:)` closes
+this gap: it is the canonical, atomic combination of the check and the write
+for one exact `task_id` + `execution_id`. It attempts to durably persist a
+`STARTED` record using create-temp-then-hardlink
+(`ExecutionRecord#save_if_absent!`), which the filesystem resolves atomically
+across concurrent callers and which never exposes a partially written record
+to a losing contender — unlike a separate existence check followed by a
+write.
+
+`acquire!` returns the same `Recovery` shape as `recover_before_execution`. A
+`nil` classification means this exact call won the race: the `STARTED`
+record is already durably persisted and returned as
+`recovery.execution_record`, and the caller should proceed to invoke the
+upstream command. Any other classification, or a raised
+`DuplicateExecutionError` / `UnresolvedExecutionStateError`, means a record
+already existed — a concurrent winner or an earlier session — and the losing
+caller must not proceed, under the exact same rules `recover_before_execution`
+already applies to that existing record. The CLI below owns this sequence for
+Worker launches; Workers must not manually compose acquire/run/complete.
+
+### Protected run entrypoint
+
+Resolve a confirmed Fable checkout that contains the Ruby script, then invoke:
+
+```text
+ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb \
+  --run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --execution-id <stable-execution-id> \
+  -- <upstream argv...>
+```
+
+`--repo` must explicitly name the original task's stable absolute
+ExecutionRecord / durable-capture root. It is never inferred from the CLI's
+current directory. `--worktree` must explicitly name an existing absolute
+directory and controls only the upstream command's working directory.
+`--task-id` and `--execution-id` are caller-supplied stable path components
+(non-empty, no path separators, neither `.` nor `..`). Preserve the same root
+and identities across sessions and models; never synthesize them from PID,
+timestamp, session, model, or current directory, including to bypass a stop.
+The original Packet still controls authorization and allowed output paths.
+
+The foreground CLI owns the execution record with its own PID while it
+supervises the upstream process. Its only new-execution route is:
+
+```text
+ExecutionRecord.acquire!
+→ DurableCommandCapture.run_and_capture(argv, ...)
+→ ExecutionRecord#complete!
+```
+
+Only a successful acquisition owner invokes the exact argv after `--`,
+directly without shell-string reconstruction (including a single executable
+argument). The capture is persisted under
+`<repo>/.fable/checkpoints/<task_id>/captures/<execution_id>.json` before the
+execution record becomes `COMPLETED`.
+
+On `PRIOR_PROCESS_COMPLETED`, the CLI reuses the saved result without invoking
+upstream, reproduces captured stdout and stderr without added status text,
+and returns the captured exit code, including non-zero. A captured
+`SIGNALED:<number>` result flushes the captured streams and terminates the CLI
+with the same signal. Completion describes durable capture, not command success.
+
+`PRIOR_PROCESS_ACTIVE`, `PRIOR_PROCESS_TERMINATED_INCOMPLETE`, and
+`PRIOR_PROCESS_STATE_UNRESOLVED` stop with exit `1` and the classification on
+stderr; none launches upstream. Malformed/unreadable state fails closed.
+Terminated-incomplete state is retained: the CLI never deletes the record,
+rotates identity, or automatically reruns. Rerun authority remains with the
+original task contract. Invalid CLI arguments exit `2` before acquisition.
+
+**Protection boundary**: only long-running commands routed through
+`task_checkpoint.rb --run` receive this technical duplicate-execution
+protection. Arbitrary direct shell bypasses remain outside that enforcement
+boundary. Applicable Worker launches MUST use this CLI and must stop if it
+cannot be resolved, rather than silently fall back to a direct command.
+
+**Deployment requirement**: publication/activation is incomplete until a Worker
+can resolve a Fable checkout containing the merged Ruby CLI. Updating only
+installed SKILL text is insufficient when the installed package lacks the
+Ruby scripts. The placeholder above means the confirmed deployed checkout;
+an isolated task worktree is never the permanent canonical runtime path.
 
 ## Publication live-state classifier
 
