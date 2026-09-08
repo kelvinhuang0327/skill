@@ -476,6 +476,600 @@ pass_case 'T8e no explicit lock release exists between rsync and post-write veri
   || fail 'T8: the real activation lock was created or modified'
 pass_case 'T8 real activation lock was never created or modified'
 
+# --- Reviewed Codex local-drift replacement mode (--replace-reviewed-local-drift)
+#
+# H/T/M bind to CURRENT_HEAD, which is the exact commit LINKED_CURRENT/
+# CURRENT_SCRIPT already runs at, so the identity checks reuse fixture state
+# the suite above already validated rather than staging a parallel commit.
+readonly RLD_H="$CURRENT_HEAD"
+readonly RLD_T="$(git -C "$FIXTURE_CANONICAL" rev-parse "${CURRENT_HEAD}^{tree}")"
+readonly RLD_M="$(git -C "$FIXTURE_CANONICAL" rev-parse "${CURRENT_HEAD}:fable-method/platforms/codex/fable-method")"
+readonly RLD_ZERO_L="$(printf '0%.0s' $(seq 1 64))"
+readonly RLD_ZERO_OBJ="$(printf '0%.0s' $(seq 1 40))"
+
+# Recovers SCRATCH_LIVE's true current LIVE_BUNDLE_SHA256_SERIALIZATION_V1
+# value by provoking a deliberate mismatch against RLD_ZERO_L and reading the
+# production script's own reported "observed" value back out of its refusal -
+# black-box, and it proves the CLI's mismatch reporting round-trips exactly,
+# without duplicating the serialization algorithm inside the test.
+rld_probe_observed_l() {
+  capture_command "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+    --expected-live-sha256 "$RLD_ZERO_L" \
+    --expected-canonical-head "$RLD_H" \
+    --expected-canonical-tree "$RLD_T" \
+    --expected-materialization-tree "$RLD_M"
+  [[ "$COMMAND_STATUS" -ne 0 ]] \
+    || fail 'rld_probe_observed_l: the all-zero probe unexpectedly succeeded'
+  local observed
+  observed="$(printf '%s\n' "$COMMAND_OUTPUT" | sed -n 's/.*observed \([0-9a-f]\{64\}\)$/\1/p')"
+  [[ "$observed" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "rld_probe_observed_l: could not recover an observed sha256 from: ${COMMAND_OUTPUT}"
+  printf '%s\n' "$observed"
+}
+
+# C/J structural checks supplement the deterministic runtime injections below.
+# The injections wrap functions only in a sourced disposable fixture process;
+# production has no synchronization hook or runtime test bypass.
+readonly RLD_DO_ACTIVATE_REPLACE_BODY="$(/usr/bin/awk '
+  $0 == "do_activate_replace_reviewed_local_drift() {" { inside = 1; next }
+  inside && $0 == "}" { exit }
+  inside { print }
+' "$SOURCE_ACTIVATE_SCRIPT")"
+[[ -n "$RLD_DO_ACTIVATE_REPLACE_BODY" ]] \
+  || fail 'C/J: could not locate do_activate_replace_reviewed_local_drift in the source script'
+
+readonly RLD_FIRST_REPLACE_STATEMENT="$(printf '%s\n' "$RLD_DO_ACTIVATE_REPLACE_BODY" | /usr/bin/awk '
+  { sub(/^[[:space:]]+/, "", $0); if ($0 != "") { print; exit } }
+')"
+[[ "$RLD_FIRST_REPLACE_STATEMENT" == 'acquire_activation_lock' ]] \
+  || fail "C/J: do_activate_replace_reviewed_local_drift does not acquire the lock first: ${RLD_FIRST_REPLACE_STATEMENT}"
+pass_case 'C/J structural: replacement acquires the shared activation lock as its first statement'
+
+readonly RLD_PREWRITE_REGION="$(printf '%s\n' "$RLD_DO_ACTIVATE_REPLACE_BODY" | /usr/bin/awk '
+  /rsync -a --checksum --delete/ { exit }
+  { print }
+')"
+readonly RLD_IDENTITY_CALLS="$(printf '%s\n' "$RLD_PREWRITE_REGION" | grep -c -F 'require_reviewed_replacement_canonical_identity')"
+readonly RLD_BUNDLE_CALLS="$(printf '%s\n' "$RLD_PREWRITE_REGION" | grep -c -F 'compute_live_bundle_sha256')"
+[[ "$RLD_IDENTITY_CALLS" -eq 2 ]] \
+  || fail "C: expected exactly two pre-write require_reviewed_replacement_canonical_identity calls, found ${RLD_IDENTITY_CALLS}"
+[[ "$RLD_BUNDLE_CALLS" -eq 2 ]] \
+  || fail "C: expected exactly two pre-write compute_live_bundle_sha256 calls, found ${RLD_BUNDLE_CALLS}"
+if printf '%s\n' "$RLD_PREWRITE_REGION" | grep -E -q '(^|[[:space:]])(mkdir|rsync)[[:space:]]'; then
+  fail 'C: a write statement exists before the prewrite revalidation completes'
+fi
+pass_case 'C: exactly two full identity+bundle revalidations precede the write, with no write between them'
+
+readonly RLD_POST_WRITE_REGION="$(printf '%s\n' "$RLD_DO_ACTIVATE_REPLACE_BODY" | /usr/bin/awk '
+  /rsync -a --checksum --delete/ { seen = 1 }
+  seen { print }
+')"
+[[ "$RLD_POST_WRITE_REGION" == *'rsync -a --checksum --delete'* ]] \
+  || fail 'J: could not locate the rsync call in the replacement function'
+[[ "$RLD_POST_WRITE_REGION" == *'classify_platform "$platform"'* ]] \
+  || fail 'J: the replacement function does not re-classify after the write'
+[[ "$RLD_POST_WRITE_REGION" == *'CLASSIFY_STATE" != EXACT_CURRENT_MATERIALIZATION'* ]] \
+  || fail 'J: the replacement function does not require EXACT_CURRENT_MATERIALIZATION post-write'
+readonly RLD_RESULT_LINE_NUM="$(printf '%s\n' "$RLD_POST_WRITE_REGION" \
+  | grep -n -F "printf 'ACTIVATION_RESULT: ACTIVATED" | head -1 | cut -d: -f1)"
+readonly RLD_CHECK_LINE_NUM="$(printf '%s\n' "$RLD_POST_WRITE_REGION" \
+  | grep -n -F 'CLASSIFY_STATE" != EXACT_CURRENT_MATERIALIZATION' | head -1 | cut -d: -f1)"
+[[ -n "$RLD_RESULT_LINE_NUM" && -n "$RLD_CHECK_LINE_NUM" && "$RLD_CHECK_LINE_NUM" -lt "$RLD_RESULT_LINE_NUM" ]] \
+  || fail 'J: ACTIVATION_RESULT: ACTIVATED is not gated behind the post-write EXACT_CURRENT_MATERIALIZATION check'
+pass_case 'J: post-write success output is structurally gated behind a re-verified EXACT_CURRENT_MATERIALIZATION'
+
+# G - lock contention blocks the replacement write path exactly like ordinary
+# activation (T8a above): acquisition is the first statement, so a placeholder
+# identity is enough - contention must fail before any identity is examined.
+hold_activation_lock "$FIXTURE_LOCK" "$HOLDER_READY" "$HOLDER_RELEASE" &
+HOLDER_PID=$!
+read -r HOLDER_SIGNAL <"$HOLDER_READY"
+[[ "$HOLDER_SIGNAL" == 'HOLDER_LOCK_ACQUIRED' ]] \
+  || fail "G: the external holder did not acquire the fixture lock: ${HOLDER_SIGNAL}"
+
+readonly RLD_DIGEST_BEFORE_G="$(live_digest "$SCRATCH_LIVE")"
+assert_failure_contains \
+  'G: contended replacement activation fails closed' \
+  'ACTIVATION_LOCK_BUSY' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+[[ "$COMMAND_OUTPUT" == *"lock: ${FIXTURE_LOCK}"* ]] \
+  || fail 'G: the contention report did not name the fixture lock'
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$RLD_DIGEST_BEFORE_G" ]] \
+  || fail 'G: a lock-contended replacement activation changed the live target'
+pass_case 'G: replacement activation cannot enter the write path while the lock is held'
+
+printf 'release\n' >"$HOLDER_RELEASE"
+set +e
+wait "$HOLDER_PID"
+HOLDER_STATUS=$?
+set -e
+HOLDER_PID=''
+[[ "$HOLDER_STATUS" -eq 0 ]] \
+  || fail "G: the holder did not exit normally: ${HOLDER_STATUS}"
+pass_case 'G external holder released the lock and was reaped'
+
+# SCRATCH_LIVE is EXACT_CURRENT_MATERIALIZATION here (T8c/T8d above). Drift it
+# so the negative cases below exercise real LOCAL_DRIFT content, and so the
+# eventual case-A probe below observes a genuine, non-trivial bundle.
+[[ -f "$SCRATCH_LIVE/SKILL.md" ]] || fail 'replacement fixture precondition: SCRATCH_LIVE/SKILL.md is missing'
+printf '\n<!-- reviewed local drift fixture marker -->\n' >>"$SCRATCH_LIVE/SKILL.md"
+readonly RLD_DIGEST_DRIFT_BASELINE="$(live_digest "$SCRATCH_LIVE")"
+
+# K - CLI fail-closed matrix. None of these reach the write path (they fail
+# at argument parsing or at the H/T/M check, which runs before the live
+# bundle is even inventoried), so RLD_ZERO_L stands in for a real L throughout.
+assert_failure_contains \
+  'K: missing --expected-materialization-tree is rejected' \
+  'REVIEWED_REPLACEMENT_MISSING_IDENTITY' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T"
+
+assert_failure_contains \
+  'K: duplicate --expected-live-sha256 is rejected' \
+  'REVIEWED_REPLACEMENT_MISSING_IDENTITY' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: duplicate --replace-reviewed-local-drift is rejected' \
+  'may be given at most once' \
+  "$CURRENT_SCRIPT" --activate --platform codex \
+  --replace-reviewed-local-drift --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: malformed (wrong length) --expected-live-sha256 is rejected' \
+  'REVIEWED_REPLACEMENT_MALFORMED_IDENTITY' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 'abc123' \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+readonly RLD_H_UPPER="$(printf '%s' "$RLD_H" | tr '[:lower:]' '[:upper:]')"
+assert_failure_contains \
+  'K: uppercase-hex --expected-canonical-head is rejected as malformed' \
+  'REVIEWED_REPLACEMENT_MALFORMED_IDENTITY' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H_UPPER" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: --replace-reviewed-local-drift with a non-Codex platform is rejected' \
+  'REVIEWED_REPLACEMENT_CODEX_ONLY' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: --check combined with --replace-reviewed-local-drift is rejected' \
+  'REVIEWED_REPLACEMENT_REQUIRES_ACTIVATE' \
+  "$CURRENT_SCRIPT" --check --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: --replace-reviewed-local-drift without any mode is rejected' \
+  'REVIEWED_REPLACEMENT_REQUIRES_ACTIVATE' \
+  "$CURRENT_SCRIPT" --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: a generic --force flag does not exist' \
+  'unknown argument: --force' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift --force \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$RLD_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'K: a CLI fail-closed case changed the live target'
+pass_case 'K: CLI fail-closed matrix left the live target byte-identical'
+
+# F - canonical identity (H/T/M) mismatches are rejected, independent of L.
+assert_failure_contains \
+  'F: wrong expected-canonical-head is rejected' \
+  'REVIEWED_REPLACEMENT_HEAD_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_ZERO_OBJ" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'F: wrong expected-canonical-tree is rejected' \
+  'REVIEWED_REPLACEMENT_TREE_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_ZERO_OBJ" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'F: wrong expected-materialization-tree is rejected' \
+  'REVIEWED_REPLACEMENT_MATERIALIZATION_TREE_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_ZERO_OBJ"
+
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$RLD_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'F: an H/T/M mismatch case changed the live target'
+pass_case 'F: canonical identity (H/T/M) mismatches are rejected with zero live writes'
+
+# B - wrong expected-live-sha256 alone (correct H/T/M) is rejected.
+assert_failure_contains \
+  'B: wrong expected-live-sha256 is rejected' \
+  'REVIEWED_REPLACEMENT_LIVE_BUNDLE_SHA256_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$RLD_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'B: a rejected wrong-L replacement changed the live target'
+pass_case 'B: wrong expected-live-sha256 leaves the live target byte-identical'
+
+# D - path/type drift under the live target is rejected outright; a rejected
+# activation must leave the offending path exactly as it was (rsync --delete
+# would otherwise have removed it), which is stronger proof of zero writes
+# than a content digest that free of construction ignores non-regular-files.
+ln -s /etc/hosts "$SCRATCH_LIVE/rld-evil-symlink"
+assert_failure_contains \
+  'D: a symlink under the live target is rejected' \
+  'LIVE_BUNDLE_REJECTED: unexpected path/type: rld-evil-symlink' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+[[ -L "$SCRATCH_LIVE/rld-evil-symlink" ]] \
+  || fail 'D: the rejected activation removed the symlink instead of leaving it untouched'
+rm -f "$SCRATCH_LIVE/rld-evil-symlink"
+pass_case 'D: a symlink under the live target is rejected with zero live writes'
+
+mkfifo "$SCRATCH_LIVE/rld-evil-fifo"
+assert_failure_contains \
+  'D: a FIFO under the live target is rejected' \
+  'LIVE_BUNDLE_REJECTED: unexpected path/type: rld-evil-fifo' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+[[ -p "$SCRATCH_LIVE/rld-evil-fifo" ]] \
+  || fail 'D: the rejected activation removed the FIFO instead of leaving it untouched'
+rm -f "$SCRATCH_LIVE/rld-evil-fifo"
+pass_case 'D: a FIFO under the live target is rejected with zero live writes'
+
+# E - even an earlier-sorting known file must remain unopened when inventory
+# later encounters an unknown ordinary file. Permissions alone are not proof:
+# the serializer spy below separately detects any attempted content open.
+printf 'unknown fixture content\n' >"$SCRATCH_LIVE/ZZZ-rld-unknown"
+assert_failure_contains \
+  'E: unknown ordinary path is rejected before hashing' \
+  'LIVE_BUNDLE_REJECTED: unknown path: ZZZ-rld-unknown' \
+  "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+[[ -f "$SCRATCH_LIVE/ZZZ-rld-unknown" ]] || fail 'E: unknown file was removed'
+rm "$SCRATCH_LIVE/ZZZ-rld-unknown"
+pass_case 'E: unknown ordinary path is preserved on refusal'
+
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$RLD_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'D/E: the live target was not restored to the drifted baseline after cleanup'
+pass_case 'D/E cleanup restored the drifted baseline exactly'
+
+# Runtime-only fault injection. Every path comes from this suite's scratch
+# root. Source the rewritten fixture, retain the real guards, and wrap only
+# the boundary at which the fault must occur. No production hook is added.
+readonly RLD_RUNNER="$SCRATCH/rld-runner.sh"
+cat >"$RLD_RUNNER" <<'RLD_RUNNER_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+script="$1" scenario="$2" trace="$3" stale="$4"
+shift 4
+source "$script"
+live="$(platform_live_path codex)"
+eval "$(declare -f require_reviewed_replacement_canonical_identity | sed '1s/require_reviewed_replacement_canonical_identity/original_identity/')"
+eval "$(declare -f classify_platform | sed '1s/classify_platform/original_classify/')"
+identity_calls=0
+writes=0
+require_reviewed_replacement_canonical_identity() {
+  identity_calls=$((identity_calls + 1))
+  if [[ "$identity_calls" -eq 2 ]]; then
+    case "$scenario" in
+      live-change) printf '\nprewrite injected change\n' >>"$live/SKILL.md" ;;
+      canonical-ref-change) git -C "$REPOSITORY_ROOT" update-ref refs/remotes/origin/master "$stale" ;;
+      source-change) printf '\nsource injected change\n' >>"$REPOSITORY_ROOT/fable-method/platforms/codex/fable-method/SKILL.md" ;;
+    esac
+  fi
+  original_identity "$@"
+}
+assert_lock_held() {
+  if /bin/bash -c 'exec 8>>"$1"; /usr/bin/lockf -s -t 0 8' _ "$ACTIVATION_LOCK" 2>/dev/null; then
+    die "FIXTURE_LOCK_NOT_HELD: $1"
+  fi
+  printf 'LOCK_HELD:%s\n' "$1" >>"$trace"
+}
+rsync() {
+  writes=$((writes + 1))
+  printf 'WRITE:%s\n' "$*" >>"$trace"
+  assert_lock_held write
+  [[ "$scenario" != write-failure ]] || return 23
+  if [[ "$scenario" == without-checksum ]]; then
+    local -a args=()
+    local arg
+    for arg in "$@"; do [[ "$arg" == --checksum ]] || args+=("$arg"); done
+    /usr/bin/rsync "${args[@]}" || return $?
+  else
+    /usr/bin/rsync "$@" || return $?
+  fi
+  if [[ "$scenario" == post-failure ]]; then
+    printf '\npostwrite injected change\n' >>"$live/SKILL.md"
+  elif [[ "$scenario" == post-mode-failure ]]; then
+    /usr/bin/ruby -e 'File.chmod(File.stat(ARGV[0]).mode ^ 0001, ARGV[0])' "$live"
+  fi
+}
+classify_platform() {
+  if [[ "$writes" -gt 0 ]]; then assert_lock_held post-check; fi
+  original_classify "$@"
+}
+main "$@"
+RLD_RUNNER_EOF
+
+rld_args=(--activate --platform codex --replace-reviewed-local-drift
+  --expected-live-sha256 "$RLD_ZERO_L" --expected-canonical-head "$RLD_H"
+  --expected-canonical-tree "$RLD_T" --expected-materialization-tree "$RLD_M")
+readonly RLD_TRACE="$SCRATCH/rld.trace"
+readonly RLD_SOURCE="$LINKED_CURRENT/fable-method/platforms/codex/fable-method"
+rld_reset_drift() {
+  /usr/bin/rsync -a --checksum --delete "$RLD_SOURCE/" "$SCRATCH_LIVE/"
+  printf '\nreviewed fixture drift\n' >>"$SCRATCH_LIVE/SKILL.md"
+  : >"$RLD_TRACE"
+}
+rld_run_injected() {
+  local scenario="$1" expected_l="$2"
+  local -a args=("${rld_args[@]}")
+  args[5]="$expected_l"
+  capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" "$scenario" "$RLD_TRACE" "$STALE_HEAD" "${args[@]}"
+}
+rld_assert_refusal() {
+  local label="$1" expected="$2"
+  [[ "$COMMAND_STATUS" -ne 0 && "$COMMAND_OUTPUT" == *"$expected"* ]] || fail "$label"
+  [[ "$COMMAND_OUTPUT" != *'ACTIVATION_RESULT: ACTIVATED'* ]] || fail "$label: false success"
+}
+rld_assert_no_write() {
+  [[ ! -s "$RLD_TRACE" ]] || fail "$1: entered rsync despite prewrite refusal"
+  pass_case "$1: zero rsync calls"
+}
+
+rld_reset_drift
+rld_l="$(rld_probe_observed_l)"
+assert_failure_contains 'ordinary LOCAL_DRIFT remains fail-closed' 'LOCAL_DRIFT' \
+  "$CURRENT_SCRIPT" --activate --platform codex
+rld_before="$(live_digest "$SCRATCH_LIVE")"
+rld_run_injected normal "$RLD_ZERO_L"
+rld_assert_refusal 'wrong L runtime' 'REVIEWED_REPLACEMENT_LIVE_BUNDLE_SHA256_MISMATCH'
+rld_assert_no_write 'wrong L runtime'
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$rld_before" ]] || fail 'wrong L runtime changed bytes'
+
+rld_run_injected live-change "$rld_l"
+rld_assert_refusal 'C live change before first write' 'REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH'
+rld_assert_no_write 'C live change before first write'
+[[ "$(tail -1 "$SCRATCH_LIVE/SKILL.md")" == 'prewrite injected change' ]] || fail 'C injected live change was overwritten'
+
+rld_reset_drift
+rld_l="$(rld_probe_observed_l)"
+rld_run_injected canonical-ref-change "$rld_l"
+rld_assert_refusal 'F canonical ref moved before first write' 'REVIEWED_REPLACEMENT_CANONICAL_REF_MISMATCH'
+rld_assert_no_write 'F canonical ref moved before first write'
+git -C "$FIXTURE_CANONICAL" update-ref refs/remotes/origin/master "$RLD_H"
+
+# Actual source bytes must stay bound to M, not just the unchanged Git object.
+cp "$RLD_SOURCE/SKILL.md" "$SCRATCH/source-skill.saved"
+rld_run_injected source-change "$rld_l"
+rld_assert_refusal 'F source bytes changed before first write' 'CANONICAL_MATERIALIZATION_DRIFT'
+rld_assert_no_write 'F source bytes changed before first write'
+cp "$SCRATCH/source-skill.saved" "$RLD_SOURCE/SKILL.md"
+
+# Known file -> directory is a rejected type change, not an allowed deletion.
+mv "$SCRATCH_LIVE/SKILL.md" "$SCRATCH/live-skill.saved"
+mkdir "$SCRATCH_LIVE/SKILL.md"
+rld_run_injected normal "$rld_l"
+rld_assert_refusal 'D known file changed to directory' 'unexpected known path type: SKILL.md'
+rld_assert_no_write 'D known file changed to directory'
+rmdir "$SCRATCH_LIVE/SKILL.md"
+mv "$SCRATCH/live-skill.saved" "$SCRATCH_LIVE/SKILL.md"
+
+rld_reset_drift
+rld_l="$(rld_probe_observed_l)"
+rld_run_injected write-failure "$rld_l"
+rld_assert_refusal 'I write failure' 'REVIEWED_REPLACEMENT_WRITE_FAILED'
+grep -q '^WRITE:' "$RLD_TRACE" || fail 'I write failure was not injected'
+pass_case 'I nonzero rsync cannot report success'
+
+rld_reset_drift
+rld_l="$(rld_probe_observed_l)"
+rld_run_injected post-failure "$rld_l"
+rld_assert_refusal 'J post-check failure' 'ACTIVATION_VERIFICATION_FAILED'
+grep -q '^LOCK_HELD:post-check$' "$RLD_TRACE" || fail 'J post-check lock was not observed'
+pass_case 'J real post-write LOCAL_DRIFT fails with lock held and no false success'
+
+rld_reset_drift
+rld_l="$(rld_probe_observed_l)"
+rld_run_injected post-mode-failure "$rld_l"
+rld_assert_refusal 'J post-check root mode mismatch' 'ACTIVATION_VERIFICATION_FAILED: full bundle differs'
+pass_case 'J full bundle post-check rejects permission drift invisible to Git file-mode classification'
+
+rld_reset_drift
+rld_l="$(rld_probe_observed_l)"
+rld_run_injected normal "$rld_l"
+[[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" == *'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION'* ]] || fail 'A reviewed drift happy path'
+grep -q '^LOCK_HELD:write$' "$RLD_TRACE" || fail 'A write lock not observed'
+grep -q '^LOCK_HELD:post-check$' "$RLD_TRACE" || fail 'A post-check lock not observed'
+[[ "$(live_digest "$SCRATCH_LIVE")" == "$(live_digest "$RLD_SOURCE")" ]] || fail 'A full bundle bytes differ'
+pass_case 'A reviewed LOCAL_DRIFT replacement succeeds with lock through exact post-check'
+
+# H - real rsync quick-check collision. Only bytes differ; size and nanosecond
+# mtime equal source. Removing --checksum in the disposable wrapper is the
+# falsifying mutation, which must fail the exact same production post-check.
+rld_same_metadata_drift() {
+  /usr/bin/rsync -a --checksum --delete "$RLD_SOURCE/" "$SCRATCH_LIVE/"
+  /usr/bin/ruby -e '
+    source, target = ARGV
+    stat = File.stat(source)
+    bytes = File.binread(source)
+    bytes.setbyte(0, bytes.getbyte(0) ^ 1)
+    File.binwrite(target, bytes)
+    # macOS File.utime may round arbitrary subsecond mtimes. Give both
+    # fixture files the same exact whole-second timestamp before comparing.
+    stamp = Time.at(1700000000)
+    File.utime(stamp, stamp, source, target)
+    raise "size/mtime fixture mismatch" unless File.size(target) == stat.size && File.mtime(target) == File.mtime(source)
+  ' "$RLD_SOURCE/SKILL.md" "$SCRATCH_LIVE/SKILL.md"
+  : >"$RLD_TRACE"
+}
+rld_same_metadata_drift
+rld_l="$(rld_probe_observed_l)"
+rld_run_injected without-checksum "$rld_l"
+rld_assert_refusal 'H checksum falsification' 'ACTIVATION_VERIFICATION_FAILED'
+pass_case 'H falsifiability: removing checksum leaves equal-size/mtime drift and fails post-check'
+rld_same_metadata_drift
+rld_l="$(rld_probe_observed_l)"
+# Exercise the unwrapped executable for the passing checksum case.
+rld_actual_args=("${rld_args[@]}")
+rld_actual_args[5]="$rld_l"
+assert_success_contains 'H real CLI checksum replacement repairs equal-size/mtime byte drift' \
+  'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" "${rld_actual_args[@]}"
+cmp "$RLD_SOURCE/SKILL.md" "$SCRATCH_LIVE/SKILL.md" || fail 'H checksum replacement left stale bytes'
+
+# Independent serialization vector includes root mode, nested-directory mode,
+# two contents and raw byte sort order. Permissions and non-SKILL content are
+# independently changed and must change L. This oracle does not call production.
+readonly RLD_VECTOR="$SCRATCH/serialization-vector"
+mkdir -p "$RLD_VECTOR/references"
+printf 'A' >"$RLD_VECTOR/SKILL.md"
+printf 'B' >"$RLD_VECTOR/references/operational-gates.md"
+chmod 750 "$RLD_VECTOR"
+chmod 700 "$RLD_VECTOR/references"
+chmod 640 "$RLD_VECTOR/SKILL.md"
+chmod 600 "$RLD_VECTOR/references/operational-gates.md"
+rld_vector_expected="$(/usr/bin/ruby -rdigest -e '
+  records = [["D", ".", 0750, nil], ["F", "SKILL.md", 0640, "A"],
+             ["D", "references", 0700, nil], ["F", "references/operational-gates.md", 0600, "B"]]
+  bytes = records.map { |type, path, mode, content|
+    type + [path.bytesize].pack("N") + path + [mode].pack("N") + (content ? Digest::SHA256.digest(content) : "\x00" * 32)
+  }.join
+  puts Digest::SHA256.hexdigest(bytes)
+')"
+rld_serialize() {
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2"' _ "$CURRENT_SCRIPT" "$1"
+}
+[[ "$(rld_serialize "$RLD_VECTOR")" == "$rld_vector_expected" ]] || fail 'serialization independent vector mismatch'
+pass_case 'serialization V1 independent full-record vector'
+chmod 751 "$RLD_VECTOR"
+[[ "$(rld_serialize "$RLD_VECTOR")" != "$rld_vector_expected" ]] || fail 'root mode not hashed'
+chmod 750 "$RLD_VECTOR"
+printf C >"$RLD_VECTOR/references/operational-gates.md"
+[[ "$(rld_serialize "$RLD_VECTOR")" != "$rld_vector_expected" ]] || fail 'non-SKILL content not hashed'
+printf B >"$RLD_VECTOR/references/operational-gates.md"
+[[ "$(rld_serialize "$RLD_VECTOR")" == "$rld_vector_expected" ]] || fail 'serialization vector restore mismatch'
+pass_case 'serialization binds root permissions and non-SKILL bytes'
+
+# Ruby seam runs only inside the sourced fixture subprocess. The read spy
+# fails on ANY content open; with a late unknown path, the expected error must
+# still be inventory rejection. A second mode changes a known file to a
+# symlink between inventory and content passes and verifies no target read.
+readonly RLD_SERIALIZER_SPY="$SCRATCH/serializer-spy.rb"
+cat >"$RLD_SERIALIZER_SPY" <<'RLD_SPY_EOF'
+module SerializerSpy
+  def open(path, *args, &block)
+    if path.to_s.start_with?(ENV.fetch("RLD_SPY_ROOT") + "/")
+      raise "FIXTURE_CONTENT_OPENED"
+    end
+    super
+  end
+  def lstat(path)
+    if ENV["RLD_SPY_MODE"] == "type-change" && path == ENV.fetch("RLD_SPY_ROOT")
+      @root_calls = (@root_calls || 0) + 1
+      if @root_calls == 2
+        target = File.join(path, "SKILL.md")
+        File.unlink(target)
+        File.symlink(ENV.fetch("RLD_SPY_DECOY"), target)
+      end
+    end
+    super
+  end
+end
+File.singleton_class.prepend(SerializerSpy)
+RLD_SPY_EOF
+printf 'scratch decoy' >"$SCRATCH/decoy"
+printf 'must not read' >"$RLD_VECTOR/ZZZ-unknown"
+assert_failure_contains 'E runtime spy: unknown path rejected before any content open' \
+  'LIVE_BUNDLE_REJECTED: unknown path: ZZZ-unknown' \
+  env RUBYOPT="-r$RLD_SERIALIZER_SPY" RLD_SPY_ROOT="$RLD_VECTOR" RLD_SPY_MODE=unknown \
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2"' _ "$CURRENT_SCRIPT" "$RLD_VECTOR"
+[[ "$COMMAND_OUTPUT" != *FIXTURE_CONTENT_OPENED* ]] || fail 'E read occurred before unknown path rejection'
+rm "$RLD_VECTOR/ZZZ-unknown"
+assert_failure_contains 'D runtime spy: mid-scan type change rejects before content open' \
+  'LIVE_BUNDLE_REJECTED: path/type changed during scan:' \
+  env RUBYOPT="-r$RLD_SERIALIZER_SPY" RLD_SPY_ROOT="$RLD_VECTOR" RLD_SPY_MODE=type-change RLD_SPY_DECOY="$SCRATCH/decoy" \
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2"' _ "$CURRENT_SCRIPT" "$RLD_VECTOR"
+[[ "$COMMAND_OUTPUT" != *FIXTURE_CONTENT_OPENED* ]] || fail 'D type change opened content'
+[[ -L "$RLD_VECTOR/SKILL.md" ]] || fail 'D type-change injection did not happen'
+
+# Every identity flag: missing, duplicate, malformed and missing value. All
+# invoke the same CLI dispatcher with a write spy and assert zero rsync calls.
+for rld_index in 4 6 8 10; do
+  for rld_variant in missing duplicate malformed no-value; do
+    rld_cli_args=("${rld_args[@]}")
+    case "$rld_variant" in
+      missing) unset 'rld_cli_args[rld_index]' 'rld_cli_args[rld_index+1]' ;;
+      duplicate) rld_cli_args+=("${rld_args[$rld_index]}" "${rld_args[$((rld_index + 1))]}") ;;
+      malformed) rld_cli_args[$((rld_index + 1))]='not-hex' ;;
+      no-value)
+        unset 'rld_cli_args[rld_index]' 'rld_cli_args[rld_index+1]'
+        rld_cli_args+=("${rld_args[$rld_index]}")
+        ;;
+    esac
+    : >"$RLD_TRACE"
+    capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" normal "$RLD_TRACE" "$STALE_HEAD" "${rld_cli_args[@]}"
+    rld_assert_refusal "CLI $rld_variant ${rld_args[$rld_index]}" 'ERROR:'
+    rld_assert_no_write "CLI $rld_variant ${rld_args[$rld_index]}"
+  done
+done
+assert_failure_contains 'identity flags without replacement mode fail closed' \
+  'REVIEWED_REPLACEMENT_IDENTITY_WITHOUT_MODE' "$CURRENT_SCRIPT" --activate --platform codex --expected-live-sha256 "$RLD_ZERO_L"
+
+[[ "$(real_lock_fingerprint)" == "$REAL_LOCK_BEFORE" ]] || fail 'replacement cases touched the real activation lock'
+pass_case 'all replacement fixtures stayed isolated; real activation lock unchanged'
+
 git -C "$FIXTURE_CANONICAL" update-ref -d refs/remotes/origin/master
 assert_failure_contains \
   'unresolved canonical origin master fails closed' \
