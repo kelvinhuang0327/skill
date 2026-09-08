@@ -171,11 +171,11 @@ Before mutation, confirm only what can invalidate execution:
 - Packet-named paths, direct consumers, runtime/import/deploy chain, and tools;
 - Owner authorization, allowed/forbidden paths, and external side effects.
 
-The only preflight stop conditions are wrong repository, incompatible
-base/ref, overlapping dirty ownership, active concurrent mutation, missing
-required capability, or an explicit safety restriction. A compatible
-descendant, unrelated outside-scope dirty path, or harmless environment
-difference is evidence to report, not a stop.
+The only preflight stop conditions are wrong repository, incompatible base/ref, overlapping dirty ownership, active concurrent mutation, missing required capability, or an explicit safety restriction. A compatible descendant, unrelated outside-scope dirty path, or harmless environment difference is evidence to report, not a stop.
+
+For runtime/worktree cleanup, `ACTIVE_RUNTIME_OWNERSHIP` exists when EITHER a currently running process owns or depends on the target OR a loaded recurring scheduler is bound to the target or its runtime source. Task-relevant mechanisms include launchd, cron, systemd, or an equivalent recurring scheduler. When applicable, cleanup preflight must inspect task-relevant binding data, including at least loaded/enabled schedule state; WorkingDirectory; executable / interpreter; script path; and import path / module root / PYTHONPATH binding. `NO_CURRENT_PROCESS` does NOT imply `NO_ACTIVE_RUNTIME_OWNERSHIP`. A loaded recurring scheduler bound to the target worktree/source retains active ownership for cleanup unless an authorized ownership transition explicitly removes or repoints the binding. Inspection remains task-relevant and bounded; do not require a workspace-wide scheduler audit.
+
+Before deleting or replacing a detached worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`: the exact deployed commit must remain reachable through an explicitly recognized durable Git source authority appropriate to the task. Content-equivalent code/tree on main is NOT sufficient evidence that the exact deployed source may be discarded. If exact `DEPLOYED_HEAD` has no durable source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`. The Worker MUST NOT automatically create a branch/tag/ref to satisfy this gate. Creating or changing a preservation ref remains a separate Git mutation and requires applicable task authority / authorization.
 
 Make the ownership discipline explicit — this is Worker behavior, not a new
 filesystem versioning subsystem:
