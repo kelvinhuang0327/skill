@@ -274,19 +274,24 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, weakenings)
   end
 
-  # Cleanup guidance only; no scheduler, worktree, or preservation-ref mutation.
+  # Cleanup/mutation guidance only; no scheduler, worktree, or preservation-ref mutation.
   def test_canonical_recurring_scheduler_runtime_ownership_contract
     clauses = [
-      'For runtime/worktree cleanup, `ACTIVE_RUNTIME_OWNERSHIP` exists when EITHER a currently running process owns or depends on the target OR a loaded recurring scheduler is bound to the target or its runtime source.',
+      'For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` exists when EITHER a currently running process owns or depends on the target OR a loaded or enabled recurring scheduler is bound to the target or its runtime source.',
       'Task-relevant mechanisms include launchd, cron, systemd, or an equivalent recurring scheduler.',
-      'When applicable, cleanup preflight must inspect task-relevant binding data, including at least loaded/enabled schedule state; WorkingDirectory; executable / interpreter; script path; and import path / module root / PYTHONPATH binding.',
+      'When applicable, cleanup or mutation preflight must inspect task-relevant binding data, including at least loaded/enabled schedule state; WorkingDirectory; executable / interpreter; script path; and import path / module root / PYTHONPATH binding.',
       '`NO_CURRENT_PROCESS` does NOT imply `NO_ACTIVE_RUNTIME_OWNERSHIP`.',
-      'A loaded recurring scheduler bound to the target worktree/source retains active ownership for cleanup unless an authorized ownership transition explicitly removes or repoints the binding.',
+      'A loaded or enabled recurring scheduler bound to the target worktree/source retains active ownership for cleanup or mutation unless an authorized ownership transition explicitly removes or repoints the binding.',
       'Inspection remains task-relevant and bounded; do not require a workspace-wide scheduler audit.'
     ]
     weakenings = {
+      # Preserve enabled schedulers and both cleanup/mutation entry points.
+      'loaded or enabled recurring scheduler' => 'loaded recurring scheduler',
+      'runtime/worktree cleanup or mutation' => 'runtime/worktree cleanup',
+      'cleanup or mutation preflight' => 'cleanup preflight',
+      'ownership for cleanup or mutation' => 'ownership for cleanup',
       # A1: reduce ownership to current processes only.
-      ' OR a loaded recurring scheduler is bound to the target or its runtime source' => '',
+      ' OR a loaded or enabled recurring scheduler is bound to the target or its runtime source' => '',
       'EITHER a currently running process owns or depends on the target OR' => 'BOTH a currently running process owns or depends on the target AND',
       ' or its runtime source' => '',
       'launchd, ' => '',
@@ -294,7 +299,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'systemd, ' => '',
       ', or an equivalent recurring scheduler' => '',
       # A2: retain the binding but deny active ownership.
-      'retains active ownership for cleanup' => 'does not count as active ownership for cleanup',
+      'retains active ownership for cleanup or mutation' => 'does not count as active ownership for cleanup',
       'does NOT imply' => 'implies',
       'an authorized ownership transition explicitly removes or repoints the binding' => 'the Worker assumes the binding is idle',
       # A3: remove each load-bearing binding surface independently.
@@ -312,9 +317,11 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
   end
 
-  def test_canonical_detached_deployed_head_durable_source_authority_contract
+  def test_canonical_deployed_head_durable_source_authority_contract
+    refute_includes Parser.skill.gsub(/\s+/, ' '), 'where exact deployment reproducibility matters'
+    refute_includes Parser.skill, 'DEPLOYED_SOURCE_DURABILITY_REQUIRED'
     clauses = [
-      'Before deleting or replacing a detached worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`:',
+      'Before deleting or replacing a checkout/worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`:',
       'the exact deployed commit must remain reachable through an explicitly recognized durable Git source authority appropriate to the task.',
       'Content-equivalent code/tree on main is NOT sufficient evidence that the exact deployed source may be discarded.',
       'If exact `DEPLOYED_HEAD` has no durable source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`.',
@@ -324,6 +331,10 @@ class ExplicitContractFailClosedTest < Minitest::Test
     weakenings = {
       'Before deleting or replacing' => 'After deleting or replacing',
       'deleting or replacing' => 'deleting',
+      'a checkout/worktree that is or was' => 'a detached worktree that is or was',
+      'that is or was' => 'that is',
+      'the exact deployed runtime source, `DEPLOYED_HEAD`' => 'the exact deployed runtime source where exact deployment reproducibility matters, `DEPLOYED_HEAD`',
+      'DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING' => 'DEPLOYED_SOURCE_DURABILITY_REQUIRED',
       'that is or was the exact deployed runtime source' => 'that is currently the deployed runtime source',
       # B1: substitute content equivalence for exact deployed-head durability.
       '`DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`' => 'content-equivalent main is sufficient',
