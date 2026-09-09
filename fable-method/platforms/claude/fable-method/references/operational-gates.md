@@ -299,6 +299,26 @@ not rebuild the Planner's lineage analysis, run a generic authority search, or
 redo a full reconciliation. A contradiction invalidates only the affected
 evidence and stops or skips that target.
 
+For publication-bound work, the Final artifact gate's existing changed-path
+authorization requirement resolves at PR-equivalent scope, not commit-local
+scope. Fresh-resolve and freeze the intended canonical publication base and
+the exact candidate head, then compute the changed-path scope as `git diff
+--name-only <canonical-base>...<candidate-head>` (or an equivalent provider
+compare API with the same base/head semantics), and validate that path set
+against the task's authorized publication scope:
+
+```text
+PUBLICATION_SCOPE_AUTHORITY = INTENDED_CANONICAL_BASE ... CANDIDATE_HEAD
+COMMIT_LOCAL_DIFF != INTENDED_PR_DIFF
+```
+
+`COMMIT_LOCAL_DIFF` — candidate-parent → candidate-head — is commit-local
+evidence only and MUST NOT be accepted as proof that the intended PR is
+scope-clean. If canonical-base → candidate-head contains unauthorized
+ancestry paths, stop before push, PR creation, mark-ready, or merge. This
+replaces the prior changed-path interpretation; it is not a second
+publication-scope gate.
+
 ## Worktrees and mutation evidence
 
 Use the exact Packet worktree path. Never create fallback, backup, scratch,
