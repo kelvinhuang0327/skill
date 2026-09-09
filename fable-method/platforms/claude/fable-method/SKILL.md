@@ -353,7 +353,7 @@ TWINS: searched <pattern> - found <N> other sites: <files or none>
 ```
 
 Run the complete local suite at most once per final tree unless load-bearing
-edits invalidate it. When a Judge trigger applies, hand off to a separate
+edits invalidate it. When merge or publication acceptance depends on exact-head verification and canonical main has advanced since that verification: inspect bounded path overlap and bounded direct consumers/dependencies of candidate-modified canonical state; if a direct dependency exists, run only the focused prospective integration verification required for that consumer; no automatic full-suite escalation solely because main advanced. When a Judge trigger applies, hand off to a separate
 fresh-context read-only Judge rather than duplicating Judge logic. Initial
 Judge depth is `BOUNDED` unless a named full trigger or explicit Owner
 requirement requires `FULL`; use `DELTA` only after the one permitted bounded
@@ -392,6 +392,7 @@ FULL_PR_LIFECYCLE_CLOSED: YES | NO
 post-merge checks, cleanup, and a clean/restored workspace. Local completion
 without publication is not a publication failure. Keep unauthorized work
 under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
+Before an authorized lifecycle mutation (publication, existing PR reuse, Ready, merge-state, exact cleanup), read live state: if desired state is already reached and exact identity matches, accept it as `SKIP_ALREADY_COMPLETE` / `ALREADY_SATISFIED` without repeating mutation or treating prior completion as an error; if a same-role resource exists with conflicting identity, stop with `STOP_UNRESOLVED`.
 
 For `FAST` and `STANDARD` work, report the compact form in
 [reporting](references/reporting.md). Report the full ledger partitions below
@@ -439,18 +440,8 @@ Load only the directly relevant reference:
 - [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
 - [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;
 - [diff coverage](references/diff-coverage.md) for on-demand changed-line execution-adequacy measurement against an already-configured coverage run;
-- [reporting](references/reporting.md) for compact outcome-first fields and
-  lifecycle reporting;
-- exactly one matching domain reference before Step 2 for a non-coding domain:
-  [business ops](references/domains/business-ops.md),
-  [data analysis](references/domains/data-analysis.md),
-  [design and UX](references/domains/design-ux.md),
-  [devops](references/domains/devops.md),
-  [finance](references/domains/finance.md),
-  [legal and compliance](references/domains/legal-compliance.md),
-  [marketing](references/domains/marketing.md), or
-  [research](references/domains/research.md). `domains/TEMPLATE.md` is only
-  for creating or updating an adapter.
+- [reporting](references/reporting.md) for compact outcome-first fields and lifecycle reporting;
+- exactly one matching domain reference before Step 2 for a non-coding domain: [business ops](references/domains/business-ops.md), [data analysis](references/domains/data-analysis.md), [design and UX](references/domains/design-ux.md), [devops](references/domains/devops.md), [finance](references/domains/finance.md), [legal and compliance](references/domains/legal-compliance.md), [marketing](references/domains/marketing.md), or [research](references/domains/research.md). `domains/TEMPLATE.md` is only for creating or updating an adapter.
 
 Preserve `/fable-method <task>`, `/fable-method plan <task>`,
 `/fable-method audit`, `/fable-method report`, `$fable-method`, and the sibling

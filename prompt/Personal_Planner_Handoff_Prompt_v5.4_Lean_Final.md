@@ -518,6 +518,27 @@ Do not：
 Prior evidence 來自不同 load-bearing tree/artifact 時（identity mismatch），不得僅因 label 相符就當作 covered 重用。
 此為 planning / verification selection 邏輯，非新的 Judge gate。
 
+DEPENDENCY_AWARE_BASE_DRIFT：
+
+當 canonical main 在 candidate 最近一次 exact-head verification 成功後推進時，依下列兩項判定整合相容性，不得僅依賴 changed-path overlap：
+1. changed-path overlap；
+2. main drift 所引入的 bounded direct semantic dependency。
+
+Direct semantic dependency 包括任何新增或修改的 consumer：
+- imports 或 calls candidate-modified source；
+- consumes candidate-modified canonical artifacts；
+- pins candidate-modified artifacts 的 HEAD / TREE / SHA / checksum；
+- validates candidate 所變更之 status / schema / value。
+
+整合驗證規則：
+- 若 `PATH_OVERLAP == NONE` 且 `DIRECT_DEPENDENCY == YES`：
+  → 在 merge / publication closure 前，僅執行該 direct consumer 所需的 focused prospective integration verification；
+  → 不得自動要求 full-repository tests。
+- 若 path overlap 與 direct dependency 皆不存在（`PATH_OVERLAP == NONE` 且 `DIRECT_DEPENDENCY == NO`）：
+  → 不得僅為 process completeness 額外增加 verification。
+
+本規則相容於既有 `REUSED_COMPLETION_EVIDENCE_DIFF` 與「Focused Verification > Blind Full Audit」原則。
+
 ### 5.5 Lifecycle closure bundle（僅限 Git/PR/worktree/artifact 收尾任務）
 
 只有當任務本身是 lifecycle cleanup 或 publication closure 時才使用；一般
@@ -576,6 +597,17 @@ ownership/status，以及既有 checksum（若存在）。任一項改變時只�
 evidence 失效，並重做必要的 bounded preflight；經過的對話輪數本身不構成
 evidence 過期。這是 bounded-authority-check 原則在 lifecycle 情境下的延伸，
 不需要為此另建 evidence package 或 research-grade sealing。
+
+LIVE_STATE_IDEMPOTENT_RESOLUTION：
+
+對所有 lifecycle 動作（包括 push/publication、PR creation/reuse、Mark Ready、merge-state handling、branch/worktree cleanup）：
+- 若 desired state 已經滿足且 load-bearing identity 完全吻合（如 matching branch 已 push、matching PR 已存在、PR 已 Ready、cleanup target 已 ALREADY_ABSENT）：
+  → accept it as already satisfied（視為已達成）；
+  → do not repeat the mutation（不重複執行變更）；
+  → do not classify successful prior completion as failure or BLOCKED（不將先前已成功完成視為失敗或 BLOCKED）。
+- 若存在同名／同 role resource 但 load-bearing identity 衝突：
+  → STOP 並回報 identity conflict。
+- 授權邊界保護：已滿足之 live state 僅能唯讀確認並重用，絕不得據此推論另一項不同 mutation 的授權。
 
 ### 5.6 Legacy code migration bundle（僅限從既有實作移植行為的任務）
 
