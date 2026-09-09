@@ -493,11 +493,12 @@ readonly RLD_ZERO_OBJ="$(printf '0%.0s' $(seq 1 40))"
 # black-box, and it proves the CLI's mismatch reporting round-trips exactly,
 # without duplicating the serialization algorithm inside the test.
 rld_probe_observed_l() {
-  capture_command "$CURRENT_SCRIPT" --activate --platform codex --replace-reviewed-local-drift \
+  local platform="${1:-codex}" materialization_tree="${2:-$RLD_M}"
+  capture_command "$CURRENT_SCRIPT" --activate --platform "$platform" --replace-reviewed-local-drift \
     --expected-live-sha256 "$RLD_ZERO_L" \
     --expected-canonical-head "$RLD_H" \
     --expected-canonical-tree "$RLD_T" \
-    --expected-materialization-tree "$RLD_M"
+    --expected-materialization-tree "$materialization_tree"
   [[ "$COMMAND_STATUS" -ne 0 ]] \
     || fail 'rld_probe_observed_l: the all-zero probe unexpectedly succeeded'
   local observed
@@ -649,9 +650,18 @@ assert_failure_contains \
   --expected-materialization-tree "$RLD_M"
 
 assert_failure_contains \
-  'K: --replace-reviewed-local-drift with a non-Codex platform is rejected' \
-  'REVIEWED_REPLACEMENT_CODEX_ONLY' \
-  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  'K: --replace-reviewed-local-drift with platform gemini is rejected' \
+  'REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM' \
+  "$CURRENT_SCRIPT" --activate --platform gemini --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M"
+
+assert_failure_contains \
+  'K: --replace-reviewed-local-drift with platform antigravity is rejected' \
+  'REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM' \
+  "$CURRENT_SCRIPT" --activate --platform antigravity --replace-reviewed-local-drift \
   --expected-live-sha256 "$RLD_ZERO_L" \
   --expected-canonical-head "$RLD_H" \
   --expected-canonical-tree "$RLD_T" \
@@ -795,7 +805,17 @@ set -euo pipefail
 script="$1" scenario="$2" trace="$3" stale="$4"
 shift 4
 source "$script"
-live="$(platform_live_path codex)"
+rld_platform=""
+rld_prev=""
+for rld_arg in "$@"; do
+  if [[ "$rld_prev" == --platform ]]; then
+    rld_platform="$rld_arg"
+    break
+  fi
+  rld_prev="$rld_arg"
+done
+[[ -n "$rld_platform" ]] || die 'RLD_RUNNER: could not determine --platform from argv'
+live="$(platform_live_path "$rld_platform")"
 eval "$(declare -f require_reviewed_replacement_canonical_identity | sed '1s/require_reviewed_replacement_canonical_identity/original_identity/')"
 eval "$(declare -f classify_platform | sed '1s/classify_platform/original_classify/')"
 identity_calls=0
@@ -806,7 +826,7 @@ require_reviewed_replacement_canonical_identity() {
     case "$scenario" in
       live-change) printf '\nprewrite injected change\n' >>"$live/SKILL.md" ;;
       canonical-ref-change) git -C "$REPOSITORY_ROOT" update-ref refs/remotes/origin/master "$stale" ;;
-      source-change) printf '\nsource injected change\n' >>"$REPOSITORY_ROOT/fable-method/platforms/codex/fable-method/SKILL.md" ;;
+      source-change) printf '\nsource injected change\n' >>"$REPOSITORY_ROOT/$(platform_materialized_rel "$rld_platform")/SKILL.md" ;;
     esac
   fi
   original_identity "$@"
@@ -849,13 +869,19 @@ rld_args=(--activate --platform codex --replace-reviewed-local-drift
 readonly RLD_TRACE="$SCRATCH/rld.trace"
 readonly RLD_SOURCE="$LINKED_CURRENT/fable-method/platforms/codex/fable-method"
 rld_reset_drift() {
-  /usr/bin/rsync -a --checksum --delete "$RLD_SOURCE/" "$SCRATCH_LIVE/"
-  printf '\nreviewed fixture drift\n' >>"$SCRATCH_LIVE/SKILL.md"
+  local source_dir="${1:-$RLD_SOURCE}" live_dir="${2:-$SCRATCH_LIVE}"
+  /usr/bin/rsync -a --checksum --delete "$source_dir/" "$live_dir/"
+  printf '\nreviewed fixture drift\n' >>"$live_dir/SKILL.md"
   : >"$RLD_TRACE"
 }
 rld_run_injected() {
-  local scenario="$1" expected_l="$2"
-  local -a args=("${rld_args[@]}")
+  local scenario="$1" expected_l="$2" platform="${3:-codex}"
+  local -a args
+  case "$platform" in
+    codex) args=("${rld_args[@]}") ;;
+    claude) args=("${RLD_CLAUDE_ARGS[@]}") ;;
+    *) fail "rld_run_injected: unsupported platform: $platform" ;;
+  esac
   args[5]="$expected_l"
   capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" "$scenario" "$RLD_TRACE" "$STALE_HEAD" "${args[@]}"
 }
@@ -989,7 +1015,7 @@ rld_vector_expected="$(/usr/bin/ruby -rdigest -e '
   puts Digest::SHA256.hexdigest(bytes)
 ')"
 rld_serialize() {
-  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2"' _ "$CURRENT_SCRIPT" "$1"
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2" codex' _ "$CURRENT_SCRIPT" "$1"
 }
 [[ "$(rld_serialize "$RLD_VECTOR")" == "$rld_vector_expected" ]] || fail 'serialization independent vector mismatch'
 pass_case 'serialization V1 independent full-record vector'
@@ -1034,13 +1060,13 @@ printf 'must not read' >"$RLD_VECTOR/ZZZ-unknown"
 assert_failure_contains 'E runtime spy: unknown path rejected before any content open' \
   'LIVE_BUNDLE_REJECTED: unknown path: ZZZ-unknown' \
   env RUBYOPT="-r$RLD_SERIALIZER_SPY" RLD_SPY_ROOT="$RLD_VECTOR" RLD_SPY_MODE=unknown \
-  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2"' _ "$CURRENT_SCRIPT" "$RLD_VECTOR"
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2" codex' _ "$CURRENT_SCRIPT" "$RLD_VECTOR"
 [[ "$COMMAND_OUTPUT" != *FIXTURE_CONTENT_OPENED* ]] || fail 'E read occurred before unknown path rejection'
 rm "$RLD_VECTOR/ZZZ-unknown"
 assert_failure_contains 'D runtime spy: mid-scan type change rejects before content open' \
   'LIVE_BUNDLE_REJECTED: path/type changed during scan:' \
   env RUBYOPT="-r$RLD_SERIALIZER_SPY" RLD_SPY_ROOT="$RLD_VECTOR" RLD_SPY_MODE=type-change RLD_SPY_DECOY="$SCRATCH/decoy" \
-  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2"' _ "$CURRENT_SCRIPT" "$RLD_VECTOR"
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2" codex' _ "$CURRENT_SCRIPT" "$RLD_VECTOR"
 [[ "$COMMAND_OUTPUT" != *FIXTURE_CONTENT_OPENED* ]] || fail 'D type change opened content'
 [[ -L "$RLD_VECTOR/SKILL.md" ]] || fail 'D type-change injection did not happen'
 
@@ -1069,6 +1095,163 @@ assert_failure_contains 'identity flags without replacement mode fail closed' \
 
 [[ "$(real_lock_fingerprint)" == "$REAL_LOCK_BEFORE" ]] || fail 'replacement cases touched the real activation lock'
 pass_case 'all replacement fixtures stayed isolated; real activation lock unchanged'
+
+# --- Reviewed Claude local-drift replacement mode (platform-aware extension)
+#
+# Reuses RLD_H/RLD_T (the commit/tree identity is platform-independent) and
+# the same fixture worktree; only the platform, its live target, its source
+# materialization, and its M value differ from the Codex section above.
+readonly RLD_CLAUDE_M="$(git -C "$FIXTURE_CANONICAL" rev-parse "${CURRENT_HEAD}:fable-method/platforms/claude/fable-method")"
+readonly SCRATCH_LIVE_CLAUDE="${FIXTURE_HOME}/.claude/skills/fable-method"
+readonly RLD_CLAUDE_SOURCE="${LINKED_CURRENT}/fable-method/platforms/claude/fable-method"
+RLD_CLAUDE_ARGS=(--activate --platform claude --replace-reviewed-local-drift
+  --expected-live-sha256 "$RLD_ZERO_L" --expected-canonical-head "$RLD_H"
+  --expected-canonical-tree "$RLD_T" --expected-materialization-tree "$RLD_CLAUDE_M")
+
+[[ ! -e "$SCRATCH_LIVE_CLAUDE" ]] || fail 'Claude RLD precondition: the scratch Claude live target already exists'
+mkdir -p "$SCRATCH_LIVE_CLAUDE"
+rld_reset_drift "$RLD_CLAUDE_SOURCE" "$SCRATCH_LIVE_CLAUDE"
+readonly RLD_CLAUDE_DIGEST_DRIFT_BASELINE="$(live_digest "$SCRATCH_LIVE_CLAUDE")"
+
+assert_failure_contains \
+  'ordinary Claude --activate continues refusing LOCAL_DRIFT' \
+  'LOCAL_DRIFT' \
+  "$CURRENT_SCRIPT" --activate --platform claude
+[[ "$(live_digest "$SCRATCH_LIVE_CLAUDE")" == "$RLD_CLAUDE_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'ordinary Claude --activate LOCAL_DRIFT refusal changed the live target'
+pass_case 'Claude: ordinary --activate refuses LOCAL_DRIFT and leaves it byte-identical'
+
+rld_claude_l="$(rld_probe_observed_l claude "$RLD_CLAUDE_M")"
+
+assert_failure_contains \
+  'Claude: wrong expected-live-sha256 is rejected' \
+  'REVIEWED_REPLACEMENT_LIVE_BUNDLE_SHA256_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+
+assert_failure_contains \
+  'Claude: wrong expected-canonical-head is rejected' \
+  'REVIEWED_REPLACEMENT_HEAD_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_ZERO_OBJ" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+
+assert_failure_contains \
+  'Claude: wrong expected-canonical-tree is rejected' \
+  'REVIEWED_REPLACEMENT_TREE_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_ZERO_OBJ" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+
+assert_failure_contains \
+  'Claude: wrong expected-materialization-tree is rejected' \
+  'REVIEWED_REPLACEMENT_MATERIALIZATION_TREE_MISMATCH' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_ZERO_OBJ"
+
+[[ "$(live_digest "$SCRATCH_LIVE_CLAUDE")" == "$RLD_CLAUDE_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'Claude: an L/H/T/M mismatch case changed the live target'
+pass_case 'Claude: L/H/T/M mismatches are each rejected with zero live writes'
+
+printf 'must not be trusted\n' >"$SCRATCH_LIVE_CLAUDE/ZZZ-claude-unknown"
+assert_failure_contains \
+  'Claude: unknown ordinary path is rejected before content trust/write' \
+  'LIVE_BUNDLE_REJECTED: unknown path: ZZZ-claude-unknown' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+[[ -f "$SCRATCH_LIVE_CLAUDE/ZZZ-claude-unknown" ]] || fail 'Claude: unknown file was removed'
+rm "$SCRATCH_LIVE_CLAUDE/ZZZ-claude-unknown"
+
+ln -s /etc/hosts "$SCRATCH_LIVE_CLAUDE/rld-claude-evil-symlink"
+assert_failure_contains \
+  'Claude: a symlink under the live target is rejected' \
+  'LIVE_BUNDLE_REJECTED: unexpected path/type: rld-claude-evil-symlink' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+[[ -L "$SCRATCH_LIVE_CLAUDE/rld-claude-evil-symlink" ]] \
+  || fail 'Claude: the rejected activation removed the symlink instead of leaving it untouched'
+rm -f "$SCRATCH_LIVE_CLAUDE/rld-claude-evil-symlink"
+
+mkfifo "$SCRATCH_LIVE_CLAUDE/rld-claude-evil-fifo"
+assert_failure_contains \
+  'Claude: a FIFO (special file) under the live target is rejected' \
+  'LIVE_BUNDLE_REJECTED: unexpected path/type: rld-claude-evil-fifo' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+[[ -p "$SCRATCH_LIVE_CLAUDE/rld-claude-evil-fifo" ]] \
+  || fail 'Claude: the rejected activation removed the FIFO instead of leaving it untouched'
+rm -f "$SCRATCH_LIVE_CLAUDE/rld-claude-evil-fifo"
+
+mv "$SCRATCH_LIVE_CLAUDE/SKILL.md" "$SCRATCH/claude-live-skill.saved"
+mkdir "$SCRATCH_LIVE_CLAUDE/SKILL.md"
+assert_failure_contains \
+  'Claude: a known file changed to a directory (wrong type) is rejected' \
+  'unexpected known path type: SKILL.md' \
+  "$CURRENT_SCRIPT" --activate --platform claude --replace-reviewed-local-drift \
+  --expected-live-sha256 "$rld_claude_l" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_CLAUDE_M"
+rmdir "$SCRATCH_LIVE_CLAUDE/SKILL.md"
+mv "$SCRATCH/claude-live-skill.saved" "$SCRATCH_LIVE_CLAUDE/SKILL.md"
+
+[[ "$(live_digest "$SCRATCH_LIVE_CLAUDE")" == "$RLD_CLAUDE_DIGEST_DRIFT_BASELINE" ]] \
+  || fail 'Claude: unknown-path/symlink/FIFO/type-change rejection left the live target changed'
+pass_case 'Claude: unknown path, symlink, FIFO, and known-file-to-directory drift are each rejected with zero live writes'
+
+rld_run_injected live-change "$rld_claude_l" claude
+rld_assert_refusal 'Claude: prewrite live identity change is rejected' 'REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH'
+rld_assert_no_write 'Claude: prewrite live identity change is rejected'
+[[ "$(tail -1 "$SCRATCH_LIVE_CLAUDE/SKILL.md")" == 'prewrite injected change' ]] \
+  || fail 'Claude: injected prewrite live change was overwritten'
+
+rld_reset_drift "$RLD_CLAUDE_SOURCE" "$SCRATCH_LIVE_CLAUDE"
+rld_claude_l="$(rld_probe_observed_l claude "$RLD_CLAUDE_M")"
+rld_run_injected canonical-ref-change "$rld_claude_l" claude
+rld_assert_refusal 'Claude: canonical ref moved before first write' 'REVIEWED_REPLACEMENT_CANONICAL_REF_MISMATCH'
+rld_assert_no_write 'Claude: canonical ref moved before first write'
+git -C "$FIXTURE_CANONICAL" update-ref refs/remotes/origin/master "$RLD_H"
+
+cp "$RLD_CLAUDE_SOURCE/SKILL.md" "$SCRATCH/claude-source-skill.saved"
+rld_run_injected source-change "$rld_claude_l" claude
+rld_assert_refusal 'Claude: source bytes changed before first write' 'CANONICAL_MATERIALIZATION_DRIFT'
+rld_assert_no_write 'Claude: source bytes changed before first write'
+cp "$SCRATCH/claude-source-skill.saved" "$RLD_CLAUDE_SOURCE/SKILL.md"
+pass_case 'Claude: prewrite live/canonical-ref/source identity changes are each rejected with zero writes'
+
+rld_reset_drift "$RLD_CLAUDE_SOURCE" "$SCRATCH_LIVE_CLAUDE"
+rld_claude_l="$(rld_probe_observed_l claude "$RLD_CLAUDE_M")"
+rld_run_injected normal "$rld_claude_l" claude
+[[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" == *'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION'* ]] \
+  || fail 'Claude: reviewed drift happy path did not report exact current materialization'
+grep -q '^LOCK_HELD:write$' "$RLD_TRACE" || fail 'Claude: A write lock not observed'
+grep -q '^LOCK_HELD:post-check$' "$RLD_TRACE" || fail 'Claude: A post-check lock not observed'
+[[ "$(live_digest "$SCRATCH_LIVE_CLAUDE")" == "$(live_digest "$RLD_CLAUDE_SOURCE")" ]] \
+  || fail 'Claude: A full bundle bytes differ from canonical materialization'
+pass_case 'Claude: reviewed LOCAL_DRIFT replacement succeeds and the final bundle equals canonical materialization'
+
+[[ "$(real_lock_fingerprint)" == "$REAL_LOCK_BEFORE" ]] \
+  || fail 'Claude replacement cases touched the real activation lock'
+pass_case 'Claude: all replacement fixtures stayed isolated; real activation lock unchanged'
 
 git -C "$FIXTURE_CANONICAL" update-ref -d refs/remotes/origin/master
 assert_failure_contains \

@@ -9,6 +9,7 @@ readonly USER_HOME='/Users/kelvin'
 readonly MANIFEST="${FABLE_ROOT}/platforms.yaml"
 readonly SYNC_SCRIPT="${SCRIPT_DIR}/sync-platforms.sh"
 readonly PLATFORMS=(codex claude gemini antigravity)
+readonly REVIEWED_REPLACEMENT_PLATFORMS=(codex claude)
 readonly TRUSTED_GIT_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 readonly ACTIVATION_LOCK="${USER_HOME}/.fable-method-activation.lock"
 
@@ -23,7 +24,7 @@ Usage:
   activate-live.sh --help
   activate-live.sh --check [--platform codex|claude|gemini|antigravity]
   activate-live.sh --activate --platform codex|claude|gemini|antigravity
-  activate-live.sh --activate --platform codex --replace-reviewed-local-drift \
+  activate-live.sh --activate --platform codex|claude --replace-reviewed-local-drift \
       --expected-live-sha256 <64-hex> --expected-canonical-head <40-hex> \
       --expected-canonical-tree <40-hex> --expected-materialization-tree <40-hex>
 EOF
@@ -49,11 +50,12 @@ activate-live.sh - repository-owned activation for the Fable Method live skill i
                                  overwritten, mirrored, or deleted.
   --help                        Show this help.
 
-  --activate --platform codex --replace-reviewed-local-drift
-                                 Codex only. Overwrites a live installation the
-                                 ordinary path refuses (LOCAL_DRIFT) provided the
-                                 caller supplies the exact identity of what is
-                                 being replaced: the current live bundle's
+  --activate --platform codex|claude --replace-reviewed-local-drift
+                                 Codex or Claude only. Overwrites a live
+                                 installation the ordinary path refuses
+                                 (LOCAL_DRIFT) provided the caller supplies the
+                                 exact identity of what is being replaced: the
+                                 current live bundle's
                                  LIVE_BUNDLE_SHA256_SERIALIZATION_V1 digest via
                                  --expected-live-sha256, and the activation
                                  source's commit/tree/materialization-tree via
@@ -63,8 +65,8 @@ activate-live.sh - repository-owned activation for the Fable Method live skill i
                                  once and is revalidated, still inside the single
                                  activation lock, immediately before the first
                                  write; any mismatch takes zero live writes. There
-                                 is no target-path override, no non-Codex use, and
-                                 no combination with --check.
+                                 is no target-path override, no platform outside
+                                 codex/claude, and no combination with --check.
 
 Running --activate against a real installation requires authorization from the
 Owner obtained outside this script. This script performs no conversational or
@@ -80,6 +82,14 @@ EOF
 is_known_platform() {
   local name="$1" p
   for p in "${PLATFORMS[@]}"; do
+    [[ "$p" == "$name" ]] && return 0
+  done
+  return 1
+}
+
+is_reviewed_replacement_platform() {
+  local name="$1" p
+  for p in "${REVIEWED_REPLACEMENT_PLATFORMS[@]}"; do
     [[ "$p" == "$name" ]] && return 0
   done
   return 1
@@ -448,8 +458,8 @@ find_symlink_component() {
 # NUL delimiters preserve raw path bytes. Failures propagate through pipefail;
 # no historical blob content is read to establish which live paths are known.
 reviewed_replacement_known_entries() {
-  local rel commits commit
-  rel="$(platform_materialized_rel codex)"
+  local platform="$1" rel commits commit
+  rel="$(platform_materialized_rel "$platform")"
   commits="$(git_identity -C "$REPOSITORY_ROOT" log --format=%H HEAD -- "$rel")" || return 1
   [[ -n "$commits" ]] || return 1
   while IFS= read -r commit; do
@@ -458,8 +468,9 @@ reviewed_replacement_known_entries() {
 }
 
 # LIVE_BUNDLE_SHA256_SERIALIZATION_V1. First inventory all path names/types
-# against known Codex history, before opening ANY live content. Reject unknown
-# paths, symlinks, special files, and known paths with unexpected types.
+# against known history for the given platform, before opening ANY live
+# content. Reject unknown paths, symlinks, special files, and known paths
+# with unexpected types.
 # Re-lstat before reading, open regular files without following symlinks, and
 # verify descriptors and the final inventory against the original metadata.
 # Records sort by raw relative-path bytes (including root ".") and concatenate:
@@ -467,8 +478,8 @@ reviewed_replacement_known_entries() {
 # + 32-byte SHA256 content digest (F) or 32 zero bytes (D). L is SHA256 of
 # that stream, lowercase hex. Size and mtime never substitute for file bytes.
 compute_live_bundle_sha256() {
-  local root="$1"
-  reviewed_replacement_known_entries | ruby -e '
+  local root="$1" platform="$2"
+  reviewed_replacement_known_entries "$platform" | ruby -e '
     require "digest"
 
     def kind(stat)
@@ -546,19 +557,19 @@ compute_live_bundle_sha256() {
       warn "LIVE_BUNDLE_REJECTED: #{e.message}"
       exit 1
     end
-  ' "$root" "$(platform_materialized_rel codex)"
+  ' "$root" "$(platform_materialized_rel "$platform")"
 }
 
 # Binds the reviewed-replacement Owner-supplied H/T/M to the executing
 # repository, independent of and in addition to require_canonical_repository_
 # state_for_activation. H must match both the activation source HEAD and
 # refs/remotes/origin/master (not merely "whatever origin/master is now"); T
-# must match HEAD's own tree; M must match the Codex materialization tree
-# recorded inside H. Called once for initial validation and again, unchanged,
-# for prewrite revalidation.
+# must match HEAD's own tree; M must match the given platform's
+# materialization tree recorded inside H. Called once for initial validation
+# and again, unchanged, for prewrite revalidation.
 require_reviewed_replacement_canonical_identity() {
-  local expected_head="$1" expected_tree="$2" expected_materialization_tree="$3"
-  local source_head canonical_head source_tree materialization_tree
+  local platform="$1" expected_head="$2" expected_tree="$3" expected_materialization_tree="$4"
+  local source_head canonical_head source_tree materialization_tree materialized_rel
 
   source_head="$(activation_source_head)" \
     || die 'ACTIVATION_SOURCE_HEAD_UNRESOLVED: executing worktree HEAD is not a commit'
@@ -575,9 +586,10 @@ require_reviewed_replacement_canonical_identity() {
   [[ "$source_tree" == "$expected_tree" ]] \
     || die "REVIEWED_REPLACEMENT_TREE_MISMATCH: expected ${expected_tree}, observed HEAD^{tree} ${source_tree}"
 
+  materialized_rel="$(platform_materialized_rel "$platform")"
   materialization_tree="$(git_identity -C "$REPOSITORY_ROOT" rev-parse --verify \
-    "${expected_head}:$(platform_materialized_rel codex)" 2>/dev/null)" \
-    || die "REVIEWED_REPLACEMENT_MATERIALIZATION_TREE_UNRESOLVED: ${expected_head}:$(platform_materialized_rel codex) is not a tree"
+    "${expected_head}:${materialized_rel}" 2>/dev/null)" \
+    || die "REVIEWED_REPLACEMENT_MATERIALIZATION_TREE_UNRESOLVED: ${expected_head}:${materialized_rel} is not a tree"
   [[ "$materialization_tree" == "$expected_materialization_tree" ]] \
     || die "REVIEWED_REPLACEMENT_MATERIALIZATION_TREE_MISMATCH: expected ${expected_materialization_tree}, observed ${materialization_tree}"
   require_canonical_source_gate
@@ -831,19 +843,20 @@ do_activate() {
   printf 'LIVE_TARGET: %s\n' "$live"
 }
 
-# Codex-only. Reuses the same single activation lock, repository-identity
-# guards, and rsync architecture as do_activate, but replaces classify_platform
-# eligibility with an Owner-supplied identity binding (L/H/T/M) so it may
-# overwrite a live target that classify_platform would report LOCAL_DRIFT.
-# Validates once, then - still holding the lock, with no live write between
-# the two - revalidates immediately before the first write; any mismatch
-# stops with zero live writes. Post-check still requires
+# Codex or Claude only (REVIEWED_REPLACEMENT_PLATFORMS). Reuses the same
+# single activation lock, repository-identity guards, and rsync architecture
+# as do_activate, but replaces classify_platform eligibility with an
+# Owner-supplied identity binding (L/H/T/M), all bound to the one supplied
+# platform, so it may overwrite a live target that classify_platform would
+# report LOCAL_DRIFT. Validates once, then - still holding the lock, with no
+# live write between the two - revalidates immediately before the first
+# write; any mismatch stops with zero live writes. Post-check still requires
 # EXACT_CURRENT_MATERIALIZATION exactly like ordinary activation.
 do_activate_replace_reviewed_local_drift() {
   acquire_activation_lock
   local platform="$1" expected_l="$2" expected_h="$3" expected_t="$4" expected_m="$5"
-  [[ "$platform" == codex ]] \
-    || die 'REVIEWED_REPLACEMENT_CODEX_ONLY: reviewed local drift replacement is Codex-only'
+  is_reviewed_replacement_platform "$platform" \
+    || die "REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM: reviewed local drift replacement supports only ${REVIEWED_REPLACEMENT_PLATFORMS[*]} (got ${platform})"
   guard_repository_root
   verify_manifest_paths
   require_canonical_source_gate
@@ -862,23 +875,23 @@ do_activate_replace_reviewed_local_drift() {
   [[ -d "$live" && ! -L "$live" ]] \
     || die 'REVIEWED_REPLACEMENT_LIVE_TARGET_NOT_READY: live target is not an existing plain directory'
 
-  require_reviewed_replacement_canonical_identity "$expected_h" "$expected_t" "$expected_m"
+  require_reviewed_replacement_canonical_identity "$platform" "$expected_h" "$expected_t" "$expected_m"
   local observed_l
-  observed_l="$(compute_live_bundle_sha256 "$live")" \
+  observed_l="$(compute_live_bundle_sha256 "$live" "$platform")" \
     || die 'REVIEWED_REPLACEMENT_LIVE_BUNDLE_REJECTED: live target inventory failed identity serialization'
   [[ "$observed_l" == "$expected_l" ]] \
     || die "REVIEWED_REPLACEMENT_LIVE_BUNDLE_SHA256_MISMATCH: expected ${expected_l}, observed ${observed_l}"
 
   # Prewrite revalidation: same checks, same lock, no write yet issued. Any
   # mismatch introduced since the checks above stops here with zero writes.
-  require_reviewed_replacement_canonical_identity "$expected_h" "$expected_t" "$expected_m"
+  require_reviewed_replacement_canonical_identity "$platform" "$expected_h" "$expected_t" "$expected_m"
   if sym="$(find_symlink_component "$live")"; then
     die "ACTIVATION_PARENT_NOT_READY: symlink component appeared in live target path before write: ${sym}"
   fi
   [[ -d "$live" && ! -L "$live" ]] \
     || die 'REVIEWED_REPLACEMENT_LIVE_TARGET_NOT_READY: live target changed type before write'
   local prewrite_l
-  prewrite_l="$(compute_live_bundle_sha256 "$live")" \
+  prewrite_l="$(compute_live_bundle_sha256 "$live" "$platform")" \
     || die 'REVIEWED_REPLACEMENT_LIVE_BUNDLE_REJECTED: live target inventory failed identity serialization before write'
   [[ "$prewrite_l" == "$expected_l" ]] \
     || die "REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH: expected ${expected_l}, observed ${prewrite_l}"
@@ -886,7 +899,7 @@ do_activate_replace_reviewed_local_drift() {
   rsync -a --checksum --delete "$canonical_abs"/ "$live"/ \
     || die 'REVIEWED_REPLACEMENT_WRITE_FAILED: rsync failed'
 
-  require_reviewed_replacement_canonical_identity "$expected_h" "$expected_t" "$expected_m"
+  require_reviewed_replacement_canonical_identity "$platform" "$expected_h" "$expected_t" "$expected_m"
   classify_platform "$platform"
   if [[ "$CLASSIFY_STATE" != EXACT_CURRENT_MATERIALIZATION ]]; then
     printf 'ACTIVATION_VERIFICATION_FAILED\n' >&2
@@ -898,9 +911,9 @@ do_activate_replace_reviewed_local_drift() {
   # Check the full serialization as well so exact success also binds all
   # directory entries and permissions, including the root.
   local source_bundle_l final_bundle_l
-  source_bundle_l="$(compute_live_bundle_sha256 "$canonical_abs")" \
+  source_bundle_l="$(compute_live_bundle_sha256 "$canonical_abs" "$platform")" \
     || die 'ACTIVATION_VERIFICATION_FAILED: canonical bundle inventory failed'
-  final_bundle_l="$(compute_live_bundle_sha256 "$live")" \
+  final_bundle_l="$(compute_live_bundle_sha256 "$live" "$platform")" \
     || die 'ACTIVATION_VERIFICATION_FAILED: live bundle inventory failed'
   [[ "$final_bundle_l" == "$source_bundle_l" ]] \
     || die 'ACTIVATION_VERIFICATION_FAILED: full bundle differs from canonical materialization'
@@ -1003,8 +1016,8 @@ main() {
       || die 'REVIEWED_REPLACEMENT_REQUIRES_ACTIVATE: --replace-reviewed-local-drift requires --activate'
     [[ -n "$platform" ]] \
       || die '--activate requires exactly one --platform'
-    [[ "$platform" == codex ]] \
-      || die "REVIEWED_REPLACEMENT_CODEX_ONLY: --replace-reviewed-local-drift requires --platform codex (got ${platform})"
+    is_reviewed_replacement_platform "$platform" \
+      || die "REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM: --replace-reviewed-local-drift requires --platform codex or claude (got ${platform})"
     (( expected_l_count == 1 )) \
       || die "REVIEWED_REPLACEMENT_MISSING_IDENTITY: --expected-live-sha256 must be given exactly once (got ${expected_l_count})"
     (( expected_h_count == 1 )) \
