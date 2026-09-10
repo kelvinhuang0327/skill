@@ -110,7 +110,7 @@ If the exact locator is readable and its identity matches, use it directly and s
 
 If the locator is unreadable or mismatched, distinguish `ABSENT`, permission denied, network/read error, and identity mismatch. Only bounded adjacent resolution already supported by the original Packet is allowed; do not guess another path as substitute authority or bypass an existing STOP. Missing required cross-lane input returns `UPSTREAM_AUTHORITY_NOT_READY`; do not replan another task.
 
-Only for exact targets already in cleanup scope: a worktree is `ALREADY_ABSENT` only when both its filesystem path and Git registration are confirmed absent; an exact local branch ref confirmed absent makes that branch `ALREADY_ABSENT`. For a confirmed-absent target, stop searching and do not call delete. One absent branch does not imply another worktree is absent. Read errors or insufficient permissions are not absence.
+Only for exact targets already in cleanup scope: a worktree is `ALREADY_ABSENT` only when both its filesystem path and Git registration are confirmed absent; an exact local branch ref confirmed absent makes that branch `ALREADY_ABSENT`. For a confirmed-absent target, stop searching and do not call delete. One absent branch does not imply another worktree is absent. Read errors or insufficient permissions are not absence. Terminal absence proves current state only: `ALREADY_ABSENT` does not by itself prove `DELETED_BY_THIS_TASK`. A handoff claim that this task deleted, removed, changed, or otherwise caused a destructive mutation must be supported by an exact entry in the existing task command or filesystem ledger recording the action and its actual observed result or exit status, not by terminal-state evidence alone; when the target is already absent before action, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.
 
 For `AUTHORITATIVE_PACKET_PARTIAL`, derive only the smallest
 machine-checkable acceptance already supported by repository behavior and mark
@@ -163,6 +163,8 @@ Before mutation, confirm only what can invalidate execution:
 
 The only preflight stop conditions are wrong repository, incompatible base/ref, overlapping dirty ownership, active concurrent mutation, missing required capability, or an explicit safety restriction. A compatible descendant, unrelated outside-scope dirty path, or harmless environment difference is evidence to report, not a stop.
 
+When acceptance or safety depends on the exact file-level count or identity of untracked content, use a file-complete inventory such as `git status --porcelain=v1 --untracked-files=all` or another command proven to expose every individual file; directory-collapsed untracked output is insufficient evidence for an exact file count, and nine files represented by one collapsed untracked directory entry must not be reported as exact cardinality one. Do not require `--untracked-files=all` for every task; trigger it only when exact cardinality or file identity is load-bearing.
+
 For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` exists when EITHER a currently running process owns or depends on the target OR a loaded or enabled recurring scheduler is bound to the target or its runtime source. Task-relevant mechanisms include launchd, cron, systemd, or an equivalent recurring scheduler. When applicable, cleanup or mutation preflight must inspect task-relevant binding data, including at least loaded/enabled schedule state; WorkingDirectory; executable / interpreter; script path; and import path / module root / PYTHONPATH binding. `NO_CURRENT_PROCESS` does NOT imply `NO_ACTIVE_RUNTIME_OWNERSHIP`. A loaded or enabled recurring scheduler bound to the target worktree/source retains active ownership for cleanup or mutation unless an authorized ownership transition explicitly removes or repoints the binding. Inspection remains task-relevant and bounded; do not require a workspace-wide scheduler audit.
 
 Before deleting or replacing a checkout/worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`: the exact deployed commit must remain reachable through an explicitly recognized durable Git source authority appropriate to the task. Content-equivalent code/tree on main is NOT sufficient evidence that the exact deployed source may be discarded. If exact `DEPLOYED_HEAD` has no durable source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`. The Worker MUST NOT automatically create a branch/tag/ref to satisfy this gate. Creating or changing a preservation ref remains a separate Git mutation and requires applicable task authority / authorization.
@@ -181,24 +183,7 @@ overwrite when a tracked or untracked path changed for a reason the current
 Packet does not explain; re-establish safe ownership of the affected state
 before resuming, and never proceed on a stale read.
 
-Never use the current working directory as implicit authority; an empty or
-dirty directory is not authority by itself. Preserve unrelated owner changes.
-Never stage or edit outside the declared scope. The declared scope includes
-adjacent source, test, and configuration paths demonstrably required to satisfy
-the Packet's acceptance; report every such path. Planner Delta is required only
-for a new outcome, an unrelated subsystem, or materially expanded risk.
-Never reset, restore, stash, or clean unrelated/Owner work. Force stays
-forbidden by default: only an exact pre-authorized fallback meeting every
-gate in operational-gates.md's Git action tiers may use it, and a generic
-cleanup authorization never authorizes it. A Packet must explicitly
-authorize a local commit. Push, publication, deployment, remote changes, PR
-creation or merge, destructive operations, credentials, secrets, production
-writes, migrations, external messages, and unrelated products require
-standalone Owner authorization. An executable Packet with Owner authorization
-authorizes reversible local edits within its stated goal and scope; ordinary
-local implementation is not blocked merely because no standalone high-risk
-authorization exists. Do not inspect protected or opaque paths; use an opaque
-aggregate when the Packet requires preservation evidence.
+Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require standalone Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no standalone high-risk authorization exists. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
 
 Before a command that inspects content across multiple committed objects,
 freeze the exact refs/trees, inventory metadata first, classify every path as
@@ -297,6 +282,14 @@ high-risk authorization always denies under `PROJECT_PROFILE: FORMAL_SECURE`;
 under `PERSONAL_FAST` the same token still applies whenever the action is
 actually high-risk.
 
+Capability preflight uses a strict tri-state:
+
+```text
+CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
+```
+
+`ALLOWED` requires direct evidence that the current harness can perform the required execution path. `UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`. `BLOCKED` means direct evidence shows the required execution path is unavailable or denied; for a `BLOCKED` capability, do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block — retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged.
+
 A task framing such as “fix the code” is not a behavior spec. Never rely on
 recall: label an unverified fact `[Unknown]`. Use precise edits and never
 overwrite without looking first.
@@ -333,6 +326,8 @@ query when database state is load-bearing, or exercise the real entry path.
 A Worker stating that it works is not verification by itself, but this does
 not add an automatic requirement for a browser, database, full suite, or
 Judge when none is otherwise relevant to the change.
+
+For large structured command or tool output used as load-bearing authority: capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface; never derive an authority, count, identity, or completeness claim from display output that may have been truncated. If complete capture cannot be established and the missing portion could alter the decision, state `UNKNOWN` rather than treat the displayed subset as complete. This does not require a new durable evidence store — use in-process parsing or an existing safe temporary mechanism.
 
 `DONOR_CHARACTERIZATION_PROBE`: before frozen behavior semantics are finalized for a legacy-donor migration, one small executable characterization probe is `REQUIRED_BY_DEFAULT` when donor execution is cheap, bounded, safe, and dependency-feasible — all four, or the default does not apply. Run exactly one minimum probe sufficient to test the load-bearing observed behavior, because source-only reading has already mistaken a dead path for a live operator and a degenerate parameter for deterministic behavior. The probe is characterization, not benchmarking: it never requires a full donor replay, exhaustive parameter sweep, performance benchmark, production mutation, external spend, or broad historical reconstruction. `SOURCE_ONLY` stays acceptable when the probe is `BLOCKED`, `DISPROPORTIONATE`, `UNSAFE`, or `DEPENDENCY_INFEASIBLE`, and the limitation must be reported. This sets the default characterization discipline only; `LEGACY_DONOR_AUTHORITY_MODE`, `DONOR_EXECUTION_STATUS`, and the existing frozen-semantics and provenance rules stay Planner-owned and unchanged.
 

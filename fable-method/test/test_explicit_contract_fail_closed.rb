@@ -373,6 +373,77 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
+  def test_canonical_exact_untracked_cardinality_contract
+    clauses = [
+      'When acceptance or safety depends on the exact file-level count or identity of untracked content, use a file-complete inventory such as `git status --porcelain=v1 --untracked-files=all` or another command proven to expose every individual file;',
+      'directory-collapsed untracked output is insufficient evidence for an exact file count,',
+      'nine files represented by one collapsed untracked directory entry must not be reported as exact cardinality one.',
+      'Do not require `--untracked-files=all` for every task;',
+      'trigger it only when exact cardinality or file identity is load-bearing.'
+    ]
+    weakenings = {
+      'use a file-complete inventory such as' => 'use a directory-level summary such as',
+      'is insufficient evidence for an exact file count' => 'is sufficient evidence for an exact file count',
+      'must not be reported as exact cardinality one' => 'may be reported as exact cardinality one',
+      'Do not require `--untracked-files=all` for every task' => 'Require `--untracked-files=all` for every task',
+      'trigger it only when exact cardinality or file identity is load-bearing' => 'trigger it for every preflight regardless of relevance'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+  end
+
+  def test_canonical_destructive_result_provenance_contract
+    clauses = [
+      'Terminal absence proves current state only:',
+      '`ALREADY_ABSENT` does not by itself prove `DELETED_BY_THIS_TASK`.',
+      'A handoff claim that this task deleted, removed, changed, or otherwise caused a destructive mutation must be supported by an exact entry in the existing task command or filesystem ledger recording the action and its actual observed result or exit status, not by terminal-state evidence alone;',
+      'when the target is already absent before action, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.'
+    ]
+    weakenings = {
+      'does not by itself prove `DELETED_BY_THIS_TASK`' => 'is sufficient to prove `DELETED_BY_THIS_TASK`',
+      'must be supported by an exact entry in the existing task command or filesystem ledger' => 'may be inferred without an entry in the existing task command or filesystem ledger',
+      'not by terminal-state evidence alone' => 'and terminal-state evidence alone is sufficient',
+      'do not execute delete, and do not claim this task caused the absence' => 'execute delete and report that this task caused the absence'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Authority and Packet fast path', clauses, weakenings)
+  end
+
+  def test_canonical_large_structured_output_transport_contract
+    clauses = [
+      'For large structured command or tool output used as load-bearing authority: capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface;',
+      'never derive an authority, count, identity, or completeness claim from display output that may have been truncated.',
+      'If complete capture cannot be established and the missing portion could alter the decision, state `UNKNOWN` rather than treat the displayed subset as complete.',
+      'This does not require a new durable evidence store',
+      'use in-process parsing or an existing safe temporary mechanism.'
+    ]
+    weakenings = {
+      'capture it completely, parse or filter it internally, then project only a bounded summary' => 'display it directly without capturing it completely',
+      'never derive an authority, count, identity, or completeness claim from display output that may have been truncated' => 'deriving an authority, count, identity, or completeness claim from possibly truncated display output is acceptable',
+      'state `UNKNOWN` rather than treat the displayed subset as complete' => 'treat the displayed subset as complete',
+      'This does not require a new durable evidence store' => 'This requires a new durable evidence store'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, weakenings)
+  end
+
+  def test_canonical_capability_strict_tri_state_contract
+    clauses = [
+      'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED',
+      '`ALLOWED` requires direct evidence that the current harness can perform the required execution path.',
+      '`UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`.',
+      '`BLOCKED` means direct evidence shows the required execution path is unavailable or denied;',
+      'do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block',
+      'retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`.',
+      'Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged.'
+    ]
+    weakenings = {
+      'must never be treated as `ALLOWED`' => 'may be treated as `ALLOWED`',
+      'do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block' => 'repeat the same capability preflight or request repeated Owner action authorization as a substitute',
+      'retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`' => 'retry at any time regardless of evidence',
+      'Owner action authorization and harness capability remain separate facts' => 'Owner action authorization is equivalent to harness capability',
+      'this leaves Planner routing semantics unchanged' => 'this changes Planner routing semantics'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Intent, authorization, and surgical execution', clauses, weakenings)
+  end
+
   private
 
   def canonical_contract_section(relative_path, heading)
