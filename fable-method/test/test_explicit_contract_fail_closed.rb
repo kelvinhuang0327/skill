@@ -373,6 +373,30 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
+  def test_canonical_dependency_topology_falsifiability_contract
+    clauses = [
+      'a dependency fingerprint, import closure, resource manifest, or similar graph the fix reasons over',
+      'a simplified fixture is not sufficient evidence by itself unless it demonstrably reproduces that structure',
+      'generalizing from an unrepresentative fixture to the real repository is not evidence the fix works there',
+      'exercise a bounded case against real repository topology, or show concretely that the fixture covers the load-bearing structure',
+      'Verify both directions of the identity the fix computes: a noncausal change — one the guarded structure does not depend on — must leave that identity unchanged, and a causal change — one it does depend on — must change it.',
+      'A check that only ever exercises one direction cannot distinguish a real dependency boundary from an accidental one.',
+      'Reuse coverage that already exercises the real structure instead of adding another probe.',
+      'when no safe bounded case is possible, say so and report the untested scope honestly rather than marking it `PASS`'
+    ]
+    weakenings = {
+      'is not sufficient evidence by itself unless it demonstrably reproduces that structure' => 'is sufficient evidence by itself even when it does not reproduce that structure',
+      'is not evidence the fix works there' => 'is evidence the fix works there',
+      'or show concretely that the fixture covers the load-bearing structure' => 'or assume the fixture covers the load-bearing structure',
+      'a noncausal change — one the guarded structure does not depend on — must leave that identity unchanged' => 'a noncausal change — one the guarded structure does not depend on — may leave that identity unchanged',
+      'and a causal change — one it does depend on — must change it' => 'and a causal change — one it does depend on — may change it',
+      'cannot distinguish a real dependency boundary from an accidental one' => 'can still distinguish a real dependency boundary from an accidental one',
+      'instead of adding another probe' => 'in addition to adding another probe',
+      'rather than marking it `PASS`' => 'and marking it `PASS` regardless'
+    }
+    assert_canonical_contract_controls('references/test-falsifiability.md', 'Dependency-boundary structure', clauses, weakenings)
+  end
+
   private
 
   def canonical_contract_section(relative_path, heading)
