@@ -468,6 +468,30 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/test-falsifiability.md', 'Dependency-boundary structure', clauses, weakenings)
   end
 
+  def test_canonical_blocked_terminal_inline_handoff_contract
+    clauses = [
+      'Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, `SMALLEST_NEXT_ACTION:` (or a named-gate prefix, e.g. `A2_BLOCKER_CODE:`) — so a downstream Agent can pick the next action without local filesystem access to the originating Agent.',
+      'The inline record is a transfer summary, not a second authority:',
+      'a durable artifact or exact locator remains canonical for full evidence, but it must never be the sole carrier of the fact needed to decide what happens next,',
+      'and this does not replace artifact paths, hashes, full evidence, runtime receipts, or exact authority locators.',
+      '`BLOCKER_DETAIL` states the actual missing or invalid fact when known — a missing strategy, draw, config, seed, unsupported capability, or unresolved authority — never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed;',
+      'when genuinely unknown, state `UNKNOWN` honestly and name the smallest bounded resolution action instead.',
+      '`SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap,',
+      'and each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases.',
+      'A `COMPLETE` handoff is not required to carry these fields.'
+    ]
+    weakenings = {
+      'includes exactly one compact inline blocker record' => 'may omit an inline blocker record',
+      'must never be the sole carrier of the fact needed to decide what happens next' => 'may be the sole carrier of the fact needed to decide what happens next',
+      'states the actual missing or invalid fact when known' => 'may state a vague placeholder even when the fact is known',
+      'never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed' => 'a vague `see artifact`, `blocked`, or `needs investigation` is acceptable even once the exact blocking fact was already observed',
+      'is one bounded progress action, not a roadmap' => 'may be an open-ended roadmap',
+      'each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases' => 'one blocker may be duplicated under multiple aliases',
+      'A `COMPLETE` handoff is not required to carry these fields' => 'A `COMPLETE` handoff is required to carry these fields'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
+  end
+
   private
 
   def canonical_contract_section(relative_path, heading)

@@ -379,6 +379,10 @@ without publication is not a publication failure. Keep unauthorized work
 under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
 Before an authorized lifecycle mutation (publication, existing PR reuse, Ready, merge-state, exact cleanup), read live state: if desired state is already reached and exact identity matches, accept it as `SKIP_ALREADY_COMPLETE` / `ALREADY_SATISFIED` without repeating mutation or treating prior completion as an error; if a same-role resource exists with conflicting identity, stop with `STOP_UNRESOLVED`.
 
+Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, `SMALLEST_NEXT_ACTION:` (or a named-gate prefix, e.g. `A2_BLOCKER_CODE:`) — so a downstream Agent can pick the next action without local filesystem access to the originating Agent. The inline record is a transfer summary, not a second authority: a durable artifact or exact locator remains canonical for full evidence, but it must never be the sole carrier of the fact needed to decide what happens next, and this does not replace artifact paths, hashes, full evidence, runtime receipts, or exact authority locators.
+
+`BLOCKER_DETAIL` states the actual missing or invalid fact when known — a missing strategy, draw, config, seed, unsupported capability, or unresolved authority — never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed; when genuinely unknown, state `UNKNOWN` honestly and name the smallest bounded resolution action instead. `SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap, and each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases. A `COMPLETE` handoff is not required to carry these fields.
+
 For `FAST` and `STANDARD` work, report the compact form in
 [reporting](references/reporting.md). Report the full ledger partitions below
 only for judged, publication-bound, or Tier-2 runtime work, using `NONE` only
