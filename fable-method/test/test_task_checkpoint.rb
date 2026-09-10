@@ -1593,6 +1593,29 @@ class DurableCommandCaptureTest < Minitest::Test
       ENV.delete('FABLE_TEST_SECRET_SENTINEL')
     end
   end
+
+  def test_signal_during_capture_to_record_commit_is_deferred
+    capture_file = capture_path('signal_during_commit')
+    record_file = File.join(@tmpdir, 'executions', 'signal_during_commit.json')
+    command = ['ruby', '-e', 'puts "durable"; exit 0']
+
+    capture = DurableCommandCapture.run_and_capture(command, file_path: capture_file) do |candidate|
+      assert File.file?(capture_file), 'capture must be saved before record finalization'
+      Process.kill('INT', Process.pid)
+      Process.kill('TERM', Process.pid)
+
+      record = ExecutionRecord.start!(record_file, task_id: 'SIGNAL_TASK',
+                                      execution_id: 'signal_during_commit', pid: Process.pid)
+      record.complete!(record_file, durable_capture_path: capture_file)
+      assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_file).status
+      assert_equal candidate.exit_status, DurableCommandCapture.load(capture_file).exit_status
+    end
+
+    assert_equal Signal.list.fetch('INT'), capture.wrapper_signal
+    assert_equal DurableCommandCapture::EVIDENCE_COMPLETE,
+                 DurableCommandCapture.classify_evidence(capture_file)
+    refute_includes File.read(capture_file), 'wrapper_signal'
+  end
 end
 
 class TaskCheckpointRunTest < Minitest::Test
@@ -1614,6 +1637,54 @@ class TaskCheckpointRunTest < Minitest::Test
     end
     result == 'TERM' ? Process.kill('TERM', Process.pid) : exit(Integer(result))
   RUBY
+  HANDLED_TERM_UPSTREAM = <<~'RUBY'
+    launches, release = ARGV
+    File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    Signal.trap('TERM') do
+      STDOUT.write("handled-out\n")
+      STDERR.write("handled-err\n")
+      STDOUT.flush
+      STDERR.flush
+      exit 143
+    end
+    STDOUT.write("out\0尾\n")
+    STDERR.write("err\0尾\n")
+    STDOUT.flush
+    STDERR.flush
+    until File.file?(release)
+      sleep 0.01
+    end
+    exit 0
+  RUBY
+  DESCENDANT_UPSTREAM = <<~'RUBY'
+    descendant_path, launches, ruby_exe = ARGV
+    File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    descendant_pid = Process.spawn(ruby_exe, '-e', 'sleep 30')
+    File.write(descendant_path, descendant_pid.to_s)
+    STDOUT.write("out\0尾\n")
+    STDERR.write("err\0尾\n")
+    STDOUT.flush
+    STDERR.flush
+    sleep 30
+  RUBY
+  STREAM_RACE_UPSTREAM = <<~'RUBY'
+    launches, release = ARGV
+    received = false
+    Signal.trap('INT') { received = true }
+    Signal.trap('TERM') { received = true }
+    File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    until File.file?(release)
+      sleep 0.001
+    end
+    64.times do |index|
+      STDOUT.write("out#{index}:#{'o' * 32768}\n")
+      STDERR.write("err#{index}:#{'e' * 32768}\n")
+      STDOUT.flush
+      STDERR.flush
+      sleep 0.002
+    end
+    exit(received ? 130 : 0)
+  RUBY
 
   def setup
     @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
@@ -1624,9 +1695,23 @@ class TaskCheckpointRunTest < Minitest::Test
     @launches = File.join(@tmpdir, 'launches')
     @release = File.join(@tmpdir, 'release')
     @children = []
+    @sentinels = []
+    @managed_pids = []
   end
 
   def teardown
+    @sentinels.each do |pid|
+      begin
+        Process.kill('TERM', pid)
+      rescue Errno::ESRCH
+        # The sentinel already observed an unexpected signal and exited.
+      end
+      begin
+        Process.wait(pid)
+      rescue Errno::ECHILD
+        # The sentinel was already reaped.
+      end
+    end
     # Every CLI gets a test-owned process group. This also stops the tiny
     # upstream left behind by the intentional foreground-termination test.
     @children.each do |child|
@@ -1640,7 +1725,20 @@ class TaskCheckpointRunTest < Minitest::Test
     end
     launch_records.each do |line|
       pid = Integer(line.split(':').first)
+      begin
+        Process.kill('TERM', -pid)
+      rescue Errno::ESRCH
+        # The dedicated upstream group has already exited.
+      end
       wait_until('test-owned upstream did not terminate') { ExecutionRecord.pid_alive?(pid) == false }
+    end
+    @managed_pids.each do |pid|
+      begin
+        Process.kill('TERM', pid)
+      rescue Errno::ESRCH
+        # The managed descendant already exited with its upstream group.
+      end
+      wait_until('test-owned managed descendant did not terminate') { ExecutionRecord.pid_alive?(pid) == false }
     end
     FileUtils.remove_entry(@tmpdir)
     refute File.exist?(@tmpdir), 'test temporary state must be deleted'
@@ -1658,13 +1756,25 @@ class TaskCheckpointRunTest < Minitest::Test
     [RbConfig.ruby, '-e', UPSTREAM, @launches, barrier ? @release : '-', result]
   end
 
+  def handled_term_upstream
+    [RbConfig.ruby, '-e', HANDLED_TERM_UPSTREAM, @launches, @release]
+  end
+
+  def descendant_upstream(descendant_path)
+    [RbConfig.ruby, '-e', DESCENDANT_UPSTREAM, descendant_path, @launches, RbConfig.ruby]
+  end
+
+  def stream_race_upstream
+    [RbConfig.ruby, '-e', STREAM_RACE_UPSTREAM, @launches, @release]
+  end
+
   def cli_args(identity, command = upstream)
     ['--run', '--repo', @repo, '--worktree', @worktree,
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
   end
 
-  def start_cli(args, cwd: @caller)
-    stdin, stdout, stderr, wait = Open3.popen3(RbConfig.ruby, CLI, *args, chdir: cwd, pgroup: true)
+  def start_cli(args, cwd: @caller, pgroup: true)
+    stdin, stdout, stderr, wait = Open3.popen3(RbConfig.ruby, CLI, *args, chdir: cwd, pgroup: pgroup)
     stdin.close
     readers = [stdout, stderr].map { |io| Thread.new { begin; io.read; ensure; io.close; end } }
     child = { wait: wait, readers: readers }
@@ -1698,6 +1808,165 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal "out\0尾\n", result[0]
     assert_equal "err\0尾\n", result[1]
     assert_equal exit_status, result[2].exitstatus
+  end
+
+  def assert_signal_result(result, signal_name)
+    assert result[2].signaled?, "expected #{signal_name}, got #{result[2].inspect}"
+    assert_equal Signal.list.fetch(signal_name), result[2].termsig
+  end
+
+  def start_group_sentinel(group_pid)
+    marker = File.join(@tmpdir, "sentinel_#{@sentinels.length}.signal")
+    script = <<~'RUBY'
+      marker = ARGV.fetch(0)
+      %w[INT TERM].each do |name|
+        Signal.trap(name) do
+          File.write(marker, name)
+          exit 99
+        end
+      end
+      loop { sleep 1 }
+    RUBY
+    pid = Process.spawn(RbConfig.ruby, '-e', script, marker, pgroup: group_pid)
+    @sentinels << pid
+    [pid, marker]
+  end
+
+  def assert_wrapper_signal_finalization(identity, signal_name)
+    command = upstream(barrier: true)
+    owner = start_cli(cli_args(identity, command))
+    wait_until('test upstream did not start') { !launch_records.empty? }
+    upstream_pid = Integer(launch_records.first.split(':').first)
+
+    Process.kill(signal_name, owner[:wait].pid)
+    result = finish_cli(owner)
+    assert result[0].start_with?("out\0尾\n")
+    assert result[1].start_with?("err\0尾\n")
+    assert_signal_result(result, signal_name)
+    wait_until('forwarded upstream did not terminate') { ExecutionRecord.pid_alive?(upstream_pid) == false }
+
+    record = ExecutionRecord.load(record_path(identity))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal owner[:wait].pid, record.pid
+    assert_equal capture_path(identity), record.durable_capture_path
+    capture = DurableCommandCapture.load(capture_path(identity))
+    assert_equal "SIGNALED:#{Signal.list.fetch(signal_name)}", capture.exit_status
+    assert_equal command, capture.command
+    assert_equal [result[0], result[1]], [capture.stdout, capture.stderr]
+    assert_operator Time.iso8601(record.ended_at), :>=, Time.iso8601(capture.ended_at)
+
+    before = [File.binread(record_path(identity)), File.binread(capture_path(identity))]
+    replay = run_cli(cli_args(identity, command), cwd: @worktree)
+    assert_equal result[0, 2], replay[0, 2]
+    assert_signal_result(replay, signal_name)
+    assert_equal 1, launch_records.size, 'signaled replay must not relaunch upstream'
+    assert_equal before, [File.binread(record_path(identity)), File.binread(capture_path(identity))]
+  end
+
+  def test_run_wrapper_sigint_finalizes_capture_before_propagating
+    assert_wrapper_signal_finalization('wrapper_sigint', 'INT')
+  end
+
+  def test_run_wrapper_sigterm_finalizes_capture_before_propagating
+    assert_wrapper_signal_finalization('wrapper_sigterm', 'TERM')
+  end
+
+  def test_run_child_handled_sigterm_preserves_integer_exit_status
+    identity = 'handled_term'
+    command = handled_term_upstream
+    owner = start_cli(cli_args(identity, command))
+    wait_until('signal-handling upstream did not start') { !launch_records.empty? }
+
+    Process.kill('TERM', owner[:wait].pid)
+    result = finish_cli(owner)
+    assert_signal_result(result, 'TERM')
+    assert_includes result[0], "out\0尾\n"
+    assert_includes result[0], "handled-out\n"
+    assert_includes result[1], "err\0尾\n"
+    assert_includes result[1], "handled-err\n"
+
+    record = ExecutionRecord.load(record_path(identity))
+    capture = DurableCommandCapture.load(record.durable_capture_path)
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal 143, capture.exit_status
+    assert_instance_of Integer, capture.exit_status
+    assert_equal 1, launch_records.size
+  end
+
+  def test_run_foreground_group_signal_does_not_hit_unrelated_sentinel
+    identity = 'foreground_isolation'
+    owner = start_cli(cli_args(identity, upstream(barrier: true)))
+    wait_until('foreground-isolation upstream did not start') { !launch_records.empty? }
+    sentinel_pid, marker = start_group_sentinel(owner[:wait].pid)
+    wait_until('foreground-isolation sentinel did not start') { ExecutionRecord.pid_alive?(sentinel_pid) }
+
+    Process.kill('INT', owner[:wait].pid)
+    result = finish_cli(owner)
+    assert_signal_result(result, 'INT')
+    wait_until('foreground-isolation upstream did not terminate') do
+      ExecutionRecord.pid_alive?(Integer(launch_records.first.split(':').first)) == false
+    end
+    assert File.exist?(marker) == false, 'forwarding must not target the wrapper foreground group'
+    assert ExecutionRecord.pid_alive?(sentinel_pid), 'unrelated sentinel must remain alive'
+    assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path(identity)).status
+  end
+
+  def test_run_owned_group_cleanup_removes_managed_descendant
+    identity = 'owned_group_cleanup'
+    descendant_path = File.join(@tmpdir, 'descendant_pid')
+    command = descendant_upstream(descendant_path)
+    owner = start_cli(cli_args(identity, command))
+    wait_until('owned-group upstream did not start') { !launch_records.empty? }
+    wait_until('managed descendant did not start') { File.file?(descendant_path) }
+    upstream_pid = Integer(launch_records.first.split(':').first)
+    descendant_pid = Integer(File.read(descendant_path))
+    @managed_pids << descendant_pid
+
+    Process.kill('INT', owner[:wait].pid)
+    result = finish_cli(owner)
+    assert_signal_result(result, 'INT')
+    wait_until('owned upstream child was not reaped') { ExecutionRecord.pid_alive?(upstream_pid) == false }
+    wait_until('managed descendant escaped its owned group') { ExecutionRecord.pid_alive?(descendant_pid) == false }
+    record = ExecutionRecord.load(record_path(identity))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal "SIGNALED:#{Signal.list.fetch('INT')}", DurableCommandCapture.load(record.durable_capture_path).exit_status
+  end
+
+  def test_run_repeated_signals_while_draining_do_not_skip_finalization
+    identity = 'repeated_signals'
+    command = stream_race_upstream
+    owner = start_cli(cli_args(identity, command))
+    wait_until('stream-race upstream did not start') { !launch_records.empty? }
+
+    Process.kill('INT', owner[:wait].pid)
+    spammer = Thread.new do
+      while owner[:wait].alive?
+        %w[TERM INT].each do |name|
+          begin
+            Process.kill(name, owner[:wait].pid)
+          rescue Errno::ESRCH
+            break
+          end
+        end
+        sleep 0.001
+      end
+    end
+    File.write(@release, 'go')
+    result = finish_cli(owner)
+    assert spammer.join(5), 'signal spammer did not stop'
+    assert result[2].signaled?
+    assert_includes [Signal.list.fetch('INT'), Signal.list.fetch('TERM')], result[2].termsig
+    assert_includes result[0], 'out0:'
+    assert_includes result[1], 'err0:'
+
+    record = ExecutionRecord.load(record_path(identity))
+    capture = DurableCommandCapture.load(record.durable_capture_path)
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal 130, capture.exit_status
+    assert_instance_of Integer, capture.exit_status
+    assert_equal result[0], capture.stdout
+    assert_equal result[1], capture.stderr
+    assert_equal 1, launch_records.size
   end
 
   def test_run_real_cli_two_contenders_and_completed_replay
