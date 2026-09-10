@@ -373,6 +373,42 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
+  def test_canonical_successor_dedup_contract
+    clauses = [
+      'Use this evaluation branch only when preparing to remediate an older source, resolving a publication conflict, or when direct clues of a potential successor already exist; do not add global successor discovery to ordinary tasks.',
+      'Evaluation authority is strictly bounded by canonical source and the current task acceptance; inspect only known candidates, directly related changes, and direct dependencies.',
+      'When all required deliverables and acceptance criteria are completely covered by a successor reachable in canonical source, and required verification evidence applies, record `SUPERSEDED_BY_CANONICAL` and stop duplicate source remediation.',
+      'Enumerate covered and missing acceptance items explicitly; continue only with the authorized missing delta inside the current scope.',
+      'If evidence is incomplete or no confirmable successor exists, do not declare completion; identify the minimum gap or continue authorized source remediation.',
+      'Matching paths, similar commit titles, or an isolated green CI run alone do not prove equivalence.',
+      'Prior candidate test results must never be relabeled as a successor PASS.',
+      '`SUPERSEDED_BY_CANONICAL` must never be reported as old PR MERGED.',
+      'Content equivalence must never be used to delete an exact deployed source that still requires preservation.',
+      'Determining canonical supersession does NOT authorize closing PRs, pushing, merging, force-deleting, or creating preservation refs;',
+      'nor does it supersede active runtime ownership, standalone destructive authorization, or existing safety gates.'
+    ]
+    weakenings = {
+      '; do not add global successor discovery to ordinary tasks.' => '; add global successor discovery to all tasks.',
+      'strictly bounded by canonical source and the current task acceptance' => 'expanded to arbitrary repositories and speculative tasks',
+      'record `SUPERSEDED_BY_CANONICAL` and stop duplicate source remediation.' => 'record `SUPERSEDED_BY_CANONICAL` and repeat source remediation anyway.',
+      'completely covered by a successor reachable in canonical source' => 'partially covered by an unreachable branch',
+      'continue only with the authorized missing delta inside the current scope.' => 'remediate all covered and missing items regardless of scope.',
+      'do not declare completion; identify the minimum gap or continue authorized source remediation.' => 'declare completion immediately without identifying gaps.',
+      'alone do not prove equivalence.' => 'alone prove equivalence.',
+      'must never be relabeled as a successor PASS.' => 'may be relabeled as a successor PASS.',
+      'must never be reported as old PR MERGED.' => 'may be reported as old PR MERGED.',
+      'must never be used to delete an exact deployed source that still requires preservation.' => 'permits deleting an exact deployed source.',
+      'does NOT authorize closing PRs, pushing, merging, force-deleting, or creating preservation refs;' => 'authorizes closing PRs, pushing, merging, force-deleting, and creating preservation refs;',
+      'nor does it supersede active runtime ownership, standalone destructive authorization, or existing safety gates.' => 'and supersedes active runtime ownership and safety gates.'
+    }
+    assert_canonical_contract_controls(
+      'references/operational-gates.md',
+      'Canonical successor and source remediation dedup',
+      clauses,
+      weakenings
+    )
+  end
+
   private
 
   def canonical_contract_section(relative_path, heading)
