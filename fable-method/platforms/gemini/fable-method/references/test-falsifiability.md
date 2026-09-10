@@ -28,6 +28,29 @@ mutation-testing requirement over the whole suite.
 
 The mutation is evidence only; it never lands in the final tree.
 
+## Dependency-boundary structure
+
+When a change's correctness turns on real dependency structure — a
+dependency fingerprint, import closure, resource manifest, or similar graph
+the fix reasons over — a simplified fixture is not sufficient evidence by
+itself unless it demonstrably reproduces that structure; generalizing from
+an unrepresentative fixture to the real repository is not evidence the fix
+works there. When safe and relevant to acceptance, exercise a bounded case
+against real repository topology, or show concretely that the fixture
+covers the load-bearing structure (import breadth, resource references, or
+graph shape) the fix depends on.
+
+Verify both directions of the identity the fix computes: a noncausal change
+— one the guarded structure does not depend on — must leave that identity
+unchanged, and a causal change — one it does depend on — must change it. A
+check that only ever exercises one direction cannot distinguish a real
+dependency boundary from an accidental one.
+
+Reuse coverage that already exercises the real structure instead of adding
+another probe. The `NOT_SAFE` / `NOT_APPLICABLE` boundary below still
+applies: when no safe bounded case is possible, say so and report the
+untested scope honestly rather than marking it `PASS`.
+
 ## Safety and `NOT_APPLICABLE`
 
 If no safe bounded mutation is possible, report `NOT_SAFE` and proceed — by
