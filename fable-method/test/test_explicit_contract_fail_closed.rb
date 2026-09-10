@@ -373,6 +373,77 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
+  def test_canonical_exact_untracked_cardinality_contract
+    clauses = [
+      'When acceptance or safety depends on the exact file-level count or identity of untracked content, use a file-complete inventory such as `git status --porcelain=v1 --untracked-files=all` or another command proven to expose every individual file;',
+      'directory-collapsed untracked output is insufficient evidence for an exact file count,',
+      'nine files represented by one collapsed untracked directory entry must not be reported as exact cardinality one.',
+      'Do not require `--untracked-files=all` for every task;',
+      'trigger it only when exact cardinality or file identity is load-bearing.'
+    ]
+    weakenings = {
+      'use a file-complete inventory such as' => 'use a directory-level summary such as',
+      'is insufficient evidence for an exact file count' => 'is sufficient evidence for an exact file count',
+      'must not be reported as exact cardinality one' => 'may be reported as exact cardinality one',
+      'Do not require `--untracked-files=all` for every task' => 'Require `--untracked-files=all` for every task',
+      'trigger it only when exact cardinality or file identity is load-bearing' => 'trigger it for every preflight regardless of relevance'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+  end
+
+  def test_canonical_destructive_result_provenance_contract
+    clauses = [
+      'Terminal absence proves current state only:',
+      '`ALREADY_ABSENT` does not by itself prove `DELETED_BY_THIS_TASK`.',
+      'A handoff claim that this task deleted, removed, changed, or otherwise caused a destructive mutation must be supported by an exact entry in the existing task command or filesystem ledger recording the action and its actual observed result or exit status, not by terminal-state evidence alone;',
+      'when the target is already absent before action, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.'
+    ]
+    weakenings = {
+      'does not by itself prove `DELETED_BY_THIS_TASK`' => 'is sufficient to prove `DELETED_BY_THIS_TASK`',
+      'must be supported by an exact entry in the existing task command or filesystem ledger' => 'may be inferred without an entry in the existing task command or filesystem ledger',
+      'not by terminal-state evidence alone' => 'and terminal-state evidence alone is sufficient',
+      'do not execute delete, and do not claim this task caused the absence' => 'execute delete and report that this task caused the absence'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Authority and Packet fast path', clauses, weakenings)
+  end
+
+  def test_canonical_large_structured_output_transport_contract
+    clauses = [
+      'For large structured command or tool output used as load-bearing authority: capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface;',
+      'never derive an authority, count, identity, or completeness claim from display output that may have been truncated.',
+      'If complete capture cannot be established and the missing portion could alter the decision, state `UNKNOWN` rather than treat the displayed subset as complete.',
+      'This does not require a new durable evidence store',
+      'use in-process parsing or an existing safe temporary mechanism.'
+    ]
+    weakenings = {
+      'capture it completely, parse or filter it internally, then project only a bounded summary' => 'display it directly without capturing it completely',
+      'never derive an authority, count, identity, or completeness claim from display output that may have been truncated' => 'deriving an authority, count, identity, or completeness claim from possibly truncated display output is acceptable',
+      'state `UNKNOWN` rather than treat the displayed subset as complete' => 'treat the displayed subset as complete',
+      'This does not require a new durable evidence store' => 'This requires a new durable evidence store'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, weakenings)
+  end
+
+  def test_canonical_capability_strict_tri_state_contract
+    clauses = [
+      'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED',
+      '`ALLOWED` requires direct evidence that the current harness can perform the required execution path.',
+      '`UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`.',
+      '`BLOCKED` means direct evidence shows the required execution path is unavailable or denied;',
+      'do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block',
+      'retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`.',
+      'Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged.'
+    ]
+    weakenings = {
+      'must never be treated as `ALLOWED`' => 'may be treated as `ALLOWED`',
+      'do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block' => 'repeat the same capability preflight or request repeated Owner action authorization as a substitute',
+      'retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`' => 'retry at any time regardless of evidence',
+      'Owner action authorization and harness capability remain separate facts' => 'Owner action authorization is equivalent to harness capability',
+      'this leaves Planner routing semantics unchanged' => 'this changes Planner routing semantics'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Intent, authorization, and surgical execution', clauses, weakenings)
+  end
+
   def test_canonical_dependency_topology_falsifiability_contract
     clauses = [
       'a dependency fingerprint, import closure, resource manifest, or similar graph the fix reasons over',
@@ -395,6 +466,30 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'rather than marking it `PASS`' => 'and marking it `PASS` regardless'
     }
     assert_canonical_contract_controls('references/test-falsifiability.md', 'Dependency-boundary structure', clauses, weakenings)
+  end
+
+  def test_canonical_blocked_terminal_inline_handoff_contract
+    clauses = [
+      'Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, `SMALLEST_NEXT_ACTION:` (or a named-gate prefix, e.g. `A2_BLOCKER_CODE:`) — so a downstream Agent can pick the next action without local filesystem access to the originating Agent.',
+      'The inline record is a transfer summary, not a second authority:',
+      'a durable artifact or exact locator remains canonical for full evidence, but it must never be the sole carrier of the fact needed to decide what happens next,',
+      'and this does not replace artifact paths, hashes, full evidence, runtime receipts, or exact authority locators.',
+      '`BLOCKER_DETAIL` states the actual missing or invalid fact when known — a missing strategy, draw, config, seed, unsupported capability, or unresolved authority — never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed;',
+      'when genuinely unknown, state `UNKNOWN` honestly and name the smallest bounded resolution action instead.',
+      '`SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap,',
+      'and each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases.',
+      'A `COMPLETE` handoff is not required to carry these fields.'
+    ]
+    weakenings = {
+      'includes exactly one compact inline blocker record' => 'may omit an inline blocker record',
+      'must never be the sole carrier of the fact needed to decide what happens next' => 'may be the sole carrier of the fact needed to decide what happens next',
+      'states the actual missing or invalid fact when known' => 'may state a vague placeholder even when the fact is known',
+      'never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed' => 'a vague `see artifact`, `blocked`, or `needs investigation` is acceptable even once the exact blocking fact was already observed',
+      'is one bounded progress action, not a roadmap' => 'may be an open-ended roadmap',
+      'each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases' => 'one blocker may be duplicated under multiple aliases',
+      'A `COMPLETE` handoff is not required to carry these fields' => 'A `COMPLETE` handoff is required to carry these fields'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
   end
 
   private
@@ -421,8 +516,16 @@ class ExplicitContractFailClosedTest < Minitest::Test
       refute_equal live, mutated, "negative control must change the clause: #{original}"
       guarded_clause = clauses.find { |clause| clause.include?(original) }
       refute_nil guarded_clause, "mutation must target an asserted protection: #{original}"
-      error = assert_raises(Minitest::Assertion) { assert_contract_clauses(mutated, clauses) }
-      assert_includes error.message, guarded_clause
+      # Check the guarded clause directly against the mutated text rather than
+      # against a raised assertion's formatted message: under a non-UTF-8
+      # Encoding.default_external (e.g. an unset LANG/LC_ALL), Minitest's own
+      # message pretty-printer escapes non-ASCII characters (such as an
+      # em dash or arrow inside a long clause) to `\uXXXX`, so a literal
+      # substring match against error.message is encoding-dependent and can
+      # false-fail even though the semantic weakening is real.
+      refute mutated.include?(guarded_clause),
+             "negative control must remove or weaken the guarded clause verbatim: #{guarded_clause}"
+      assert_raises(Minitest::Assertion) { assert_contract_clauses(mutated, clauses) }
     end
     # Re-read canonical source: no negative control may alter the real file.
     restored = canonical_contract_section(relative_path, heading)
