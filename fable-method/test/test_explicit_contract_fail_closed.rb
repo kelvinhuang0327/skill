@@ -468,8 +468,16 @@ class ExplicitContractFailClosedTest < Minitest::Test
       refute_equal live, mutated, "negative control must change the clause: #{original}"
       guarded_clause = clauses.find { |clause| clause.include?(original) }
       refute_nil guarded_clause, "mutation must target an asserted protection: #{original}"
-      error = assert_raises(Minitest::Assertion) { assert_contract_clauses(mutated, clauses) }
-      assert_includes error.message, guarded_clause
+      # Check the guarded clause directly against the mutated text rather than
+      # against a raised assertion's formatted message: under a non-UTF-8
+      # Encoding.default_external (e.g. an unset LANG/LC_ALL), Minitest's own
+      # message pretty-printer escapes non-ASCII characters (such as an
+      # em dash or arrow inside a long clause) to `\uXXXX`, so a literal
+      # substring match against error.message is encoding-dependent and can
+      # false-fail even though the semantic weakening is real.
+      refute mutated.include?(guarded_clause),
+             "negative control must remove or weaken the guarded clause verbatim: #{guarded_clause}"
+      assert_raises(Minitest::Assertion) { assert_contract_clauses(mutated, clauses) }
     end
     # Re-read canonical source: no negative control may alter the real file.
     restored = canonical_contract_section(relative_path, heading)
