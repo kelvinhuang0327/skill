@@ -516,6 +516,15 @@ Do not：
 - require historical metadata not needed to prove coverage。
 
 Prior evidence 來自不同 load-bearing tree/artifact 時（identity mismatch），不得僅因 label 相符就當作 covered 重用。
+
+Packet synthesis must apply the existing `COVERED_ITEMS` / `MISSING_ITEMS`
+accounting as follows：
+
+- one valid evidence item may cover every acceptance claim it actually proves；
+- do not create one verification action for each acceptance bullet by default；
+- when `MISSING_ITEMS = NONE`，do not rerun the workflow for process completeness；
+- create a new verification only for genuinely missing load-bearing evidence。
+
 此為 planning / verification selection 邏輯，非新的 Judge gate。
 
 DEPENDENCY_AWARE_BASE_DRIFT：
@@ -820,6 +829,12 @@ exact identity。
 若 remediation 改變 source/test，原 verdict 失效，需以 DELTA re-Judge，且不得在
 Judge pending 時 integration、push、publish、merge 或 cleanup。
 
+`IMPLEMENTATION_DEPTH` and `DEPTH_SOURCE` are separate from Judge trigger,
+depth, and reconciliation. Packet slimming must not lower any mandatory `FULL`
+trigger, remove independent Judge reproduction, turn `NOT RUN` into `VERIFIED`,
+or cap the number of confirmed findings. `DEPTH_SOURCE` is provenance only；
+it is not a Judge setting, authority, or authorization。
+
 ## 7. Copyable Worker Packet
 
 以下模板只放 task-specific values；stable Worker procedure 由 /fable-method
@@ -841,6 +856,27 @@ AUTHORIZATION_HANDOFF_MODE 等欄位，並依 §4.3 準備兩則獨立訊息；�
 SAME_CONVERSATION，不需要重複貼一次授權區塊。一般不涉及 standalone
 authorization 的任務，這一組欄位留 NOT_APPLICABLE 或整段省略。
 
+For an already-verified exact-tree publication / Ready / merge / cleanup task，
+emit a compact lifecycle packet carrying only：
+
+- exact identity；
+- this round's authorization；
+- lifecycle checks missing this round；
+- stop boundary；
+- minimal handoff。
+
+Do not restate stable `/fable-method` rules already owned by the Skill in that
+compact variant。
+
+For implementation tasks，populate `IMPLEMENTATION_DEPTH` only when the
+Planner has a clear determination；otherwise omit it and let `/fable-method`
+select its fallback. Planner must not emit `SKILL_FALLBACK`。
+
+The four model/native-thinking fields below are Owner recommendations only。
+They are not Worker runtime settings already applied, do not grant
+authorization, and must not be used by Fable to change the Owner-selected
+model or native effort。
+
 ~~~text
 Owner Authorization: <EXACT_TOKEN_OR_REMOVE_FOR_READ_ONLY>
 
@@ -853,6 +889,11 @@ MODE: WORKER_EXECUTION
 OWNER_AUTHORIZATION_STATUS: PRESENT | NOT_REQUIRED
 TASK_CLASS: <ENUM>
 WORKER_ROUTE: <ENUM>
+IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
+IMPLEMENTATION_MODEL_RECOMMENDATION: <OWNER_RECOMMENDATION | NONE>
+IMPLEMENTATION_THINKING_RECOMMENDATION: <OWNER_RECOMMENDATION | NONE>
+JUDGE_MODEL_RECOMMENDATION: <OWNER_RECOMMENDATION | NOT_APPLICABLE>
+JUDGE_THINKING_RECOMMENDATION: <OWNER_RECOMMENDATION | NOT_APPLICABLE>
 
 ## Identity
 CURRENT_PROJECT: <PROJECT>
@@ -982,7 +1023,11 @@ Planner 回覆只需以下內容：
 5. 下一輪單一任務的 Goal、Repo/Base、Worktree、Allowed Writes、Required
    Verification、Judge、Publication、Stop Boundary；
 6. 一份可直接複製的 Worker Packet。
-7. 最後部分註明可用的強中弱模型和思考強度。
+7. 最後部分註明可用的強中弱模型和思考強度；model / native-thinking 建議
+   分別使用 `IMPLEMENTATION_MODEL_RECOMMENDATION`、
+   `IMPLEMENTATION_THINKING_RECOMMENDATION`、`JUDGE_MODEL_RECOMMENDATION`、
+   `JUDGE_THINKING_RECOMMENDATION`；這些只供 Owner 選擇，不是 runtime 已套用
+   的設定或授權。
 
 若沒有下一輪任務，寫 NONE REQUIRED。非 Git/PR 任務省略不適用 lifecycle 欄位。
 
