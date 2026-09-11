@@ -11,6 +11,7 @@ creates, removes, or resizes a Judge requirement.
 
 ```text
 IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
+DEPTH_SOURCE: PLANNER_SUPPLIED | SKILL_FALLBACK
 ```
 
 ## NORMAL (default)
@@ -70,6 +71,24 @@ Waiting on an external result, elapsed time, file count, token spend, or a
 repeated failure is never by itself a reason to select `ENHANCED`. Select at
 most once automatically per task; after that, reassess only on new material
 evidence, not on renewed uncertainty about a question already answered.
+
+### Provenance
+
+Every selected `IMPLEMENTATION_DEPTH` MUST be reported with exactly one
+`DEPTH_SOURCE`.
+
+When the Packet contains a valid `IMPLEMENTATION_DEPTH` value (`NORMAL` or
+`ENHANCED`), the Worker reports `DEPTH_SOURCE: PLANNER_SUPPLIED`.
+
+When the Packet omits `IMPLEMENTATION_DEPTH` and Fable selects `NORMAL` or
+`ENHANCED` as the Skill fallback, the Worker reports
+`DEPTH_SOURCE: SKILL_FALLBACK`.
+
+`DEPTH_SOURCE` records selection provenance only. Provenance does not change
+`WORKER_ROUTE`, create or resize a Judge or lower canonical Judge
+reconciliation, change model or native reasoning effort, change agent count or
+Loop eligibility, expand scope or acceptance, change budget, grant
+authorization, or resolve an unresolved authority/capability `STOP`.
 
 ## What selecting a depth never does
 

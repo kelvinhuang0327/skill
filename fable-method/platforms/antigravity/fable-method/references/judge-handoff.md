@@ -222,7 +222,11 @@ Provide the original Packet and forbidden actions; repository, branch, HEAD,
 tree, worktree and status; actual diff; exact authorized scope; acceptance
 criteria; route, Judge mode/depth, and implementation depth (with
 `ENHANCED_EVIDENCE` per [implementation depth](implementation-depth.md) when
-applicable); commands, exit statuses, and raw summaries (durable per
+applicable). The implementation-depth evidence in this payload must include
+`DEPTH_SOURCE` alongside `IMPLEMENTATION_DEPTH`, using the exact two-value enum
+defined by `implementation-depth.md`. The Judge independently derives its own
+Judge trigger/depth and must not treat `DEPTH_SOURCE` as authority for Judge
+depth. Include commands, exit statuses, and raw summaries (durable per
 [Durable terminal capture](#durable-terminal-capture) when load-bearing);
 runtime evidence; all unknowns and failed attempts; and the complete
 filesystem write/retained/deleted ledger.

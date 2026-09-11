@@ -178,6 +178,65 @@ class ExplicitContractFailClosedTest < Minitest::Test
     refute Parser.enum_accepted?('TASK_CLASS', 'WHATEVER')
   end
 
+  def test_canonical_implementation_depth_provenance_contract
+    implementation_depth = File.read(
+      File.expand_path('../shared/references/implementation-depth.md', __dir__),
+      encoding: 'UTF-8'
+    )
+    judge_handoff = File.read(
+      File.expand_path('../shared/references/judge-handoff.md', __dir__),
+      encoding: 'UTF-8'
+    )
+
+    assert_includes implementation_depth, 'IMPLEMENTATION_DEPTH: NORMAL | ENHANCED'
+    exact_enum = 'DEPTH_SOURCE: PLANNER_SUPPLIED | SKILL_FALLBACK'
+    exact_enum_lines = lambda do |text|
+      text.lines.map(&:chomp).select { |line| line.start_with?('DEPTH_SOURCE:') }
+    end
+    assert_equal [exact_enum], exact_enum_lines.call(implementation_depth)
+
+    enum_mutations = [
+      implementation_depth.sub(exact_enum, ''),
+      implementation_depth.sub(exact_enum, "#{exact_enum} | AUTO")
+    ]
+    enum_mutations.each do |mutated|
+      refute_equal implementation_depth, mutated
+      assert_raises(Minitest::Assertion) { assert_equal [exact_enum], exact_enum_lines.call(mutated) }
+    end
+
+    depth_clauses = [
+      'Every selected `IMPLEMENTATION_DEPTH` MUST be reported with exactly one `DEPTH_SOURCE`.',
+      'When the Packet contains a valid `IMPLEMENTATION_DEPTH` value (`NORMAL` or `ENHANCED`), the Worker reports `DEPTH_SOURCE: PLANNER_SUPPLIED`.',
+      'When the Packet omits `IMPLEMENTATION_DEPTH` and Fable selects `NORMAL` or `ENHANCED` as the Skill fallback, the Worker reports `DEPTH_SOURCE: SKILL_FALLBACK`.',
+      '`DEPTH_SOURCE` records selection provenance only.',
+      'Provenance does not change `WORKER_ROUTE`, create or resize a Judge or lower canonical Judge reconciliation, change model or native reasoning effort, change agent count or Loop eligibility, expand scope or acceptance, change budget, grant authorization, or resolve an unresolved authority/capability `STOP`.',
+    ]
+    depth_weakenings = {
+      'MUST be reported with exactly one `DEPTH_SOURCE`' => 'may be reported without `DEPTH_SOURCE`',
+      'reports `DEPTH_SOURCE: PLANNER_SUPPLIED`' => 'reports `DEPTH_SOURCE: SKILL_FALLBACK`',
+      'reports `DEPTH_SOURCE: SKILL_FALLBACK`' => 'reports `DEPTH_SOURCE: PLANNER_SUPPLIED`',
+      'selection provenance only' => 'authority for Judge depth',
+      'Provenance does not change' => 'Provenance changes'
+    }
+    assert_canonical_contract_controls(
+      'references/implementation-depth.md', 'Selecting a depth', depth_clauses, depth_weakenings
+    )
+
+    handoff_clauses = [
+      'The implementation-depth evidence in this payload must include `DEPTH_SOURCE` alongside `IMPLEMENTATION_DEPTH`, using the exact two-value enum defined by `implementation-depth.md`.',
+      'The Judge independently derives its own Judge trigger/depth and must not treat `DEPTH_SOURCE` as authority for Judge depth.',
+    ]
+    handoff_weakenings = {
+      'must include `DEPTH_SOURCE` alongside `IMPLEMENTATION_DEPTH`' => 'may omit `DEPTH_SOURCE` alongside `IMPLEMENTATION_DEPTH`',
+      'independently derives its own Judge trigger/depth' => 'takes its Judge depth from `DEPTH_SOURCE`'
+    }
+    assert_canonical_contract_controls(
+      'references/judge-handoff.md', 'Handoff payload', handoff_clauses, handoff_weakenings
+    )
+
+    assert_includes judge_handoff, 'DEPTH_SOURCE'
+  end
+
   # Text-only regression against the real shared Skill; no runtime enforcement.
   def test_exact_locator_first_and_absence_contract
     assert_exact_locator_contract(Parser.skill)
