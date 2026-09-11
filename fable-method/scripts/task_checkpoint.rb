@@ -1309,7 +1309,8 @@ class DurableCommandCapture
   EVIDENCE_COMPLETE = 'EVIDENCE_COMPLETE'
   EVIDENCE_UNKNOWN_UNVERIFIABLE = 'EVIDENCE_UNKNOWN_UNVERIFIABLE'
 
-  attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :started_at, :ended_at
+  attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :started_at, :ended_at,
+                :wrapper_signal
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1319,6 +1320,7 @@ class DurableCommandCapture
     @exit_status = attrs.key?(:exit_status) ? attrs[:exit_status] : attrs['exit_status']
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
+    @wrapper_signal = attrs[:wrapper_signal] || attrs['wrapper_signal']
   end
 
   def complete?
@@ -1395,29 +1397,99 @@ class DurableCommandCapture
   # persists the exact terminal evidence to file_path before returning, so
   # the durable record exists before any caller can rely on it for a
   # verdict. Never reads or persists ENV; stdout/stderr are captured exactly
-  # as the command produced them.
+  # as the command produced them. When a block is given, signal handling stays
+  # installed until the block finishes its durable finalization and output
+  # work; the block must not propagate a signal itself.
   def self.run_and_capture(command, file_path:, chdir: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
     started_at = Time.now.utc.iso8601
-    spawn_opts = {}
-    spawn_opts[:chdir] = chdir if chdir
-    # The executable/argv0 pair also prevents Ruby's single-string shell
-    # fallback when the upstream argv contains only an executable name.
-    stdout_str, stderr_str, status = Open3.capture3([command.first, command.first], *command.drop(1), **spawn_opts)
-    ended_at = Time.now.utc.iso8601
+    pending_signal = nil
+    forwarding_error = nil
+    upstream_pgid = nil
+    signal_forwarded = false
+    previous_handlers = {}
+    installed_signals = []
+    signal_names = %w[INT TERM]
+    forward_signal = lambda do |signal|
+      pgid = upstream_pgid
+      next unless pgid
+      next if signal_forwarded
 
-    capture = new(
-      command: command,
-      stdout: stdout_str,
-      stderr: stderr_str,
-      exit_status: status.exitstatus.nil? ? "SIGNALED:#{status.termsig}" : status.exitstatus,
-      started_at: started_at,
-      ended_at: ended_at
-    )
-    capture.save(file_path)
-    capture
+      begin
+        Process.kill(signal, -pgid)
+        signal_forwarded = true
+      rescue Errno::ESRCH
+        # The child group may have been reaped between the trap and forwarding.
+        signal_forwarded = true
+      rescue StandardError => e
+        # Signal traps must not raise into pipe reads or finalization. Surface a
+        # forwarding failure after the child has been waited and drained.
+        forwarding_error ||= e
+      end
+    end
+
+    begin
+      signal_names.each do |name|
+        previous_handlers[name] = Signal.trap(name) do
+          signal = Signal.list.fetch(name)
+          pending_signal ||= signal
+          forward_signal.call(signal)
+        end
+        installed_signals << name
+      end
+
+      spawn_opts = { pgroup: true }
+      spawn_opts[:chdir] = chdir if chdir
+      # The executable/argv0 pair also prevents Ruby's single-string shell
+      # fallback when the upstream argv contains only an executable name.
+      Open3.popen3([command.first, command.first], *command.drop(1), **spawn_opts) do |stdin, stdout, stderr, wait_thr|
+        upstream_pgid = wait_thr.pid
+        stdin.close
+        forward_signal.call(pending_signal) if pending_signal
+
+        stdout_reader = Thread.new { stdout.read }
+        stderr_reader = Thread.new { stderr.read }
+        status = wait_thr.value
+        terminal_at = Time.now.utc.iso8601
+        stdout_str = stdout_reader.value
+        stderr_str = stderr_reader.value
+        # wait_thr.value has reaped the direct child and both readers have
+        # drained their pipes. The wrapper is no longer allowed to target this
+        # invocation while it commits the durable evidence.
+        upstream_pgid = nil
+
+        raise forwarding_error if forwarding_error
+
+        capture = new(
+          command: command,
+          stdout: stdout_str,
+          stderr: stderr_str,
+          exit_status: status.signaled? ? "SIGNALED:#{status.termsig}" : status.exitstatus,
+          started_at: started_at,
+          ended_at: terminal_at
+        )
+        capture.save(file_path)
+        yield capture if block_given?
+        capture.wrapper_signal = pending_signal
+        capture
+      end
+    rescue StandardError
+      if upstream_pgid
+        begin
+          Process.kill('TERM', -upstream_pgid)
+        rescue Errno::ESRCH
+          # The child group already exited while the failure was being handled.
+        end
+      end
+      raise
+    ensure
+      upstream_pgid = nil
+      installed_signals.reverse_each do |name|
+        Signal.trap(name, previous_handlers[name])
+      end
+    end
   end
 
   class ValidationError < StandardError; end
@@ -1741,12 +1813,41 @@ if __FILE__ == $PROGRAM_NAME
         raise ExecutionRecord::UnresolvedExecutionStateError, 'execution record identity or schema is malformed'
       end
 
+      validate_capture = lambda do |candidate|
+        unless candidate && candidate.schema_version == DurableCommandCapture::SCHEMA_VERSION && candidate.complete?
+          raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture is malformed or incomplete'
+        end
+
+        result = candidate.exit_status
+        signal_match = result.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(result)
+        signal = signal_match[1].to_i if signal_match
+        unless (result.is_a?(Integer) && (0..255).cover?(result)) ||
+               (signal && Signal.list.value?(signal) && !%w[STOP CONT].any? { |name| Signal.list[name] == signal })
+          raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture exit result is malformed'
+        end
+        [result, signal]
+      end
+
+      emit_capture = lambda do |candidate|
+        $stdout.binmode.write(candidate.stdout)
+        $stderr.binmode.write(candidate.stderr)
+        $stdout.flush
+        $stderr.flush
+      end
+
+      result = nil
+      capture_signal = nil
       case recovery.classification
       when nil
-        capture = DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path, chdir: options[:worktree])
-        record.complete!(record_path, durable_capture_path: capture_path)
+        capture = DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path, chdir: options[:worktree]) do |candidate|
+          result, capture_signal = validate_capture.call(candidate)
+          record.complete!(record_path, durable_capture_path: capture_path)
+          emit_capture.call(candidate)
+        end
       when ExecutionRecord::CLASSIFICATION_COMPLETED
         capture = recovery.durable_capture
+        result, capture_signal = validate_capture.call(capture)
+        emit_capture.call(capture)
       when ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
         warn "#{recovery.classification}: original task authority must resolve rerun eligibility; record retained"
         exit 1
@@ -1754,22 +1855,9 @@ if __FILE__ == $PROGRAM_NAME
         raise ExecutionRecord::UnresolvedExecutionStateError, 'acquisition did not grant execution ownership'
       end
 
-      unless capture && capture.schema_version == DurableCommandCapture::SCHEMA_VERSION && capture.complete?
-        raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture is malformed or incomplete'
-      end
-      result = capture.exit_status
-      signal = result.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(result)
-      signal = signal[1].to_i if signal
-      unless (result.is_a?(Integer) && (0..255).cover?(result)) ||
-             (signal && Signal.list.value?(signal) && !%w[STOP CONT].any? { |name| Signal.list[name] == signal })
-        raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture exit result is malformed'
-      end
-      $stdout.binmode.write(capture.stdout)
-      $stderr.binmode.write(capture.stderr)
-      $stdout.flush
-      $stderr.flush
+      signal = capture.wrapper_signal || capture_signal
       if signal
-        Signal.trap(signal, 'DEFAULT') unless signal == Signal.list['KILL']
+        Signal.trap(signal, 'SYSTEM_DEFAULT') unless signal == Signal.list['KILL']
         Process.kill(signal, Process.pid)
         exit(128 + signal)
       end
