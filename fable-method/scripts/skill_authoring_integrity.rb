@@ -4,7 +4,7 @@
 require 'open3'
 require 'pathname'
 require 'set'
-require 'yaml'
+require_relative 'platform_manifest'
 
 # Authoring-time structural integrity for the Fable Skill source tree: does the
 # canonical entrypoint/reference registry declared in platforms.yaml match what
@@ -15,11 +15,8 @@ require 'yaml'
 # per-platform output.
 module Fable
   module SkillAuthoringIntegrity
-    class IntegrityViolation < StandardError; end
+    IntegrityViolation = PlatformManifest::Error
 
-    CANONICAL_SKILL = 'fable-method/shared/SKILL.md'
-    SHARED_ROOT = 'fable-method/shared'
-    REFERENCE_ROOT = 'fable-method/shared/references'
     SYNC_SCRIPT_RELATIVE = 'fable-method/scripts/sync-platforms.sh'
 
     Outcome = Struct.new(:report, :sync_result, keyword_init: true)
@@ -45,44 +42,18 @@ module Fable
     # source tree. Every check is a mechanical set/path comparison; none of
     # them evaluate prose quality or use text-similarity heuristics.
     class Validator
-      class << self
-        def load_registry(manifest_path)
-          yaml = File.read(manifest_path, encoding: 'UTF-8')
-          document = Psych.parse(yaml)
-          raise IntegrityViolation, 'platforms.yaml must contain one YAML document' unless document&.root
-
-          reject_duplicate_mapping_keys!(document.root, 'platforms.yaml')
-          YAML.safe_load(yaml, permitted_classes: [], aliases: false)
-        rescue Psych::Exception => error
-          raise IntegrityViolation, "platforms.yaml could not be parsed: #{error.message}"
-        end
-
-        private
-
-        def reject_duplicate_mapping_keys!(node, location)
-          case node
-          when Psych::Nodes::Mapping
-            keys = Set.new
-            node.children.each_slice(2) do |key, value|
-              unless key.is_a?(Psych::Nodes::Scalar)
-                raise IntegrityViolation, "#{location} contains a non-scalar mapping key"
-              end
-              unless keys.add?(key.value)
-                raise IntegrityViolation, "duplicate YAML mapping key at #{location}.#{key.value}"
-              end
-              reject_duplicate_mapping_keys!(value, "#{location}.#{key.value}")
-            end
-          when Psych::Nodes::Sequence
-            node.children.each_with_index do |child, index|
-              reject_duplicate_mapping_keys!(child, "#{location}[#{index}]")
-            end
-          end
-        end
+      def self.load_registry(manifest_path)
+        PlatformManifest.load(manifest_path).data
       end
 
-      def initialize(repository_root:, registry:)
+      def initialize(repository_root:, registry:, skill: 'fable-method')
         @repository_root = Pathname.new(repository_root).expand_path.cleanpath
-        @registry = registry
+        @model = PlatformManifest.new(registry)
+        @skill = skill
+        @registry = @model.skill(skill)
+        @shared_root = "#{skill}/shared"
+        @reference_root = "#{@shared_root}/references"
+        @canonical_skill = "#{@shared_root}/SKILL.md"
       end
 
       attr_reader :markdown_link_count
@@ -90,15 +61,15 @@ module Fable
       # Check 1: canonical Skill entrypoint exists, and is the only one.
       def validate_canonical_entry!
         canonical_skill = canonical_skill_path!
-        unless canonical_skill == CANONICAL_SKILL
-          violation!("shared.skill must resolve to #{CANONICAL_SKILL}, got #{canonical_skill}")
+        unless canonical_skill == @canonical_skill
+          violation!("shared.skill must resolve to #{@canonical_skill}, got #{canonical_skill}")
         end
         unless @repository_root.join(canonical_skill).file?
           violation!("canonical shared skill is missing: #{canonical_skill}")
         end
 
-        actual_skills = repository_files(SHARED_ROOT, 'SKILL.md')
-        expected_skills = [CANONICAL_SKILL]
+        actual_skills = repository_files(@shared_root, 'SKILL.md')
+        expected_skills = [@canonical_skill]
         unless actual_skills == expected_skills
           violation!(
             "canonical shared SKILL.md set mismatch: expected=#{expected_skills.inspect} " \
@@ -127,7 +98,7 @@ module Fable
       # Check 4a: every reference file on disk is declared (no orphans).
       def validate_no_orphan_references!
         registered = registered_reference_paths!.to_set
-        actual = repository_files(REFERENCE_ROOT, '*.md').to_set
+        actual = repository_files(@reference_root, '*.md').to_set
         return true if registered == actual
 
         orphans = (actual - registered).to_a.sort
@@ -142,90 +113,14 @@ module Fable
       # source). Ownership here is exactly what platforms.yaml declares, so a
       # conflict is mechanically provable without any semantic judgment.
       def validate_source_ownership!
-        owners = Hash.new { |paths, path| paths[path] = Set.new }
-        register_source_owner!(owners, canonical_skill_path!, 'shared.skill')
-        registered_reference_paths!.each do |reference|
-          register_source_owner!(owners, reference, 'shared.references')
+        @model.source_paths(@skill).each do |path|
+          PlatformManifest.safe_file!(@repository_root.join(path))
         end
-
-        platform_records!.each_with_index do |platform, index|
-          label = "platforms[#{index}]"
-          register_source_owner!(
-            owners,
-            scalar_field!(platform, 'frontmatter_source', label),
-            "#{label}.frontmatter_source"
-          )
-          array_field!(platform, 'adapter_sources', label).each do |adapter|
-            register_source_owner!(owners, adapter, "#{label}.adapter_sources")
-          end
-          override_records!(platform, label).each do |override|
-            register_source_owner!(
-              owners,
-              scalar_field!(override, 'source', "#{label}.reference_overrides"),
-              "#{label}.reference_overrides.source"
-            )
-          end
-        end
-
-        conflicts = owners.select { |_path, roles| roles.length > 1 }
-        unless conflicts.empty?
-          details = conflicts.sort.map { |path, roles| "#{path} => #{roles.to_a.sort.join(', ')}" }
-          violation!("incompatible canonical source ownership: #{details.join('; ')}")
-        end
-
-        true
+        @model.validate!
       end
 
-      # Check 4c: within the declared registry, no two sources are mapped onto
-      # the same per-platform materialized destination, and no two platforms
-      # share one materialized root. This is registry-internal (it never stats
-      # the materialized filesystem); actual on-disk drift is check 6, via
-      # sync-platforms.sh.
       def validate_destination_ownership!
-        materialized_root_owners = Hash.new { |paths, path| paths[path] = [] }
-
-        platform_records!.each_with_index do |platform, index|
-          label = "platforms[#{index}]"
-          materialized_root = normalize_repo_relative!(
-            scalar_field!(platform, 'materialized_destination', label),
-            "#{label}.materialized_destination"
-          )
-          materialized_root_owners[materialized_root] << label
-
-          destination_owners = Hash.new { |paths, path| paths[path] = [] }
-          register_destination_owner!(
-            destination_owners,
-            destination_path!(materialized_root, 'SKILL.md', "#{label}.SKILL.md"),
-            "#{label}.materialized_skill"
-          )
-
-          registered_reference_paths!.each_with_index do |reference, reference_index|
-            relative_destination = reference.delete_prefix("#{SHARED_ROOT}/")
-            register_destination_owner!(
-              destination_owners,
-              destination_path!(materialized_root, relative_destination, reference),
-              "shared.references[#{reference_index}]"
-            )
-          end
-
-          override_records!(platform, label).each_with_index do |override, override_index|
-            destination = scalar_field!(
-              override,
-              'destination',
-              "#{label}.reference_overrides[#{override_index}]"
-            )
-            register_destination_owner!(
-              destination_owners,
-              destination_path!(materialized_root, destination, destination),
-              "#{label}.reference_overrides[#{override_index}]"
-            )
-          end
-
-          reject_duplicate_destinations!(destination_owners, "#{label} destination")
-        end
-
-        reject_duplicate_destinations!(materialized_root_owners, 'materialized root')
-        true
+        @model.validate!
       end
 
       # Check 5: relative Markdown links in every canonical/materialized
@@ -235,6 +130,19 @@ module Fable
       # be used to point outside the intended root.
       def validate_markdown_links!
         @markdown_link_count = 0
+        if @skill == 'fable-judge'
+          @model.platforms(@skill).each do |platform|
+            @model.render(@repository_root.to_s, @skill, platform['name'])
+            root = @repository_root.join(platform['materialized_destination']).to_s
+            inventory = PlatformManifest.inventory(root)
+            files = inventory.select { |_, kind| kind == :file }.to_h do |path, _|
+              [path, File.binread(File.join(root, path))]
+            end
+            PlatformManifest.validate_links!(files)
+            @markdown_link_count += files.length
+          end
+          return true
+        end
         managed_markdown_surfaces.each do |relative_path, intended_root|
           validate_markdown_surface!(relative_path, intended_root)
         end
@@ -244,9 +152,9 @@ module Fable
       private
 
       def managed_markdown_surfaces
-        surfaces = repository_files(SHARED_ROOT, '*.md').map { |path| [path, SHARED_ROOT] }
-        surfaces << [canonical_skill_path!, SHARED_ROOT]
-        registered_reference_paths!.each { |reference| surfaces << [reference, SHARED_ROOT] }
+        surfaces = repository_files(@shared_root, '*.md').map { |path| [path, @shared_root] }
+        surfaces << [canonical_skill_path!, @shared_root]
+        registered_reference_paths!.each { |reference| surfaces << [reference, @shared_root] }
 
         platform_records!.each_with_index do |platform, index|
           label = "platforms[#{index}]"
@@ -261,7 +169,7 @@ module Fable
           ]
 
           registered_reference_paths!.each do |reference|
-            relative_destination = reference.delete_prefix("#{SHARED_ROOT}/")
+            relative_destination = reference.delete_prefix("#{@shared_root}/")
             surfaces << [
               destination_path!(materialized_root, relative_destination, reference),
               materialized_root
@@ -283,6 +191,7 @@ module Fable
 
       def validate_markdown_surface!(relative_path, intended_root)
         path = @repository_root.join(relative_path)
+        PlatformManifest.safe_file!(path)
         violation!("managed Markdown surface is missing: #{relative_path}") unless path.file?
 
         markdown_targets(File.read(path, encoding: 'UTF-8')).each do |target, line_number|
@@ -376,6 +285,7 @@ module Fable
           )
         end
 
+        PlatformManifest.safe_file!(target_path) if target_path.exist?
         unless target_path.file?
           violation!(
             "broken Markdown local link at #{source_path}:#{line_number}: " \
@@ -413,8 +323,8 @@ module Fable
 
         references.map.with_index do |reference, index|
           path = normalize_repo_relative!(reference, "shared.references[#{index}]")
-          unless path.start_with?("#{REFERENCE_ROOT}/")
-            violation!("shared.references entry is outside #{REFERENCE_ROOT}: #{path}")
+          unless path.start_with?("#{@reference_root}/")
+            violation!("shared.references entry is outside #{@reference_root}: #{path}")
           end
           violation!("shared.references entry is not Markdown: #{path}") unless File.extname(path) == '.md'
           path
@@ -523,12 +433,17 @@ module Fable
     # authority's job. This never re-renders or re-diffs platform output
     # itself; it only shells out and reports what that authority found.
     module SyncPlatformsCheck
-      def self.run(repository_root:)
+      def self.run(repository_root:, skill: nil)
         script = repository_root.join(SYNC_SCRIPT_RELATIVE)
         raise IntegrityViolation, "sync authority is missing: #{SYNC_SCRIPT_RELATIVE}" unless script.file?
 
-        stdout, stderr, status = Open3.capture3('bash', script.to_s, '--check', chdir: repository_root.to_s)
-        SyncResult.new(ok: status.success?, stdout: stdout, stderr: stderr, exit_status: status.exitstatus)
+        names = skill ? [skill] : PlatformManifest.load(repository_root.join('fable-method/platforms.yaml')).skills
+        results = names.map do |name|
+          Open3.capture3('bash', script.to_s, '--check', '--skill', name, chdir: repository_root.to_s)
+        end
+        ok = results.all? { |_, _, status| status.success? }
+        SyncResult.new(ok: ok, stdout: results.map(&:first).join, stderr: results.map { |r| r[1] }.join,
+                       exit_status: ok ? 0 : results.find { |r| !r[2].success? }[2].exitstatus)
       end
     end
 
@@ -560,9 +475,11 @@ module Fable
       end
 
       if registry
-        validator = Validator.new(repository_root: repository_root, registry: registry)
-        STRUCTURAL_CHECKS.each do |name, method|
-          run_check(report, name, validator, method)
+        registry.fetch('skills').each_key do |skill|
+          validator = Validator.new(repository_root: repository_root, registry: registry, skill: skill)
+          STRUCTURAL_CHECKS.each do |name, method|
+            run_check(report, "#{skill}/#{name}", validator, method)
+          end
         end
       end
 

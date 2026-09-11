@@ -8,7 +8,9 @@ readonly CANONICAL_REPOSITORY_ROOT='/Users/kelvin/VibeCoding-WorkSpace/skill'
 readonly USER_HOME='/Users/kelvin'
 readonly MANIFEST="${FABLE_ROOT}/platforms.yaml"
 readonly SYNC_SCRIPT="${SCRIPT_DIR}/sync-platforms.sh"
-readonly PLATFORMS=(codex claude gemini antigravity)
+PLATFORMS=(codex claude gemini antigravity)
+SELECTED_SKILL=fable-method
+MANIFEST_RECORDS=""
 readonly REVIEWED_REPLACEMENT_PLATFORMS=(codex claude)
 readonly TRUSTED_GIT_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 readonly ACTIVATION_LOCK="${USER_HOME}/.fable-method-activation.lock"
@@ -22,6 +24,8 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   activate-live.sh --help
+  All operations accept [--skill fable-method|fable-judge]; default fable-method.
+  Judge platforms: codex|claude|gemini (including reviewed replacement).
   activate-live.sh --check [--platform codex|claude|gemini|antigravity]
   activate-live.sh --activate --platform codex|claude|gemini|antigravity
   activate-live.sh --activate --platform codex|claude --replace-reviewed-local-drift \
@@ -33,8 +37,13 @@ EOF
 
 print_help() {
   cat <<'EOF'
-activate-live.sh - repository-owned activation for the Fable Method live skill installs.
+activate-live.sh - repository-owned activation for managed Fable skill installs.
 
+  --skill fable-method|fable-judge
+                                 Select one skill. Default: fable-method.
+                                 Judge supports codex, claude, gemini only.
+                                 Judge reviewed replacement supports those three;
+                                 Method remains limited to codex and claude.
   --check                       Read-only. Classifies every configured platform's
                                  live installation against this repository's current
                                  and historical materializations. Never writes to
@@ -51,7 +60,7 @@ activate-live.sh - repository-owned activation for the Fable Method live skill i
   --help                        Show this help.
 
   --activate --platform codex|claude --replace-reviewed-local-drift
-                                 Codex or Claude only. Overwrites a live
+                                 Method: Codex or Claude; Judge: all three. Overwrites a live
                                  installation the ordinary path refuses
                                  (LOCAL_DRIFT) provided the caller supplies the
                                  exact identity of what is being replaced: the
@@ -65,8 +74,7 @@ activate-live.sh - repository-owned activation for the Fable Method live skill i
                                  once and is revalidated, still inside the single
                                  activation lock, immediately before the first
                                  write; any mismatch takes zero live writes. There
-                                 is no target-path override, no platform outside
-                                 codex/claude, and no combination with --check.
+                                 is no target-path override, no unsupported pair, and no combination with --check.
 
 Running --activate against a real installation requires authorization from the
 Owner obtained outside this script. This script performs no conversational or
@@ -89,6 +97,10 @@ is_known_platform() {
 
 is_reviewed_replacement_platform() {
   local name="$1" p
+  if [[ "$SELECTED_SKILL" == fable-judge ]]; then
+    [[ "$name" == codex || "$name" == claude || "$name" == gemini ]]
+    return $?
+  fi
   for p in "${REVIEWED_REPLACEMENT_PLATFORMS[@]}"; do
     [[ "$p" == "$name" ]] && return 0
   done
@@ -96,23 +108,13 @@ is_reviewed_replacement_platform() {
 }
 
 platform_materialized_rel() {
-  case "$1" in
-    codex) printf '%s\n' 'fable-method/platforms/codex/fable-method' ;;
-    claude) printf '%s\n' 'fable-method/platforms/claude/fable-method' ;;
-    gemini) printf '%s\n' 'fable-method/platforms/gemini/fable-method' ;;
-    antigravity) printf '%s\n' 'fable-method/platforms/antigravity/fable-method' ;;
-    *) die "unknown platform: $1" ;;
-  esac
+  [[ -n "$MANIFEST_RECORDS" ]] || verify_manifest_paths
+  printf '%s\n' "$MANIFEST_RECORDS" | awk -F '\t' -v p="$1" '$1 == p {print $2}'
 }
 
 platform_live_path() {
-  case "$1" in
-    codex) printf '%s\n' '/Users/kelvin/.codex/skills/fable-method' ;;
-    claude) printf '%s\n' '/Users/kelvin/.claude/skills/fable-method' ;;
-    gemini) printf '%s\n' '/Users/kelvin/.gemini/skills/fable-method' ;;
-    antigravity) printf '%s\n' '/Users/kelvin/.gemini/config/skills/fable-method' ;;
-    *) die "unknown platform: $1" ;;
-  esac
+  [[ -n "$MANIFEST_RECORDS" ]] || verify_manifest_paths
+  printf '%s\n' "$MANIFEST_RECORDS" | awk -F '\t' -v p="$1" '$1 == p {print $3}'
 }
 
 repo_path() {
@@ -212,53 +214,18 @@ guard_repository_root() {
 }
 
 read_manifest_records() {
-  ruby -ryaml -e '
-    path = ARGV.fetch(0)
-    data = YAML.safe_load(File.read(path), permitted_classes: [], aliases: false)
-    raise "manifest must be a mapping" unless data.is_a?(Hash)
-    raise "schema_version must be 1" unless data.fetch("schema_version") == 1
-    platforms = data.fetch("platforms")
-    raise "platforms must be an array" unless platforms.is_a?(Array)
-    names = platforms.map { |p| p.fetch("name") }
-    raise "duplicate platform name" unless names.uniq.length == names.length
-    raise "platforms must be exactly antigravity, codex, claude, gemini" unless names.sort == %w[antigravity claude codex gemini]
-    platforms.each do |platform|
-      name = platform.fetch("name")
-      dest = platform.fetch("materialized_destination")
-      live = platform.fetch("live_installation_path")
-      raise "#{name} destination must be a relative path" if dest.start_with?("/")
-      raise "#{name} live path must be an absolute path" unless live.start_with?("/")
-      puts "#{name}\t#{dest}\t#{live}"
-    end
-  ' "$MANIFEST"
+  ruby "$SCRIPT_DIR/platform_manifest.rb" --records "$MANIFEST" "$SELECTED_SKILL"
 }
 
 verify_manifest_paths() {
-  [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || die 'platform manifest is missing or is a symlink'
-  local records
-  records="$(read_manifest_records)" \
-    || die 'ACTIVATION_MANIFEST_PATH_MISMATCH: manifest failed schema validation (unknown, duplicate, or missing platform)'
-  local name dest live expected_dest expected_live mismatch=0
-  while IFS=$'\t' read -r name dest live; do
-    [[ -n "$name" ]] || continue
-    expected_dest="$(platform_materialized_rel "$name")"
-    expected_live="$(platform_live_path "$name")"
-    if [[ "$dest" != "$expected_dest" || "$live" != "$expected_live" ]]; then
-      printf 'ACTIVATION_MANIFEST_PATH_MISMATCH: %s\n' "$name" >&2
-      printf '  manifest materialized_destination: %s\n' "$dest" >&2
-      printf '  expected materialized_destination: %s\n' "$expected_dest" >&2
-      printf '  manifest live_installation_path:   %s\n' "$live" >&2
-      printf '  expected live_installation_path:   %s\n' "$expected_live" >&2
-      mismatch=1
-    fi
-  done <<<"$records"
-  (( mismatch == 0 )) || exit 2
+  MANIFEST_RECORDS="$(read_manifest_records)" \
+    || die 'ACTIVATION_MANIFEST_PATH_MISMATCH: manifest failed schema validation'
 }
 
 require_canonical_source_gate() {
   [[ -f "$SYNC_SCRIPT" ]] || die "canonical sync script missing: $SYNC_SCRIPT"
   local output
-  if ! output="$(/bin/bash "$SYNC_SCRIPT" --check 2>&1)"; then
+  if ! output="$(/bin/bash "$SYNC_SCRIPT" --check --skill "$SELECTED_SKILL" 2>&1)"; then
     printf '%s\n' "$output" >&2
     die 'CANONICAL_MATERIALIZATION_DRIFT: sync-platforms.sh --check did not pass'
   fi
@@ -283,7 +250,7 @@ canonical_master_head() {
 
 path_in_fable_scope() {
   local p="$1"
-  [[ "$p" == "fable-method" || "$p" == fable-method/* ]]
+  [[ "$p" == "fable-method" || "$p" == fable-method/* || "$p" == "fable-judge" || "$p" == fable-judge/* ]]
 }
 
 classify_one_status_entry() {
@@ -436,8 +403,8 @@ find_symlink_component() {
     "$USER_HOME"/*) ;;
     *) die "live target outside expected home: $target" ;;
   esac
-  local rest="${target#"$USER_HOME"/}"
-  local cur="$USER_HOME"
+  local rest="${target#/}"
+  local cur=""
   local saved_ifs="$IFS"
   local -a parts
   IFS='/' read -r -a parts <<<"$rest"
@@ -446,7 +413,7 @@ find_symlink_component() {
   for part in "${parts[@]}"; do
     [[ -n "$part" ]] || continue
     cur="$cur/$part"
-    if [[ -L "$cur" ]]; then
+    if [[ -L "$cur" || ( -e "$cur" && ! -d "$cur" && "$cur" != "$target" ) ]]; then
       printf '%s\n' "$cur"
       return 0
     fi
@@ -478,7 +445,7 @@ reviewed_replacement_known_entries() {
 # + 32-byte SHA256 content digest (F) or 32 zero bytes (D). L is SHA256 of
 # that stream, lowercase hex. Size and mtime never substitute for file bytes.
 compute_live_bundle_sha256() {
-  local root="$1" platform="$2"
+  local root="$1" platform="$2" output_format="${3:-digest}"
   reviewed_replacement_known_entries "$platform" | ruby -e '
     require "digest"
 
@@ -493,7 +460,7 @@ compute_live_bundle_sha256() {
     end
 
     begin
-      root, prefix = ARGV
+      root, prefix, output_format = ARGV
       prefix = prefix.b
       allowed = {".".b => [:directory]}
       STDIN.binmode.read.split("\x00").each do |entry|
@@ -511,7 +478,12 @@ compute_live_bundle_sha256() {
         (allowed[rel] ||= []) << expected
       end
       raise "empty history inventory" if allowed.size == 1
+      check_readable = lambda do |path, stat|
+        raise "unreadable path: #{path}" unless File.readable?(path) && (stat.mode & 0444) != 0
+        raise "unsearchable path: #{path}" if stat.directory? && (stat.mode & 0111) == 0
+      end
       root_stat = File.lstat(root)
+      check_readable.call(root, root_stat)
       raise "root is not a directory" unless kind(root_stat) == :directory
       inventory = [[".".b, root_stat]]
       walk = lambda do |dir, rel|
@@ -519,6 +491,7 @@ compute_live_bundle_sha256() {
           child = File.join(dir, name)
           child_rel = rel == "." ? name : "#{rel}/#{name}"
           stat = File.lstat(child)
+          check_readable.call(child, stat)
           actual = kind(stat)
           raise "unexpected path/type: #{child_rel}" unless [:directory, :file].include?(actual)
           raise "unknown path: #{child_rel}" unless allowed.key?(child_rel)
@@ -529,6 +502,7 @@ compute_live_bundle_sha256() {
       end
       walk.call(root, ".".b)
       inventory.sort_by! { |rel, _stat| rel.b }
+      git_entries = []
       records = inventory.map do |rel, original|
         full = rel == "." ? root : File.join(root, rel)
         fresh = File.lstat(full)
@@ -537,8 +511,14 @@ compute_live_bundle_sha256() {
           File.open(full, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) do |file|
             raise "path/type changed before read: #{rel}" unless identity(file.stat) == identity(original)
             hash = Digest::SHA256.new
+            git_hash = Digest::SHA1.new.update("blob #{original.size}\x00")
             buffer = "".b
-            hash.update(buffer) while file.read(65536, buffer)
+            while file.read(65536, buffer)
+              hash.update(buffer)
+              git_hash.update(buffer)
+            end
+            mode = (original.mode & 0111).zero? ? "100644" : "100755"
+            git_entries << "#{mode}\t#{git_hash.hexdigest}\t#{rel}"
             raise "content changed during read: #{rel}" unless identity(file.stat) == identity(original)
             hash.digest
           end
@@ -552,12 +532,16 @@ compute_live_bundle_sha256() {
         full = rel == "." ? root : File.join(root, rel)
         raise "path/type changed during scan: #{rel}" unless identity(File.lstat(full)) == identity(original)
       end
-      puts Digest::SHA256.hexdigest(records.join)
+      if output_format == "git-entries"
+        puts git_entries.sort
+      else
+        puts Digest::SHA256.hexdigest(records.join)
+      end
     rescue => e
       warn "LIVE_BUNDLE_REJECTED: #{e.message}"
       exit 1
     end
-  ' "$root" "$(platform_materialized_rel "$platform")"
+  ' "$root" "$(platform_materialized_rel "$platform")" "$output_format"
 }
 
 # Binds the reviewed-replacement Owner-supplied H/T/M to the executing
@@ -596,18 +580,6 @@ require_reviewed_replacement_canonical_identity() {
   require_canonical_repository_state_for_activation
 }
 
-known_paths_for_platform() {
-  local platform="$1"
-  local rel commit
-  rel="$(platform_materialized_rel "$platform")"
-  {
-    while IFS= read -r commit; do
-      [[ -n "$commit" ]] || continue
-      git_identity -C "$REPOSITORY_ROOT" ls-tree -r --name-only "$commit" -- "$rel" 2>/dev/null
-    done < <(git_identity -C "$REPOSITORY_ROOT" log --format=%H -- "$rel")
-  } | sed "s#^${rel}/##" | LC_ALL=C sort -u
-}
-
 commit_tree_entries() {
   local commit="$1" rel="$2"
   git_identity -C "$REPOSITORY_ROOT" ls-tree -r "$commit" -- "$rel" 2>/dev/null | while IFS=$'\t' read -r meta path; do
@@ -617,18 +589,6 @@ commit_tree_entries() {
     hash="$(awk '{print $3}' <<<"$meta")"
     printf '%s\t%s\t%s\n' "$mode" "$hash" "${path#"$rel"/}"
   done | LC_ALL=C sort
-}
-
-live_tree_entries() {
-  local live="$1" paths="$2"
-  local rel f mode hash
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    f="$live/$rel"
-    if [[ -x "$f" ]]; then mode=100755; else mode=100644; fi
-    hash="$(git_identity -C "$REPOSITORY_ROOT" hash-object --no-filters -- "$f")"
-    printf '%s\t%s\t%s\n' "$mode" "$hash" "$rel"
-  done <<<"$paths" | LC_ALL=C sort
 }
 
 # Sets CLASSIFY_STATE and CLASSIFY_MATCHED_COMMIT. Read-only: never mutates the
@@ -679,26 +639,18 @@ classify_platform() {
     return 0
   fi
 
-  local raw_paths live_paths
-  if ! raw_paths="$(find "$live" -type f -print 2>/dev/null | LC_ALL=C sort)"; then
-    CLASSIFY_STATE=UNRESOLVED
+  local inventory_result
+  if ! inventory_result="$(compute_live_bundle_sha256 "$live" "$platform" git-entries 2>&1)"; then
+    case "$inventory_result" in
+      *'unknown path:'*) CLASSIFY_STATE=LOCAL_DRIFT ;;
+      *'unexpected path/type:'*|*'unexpected known path type:'*) CLASSIFY_STATE=SYMLINK_OR_WRONG_TYPE ;;
+      *) CLASSIFY_STATE=UNRESOLVED ;;
+    esac
     return 0
   fi
-  live_paths="$(while IFS= read -r f; do [[ -n "$f" ]] && printf '%s\n' "${f#"$live"/}"; done <<<"$raw_paths")"
 
-  local known p
-  known="$(known_paths_for_platform "$platform")"
-  while IFS= read -r p; do
-    [[ -n "$p" ]] || continue
-    if ! printf '%s\n' "$known" | grep -Fxq "$p"; then
-      CLASSIFY_STATE=LOCAL_DRIFT
-      return 0
-    fi
-  done <<<"$live_paths"
-
-  local live_entries current_entries
-  live_entries="$(live_tree_entries "$live" "$live_paths")"
-  current_entries="$(commit_tree_entries HEAD "$rel")"
+  local live_entries="$inventory_result" current_entries
+  current_entries="$(commit_tree_entries HEAD "$rel")" || { CLASSIFY_STATE=UNRESOLVED; return 0; }
   if [[ "$live_entries" == "$current_entries" ]]; then
     CLASSIFY_STATE=EXACT_CURRENT_MATERIALIZATION
     CLASSIFY_MATCHED_COMMIT="$(activation_source_head)"
@@ -754,10 +706,17 @@ do_check() {
       ABSENT|EXACT_CURRENT_MATERIALIZATION|EXACT_HISTORICAL_MATERIALIZATION) ready=YES ;;
       *) ready=NO; overall=1 ;;
     esac
+    printf 'SKILL: %s\n' "$SELECTED_SKILL"
     printf 'PLATFORM: %s\n' "$platform"
     printf 'STATE: %s\n' "$CLASSIFY_STATE"
     printf 'MATCHED_COMMIT: %s\n' "$CLASSIFY_MATCHED_COMMIT"
-    printf 'CANONICAL_HEAD: %s\n' "$source_head"
+    if [[ "$source_head" == "$canonical_head" ]]; then
+      printf 'REFERENCE_CLASS: CANONICAL_MASTER\n'
+      printf 'CANONICAL_HEAD: %s\n' "$source_head"
+    else
+      printf 'REFERENCE_CLASS: CANDIDATE\n'
+    fi
+    printf 'REFERENCE_HEAD: %s\n' "$source_head"
     printf 'CANONICAL_MASTER_HEAD: %s\n' "$canonical_head"
     printf 'LIVE_TARGET: %s\n' "$(platform_live_path "$platform")"
     printf 'ACTIVATION_READY: %s\n' "$ready"
@@ -775,6 +734,9 @@ do_activate() {
   require_canonical_repository_state_for_activation
   require_rsync
 
+  local preflight_head preflight_tree
+  preflight_head="$(activation_source_head)"
+  preflight_tree="$(git_identity -C "$REPOSITORY_ROOT" rev-parse HEAD^{tree})"
   classify_platform "$platform"
   local prev_state="$CLASSIFY_STATE"
   local prev_matched="$CLASSIFY_MATCHED_COMMIT"
@@ -799,6 +761,15 @@ do_activate() {
   canonical_abs="$(repo_path "$(platform_materialized_rel "$platform")")"
   [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] || die 'canonical materialization is missing or is a symlink'
 
+  verify_manifest_paths
+  require_canonical_source_gate
+  require_canonical_repository_state_for_activation
+  [[ "$(activation_source_head)" == "$preflight_head" && "$(git_identity -C "$REPOSITORY_ROOT" rev-parse HEAD^{tree})" == "$preflight_tree" ]] \
+    || die 'ACTIVATION_SOURCE_CHANGED_BEFORE_WRITE'
+  classify_platform "$platform"
+  [[ "$CLASSIFY_STATE" == "$prev_state" && "$CLASSIFY_MATCHED_COMMIT" == "$prev_matched" ]] \
+    || die 'LIVE_TARGET_CHANGED_BEFORE_WRITE'
+
   case "$prev_state" in
     ABSENT)
       local parent
@@ -812,11 +783,11 @@ do_activate() {
         mkdir "$parent"
       fi
       mkdir "$live"
-      rsync -a --delete "$canonical_abs"/ "$live"/
+      rsync -a --checksum --delete "$canonical_abs"/ "$live"/
       result=ACTIVATED
       ;;
     EXACT_HISTORICAL_MATERIALIZATION)
-      rsync -a --delete "$canonical_abs"/ "$live"/
+      rsync -a --checksum --delete "$canonical_abs"/ "$live"/
       result=ACTIVATED
       ;;
     EXACT_CURRENT_MATERIALIZATION)
@@ -907,7 +878,7 @@ do_activate_replace_reviewed_local_drift() {
     exit 2
   fi
 
-  # The legacy classifier uses Git file modes and omits empty directories.
+  # Classification uses Git file modes; serialization additionally binds all modes.
   # Check the full serialization as well so exact success also binds all
   # directory entries and permissions, including the root.
   local source_bundle_l final_bundle_l
@@ -936,7 +907,7 @@ main() {
     usage
   fi
 
-  local mode="" platform="" platform_count=0
+  local mode="" platform="" platform_count=0 skill_count=0
   local replace_mode=0 replace_flag_count=0
   local expected_l="" expected_l_count=0
   local expected_h="" expected_h_count=0
@@ -957,6 +928,12 @@ main() {
         [[ -z "$mode" ]] || die 'cannot combine modes'
         mode=activate
         shift
+        ;;
+      --skill)
+        [[ $# -ge 2 ]] || die '--skill requires a value'
+        SELECTED_SKILL="$2"
+        skill_count=$((skill_count + 1))
+        shift 2
         ;;
       --platform)
         [[ $# -ge 2 ]] || die '--platform requires a value'
@@ -999,6 +976,13 @@ main() {
     esac
   done
 
+  (( skill_count <= 1 )) || die '--skill may be given at most once'
+  case "$SELECTED_SKILL" in
+    fable-method) PLATFORMS=(codex claude gemini antigravity) ;;
+    fable-judge) PLATFORMS=(codex claude gemini) ;;
+    *) die "unknown skill: $SELECTED_SKILL" ;;
+  esac
+  MANIFEST_RECORDS=""
   (( replace_flag_count <= 1 )) || die '--replace-reviewed-local-drift may be given at most once'
 
   if (( replace_mode )) && [[ -z "$mode" ]]; then

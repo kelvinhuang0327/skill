@@ -128,7 +128,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-readonly SCRATCH_BASE="${TMPDIR:-/tmp}"
+readonly SCRATCH_BASE="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
 SCRATCH="$(mktemp -d "${SCRATCH_BASE%/}/fable-activate-live-test.XXXXXX")"
 readonly FIXTURE_CANONICAL="${SCRATCH}/canonical"
 readonly FIXTURE_HOME="${SCRATCH}/home"
@@ -145,30 +145,46 @@ readonly FAKE_BIN="${SCRATCH}/fake-bin"
 
 mkdir -p "$FIXTURE_CANONICAL" "$FIXTURE_HOME/.codex"
 git -C "$SOURCE_ROOT" archive HEAD | tar -x -C "$FIXTURE_CANONICAL"
-cp "$SOURCE_ACTIVATE_SCRIPT" "$FIXTURE_CANONICAL/fable-method/scripts/activate-live.sh"
+# Overlay the entire candidate authority, including uncommitted v2 sources.
+# This prevents precommit regression from silently exercising archived v1 files.
+for skill in fable-method fable-judge; do
+  if [[ -d "$SOURCE_ROOT/$skill" ]]; then
+    cp -R "$SOURCE_ROOT/$skill/." "$FIXTURE_CANONICAL/$skill/"
+  fi
+done
 
 # Production has no runtime bypass. The harness rewrites fixed installation
 # metadata only inside its disposable repository so an accepted activation can
 # exercise the real write path without ever naming a real live installation.
 /usr/bin/ruby -e '
-  canonical_root, fixture_home, activate, sync, manifest = ARGV
+  canonical_root, fixture_home, *paths = ARGV
   replacements = {
     "/Users/kelvin/VibeCoding-WorkSpace/skill" => canonical_root,
     "/Users/kelvin" => fixture_home
   }
-  [activate, sync, manifest].each do |path|
+  paths.each do |path|
     content = File.binread(path)
-    replacements.each { |old, new_value| content = content.gsub(old, new_value) }
+    content = content.gsub(Regexp.union(replacements.keys)) { |old| replacements.fetch(old) }
     File.binwrite(path, content)
   end
 ' "$FIXTURE_CANONICAL" "$FIXTURE_HOME" \
   "$FIXTURE_CANONICAL/fable-method/scripts/activate-live.sh" \
   "$FIXTURE_CANONICAL/fable-method/scripts/sync-platforms.sh" \
+  "$FIXTURE_CANONICAL/fable-method/scripts/platform_manifest.rb" \
   "$FIXTURE_CANONICAL/fable-method/platforms.yaml"
 
-if grep -Fq '/Users/kelvin' \
+# Project-local TMPDIR can itself be below /Users/kelvin; strip only the
+# two exact fixture roots before checking for surviving real user paths.
+if ! /usr/bin/ruby -e '
+  canonical, home, *paths = ARGV
+  paths.each do |path|
+    content = File.read(path).gsub(canonical, "FIXTURE_CANONICAL").gsub(home, "FIXTURE_HOME")
+    raise "real user path survived: #{path}" if content.include?("/Users/kelvin")
+  end
+' "$FIXTURE_CANONICAL" "$FIXTURE_HOME" \
   "$FIXTURE_CANONICAL/fable-method/scripts/activate-live.sh" \
   "$FIXTURE_CANONICAL/fable-method/scripts/sync-platforms.sh" \
+  "$FIXTURE_CANONICAL/fable-method/scripts/platform_manifest.rb" \
   "$FIXTURE_CANONICAL/fable-method/platforms.yaml"; then
   fail 'fixture isolation: a real user path survived rewriting'
 fi
@@ -185,12 +201,22 @@ pass_case 'fixture activation lock is scratch-only and absent'
 git -C "$FIXTURE_CANONICAL" init -q -b master
 git -C "$FIXTURE_CANONICAL" config user.name 'Fable Activate Test'
 git -C "$FIXTURE_CANONICAL" config user.email 'fable-activate-test@example.invalid'
+# Distinct historical bundles, with sources kept internally consistent.
+for skill in fable-method fable-judge; do
+  printf '\nHistorical fixture revision.\n' >>"$FIXTURE_CANONICAL/$skill/shared/SKILL.md"
+  "$FIXTURE_CANONICAL/fable-method/scripts/sync-platforms.sh" --write --skill "$skill" >/dev/null
+done
 git -C "$FIXTURE_CANONICAL" add --all
 git -C "$FIXTURE_CANONICAL" commit -q -m 'fixture stale master'
 readonly STALE_HEAD="$(git -C "$FIXTURE_CANONICAL" rev-parse HEAD)"
 
 git -C "$FIXTURE_CANONICAL" switch -q -c canonical-tip
-git -C "$FIXTURE_CANONICAL" commit -q --allow-empty -m 'fixture canonical origin master'
+for skill in fable-method fable-judge; do
+  cp "$SOURCE_ROOT/$skill/shared/SKILL.md" "$FIXTURE_CANONICAL/$skill/shared/SKILL.md"
+  "$FIXTURE_CANONICAL/fable-method/scripts/sync-platforms.sh" --write --skill "$skill" >/dev/null
+done
+git -C "$FIXTURE_CANONICAL" add fable-method fable-judge
+git -C "$FIXTURE_CANONICAL" commit -q -m 'fixture canonical origin master'
 readonly CURRENT_HEAD="$(git -C "$FIXTURE_CANONICAL" rev-parse HEAD)"
 git -C "$FIXTURE_CANONICAL" remote add origin "$FIXTURE_CANONICAL"
 git -C "$FIXTURE_CANONICAL" update-ref refs/remotes/origin/master "$CURRENT_HEAD"
@@ -460,11 +486,11 @@ forbid_in_source 'lockf is resolved through PATH' '(^|[[:space:]])lockf[[:space:
 pass_case 'T8e no stale-cleanup, override, trap, unlink, or PATH-resolved lock path exists'
 
 readonly POST_WRITE_REGION="$(printf '%s\n' "$DO_ACTIVATE_BODY" | /usr/bin/awk '
-  /rsync -a --delete/ { seen = 1 }
+  /rsync -a --checksum --delete/ { seen = 1 }
   seen { print }
   seen && /classify_platform/ { exit }
 ')"
-[[ "$POST_WRITE_REGION" == *'rsync -a --delete'* && "$POST_WRITE_REGION" == *'classify_platform'* ]] \
+[[ "$POST_WRITE_REGION" == *'rsync -a --checksum --delete'* && "$POST_WRITE_REGION" == *'classify_platform'* ]] \
   || fail 'T8e: could not locate the rsync-to-verification region of do_activate'
 if printf '%s\n' "$POST_WRITE_REGION" \
   | grep -E -q '9[<>]|lockf|ACTIVATION_LOCK|(^|[[:space:]])(rm|unlink)[[:space:]]'; then
@@ -493,12 +519,12 @@ readonly RLD_ZERO_OBJ="$(printf '0%.0s' $(seq 1 40))"
 # black-box, and it proves the CLI's mismatch reporting round-trips exactly,
 # without duplicating the serialization algorithm inside the test.
 rld_probe_observed_l() {
-  local platform="${1:-codex}" materialization_tree="${2:-$RLD_M}"
+  local platform="${1:-codex}" materialization_tree="${2:-$RLD_M}" skill="${3:-fable-method}"
   capture_command "$CURRENT_SCRIPT" --activate --platform "$platform" --replace-reviewed-local-drift \
     --expected-live-sha256 "$RLD_ZERO_L" \
     --expected-canonical-head "$RLD_H" \
     --expected-canonical-tree "$RLD_T" \
-    --expected-materialization-tree "$materialization_tree"
+    --expected-materialization-tree "$materialization_tree" --skill "$skill"
   [[ "$COMMAND_STATUS" -ne 0 ]] \
     || fail 'rld_probe_observed_l: the all-zero probe unexpectedly succeeded'
   local observed
@@ -810,7 +836,8 @@ rld_prev=""
 for rld_arg in "$@"; do
   if [[ "$rld_prev" == --platform ]]; then
     rld_platform="$rld_arg"
-    break
+  elif [[ "$rld_prev" == --skill ]]; then
+    SELECTED_SKILL="$rld_arg"
   fi
   rld_prev="$rld_arg"
 done
@@ -875,13 +902,17 @@ rld_reset_drift() {
   : >"$RLD_TRACE"
 }
 rld_run_injected() {
-  local scenario="$1" expected_l="$2" platform="${3:-codex}"
+  local scenario="$1" expected_l="$2" platform="${3:-codex}" skill="${4:-fable-method}"
   local -a args
+  if [[ "$skill" == fable-judge ]]; then
+    args=("${judge_args[@]}")
+  else
   case "$platform" in
     codex) args=("${rld_args[@]}") ;;
     claude) args=("${RLD_CLAUDE_ARGS[@]}") ;;
     *) fail "rld_run_injected: unsupported platform: $platform" ;;
   esac
+  fi
   args[5]="$expected_l"
   capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" "$scenario" "$RLD_TRACE" "$STALE_HEAD" "${args[@]}"
 }
@@ -1252,6 +1283,141 @@ pass_case 'Claude: reviewed LOCAL_DRIFT replacement succeeds and the final bundl
 [[ "$(real_lock_fingerprint)" == "$REAL_LOCK_BEFORE" ]] \
   || fail 'Claude replacement cases touched the real activation lock'
 pass_case 'Claude: all replacement fixtures stayed isolated; real activation lock unchanged'
+
+# Schema-v2 pair regressions; every live path is read from the rewritten
+# fixture manifest, and every mutation remains in this suite's scratch root.
+for skill in fable-method fable-judge; do
+  pair_platforms=(codex claude gemini)
+  [[ "$skill" != fable-method ]] || pair_platforms+=(antigravity)
+  for platform in "${pair_platforms[@]}"; do
+    pair_live="$(/bin/bash -c 'source "$1"; SELECTED_SKILL="$2"; platform_live_path "$3"' _ "$CURRENT_SCRIPT" "$skill" "$platform")"
+    pair_source="$LINKED_CURRENT/fable-method/platforms/$platform/$skill"
+    case "$pair_live" in "$FIXTURE_HOME"/*) ;; *) fail 'pair live escaped fixture home' ;; esac
+    mkdir -p "$(dirname "$pair_live")"
+    if [[ ! -e "$pair_live" ]]; then
+      assert_success_contains "$skill/$platform ABSENT" 'STATE: ABSENT' "$CURRENT_SCRIPT" --check --skill "$skill" --platform "$platform"
+      assert_success_contains "$skill/$platform exact-pair activation" 'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" --activate --skill "$skill" --platform "$platform"
+    fi
+    assert_success_contains "$skill/$platform CURRENT" 'STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" --check --skill "$skill" --platform "$platform"
+    /usr/bin/rsync -a --checksum --delete "$LINKED_STALE/fable-method/platforms/$platform/$skill/" "$pair_live/"
+    assert_success_contains "$skill/$platform HISTORICAL" 'STATE: EXACT_HISTORICAL_MATERIALIZATION' "$CURRENT_SCRIPT" --check --skill "$skill" --platform "$platform"
+    assert_success_contains "$skill/$platform historical activation" 'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" --activate --skill "$skill" --platform "$platform"
+  done
+done
+
+assert_failure_contains 'Judge Antigravity pair rejected' 'unknown platform' "$CURRENT_SCRIPT" --check --skill fable-judge --platform antigravity
+assert_failure_contains 'unknown skill rejected' 'unknown skill' "$CURRENT_SCRIPT" --check --skill all
+assert_failure_contains 'duplicate skill rejected' '--skill may be given at most once' "$CURRENT_SCRIPT" --check --skill fable-judge --skill fable-judge
+assert_failure_contains 'Judge activation requires exact platform' 'requires exactly one --platform' "$CURRENT_SCRIPT" --activate --skill fable-judge
+assert_failure_contains 'duplicate platform rejected' '--platform may be given at most once' "$CURRENT_SCRIPT" --check --skill fable-judge --platform codex --platform codex
+capture_command "$CURRENT_SCRIPT" --check
+[[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" != *'SKILL: fable-judge'* ]] || fail 'default activation check includes Judge'
+legacy_output="$COMMAND_OUTPUT"
+capture_command "$CURRENT_SCRIPT" --check --skill fable-method
+[[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" == "$legacy_output" ]] || fail 'explicit Method activation check differs from legacy'
+pass_case 'activation legacy default equals explicit Method-only check'
+
+for platform in codex claude gemini; do
+  judge_live="$(/bin/bash -c 'source "$1"; SELECTED_SKILL=fable-judge; platform_live_path "$2"' _ "$CURRENT_SCRIPT" "$platform")"
+  judge_source="$LINKED_CURRENT/fable-method/platforms/$platform/fable-judge"
+  judge_m="$(git -C "$LINKED_CURRENT" rev-parse "$RLD_H:fable-method/platforms/$platform/fable-judge")"
+  method_live="$(/bin/bash -c 'source "$1"; platform_live_path "$2"' _ "$CURRENT_SCRIPT" "$platform")"
+  sibling_before="$(live_digest "$method_live")"
+  judge_args=(--activate --platform "$platform" --replace-reviewed-local-drift
+    --expected-live-sha256 "$RLD_ZERO_L" --expected-canonical-head "$RLD_H"
+    --expected-canonical-tree "$RLD_T" --expected-materialization-tree "$judge_m" --skill fable-judge)
+  rld_reset_drift "$judge_source" "$judge_live"
+  assert_failure_contains "Judge/$platform ordinary LOCAL_DRIFT" 'LOCAL_DRIFT' "$CURRENT_SCRIPT" --activate --skill fable-judge --platform "$platform"
+  judge_l="$(rld_probe_observed_l "$platform" "$judge_m" fable-judge)"
+  for index in 5 7 9 11; do
+    args=("${judge_args[@]}")
+    args[5]="$judge_l"
+    if [[ "$index" -eq 5 ]]; then args[$index]="$RLD_ZERO_L"; else args[$index]="$RLD_ZERO_OBJ"; fi
+    : >"$RLD_TRACE"
+    capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" normal "$RLD_TRACE" "$STALE_HEAD" "${args[@]}"
+    rld_assert_refusal "Judge/$platform identity $index" 'MISMATCH'
+    rld_assert_no_write "Judge/$platform identity $index"
+  done
+  for kind in unknown empty symlink wrong-type unreadable; do
+    case "$kind" in
+      unknown) printf unknown >"$judge_live/ZZZ-unknown" ;;
+      empty) mkdir "$judge_live/ZZZ-empty" ;;
+      symlink) ln -s "$judge_source/SKILL.md" "$judge_live/ZZZ-symlink" ;;
+      wrong-type) mv "$judge_live/SKILL.md" "$SCRATCH/judge-saved"; mkdir "$judge_live/SKILL.md" ;;
+      unreadable) chmod 000 "$judge_live/SKILL.md" ;;
+    esac
+    expected_state=LOCAL_DRIFT
+    [[ "$kind" != symlink && "$kind" != wrong-type ]] || expected_state=SYMLINK_OR_WRONG_TYPE
+    [[ "$kind" != unreadable ]] || expected_state=UNRESOLVED
+    assert_failure_contains "Judge/$platform $kind classification" "STATE: $expected_state" "$CURRENT_SCRIPT" --check --skill fable-judge --platform "$platform"
+    : >"$RLD_TRACE"
+    rld_run_injected normal "$judge_l" "$platform" fable-judge
+    rld_assert_refusal "Judge/$platform $kind replacement" 'LIVE_BUNDLE_REJECTED'
+    rld_assert_no_write "Judge/$platform $kind replacement"
+    case "$kind" in
+      unknown) rm "$judge_live/ZZZ-unknown" ;;
+      empty) rmdir "$judge_live/ZZZ-empty" ;;
+      symlink) rm "$judge_live/ZZZ-symlink" ;;
+      wrong-type) rmdir "$judge_live/SKILL.md"; mv "$SCRATCH/judge-saved" "$judge_live/SKILL.md" ;;
+      unreadable) chmod 644 "$judge_live/SKILL.md" ;;
+    esac
+  done
+  for scenario in live-change canonical-ref-change source-change write-failure post-failure; do
+    rld_reset_drift "$judge_source" "$judge_live"
+    judge_l="$(rld_probe_observed_l "$platform" "$judge_m" fable-judge)"
+    cp "$judge_source/SKILL.md" "$SCRATCH/judge-source-saved"
+    rld_run_injected "$scenario" "$judge_l" "$platform" fable-judge
+    case "$scenario" in
+      live-change) expected=REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH ;;
+      canonical-ref-change) expected=REVIEWED_REPLACEMENT_CANONICAL_REF_MISMATCH ;;
+      source-change) expected=CANONICAL_MATERIALIZATION_DRIFT ;;
+      write-failure) expected=REVIEWED_REPLACEMENT_WRITE_FAILED ;;
+      post-failure) expected=ACTIVATION_VERIFICATION_FAILED ;;
+    esac
+    rld_assert_refusal "Judge/$platform $scenario" "$expected"
+    if [[ "$scenario" != write-failure && "$scenario" != post-failure ]]; then rld_assert_no_write "Judge/$platform $scenario"; fi
+    git -C "$FIXTURE_CANONICAL" update-ref refs/remotes/origin/master "$RLD_H"
+    cp "$SCRATCH/judge-source-saved" "$judge_source/SKILL.md"
+  done
+  # Same size and timestamp, different bytes: only checksum copy repairs it.
+  /usr/bin/rsync -a --checksum --delete "$judge_source/" "$judge_live/"
+  ruby -e 's,t=ARGV; b=File.binread(s); b.setbyte(0,b.getbyte(0)^1); File.binwrite(t,b); stamp=Time.at(1700000000); File.utime(stamp,stamp,s,t)' "$judge_source/SKILL.md" "$judge_live/SKILL.md"
+  judge_l="$(rld_probe_observed_l "$platform" "$judge_m" fable-judge)"
+  : >"$RLD_TRACE"
+  rld_run_injected without-checksum "$judge_l" "$platform" fable-judge
+  rld_assert_refusal "Judge/$platform checksum negative control" 'ACTIVATION_VERIFICATION_FAILED'
+  pass_case "Judge/$platform checksum negative control fails as required"
+  : >"$RLD_TRACE"
+  rld_run_injected normal "$judge_l" "$platform" fable-judge
+  [[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" == *'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION'* ]] || fail "Judge/$platform reviewed replacement"
+  [[ "$(live_digest "$judge_live")" == "$(live_digest "$judge_source")" ]] || fail "Judge/$platform full bundle mismatch"
+  [[ "$(live_digest "$method_live")" == "$sibling_before" ]] || fail "Judge/$platform mutated Method sibling"
+  pass_case "Judge/$platform reviewed replacement with exact bundle and unchanged Method sibling"
+done
+
+# Authority scopes include both skills and cross-scope renames.
+for skill in fable-method fable-judge; do
+  printf dirty >"$LINKED_CURRENT/$skill/authority-dirty"
+  assert_failure_contains "$skill dirty authority refuses Judge activation" 'ACTIVATION_REPOSITORY_STATE_NOT_READY' "$CURRENT_SCRIPT" --activate --skill fable-judge --platform codex
+  rm "$LINKED_CURRENT/$skill/authority-dirty"
+done
+git -C "$LINKED_CURRENT" mv fable-judge/MIGRATION.md judge-moved.md
+assert_failure_contains 'Judge cross-scope rename refuses activation' 'ACTIVATION_REPOSITORY_STATE_NOT_READY' "$CURRENT_SCRIPT" --activate --skill fable-judge --platform codex
+git -C "$LINKED_CURRENT" mv judge-moved.md fable-judge/MIGRATION.md
+
+readonly JUDGE_READY_FIFO="$SCRATCH/judge-lock-ready"
+readonly JUDGE_RELEASE_FIFO="$SCRATCH/judge-lock-release"
+mkfifo "$JUDGE_READY_FIFO" "$JUDGE_RELEASE_FIFO"
+hold_activation_lock "$FIXTURE_LOCK" "$JUDGE_READY_FIFO" "$JUDGE_RELEASE_FIFO" &
+HOLDER_PID=$!
+read -r judge_lock_status <"$JUDGE_READY_FIFO"
+[[ "$judge_lock_status" == HOLDER_LOCK_ACQUIRED ]] || fail 'Judge lock fixture failed'
+assert_failure_contains 'Judge shares Method activation lock' 'ACTIVATION_LOCK_BUSY' "$CURRENT_SCRIPT" --activate --skill fable-judge --platform codex
+printf release >"$JUDGE_RELEASE_FIFO"
+wait "$HOLDER_PID"
+HOLDER_PID=''
+[[ "$(real_lock_fingerprint)" == "$REAL_LOCK_BEFORE" ]] || fail 'Judge fixtures changed real activation lock'
+pass_case 'all Judge mutations were scratch-only'
 
 git -C "$FIXTURE_CANONICAL" update-ref -d refs/remotes/origin/master
 assert_failure_contains \
