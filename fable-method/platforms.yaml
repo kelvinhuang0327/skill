@@ -1,72 +1,104 @@
-schema_version: 1
-repository_root: /Users/kelvin/VibeCoding-WorkSpace/skill
+---
+schema_version: 2
+repository_root: "/Users/kelvin/VibeCoding-WorkSpace/skill"
 materialized_root: fable-method/platforms
-
-shared:
-  skill: fable-method/shared/SKILL.md
-  references:
-    - fable-method/shared/references/domains/TEMPLATE.md
-    - fable-method/shared/references/domains/business-ops.md
-    - fable-method/shared/references/domains/data-analysis.md
-    - fable-method/shared/references/domains/design-ux.md
-    - fable-method/shared/references/domains/devops.md
-    - fable-method/shared/references/domains/finance.md
-    - fable-method/shared/references/domains/legal-compliance.md
-    - fable-method/shared/references/domains/marketing.md
-    - fable-method/shared/references/domains/research.md
-    - fable-method/shared/references/authority-sources.md
-    - fable-method/shared/references/diff-coverage.md
-    - fable-method/shared/references/examples.md
-    - fable-method/shared/references/failure-modes.md
-    - fable-method/shared/references/flowcharts.md
-    - fable-method/shared/references/generic-ranking.md
-    - fable-method/shared/references/implementation-depth.md
-    - fable-method/shared/references/operational-gates.md
-    - fable-method/shared/references/judge-handoff.md
-    - fable-method/shared/references/property-based-verification.md
-    - fable-method/shared/references/regression-bisection.md
-    - fable-method/shared/references/reporting.md
-    - fable-method/shared/references/task-checkpoint.md
-    - fable-method/shared/references/test-falsifiability.md
-
-platforms:
-  - name: codex
-    frontmatter_source: fable-method/shared/platforms/codex/frontmatter.md
-    adapter_sources: []
-    reference_overrides: []
-    materialized_destination: fable-method/platforms/codex/fable-method
-    live_installation_path: /Users/kelvin/.codex/skills/fable-method
-    live_installation_role: deployment_metadata_only
-
-  - name: claude
-    frontmatter_source: fable-method/shared/platforms/claude/frontmatter.md
-    adapter_sources:
+skills:
+  fable-method:
+    shared:
+      skill: fable-method/shared/SKILL.md
+      references:
+      - fable-method/shared/references/domains/TEMPLATE.md
+      - fable-method/shared/references/domains/business-ops.md
+      - fable-method/shared/references/domains/data-analysis.md
+      - fable-method/shared/references/domains/design-ux.md
+      - fable-method/shared/references/domains/devops.md
+      - fable-method/shared/references/domains/finance.md
+      - fable-method/shared/references/domains/legal-compliance.md
+      - fable-method/shared/references/domains/marketing.md
+      - fable-method/shared/references/domains/research.md
+      - fable-method/shared/references/authority-sources.md
+      - fable-method/shared/references/diff-coverage.md
+      - fable-method/shared/references/examples.md
+      - fable-method/shared/references/failure-modes.md
+      - fable-method/shared/references/flowcharts.md
+      - fable-method/shared/references/generic-ranking.md
+      - fable-method/shared/references/implementation-depth.md
+      - fable-method/shared/references/operational-gates.md
+      - fable-method/shared/references/judge-handoff.md
+      - fable-method/shared/references/property-based-verification.md
+      - fable-method/shared/references/regression-bisection.md
+      - fable-method/shared/references/reporting.md
+      - fable-method/shared/references/task-checkpoint.md
+      - fable-method/shared/references/test-falsifiability.md
+      projections: []
+    platforms:
+    - name: codex
+      frontmatter_source: fable-method/shared/platforms/codex/frontmatter.md
+      adapter_sources: []
+      reference_overrides: []
+      materialized_destination: fable-method/platforms/codex/fable-method
+      live_installation_path: "/Users/kelvin/.codex/skills/fable-method"
+      live_installation_role: deployment_metadata_only
+    - name: claude
+      frontmatter_source: fable-method/shared/platforms/claude/frontmatter.md
+      adapter_sources:
       - fable-method/shared/platforms/claude/adapter.md
-    reference_overrides:
+      reference_overrides:
       - source: fable-method/shared/platforms/claude/references/platform-claude.md
         destination: references/platform-claude.md
-    materialized_destination: fable-method/platforms/claude/fable-method
-    live_installation_path: /Users/kelvin/.claude/skills/fable-method
-    live_installation_role: deployment_metadata_only
-
-  - name: gemini
-    frontmatter_source: fable-method/shared/platforms/gemini/frontmatter.md
-    adapter_sources:
+      materialized_destination: fable-method/platforms/claude/fable-method
+      live_installation_path: "/Users/kelvin/.claude/skills/fable-method"
+      live_installation_role: deployment_metadata_only
+    - name: gemini
+      frontmatter_source: fable-method/shared/platforms/gemini/frontmatter.md
+      adapter_sources:
       - fable-method/shared/platforms/gemini/adapter.md
-    reference_overrides:
+      reference_overrides:
       - source: fable-method/shared/platforms/gemini/references/platform-gemini.md
         destination: references/platform-gemini.md
-    materialized_destination: fable-method/platforms/gemini/fable-method
-    live_installation_path: /Users/kelvin/.gemini/skills/fable-method
-    live_installation_role: deployment_metadata_only
-
-  - name: antigravity
-    frontmatter_source: fable-method/shared/platforms/antigravity/frontmatter.md
-    adapter_sources:
+      materialized_destination: fable-method/platforms/gemini/fable-method
+      live_installation_path: "/Users/kelvin/.gemini/skills/fable-method"
+      live_installation_role: deployment_metadata_only
+    - name: antigravity
+      frontmatter_source: fable-method/shared/platforms/antigravity/frontmatter.md
+      adapter_sources:
       - fable-method/shared/platforms/antigravity/adapter.md
-    reference_overrides:
+      reference_overrides:
       - source: fable-method/shared/platforms/antigravity/references/platform-antigravity.md
         destination: references/platform-antigravity.md
-    materialized_destination: fable-method/platforms/antigravity/fable-method
-    live_installation_path: /Users/kelvin/.gemini/config/skills/fable-method
-    live_installation_role: deployment_metadata_only
+      materialized_destination: fable-method/platforms/antigravity/fable-method
+      live_installation_path: "/Users/kelvin/.gemini/config/skills/fable-method"
+      live_installation_role: deployment_metadata_only
+  fable-judge:
+    shared:
+      skill: fable-judge/shared/SKILL.md
+      references: []
+      projections:
+      - source: fable-method/shared/references/judge-handoff.md
+        destination: references/judge-depth-contract.md
+        sections:
+        - Depth and evidence reuse
+        - Depth reconciliation
+        - Remediation limit
+    platforms:
+    - name: codex
+      frontmatter_source: fable-judge/shared/platforms/codex/frontmatter.md
+      adapter_sources: []
+      reference_overrides: []
+      materialized_destination: fable-method/platforms/codex/fable-judge
+      live_installation_path: "/Users/kelvin/.codex/skills/fable-judge"
+      live_installation_role: deployment_metadata_only
+    - name: claude
+      frontmatter_source: fable-judge/shared/platforms/claude/frontmatter.md
+      adapter_sources: []
+      reference_overrides: []
+      materialized_destination: fable-method/platforms/claude/fable-judge
+      live_installation_path: "/Users/kelvin/.claude/skills/fable-judge"
+      live_installation_role: deployment_metadata_only
+    - name: gemini
+      frontmatter_source: fable-judge/shared/platforms/gemini/frontmatter.md
+      adapter_sources: []
+      reference_overrides: []
+      materialized_destination: fable-method/platforms/gemini/fable-judge
+      live_installation_path: "/Users/kelvin/.gemini/config/plugins/fable-method-plugin/skills/fable-judge"
+      live_installation_role: deployment_metadata_only
