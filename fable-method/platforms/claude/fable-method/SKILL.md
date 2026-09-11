@@ -64,6 +64,14 @@ once and Judge triggers already require. Neither value changes task class,
 route, or Worker selection. Absent a Packet value, apply Route once and the
 Judge-trigger rules unchanged.
 
+A second optional field sets work mechanism, independent of model or native reasoning effort, which stay Owner-controlled:
+
+```text
+IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
+```
+
+Absent a Packet value, select `NORMAL` unless a [selection condition](references/implementation-depth.md#selecting-a-depth) applies, and name which; `ENHANCED` requires naming each at-risk invariant and its confirming check. Neither value changes route, Judge mode/depth, model, native reasoning effort, or agent count; see [implementation depth](references/implementation-depth.md).
+
 ## First output and task class
 
 Before any external tool call, repository read, or filesystem inspection, emit exactly one routing block:
@@ -435,6 +443,7 @@ Load only the directly relevant reference:
 - [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, or detailed authority checks;
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
+- [authority sources](references/authority-sources.md) when a load-bearing signal might not be authoritative, and [implementation depth](references/implementation-depth.md) before selecting or defaulting `IMPLEMENTATION_DEPTH`;
 - [test falsifiability](references/test-falsifiability.md) before citing newly-added test/check coverage as completion evidence;
 - [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
 - [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;

@@ -14,11 +14,13 @@ shared:
     - fable-method/shared/references/domains/legal-compliance.md
     - fable-method/shared/references/domains/marketing.md
     - fable-method/shared/references/domains/research.md
+    - fable-method/shared/references/authority-sources.md
     - fable-method/shared/references/diff-coverage.md
     - fable-method/shared/references/examples.md
     - fable-method/shared/references/failure-modes.md
     - fable-method/shared/references/flowcharts.md
     - fable-method/shared/references/generic-ranking.md
+    - fable-method/shared/references/implementation-depth.md
     - fable-method/shared/references/operational-gates.md
     - fable-method/shared/references/judge-handoff.md
     - fable-method/shared/references/property-based-verification.md

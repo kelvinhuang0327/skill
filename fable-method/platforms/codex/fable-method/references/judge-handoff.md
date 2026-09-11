@@ -220,10 +220,16 @@ redaction system rather than inventing a new one.
 
 Provide the original Packet and forbidden actions; repository, branch, HEAD,
 tree, worktree and status; actual diff; exact authorized scope; acceptance
-criteria; route and Judge mode/depth; commands, exit statuses, and raw
-summaries (durable per [Durable terminal capture](#durable-terminal-capture)
-when load-bearing); runtime evidence; all unknowns and failed attempts; and
-the complete filesystem write/retained/deleted ledger.
+criteria; route, Judge mode/depth, and implementation depth (with
+`ENHANCED_EVIDENCE` per [implementation depth](implementation-depth.md) when
+applicable). The implementation-depth evidence in this payload must include
+`DEPTH_SOURCE` alongside `IMPLEMENTATION_DEPTH`, using the exact two-value enum
+defined by `implementation-depth.md`. The Judge independently derives its own
+Judge trigger/depth and must not treat `DEPTH_SOURCE` as authority for Judge
+depth. Include commands, exit statuses, and raw summaries (durable per
+[Durable terminal capture](#durable-terminal-capture) when load-bearing);
+runtime evidence; all unknowns and failed attempts; and the complete
+filesystem write/retained/deleted ledger.
 
 The Judge re-derives its verdict from the Packet, diff, and evidence. Do not
 pass internal reasoning or a persuasive summary as evidence.

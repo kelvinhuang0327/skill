@@ -23,6 +23,7 @@ needs diagnosis.
 | 16 | Dropped follow-up | Required deploy/restart was omitted from report | `PENDING` caveat |
 | 17 | Missed twins | One defect site was fixed without a sweep | `TWINS` search |
 | 18 | Costume rigor | Thorough-looking claims had no evidence | Fit gate and runnable checks |
+| 19 | Non-authoritative signal | A stale, cached, or wrong-scope source was trusted as current/ground truth | Authority-source check |
 
 Skipped steps create the corresponding risk. A claimed-but-unobserved step is
 verification theater, not a pass.
