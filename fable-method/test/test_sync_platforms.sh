@@ -40,7 +40,7 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   check.call(run.call('--write')[0], 'Method write succeeds')
   check.call(method_before == digest.call('fable-method'), 'four Method bundles stay byte invariant')
   2.times { check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge generation succeeds') }
-  check.call(judge_before == digest.call('fable-judge'), 'three Judge bundles deterministic after second write')
+  check.call(judge_before == digest.call('fable-judge'), 'four Judge bundles deterministic after second write')
   check.call(run.call('--check', '--skill', 'fable-judge')[0], 'Judge second-generation NO_DRIFT')
   File.open(File.join(tmp, 'fable-judge/shared/SKILL.md'), 'a') { |f| f.write("\nJudge fixture change.\n") }
   check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge-only source change generates')

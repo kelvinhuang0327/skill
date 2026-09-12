@@ -102,5 +102,12 @@ skills:
       adapter_sources: []
       reference_overrides: []
       materialized_destination: fable-method/platforms/gemini/fable-judge
-      live_installation_path: "/Users/kelvin/.gemini/config/plugins/fable-method-plugin/skills/fable-judge"
+      live_installation_path: "/Users/kelvin/.gemini/skills/fable-judge"
+      live_installation_role: deployment_metadata_only
+    - name: antigravity
+      frontmatter_source: fable-judge/shared/platforms/antigravity/frontmatter.md
+      adapter_sources: []
+      reference_overrides: []
+      materialized_destination: fable-method/platforms/antigravity/fable-judge
+      live_installation_path: "/Users/kelvin/.gemini/config/skills/fable-judge"
       live_installation_role: deployment_metadata_only

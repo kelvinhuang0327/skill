@@ -15,7 +15,7 @@ module Fable
     MATERIALIZED = 'fable-method/platforms'
     PAIRS = {
       'fable-method' => %w[codex claude gemini antigravity],
-      'fable-judge' => %w[codex claude gemini]
+      'fable-judge' => %w[codex claude gemini antigravity]
     }.freeze
     DEPTH_SOURCE = 'fable-method/shared/references/judge-handoff.md'
     DEPTH_DESTINATION = 'references/judge-depth-contract.md'
@@ -30,7 +30,8 @@ module Fable
       'fable-judge' => {
         'codex' => '/Users/kelvin/.codex/skills/fable-judge',
         'claude' => '/Users/kelvin/.claude/skills/fable-judge',
-        'gemini' => '/Users/kelvin/.gemini/config/plugins/fable-method-plugin/skills/fable-judge'
+        'gemini' => '/Users/kelvin/.gemini/skills/fable-judge',
+        'antigravity' => '/Users/kelvin/.gemini/config/skills/fable-judge'
       }
     }.freeze
 
