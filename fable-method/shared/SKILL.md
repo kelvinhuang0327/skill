@@ -53,6 +53,8 @@ once and Judge triggers already require. Neither value changes task class,
 route, or Worker selection. Absent a Packet value, apply Route once and the
 Judge-trigger rules unchanged.
 
+`IMPLEMENTATION_DEPTH: NORMAL | ENHANCED` is an optional work-mechanism field；when the Packet omits it, Fable selects its fallback and reports `DEPTH_SOURCE: SKILL_FALLBACK`; it never changes route, Judge mode/depth/reconciliation, model/native effort, agent count, scope, acceptance, budget, authorization, or STOP boundaries；see [implementation depth](references/implementation-depth.md)。
+
 ## First output and task class
 
 Before any external tool call, repository read, or filesystem inspection, emit
@@ -181,24 +183,7 @@ overwrite when a tracked or untracked path changed for a reason the current
 Packet does not explain; re-establish safe ownership of the affected state
 before resuming, and never proceed on a stale read.
 
-Never use the current working directory as implicit authority; an empty or
-dirty directory is not authority by itself. Preserve unrelated owner changes.
-Never stage or edit outside the declared scope. The declared scope includes
-adjacent source, test, and configuration paths demonstrably required to satisfy
-the Packet's acceptance; report every such path. Planner Delta is required only
-for a new outcome, an unrelated subsystem, or materially expanded risk.
-Never reset, restore, stash, or clean unrelated/Owner work. Force stays
-forbidden by default: only an exact pre-authorized fallback meeting every
-gate in operational-gates.md's Git action tiers may use it, and a generic
-cleanup authorization never authorizes it. A Packet must explicitly
-authorize a local commit. Push, publication, deployment, remote changes, PR
-creation or merge, destructive operations, credentials, secrets, production
-writes, migrations, external messages, and unrelated products require
-standalone Owner authorization. An executable Packet with Owner authorization
-authorizes reversible local edits within its stated goal and scope; ordinary
-local implementation is not blocked merely because no standalone high-risk
-authorization exists. Do not inspect protected or opaque paths; use an opaque
-aggregate when the Packet requires preservation evidence.
+Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require standalone Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no standalone high-risk authorization exists. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
 
 Before a command that inspects content across multiple committed objects,
 freeze the exact refs/trees, inventory metadata first, classify every path as
@@ -378,6 +363,8 @@ post-merge checks, cleanup, and a clean/restored workspace. Local completion
 without publication is not a publication failure. Keep unauthorized work
 under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
 
+Before entering a long Ready / merge / publication lifecycle for a PR, preflight overlapping authority: inspect only open PRs in the same repository for overlap with the target PR's already-known load-bearing changed paths; do not perform a repository-wide audit. If there is no overlapping open PR, continue normally. If there is path overlap alone, normal live-state and base-drift handling applies (do not STOP solely because files overlap). If an overlapping open PR also carries a competing CTO architecture decision, successor claim, canonical-authority claim, or supersession claim, do not begin the long publication lifecycle; stop with `OVERLAPPING_AUTHORITY_PUBLICATION_ORDER_REQUIRED` for Planner/Owner publication order resolution. Do not create a second governance authority to track these relationships.
+
 For `FAST` and `STANDARD` work, report the compact form in
 [reporting](references/reporting.md). Report the full ledger partitions below
 only for judged, publication-bound, or Tier-2 runtime work, using `NONE` only
@@ -424,6 +411,8 @@ Load only the directly relevant reference:
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or
   comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
+- [implementation depth](references/implementation-depth.md) before selecting
+  or defaulting `IMPLEMENTATION_DEPTH`;
 - [reporting](references/reporting.md) for compact outcome-first fields and
   lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain:
