@@ -201,9 +201,16 @@ pass_case 'fixture activation lock is scratch-only and absent'
 git -C "$FIXTURE_CANONICAL" init -q -b master
 git -C "$FIXTURE_CANONICAL" config user.name 'Fable Activate Test'
 git -C "$FIXTURE_CANONICAL" config user.email 'fable-activate-test@example.invalid'
-# Distinct historical bundles, with sources kept internally consistent.
+# Distinct historical bundles, with sources kept internally consistent. Change
+# an existing heading so a near-limit canonical Skill keeps its line budget.
 for skill in fable-method fable-judge; do
-  printf '\nHistorical fixture revision.\n' >>"$FIXTURE_CANONICAL/$skill/shared/SKILL.md"
+  /usr/bin/ruby -e '
+    path = ARGV.fetch(0)
+    body = File.binread(path)
+    historical = body.sub(/^# [^\n]+$/) { |heading| "#{heading} (Historical fixture revision.)" }
+    raise "historical fixture heading missing" if historical == body
+    File.binwrite(path, historical)
+  ' "$FIXTURE_CANONICAL/$skill/shared/SKILL.md"
   "$FIXTURE_CANONICAL/fable-method/scripts/sync-platforms.sh" --write --skill "$skill" >/dev/null
 done
 git -C "$FIXTURE_CANONICAL" add --all
@@ -685,15 +692,6 @@ assert_failure_contains \
   --expected-materialization-tree "$RLD_M"
 
 assert_failure_contains \
-  'K: --replace-reviewed-local-drift with platform antigravity is rejected' \
-  'REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM' \
-  "$CURRENT_SCRIPT" --activate --platform antigravity --replace-reviewed-local-drift \
-  --expected-live-sha256 "$RLD_ZERO_L" \
-  --expected-canonical-head "$RLD_H" \
-  --expected-canonical-tree "$RLD_T" \
-  --expected-materialization-tree "$RLD_M"
-
-assert_failure_contains \
   'K: --check combined with --replace-reviewed-local-drift is rejected' \
   'REVIEWED_REPLACEMENT_REQUIRES_ACTIVATE' \
   "$CURRENT_SCRIPT" --check --platform codex --replace-reviewed-local-drift \
@@ -845,6 +843,15 @@ done
 live="$(platform_live_path "$rld_platform")"
 eval "$(declare -f require_reviewed_replacement_canonical_identity | sed '1s/require_reviewed_replacement_canonical_identity/original_identity/')"
 eval "$(declare -f classify_platform | sed '1s/classify_platform/original_classify/')"
+# Negative control for the Antigravity extension; only this fixture process
+# restores the former Method platform gate. Production has no bypass or hook.
+if [[ "$scenario" == without-method-antigravity ]]; then
+  eval "$(declare -f is_reviewed_replacement_platform | sed '1s/is_reviewed_replacement_platform/original_supported/')"
+  is_reviewed_replacement_platform() {
+    [[ "$SELECTED_SKILL" != fable-method || "$1" != antigravity ]] || return 1
+    original_supported "$@"
+  }
+fi
 identity_calls=0
 writes=0
 require_reviewed_replacement_canonical_identity() {
@@ -910,6 +917,7 @@ rld_run_injected() {
   case "$platform" in
     codex) args=("${rld_args[@]}") ;;
     claude) args=("${RLD_CLAUDE_ARGS[@]}") ;;
+    antigravity) args=("${RLD_ANTIGRAVITY_ARGS[@]}") ;;
     *) fail "rld_run_injected: unsupported platform: $platform" ;;
   esac
   fi
@@ -1046,7 +1054,7 @@ rld_vector_expected="$(/usr/bin/ruby -rdigest -e '
   puts Digest::SHA256.hexdigest(bytes)
 ')"
 rld_serialize() {
-  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2" codex' _ "$CURRENT_SCRIPT" "$1"
+  /bin/bash -c 'source "$1"; compute_live_bundle_sha256 "$2" "$3"' _ "$CURRENT_SCRIPT" "$1" "${2:-codex}"
 }
 [[ "$(rld_serialize "$RLD_VECTOR")" == "$rld_vector_expected" ]] || fail 'serialization independent vector mismatch'
 pass_case 'serialization V1 independent full-record vector'
@@ -1303,6 +1311,152 @@ for skill in fable-method fable-judge; do
     assert_success_contains "$skill/$platform historical activation" 'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" --activate --skill "$skill" --platform "$platform"
   done
 done
+
+# --- Reviewed Antigravity Method replacement ------------------------------
+# The pair matrix above populated every Method/Judge target. Reuse its exact
+# manifest-owned destinations and the generic identity/lock/fault-injection
+# harness; serializer/type/CLI invariants retain their existing generic tests.
+readonly RLD_ANTIGRAVITY_M="$(git -C "$FIXTURE_CANONICAL" rev-parse "${CURRENT_HEAD}:fable-method/platforms/antigravity/fable-method")"
+readonly SCRATCH_LIVE_ANTIGRAVITY="${FIXTURE_HOME}/.gemini/config/skills/fable-method"
+readonly RLD_ANTIGRAVITY_SOURCE="${LINKED_CURRENT}/fable-method/platforms/antigravity/fable-method"
+RLD_ANTIGRAVITY_ARGS=(--activate --platform antigravity --replace-reviewed-local-drift
+  --expected-live-sha256 "$RLD_ZERO_L" --expected-canonical-head "$RLD_H"
+  --expected-canonical-tree "$RLD_T" --expected-materialization-tree "$RLD_ANTIGRAVITY_M"
+  --skill fable-method)
+
+# Full V1 identities bind every sibling's paths, bytes, and permissions,
+# including all three other Method platforms and all four Judge targets.
+antigravity_sibling_bundles() {
+  /bin/bash -c '
+    source "$1"
+    for SELECTED_SKILL in fable-method fable-judge; do
+      verify_manifest_paths
+      for platform in codex claude gemini antigravity; do
+        [[ "$SELECTED_SKILL/$platform" != fable-method/antigravity ]] || continue
+        printf "%s/%s: " "$SELECTED_SKILL" "$platform"
+        compute_live_bundle_sha256 "$(platform_live_path "$platform")" "$platform" || exit 1
+      done
+    done
+  ' _ "$CURRENT_SCRIPT"
+}
+RLD_ANTIGRAVITY_SIBLINGS_BEFORE="$(antigravity_sibling_bundles)"
+readonly RLD_ANTIGRAVITY_SIBLINGS_BEFORE
+rld_reset_drift "$RLD_ANTIGRAVITY_SOURCE" "$SCRATCH_LIVE_ANTIGRAVITY"
+rld_antigravity_l="$(rld_probe_observed_l antigravity "$RLD_ANTIGRAVITY_M")"
+RLD_ANTIGRAVITY_DRIFT="$(rld_serialize "$SCRATCH_LIVE_ANTIGRAVITY" antigravity)"
+readonly RLD_ANTIGRAVITY_DRIFT
+
+capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" normal "$RLD_TRACE" "$STALE_HEAD" \
+  --activate --skill fable-method --platform antigravity
+rld_assert_refusal 'Antigravity: ordinary activation refuses LOCAL_DRIFT' 'state: LOCAL_DRIFT'
+rld_assert_no_write 'Antigravity: ordinary activation refuses LOCAL_DRIFT'
+[[ "$(rld_serialize "$SCRATCH_LIVE_ANTIGRAVITY" antigravity)" == "$RLD_ANTIGRAVITY_DRIFT" ]] \
+  || fail 'Antigravity: ordinary refusal changed the live bundle'
+
+for index in 5 7 9 11; do
+  args=("${RLD_ANTIGRAVITY_ARGS[@]}")
+  args[5]="$rld_antigravity_l"
+  case "$index" in
+    5) args[$index]="$RLD_ZERO_L"; expected=REVIEWED_REPLACEMENT_LIVE_BUNDLE_SHA256_MISMATCH ;;
+    7) args[$index]="$RLD_ZERO_OBJ"; expected=REVIEWED_REPLACEMENT_HEAD_MISMATCH ;;
+    9) args[$index]="$RLD_ZERO_OBJ"; expected=REVIEWED_REPLACEMENT_TREE_MISMATCH ;;
+    11) args[$index]="$RLD_M"; expected=REVIEWED_REPLACEMENT_MATERIALIZATION_TREE_MISMATCH ;;
+  esac
+  : >"$RLD_TRACE"
+  capture_command /bin/bash "$RLD_RUNNER" "$CURRENT_SCRIPT" normal "$RLD_TRACE" "$STALE_HEAD" "${args[@]}"
+  rld_assert_refusal "Antigravity: wrong ${args[$((index - 1))]}" "$expected"
+  rld_assert_no_write "Antigravity: wrong ${args[$((index - 1))]}"
+  [[ "$(rld_serialize "$SCRATCH_LIVE_ANTIGRAVITY" antigravity)" == "$RLD_ANTIGRAVITY_DRIFT" ]] \
+    || fail "Antigravity: identity $index refusal changed the live bundle"
+done
+
+# Its extra .gemini/config path component must retain the shared path guard.
+mv "$FIXTURE_HOME/.gemini/config" "$SCRATCH/antigravity-config.saved"
+ln -s "$SCRATCH/antigravity-config.saved" "$FIXTURE_HOME/.gemini/config"
+rld_run_injected normal "$rld_antigravity_l" antigravity
+rld_assert_refusal 'Antigravity: symlink parent' 'ACTIVATION_PARENT_NOT_READY'
+rld_assert_no_write 'Antigravity: symlink parent'
+[[ -L "$FIXTURE_HOME/.gemini/config" ]] || fail 'Antigravity: symlink parent was replaced'
+rm "$FIXTURE_HOME/.gemini/config"
+mv "$SCRATCH/antigravity-config.saved" "$FIXTURE_HOME/.gemini/config"
+
+rld_run_injected live-change "$rld_antigravity_l" antigravity
+rld_assert_refusal 'Antigravity: live changes before first write' 'REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH'
+rld_assert_no_write 'Antigravity: live changes before first write'
+[[ "$(tail -1 "$SCRATCH_LIVE_ANTIGRAVITY/SKILL.md")" == 'prewrite injected change' ]] \
+  || fail 'Antigravity: prewrite live change was overwritten'
+
+rld_reset_drift "$RLD_ANTIGRAVITY_SOURCE" "$SCRATCH_LIVE_ANTIGRAVITY"
+rld_antigravity_l="$(rld_probe_observed_l antigravity "$RLD_ANTIGRAVITY_M")"
+rld_run_injected canonical-ref-change "$rld_antigravity_l" antigravity
+rld_assert_refusal 'Antigravity: canonical ref changes before first write' 'REVIEWED_REPLACEMENT_CANONICAL_REF_MISMATCH'
+rld_assert_no_write 'Antigravity: canonical ref changes before first write'
+git -C "$FIXTURE_CANONICAL" update-ref refs/remotes/origin/master "$RLD_H"
+cp "$RLD_ANTIGRAVITY_SOURCE/SKILL.md" "$SCRATCH/antigravity-source.saved"
+rld_run_injected source-change "$rld_antigravity_l" antigravity
+rld_assert_refusal 'Antigravity: source changes before first write' 'CANONICAL_MATERIALIZATION_DRIFT'
+rld_assert_no_write 'Antigravity: source changes before first write'
+cp "$SCRATCH/antigravity-source.saved" "$RLD_ANTIGRAVITY_SOURCE/SKILL.md"
+
+hold_activation_lock "$FIXTURE_LOCK" "$HOLDER_READY" "$HOLDER_RELEASE" &
+HOLDER_PID=$!
+read -r HOLDER_SIGNAL <"$HOLDER_READY"
+[[ "$HOLDER_SIGNAL" == HOLDER_LOCK_ACQUIRED ]] || fail 'Antigravity: lock holder failed'
+rld_run_injected normal "$rld_antigravity_l" antigravity
+rld_assert_refusal 'Antigravity: activation lock contention' 'ACTIVATION_LOCK_BUSY'
+rld_assert_no_write 'Antigravity: activation lock contention'
+[[ "$COMMAND_OUTPUT" == *"lock: ${FIXTURE_LOCK}"* ]] || fail 'Antigravity: wrong activation lock'
+[[ "$(rld_serialize "$SCRATCH_LIVE_ANTIGRAVITY" antigravity)" == "$rld_antigravity_l" ]] \
+  || fail 'Antigravity: lock contention changed the live bundle'
+printf 'release\n' >"$HOLDER_RELEASE"
+wait "$HOLDER_PID"
+HOLDER_PID=''
+
+rld_run_injected normal "$rld_antigravity_l" antigravity
+[[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" == *'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION'* ]] \
+  || fail 'Antigravity: reviewed replacement with correct exact bindings failed'
+[[ "$(grep -c '^WRITE:' "$RLD_TRACE")" -eq 1 ]] || fail 'Antigravity: expected exactly one write'
+grep -Fxq "WRITE:-a --checksum --delete $RLD_ANTIGRAVITY_SOURCE/ $SCRATCH_LIVE_ANTIGRAVITY/" "$RLD_TRACE" \
+  || fail 'Antigravity: write source/destination differs from its manifest-owned pair'
+grep -q '^LOCK_HELD:write$' "$RLD_TRACE" || fail 'Antigravity: write lock not observed'
+grep -q '^LOCK_HELD:post-check$' "$RLD_TRACE" || fail 'Antigravity: post-check lock not observed'
+[[ "$(rld_serialize "$SCRATCH_LIVE_ANTIGRAVITY" antigravity)" == "$(rld_serialize "$RLD_ANTIGRAVITY_SOURCE" antigravity)" ]] \
+  || fail 'Antigravity: final full bundle differs from current materialization'
+pass_case 'Antigravity: exact reviewed replacement succeeds with the lock held through post-check'
+
+# Green -> former unsupported-platform gate -> green, using the same bindings.
+rld_reset_drift "$RLD_ANTIGRAVITY_SOURCE" "$SCRATCH_LIVE_ANTIGRAVITY"
+rld_antigravity_l="$(rld_probe_observed_l antigravity "$RLD_ANTIGRAVITY_M")"
+rld_run_injected without-method-antigravity "$rld_antigravity_l" antigravity
+rld_assert_refusal 'Antigravity: former platform gate negative control' 'REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM'
+rld_assert_no_write 'Antigravity: former platform gate negative control'
+args=("${RLD_ANTIGRAVITY_ARGS[@]}")
+args[5]="$rld_antigravity_l"
+assert_success_contains 'Antigravity: restored unwrapped CLI replaces reviewed LOCAL_DRIFT' \
+  'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" "${args[@]}"
+assert_success_contains 'Antigravity: post-success check is exact current materialization' \
+  'STATE: EXACT_CURRENT_MATERIALIZATION' "$CURRENT_SCRIPT" --check --skill fable-method --platform antigravity
+[[ "$(rld_serialize "$SCRATCH_LIVE_ANTIGRAVITY" antigravity)" == "$(rld_serialize "$RLD_ANTIGRAVITY_SOURCE" antigravity)" ]] \
+  || fail 'Antigravity: unwrapped CLI left a different full bundle'
+[[ "$(antigravity_sibling_bundles)" == "$RLD_ANTIGRAVITY_SIBLINGS_BEFORE" ]] \
+  || fail 'Antigravity: another Method or Judge live target changed'
+pass_case 'Antigravity: Codex/Claude/Gemini Method and all Judge bundles stayed identical'
+
+capture_command "$CURRENT_SCRIPT" --help
+[[ "$COMMAND_STATUS" -eq 0 ]] || fail 'help did not exit successfully'
+for expected in 'Method: codex|claude|antigravity.' 'Judge: codex|claude|gemini.' \
+  'LOCAL_DRIFT' 'LIVE_BUNDLE_SHA256_SERIALIZATION_V1' \
+  '--expected-live-sha256' '--expected-canonical-head' '--expected-canonical-tree' '--expected-materialization-tree' \
+  'is required exactly' 'immediately before the first' 'does not perform semantic review'; do
+  [[ "$COMMAND_OUTPUT" == *"$expected"* ]] || fail "help omitted: $expected"
+done
+pass_case 'help names the skill-specific platforms, fail-closed path, and exact identity contract'
+capture_command "$CURRENT_SCRIPT"
+[[ "$COMMAND_STATUS" -eq 2 && "$COMMAND_OUTPUT" == *'Method reviewed replacement: codex|claude|antigravity.'* \
+  && "$COMMAND_OUTPUT" == *'(reviewed replacement: codex|claude|gemini)'* \
+  && "$COMMAND_OUTPUT" == *'Ordinary activation refuses LOCAL_DRIFT.'* \
+  && "$COMMAND_OUTPUT" == *'exact identity bindings, each exactly once'* ]] || fail 'usage misstated reviewed replacement semantics'
+pass_case 'usage states Method/Judge platform limits and ordinary LOCAL_DRIFT refusal'
 
 assert_failure_contains 'unknown Judge platform rejected' 'unknown platform' "$CURRENT_SCRIPT" --check --skill fable-judge --platform unknown
 assert_failure_contains 'unknown skill rejected' 'unknown skill' "$CURRENT_SCRIPT" --check --skill all
