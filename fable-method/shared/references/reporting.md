@@ -5,6 +5,7 @@
 - [Compact Worker report](#compact-worker-report)
 - [Evidence labels](#evidence-labels)
 - [Platform consumer evidence view](#platform-consumer-evidence-view)
+- [Runtime transition provenance](#runtime-transition-provenance)
 - [Lifecycle closure](#lifecycle-closure)
 
 Use the compact form for ordinary `FAST`/`STANDARD` work. Use the full
@@ -143,6 +144,54 @@ unqualified "verified," and is not by itself a task failure. Whether a given
 task's acceptance requires current materialization, Discovery, or Execution
 evidence remains task-specific, decided by that task's own acceptance
 criteria — not a universal consequence of using this view.
+
+## Runtime transition provenance
+
+When a Worker actually changes an installed/runtime HEAD, tree, executable
+binding, working-directory binding, plist binding, or equivalent production
+runtime identity, the terminal handoff must explicitly report the transition
+provenance.
+
+Capture that information in the same terminal handoff instead of forcing a
+future Agent to reconstruct it from reflog. Do not infer or fabricate
+transition ownership from later reflog/history.
+
+This is reporting provenance only. It must NOT:
+- authorize runtime mutation;
+- authorize launchctl actions;
+- weaken standalone Owner authorization;
+- create automatic rollback;
+- create a new runtime registry;
+- require permanent evidence files;
+- require extra commands when the transition information is already naturally
+  known to the Worker that performed the action;
+- make ordinary non-runtime tasks emit irrelevant transition fields.
+
+For a task that itself performs a runtime identity transition, terminal handoff
+must report:
+
+```text
+RUNTIME_TRANSITION_OCCURRED: YES
+RUNTIME_HEAD_BEFORE: <exact | NOT_APPLICABLE>
+RUNTIME_TREE_BEFORE: <exact | NOT_APPLICABLE>
+RUNTIME_HEAD_AFTER: <exact | NOT_APPLICABLE>
+RUNTIME_TREE_AFTER: <exact | NOT_APPLICABLE>
+RUNTIME_TRANSITION_AT: <timestamp>
+RUNTIME_TRANSITION_ACTION: <exact action>
+RUNTIME_TRANSITION_TASK_OR_RUN_ID: <exact current task/run identity if available>
+RUNTIME_BINDING_BEFORE: <exact executable/worktree/plist/service binding | NOT_APPLICABLE>
+RUNTIME_BINDING_AFTER: <exact executable/worktree/plist/service binding | NOT_APPLICABLE>
+ROLLBACK_TARGET: <exact pre-transition identity | NOT_APPLICABLE>
+```
+
+If the current task did not perform a runtime identity transition:
+
+```text
+RUNTIME_TRANSITION_OCCURRED: NO
+```
+
+Ordinary tasks with `RUNTIME_TRANSITION_OCCURRED: NO` remain backward compatible
+and do not emit the transition-specific fields above.
 
 ## Lifecycle closure
 
