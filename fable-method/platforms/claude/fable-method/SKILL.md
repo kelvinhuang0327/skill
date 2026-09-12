@@ -187,6 +187,8 @@ For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` exists when
 
 Before deleting or replacing a checkout/worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`: the exact deployed commit must remain reachable through an explicitly recognized durable Git source authority appropriate to the task. Content-equivalent code/tree on main is NOT sufficient evidence that the exact deployed source may be discarded. If exact `DEPLOYED_HEAD` has no durable source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`. The Worker MUST NOT automatically create a branch/tag/ref to satisfy this gate. Creating or changing a preservation ref remains a separate Git mutation and requires applicable task authority / authorization.
 
+When an authorized task actually changes an installed/runtime HEAD, tree, executable binding, working-directory binding, plist binding, or equivalent production runtime identity, the terminal handoff must explicitly report runtime transition provenance (`RUNTIME_TRANSITION_OCCURRED: YES`, before/after identities, action, bindings, and rollback target); tasks performing no runtime transition report `RUNTIME_TRANSITION_OCCURRED: NO`. This reporting requirement does not authorize runtime mutation or launchctl actions; see [reporting](references/reporting.md#runtime-transition-provenance).
+
 Make the ownership discipline explicit — this is Worker behavior, not a new
 filesystem versioning subsystem:
 
@@ -491,7 +493,7 @@ applies. Lead with what happened, distinguish NOT RUN, BLOCKED, and UNKNOWN,
 and never claim deployment, publication, runtime success, equality, or cleanup
 without observing it. FULL_PR_LIFECYCLE_CLOSED: YES additionally requires a
 verified merge commit, target containment, required post-merge checks, cleanup,
-and a clean/restored workspace.
+and a clean/restored workspace. When the task performed a runtime identity transition, include the transition provenance block (`RUNTIME_TRANSITION_OCCURRED: YES`, before/after HEAD/tree/bindings, action, timestamp, task/run ID, rollback target); otherwise report `RUNTIME_TRANSITION_OCCURRED: NO`.
 
 For judged or publication-bound work, also include:
 

@@ -349,6 +349,23 @@ FINAL_STATE:
 This applies to source writes, Git lifecycle, worktree changes, runtime
 cleanup, evidence roots, manifests, and checksums.
 
+When a mutation actually changes an installed/runtime HEAD, tree, executable
+binding, working-directory binding, plist binding, or equivalent production
+runtime identity, capture the transition provenance directly from the action:
+before identity (`RUNTIME_HEAD_BEFORE`, `RUNTIME_TREE_BEFORE`,
+`RUNTIME_BINDING_BEFORE`), action and timestamp (`RUNTIME_TRANSITION_ACTION`,
+`RUNTIME_TRANSITION_AT`, `RUNTIME_TRANSITION_TASK_OR_RUN_ID`), after identity
+(`RUNTIME_HEAD_AFTER`, `RUNTIME_TREE_AFTER`, `RUNTIME_BINDING_AFTER`), and
+pre-transition identity (`ROLLBACK_TARGET`). The terminal handoff must report
+these fields under `RUNTIME_TRANSITION_OCCURRED: YES`. Tasks that perform no
+runtime identity transition report `RUNTIME_TRANSITION_OCCURRED: NO` without
+the transition-specific fields.
+
+This is reporting provenance only. It does not authorize runtime mutation or
+launchctl actions, does not weaken standalone Owner authorization, does not
+create automatic rollback, and does not permit inferring transition ownership
+from reflog history.
+
 ## Continuity
 
 At stable milestones or before handoff, preserve observable state only:
