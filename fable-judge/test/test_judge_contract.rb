@@ -68,11 +68,11 @@ class JudgeContractTest < Minitest::Test
     assert_empty contract_errors(@source)
   end
 
-  def test_all_three_platforms_have_identical_body_and_exact_depth_projection
+  def test_all_four_platforms_have_identical_body_and_exact_depth_projection
     bodies = []
     depth_source = File.binread(File.join(ROOT, Model::DEPTH_SOURCE))
     projected = Model.project(depth_source, Model::DEPTH_SECTIONS)
-    %w[codex claude gemini].each do |platform|
+    %w[codex claude gemini antigravity].each do |platform|
       bundle = @model.render(ROOT, 'fable-judge', platform)
       bodies << bundle.fetch('SKILL.md').sub(/\A---\n.*?\n---\n/m, '')
       assert_empty contract_errors(bundle.fetch('SKILL.md'))
@@ -91,7 +91,7 @@ class JudgeContractTest < Minitest::Test
   def test_judge_has_no_handwritten_second_trigger_list_or_extra_platform
     refute_includes @source, 'Subject-matter triggers'
     refute_includes @source, 'Workload-shape triggers'
-    assert_equal %w[claude codex gemini], @model.platforms('fable-judge').map { |p| p['name'] }.sort
+    assert_equal %w[antigravity claude codex gemini], @model.platforms('fable-judge').map { |p| p['name'] }.sort
     @model.platforms('fable-judge').each do |p|
       assert_empty p['adapter_sources']
       assert_empty p['reference_overrides']

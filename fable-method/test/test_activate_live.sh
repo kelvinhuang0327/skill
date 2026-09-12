@@ -1287,8 +1287,7 @@ pass_case 'Claude: all replacement fixtures stayed isolated; real activation loc
 # Schema-v2 pair regressions; every live path is read from the rewritten
 # fixture manifest, and every mutation remains in this suite's scratch root.
 for skill in fable-method fable-judge; do
-  pair_platforms=(codex claude gemini)
-  [[ "$skill" != fable-method ]] || pair_platforms+=(antigravity)
+  pair_platforms=(codex claude gemini antigravity)
   for platform in "${pair_platforms[@]}"; do
     pair_live="$(/bin/bash -c 'source "$1"; SELECTED_SKILL="$2"; platform_live_path "$3"' _ "$CURRENT_SCRIPT" "$skill" "$platform")"
     pair_source="$LINKED_CURRENT/fable-method/platforms/$platform/$skill"
@@ -1305,11 +1304,20 @@ for skill in fable-method fable-judge; do
   done
 done
 
-assert_failure_contains 'Judge Antigravity pair rejected' 'unknown platform' "$CURRENT_SCRIPT" --check --skill fable-judge --platform antigravity
+assert_failure_contains 'unknown Judge platform rejected' 'unknown platform' "$CURRENT_SCRIPT" --check --skill fable-judge --platform unknown
 assert_failure_contains 'unknown skill rejected' 'unknown skill' "$CURRENT_SCRIPT" --check --skill all
 assert_failure_contains 'duplicate skill rejected' '--skill may be given at most once' "$CURRENT_SCRIPT" --check --skill fable-judge --skill fable-judge
 assert_failure_contains 'Judge activation requires exact platform' 'requires exactly one --platform' "$CURRENT_SCRIPT" --activate --skill fable-judge
 assert_failure_contains 'duplicate platform rejected' '--platform may be given at most once' "$CURRENT_SCRIPT" --check --skill fable-judge --platform codex --platform codex
+assert_failure_contains \
+  'Judge --replace-reviewed-local-drift with platform antigravity is rejected' \
+  'REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM' \
+  "$CURRENT_SCRIPT" --activate --platform antigravity --replace-reviewed-local-drift \
+  --expected-live-sha256 "$RLD_ZERO_L" \
+  --expected-canonical-head "$RLD_H" \
+  --expected-canonical-tree "$RLD_T" \
+  --expected-materialization-tree "$RLD_M" \
+  --skill fable-judge
 capture_command "$CURRENT_SCRIPT" --check
 [[ "$COMMAND_STATUS" -eq 0 && "$COMMAND_OUTPUT" != *'SKILL: fable-judge'* ]] || fail 'default activation check includes Judge'
 legacy_output="$COMMAND_OUTPUT"

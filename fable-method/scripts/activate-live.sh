@@ -25,7 +25,7 @@ usage() {
 Usage:
   activate-live.sh --help
   All operations accept [--skill fable-method|fable-judge]; default fable-method.
-  Judge platforms: codex|claude|gemini (including reviewed replacement).
+  Judge platforms: codex|claude|gemini|antigravity (reviewed replacement: codex|claude|gemini).
   activate-live.sh --check [--platform codex|claude|gemini|antigravity]
   activate-live.sh --activate --platform codex|claude|gemini|antigravity
   activate-live.sh --activate --platform codex|claude --replace-reviewed-local-drift \
@@ -41,8 +41,8 @@ activate-live.sh - repository-owned activation for managed Fable skill installs.
 
   --skill fable-method|fable-judge
                                  Select one skill. Default: fable-method.
-                                 Judge supports codex, claude, gemini only.
-                                 Judge reviewed replacement supports those three;
+                                 Judge supports codex, claude, gemini, and antigravity.
+                                 Judge reviewed replacement supports codex, claude, and gemini;
                                  Method remains limited to codex and claude.
   --check                       Read-only. Classifies every configured platform's
                                  live installation against this repository's current
@@ -979,7 +979,7 @@ main() {
   (( skill_count <= 1 )) || die '--skill may be given at most once'
   case "$SELECTED_SKILL" in
     fable-method) PLATFORMS=(codex claude gemini antigravity) ;;
-    fable-judge) PLATFORMS=(codex claude gemini) ;;
+    fable-judge) PLATFORMS=(codex claude gemini antigravity) ;;
     *) die "unknown skill: $SELECTED_SKILL" ;;
   esac
   MANIFEST_RECORDS=""

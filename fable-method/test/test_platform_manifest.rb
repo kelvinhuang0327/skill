@@ -32,11 +32,13 @@ class PlatformManifestTest < Minitest::Test
     assert_raises(Model::Error) { Model.new(@data) }
   end
 
-  def test_v2_has_exactly_seven_pairs_and_defaults_can_select_method
+  def test_v2_has_exactly_eight_pairs_and_defaults_can_select_method
     assert_equal 2, @data['schema_version']
     assert_equal 4, @model.platforms('fable-method').length
-    assert_equal 3, @model.platforms('fable-judge').length
-    assert_raises(Model::Error) { @model.pair('fable-judge', 'antigravity') }
+    assert_equal 4, @model.platforms('fable-judge').length
+    assert_equal '/Users/kelvin/.gemini/skills/fable-judge', @model.pair('fable-judge', 'gemini')['live_installation_path']
+    assert_equal '/Users/kelvin/.gemini/config/skills/fable-judge', @model.pair('fable-judge', 'antigravity')['live_installation_path']
+    assert_raises(Model::Error) { @model.pair('fable-judge', 'unknown') }
     assert_raises(Model::Error) { @model.skill('all') }
   end
 
@@ -64,7 +66,7 @@ class PlatformManifestTest < Minitest::Test
   end
 
   def test_unsupported_pair
-    rejects { judge_platform['name'] = 'antigravity' }
+    rejects { judge_platform['name'] = 'unsupported' }
   end
 
   def test_missing_field
