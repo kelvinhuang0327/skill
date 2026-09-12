@@ -25,11 +25,13 @@ skills:
       - fable-method/shared/references/implementation-depth.md
       - fable-method/shared/references/operational-gates.md
       - fable-method/shared/references/judge-handoff.md
+      - fable-method/shared/references/memory-boundary.md
       - fable-method/shared/references/property-based-verification.md
       - fable-method/shared/references/regression-bisection.md
       - fable-method/shared/references/reporting.md
       - fable-method/shared/references/task-checkpoint.md
       - fable-method/shared/references/test-falsifiability.md
+      - fable-method/shared/references/workspace-containment.md
       projections: []
     platforms:
     - name: codex
