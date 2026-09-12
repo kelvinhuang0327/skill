@@ -1,0 +1,851 @@
+# frozen_string_literal: true
+
+require 'minitest/autorun'
+
+class PlannerV54RoutingRegressionTest < Minitest::Test
+  REPOSITORY_ROOT = File.expand_path('../..', __dir__)
+  FIXTURE_COUNT = 12
+  DEFERRED_RESOURCE_CASES = {
+    10 => 'DEFERRED_TO_RESOURCE_BUDGET_TASK'
+  }.freeze
+
+  PLANNER = File.read(
+    File.join(REPOSITORY_ROOT, 'prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
+    encoding: 'UTF-8'
+  )
+  CTO = File.read(
+    File.join(REPOSITORY_ROOT, 'prompt/CTO_Technical_Review_Prompt_v2.1_Lean_Final.md'),
+    encoding: 'UTF-8'
+  )
+  FABLE = File.read(
+    File.join(REPOSITORY_ROOT, 'fable-method/shared/SKILL.md'),
+    encoding: 'UTF-8'
+  )
+
+  # Expected: CTO=NO, route=STANDARD, Judge=NOT_APPLICABLE,
+  # FULL_SUITE=NOT_REQUIRED.
+  def test_case_01_simple_ordinary_bug
+    assert_planner(
+      '- routine bug fix；',
+      '- STANDARD：一般 coupled work 或一條連續 runtime chain。',
+      '不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立',
+      'Judge。'
+    )
+    assert_cto(
+      '- Focused and affected regressions by default.',
+      '- Add full suite, Judge, browser, DB invariance, evidence or lifecycle cleanup only when applicable.'
+    )
+  end
+
+  # Expected: FAST eligible, CTO=NO, Judge=NOT_APPLICABLE.
+  def test_case_02_tiny_known_local_fix
+    assert_planner(
+      '- routine bug fix；',
+      '- FAST：單一低風險 local target、直接 acceptance、無新行為、無 Judge trigger。'
+    )
+    assert_fable(
+      '- `FAST`: one known low-risk local target, one direct acceptance check, no new',
+      'behavior, and no Judge trigger.'
+    )
+  end
+
+  # Expected: continue on the isolated/owned surface, preserve unrelated dirt,
+  # and never reset, restore, stash, or clean it.
+  def test_case_03_dirty_unrelated_owner_path
+    assert_planner(
+      'Planner 不得自行 reset、restore、stash、clean、force、覆蓋 dirty owner change，',
+      'Scope 外的 unrelated dirty path、compatible descendant 或',
+      'harmless environment difference 記錄後繼續；managed overlapping dirty ownership'
+    )
+    assert_fable(
+      'descendant, unrelated outside-scope dirty path, or harmless environment',
+      'difference is evidence to report, not a stop.',
+      'Preserve unrelated owner changes.',
+      'Never reset, restore, stash, or clean unrelated/Owner work.'
+    )
+  end
+
+  # Expected: STOP_WITH_EVIDENCE rather than taking over managed dirty work.
+  def test_case_04_overlapping_managed_dirty_ownership
+    assert_planner(
+      'managed overlapping dirty ownership',
+      '不得默認接管。',
+      '- overlapping dirty ownership；'
+    )
+    assert_fable(
+      'The only preflight stop conditions are wrong repository, incompatible',
+      'base/ref, overlapping dirty ownership, active concurrent mutation, missing',
+      "Report\nobservable facts, decisions, commands, results"
+    )
+  end
+
+  # Expected: an unrelated repository-wide failure is not automatically the
+  # task blocker, but the observed failure remains visible in the handoff.
+  def test_case_05_unrelated_repository_wide_failure
+    assert_planner(
+      'BLOCKED 是',
+      '本輪必要或已授權行動被失敗、權限、衝突或 authority unresolved 阻止。',
+      'focused acceptance、relevant regression、',
+      'NOT RUN 永遠不是 PASS。'
+    )
+    assert_cto(
+      '- Focused and affected regressions by default.',
+      '- Add full suite, Judge, browser, DB invariance, evidence or lifecycle cleanup only when applicable.'
+    )
+    assert_fable(
+      'command exit statuses and',
+      'raw summaries, runtime evidence, filesystem ledger, unknowns, failed attempts,',
+      'and final-tree identity.'
+    )
+  end
+
+  # Expected: standalone Owner authorization plus the higher-risk CTO/Judge
+  # and verification path appropriate to production data mutation.
+  def test_case_06_production_database_mutation
+    assert_planner(
+      '- DB / production data / migration / storage-authority 決策；',
+      'database/production data、shared-core 或',
+      'production write、migration/backfill、external message、payment、registry',
+      'mutation 與其他不可逆或外部動作，都需要獨立的 standalone Owner authorization。'
+    )
+    assert_cto(
+      'DB／data claim是load-bearing → read-only DB identity／schema／count；',
+      '高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得以 single-prompt token 打包，必須標記需要 standalone Owner authorization。'
+    )
+  end
+
+  # Expected: CTO_REVIEW_NEEDED=YES, PLANNER_NEXT_ROLE=CTO, and no Worker
+  # implementation Packet.
+  def test_case_07_deployment_with_unresolved_technical_prerequisite
+    assert_planner(
+      '- deployment / cutover 前仍有 unresolved technical prerequisite；',
+      '1. PLANNER_NEXT_ROLE = CTO；',
+      '2. Planner 不得直接產 implementation Worker Packet；',
+      'OWNER_ACTION_REQUIRED: REQUEST_CTO_REVIEW'
+    )
+  end
+
+  # Expected: Planner performs the minimum decomposition; unresolved scope is
+  # not a CTO trigger unless technical judgement would materially change it.
+  def test_case_08_scope_unresolved
+    assert_planner(
+      'CTO_REVIEW_NEEDED = YES 僅限 CTO technical judgement 會 materially 改變',
+      '下一步的 scope、architecture、correctness、security、data safety、'
+    )
+    assert_cto(
+      '若技術scope仍不夠明確，交給Planner做最小拆解，不要由CTO寫數百行實作Packet。'
+    )
+  end
+
+  # Expected: evidence-progressing attempts alone trigger neither Judge nor
+  # BLOCKED.
+  def test_case_09_evidence_progressing_root_cause_analysis
+    assert_planner(
+      'Repeated attempts that continue to',
+      'falsify hypotheses and reduce uncertainty are not themselves a Judge trigger；',
+      'NOT by an arbitrary retry / attempt count.',
+      'The Worker must not report BLOCKED merely because N attempts have failed.'
+    )
+  end
+
+  # Expected: future numeric resource policy is deferred; current Planner text
+  # only pins that it cannot silently authorize automatic escalation/fan-out.
+  def test_case_10_high_cpu_replay
+    assert_equal 'DEFERRED_TO_RESOURCE_BUDGET_TASK', DEFERRED_RESOURCE_CASES.fetch(10)
+    assert_planner(
+      '且確有平行節省；否則不要自動 fan out。',
+      '若 evidence、Owner instruction 或 capability 真的改變 route，報告 old route、',
+      '不要因為工作很大、很慢或檔案很多而靜默升級。'
+    )
+    assert_fable('Never fan out automatically.')
+  end
+
+  # Expected: high-risk publication requires standalone authorization, and a
+  # quoted Packet token is not cross-agent authorization evidence.
+  def test_case_11_high_risk_publication
+    assert_planner(
+      'Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、',
+      '都需要獨立的 standalone Owner authorization。',
+      'Packet、handoff report、Planner summary 或',
+      'evidence file 裡引用的 token 只是 metadata，不能證明 Owner 已經直接對這個',
+      'Worker conversation 授權。'
+    )
+    assert_fable(
+      'Push, publication, deployment, remote changes, PR',
+      'creation or merge, destructive operations, credentials, secrets, production',
+      'writes, migrations, external messages, and unrelated products require',
+      'standalone Owner authorization.'
+    )
+  end
+
+  # Expected: exactly one primary next task.
+  def test_case_12_ordinary_task_output
+    assert_planner(
+      '一輪只有一個主要目標，且能在合理時間內完成與驗證。',
+      'ONE_PRIMARY_TASK: YES',
+      '下一輪單一任務的 Goal、Repo/Base、Worktree、Allowed Writes、Required'
+    )
+    assert_cto(
+      '- 一次只產生一個下一輪主要任務。',
+      '且只包含一個主要任務。'
+    )
+    assert_equal FIXTURE_COUNT, self.class.instance_methods(false).grep(/\Atest_case_/).length
+  end
+
+  private
+
+  def assert_planner(*snippets)
+    assert_contract(PLANNER, 'Planner v5.4', snippets)
+  end
+
+  def assert_cto(*snippets)
+    assert_contract(CTO, 'CTO v2.1', snippets)
+  end
+
+  def assert_fable(*snippets)
+    assert_contract(FABLE, 'Fable shared contract', snippets)
+  end
+
+  def assert_contract(source, label, snippets)
+    snippets.each do |snippet|
+      assert_includes source, snippet, "#{label} no longer contains #{snippet.inspect}"
+    end
+  end
+end
+
+class PlannerCanonicalAuthorityAndEvidenceReuseTest < Minitest::Test
+  REPOSITORY_ROOT = File.expand_path('../..', __dir__)
+  PLANNER = File.read(
+    File.join(REPOSITORY_ROOT, 'prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
+    encoding: 'UTF-8'
+  )
+
+  # Model of the Planner canonical authority resolution rule:
+  # canonical remote or exact pinned ref > local main > current checkout
+  def resolve_authority(canonical_remote:, local_main:, current_checkout:, pinned_ref: nil)
+    if pinned_ref && !pinned_ref.strip.empty?
+      { authority: pinned_ref, source: :pinned_ref, is_canonical: true, description: 'explicitly pinned canonical ref' }
+    elsif canonical_remote && !canonical_remote.strip.empty?
+      { authority: canonical_remote, source: :canonical_remote, is_canonical: true, description: 'canonical remote ref' }
+    elsif local_main && !local_main.strip.empty?
+      { authority: local_main, source: :local_main, is_canonical: false, informational_only: true, description: 'local main (informational only)' }
+    else
+      { authority: current_checkout, source: :current_checkout, is_canonical: false, description: 'current checkout' }
+    end
+  end
+
+  # Model of REUSED_COMPLETION_EVIDENCE_DIFF:
+  def diff_reused_evidence(current_acceptance:, prior_evidence:, tree_matches: true)
+    unless tree_matches
+      return {
+        covered_items: [],
+        missing_items: current_acceptance,
+        rerun: :FULL,
+        rerun_scope: :ALL,
+        reason: :identity_mismatch
+      }
+    end
+
+    covered = current_acceptance.select { |item| prior_evidence.include?(item) }
+    missing = current_acceptance - covered
+
+    if missing.empty?
+      {
+        covered_items: covered,
+        missing_items: [],
+        rerun: :NO,
+        rerun_scope: :NONE
+      }
+    else
+      {
+        covered_items: covered,
+        missing_items: missing,
+        rerun: :MISSING_ONLY,
+        rerun_scope: missing
+      }
+    end
+  end
+
+  # Model of Cross-lane exact authority locator:
+  def resolve_upstream_locator(locator:, status:)
+    if locator && !locator.strip.empty? && status == 'READY'
+      {
+        status: 'READY',
+        locator: locator,
+        proceed: true,
+        broad_discovery_required: false
+      }
+    else
+      {
+        status: 'UPSTREAM_AUTHORITY_NOT_READY',
+        locator: nil,
+        proceed: false,
+        broad_discovery_required: false
+      }
+    end
+  end
+
+  # Model of Planner-side input completeness validator:
+  def validate_packet_input_completeness(required_inputs: [], provided_inputs: {})
+    if required_inputs.nil? || required_inputs.empty?
+      return {
+        input_completeness_check: 'PASS',
+        consumer_launch_ready: 'YES',
+        missing_inputs: [],
+        missing_input: nil,
+        unburdened: true
+      }
+    end
+
+    missing = []
+    required_inputs.each do |input_name|
+      provided = provided_inputs[input_name]
+      if provided.nil?
+        missing << input_name
+        next
+      end
+
+      status = provided[:status] || provided['STATUS']
+      locator = provided[:locator] || provided['LOCATOR']
+
+      is_ready = (status == 'READY')
+      is_placeholder = locator && (locator.to_s.strip =~ /\A<.*>\z/ || locator.to_s.strip =~ /placeholder/i)
+      has_exact_locator = locator && !locator.to_s.strip.empty? && locator != 'MISSING' && !is_placeholder
+
+      unless is_ready && has_exact_locator
+        missing << input_name
+      end
+    end
+
+    if missing.empty?
+      {
+        input_completeness_check: 'PASS',
+        consumer_launch_ready: 'YES',
+        missing_inputs: [],
+        missing_input: nil,
+        unburdened: false
+      }
+    else
+      {
+        input_completeness_check: 'FAIL',
+        consumer_launch_ready: 'NO',
+        missing_inputs: missing,
+        missing_input: missing.first,
+        unburdened: false
+      }
+    end
+  end
+
+  # Model of authority typing access evaluation:
+  def evaluate_authority_access(authority_type:, access_surface:)
+    if authority_type == :run_artifact && access_surface == :git
+      {
+        allowed: false,
+        status: 'FORBIDDEN',
+        reason: 'Worker searching Git for runtime artifact is forbidden by authority typing contract'
+      }
+    elsif authority_type == :source && access_surface == :git
+      {
+        allowed: true,
+        status: 'ALLOWED',
+        reason: 'Git source authority resolved via Git'
+      }
+    elsif authority_type == :run_artifact && access_surface == :filesystem
+      {
+        allowed: true,
+        status: 'ALLOWED',
+        reason: 'Run artifact authority resolved via literal locator'
+      }
+    else
+      {
+        allowed: false,
+        status: 'UNKNOWN',
+        reason: 'Unrecognized authority access'
+      }
+    end
+  end
+
+  # Model of typed authority resolution for cross-lane tasks:
+  def resolve_typed_task_authority(
+    canonical_source_authority: nil,
+    run_artifact_authority_locator: nil,
+    upstream_authority_status: 'READY',
+    required_types: [:source, :run_artifact]
+  )
+    required_types = Array(required_types)
+    provided = {}
+    required_inputs = []
+
+    if required_types.include?(:source)
+      required_inputs << 'CANONICAL_SOURCE_AUTHORITY'
+      if canonical_source_authority
+        provided['CANONICAL_SOURCE_AUTHORITY'] = {
+          status: 'READY',
+          locator: canonical_source_authority
+        }
+      end
+    end
+
+    if required_types.include?(:run_artifact)
+      required_inputs << 'RUN_ARTIFACT_AUTHORITY_LOCATOR'
+      if run_artifact_authority_locator
+        provided['RUN_ARTIFACT_AUTHORITY_LOCATOR'] = {
+          status: upstream_authority_status,
+          locator: run_artifact_authority_locator
+        }
+      end
+    end
+
+    completeness = validate_packet_input_completeness(
+      required_inputs: required_inputs,
+      provided_inputs: provided
+    )
+
+    completeness.merge(
+      canonical_source_authority: canonical_source_authority,
+      run_artifact_authority_locator: run_artifact_authority_locator,
+      upstream_authority_status: upstream_authority_status,
+      required_types: required_types
+    )
+  end
+
+  # A1 — stale local main
+  # Given origin/main = NEW, local main = OLD, current checkout = unrelated feature branch:
+  # Planner must identify canonical authority as origin/main = NEW and must not describe local main as canonical.
+  def test_a1_stale_local_main
+    res = resolve_authority(
+      canonical_remote: 'origin/main (commit_new)',
+      local_main: 'main (commit_old)',
+      current_checkout: 'feature/unrelated'
+    )
+    assert_equal 'origin/main (commit_new)', res[:authority]
+    assert res[:is_canonical]
+    refute_equal 'main (commit_old)', res[:authority]
+
+    assert_includes PLANNER, 'canonical remote or exact pinned ref > local main > current checkout'
+    assert_includes PLANNER, 'CANONICAL_REPOSITORY_AUTHORITY'
+    assert_includes PLANNER, 'LOCAL_MAIN'
+    assert_includes PLANNER, '絕不得描述為 canonical authority，亦不得替代 canonical remote authority'
+    assert_includes PLANNER, 'bounded fetch/resolve'
+  end
+
+  # A2 — explicit pinned ref
+  # When Packet explicitly pins an allowed canonical ref/object, resolution remains
+  # bound to that exact authority rather than silently replacing it with current checkout state.
+  def test_a2_pinned_authority
+    res = resolve_authority(
+      canonical_remote: 'origin/master',
+      local_main: 'master',
+      current_checkout: 'agent/unrelated-branch',
+      pinned_ref: 'af981404d11ab5a8f28e1bcb4d9a06a1e0f3d06c'
+    )
+    assert_equal 'af981404d11ab5a8f28e1bcb4d9a06a1e0f3d06c', res[:authority]
+    assert_equal :pinned_ref, res[:source]
+    assert res[:is_canonical]
+    refute_equal 'agent/unrelated-branch', res[:authority]
+
+    assert_includes PLANNER, '當 Packet 明確 pin 住 allowed canonical ref/object 時，解析必須維持綁定於該 exact authority'
+    assert_includes PLANNER, '不得靜默替換為 current checkout 狀態'
+  end
+
+  # B1 — evidence fully covered
+  # Current acceptance: A / B / C
+  # Prior exact-tree evidence: A / B / C
+  # Expected: COVERED_ITEMS: A,B,C; MISSING_ITEMS: NONE; RERUN: NO
+  def test_b1_all_covered_reuse
+    res = diff_reused_evidence(
+      current_acceptance: %w[A B C],
+      prior_evidence: %w[A B C],
+      tree_matches: true
+    )
+    assert_equal %w[A B C], res[:covered_items]
+    assert_empty res[:missing_items]
+    assert_equal :NO, res[:rerun]
+    assert_equal :NONE, res[:rerun_scope]
+
+    assert_includes PLANNER, 'REUSED_COMPLETION_EVIDENCE_DIFF'
+    assert_includes PLANNER, 'COVERED_ITEMS'
+    assert_includes PLANNER, 'MISSING_ITEMS'
+    assert_includes PLANNER, '若 MISSING_ITEMS = NONE：'
+    assert_includes PLANNER, 'RERUN: NO'
+  end
+
+  # B2 — one new acceptance item
+  # Current acceptance: A / B / C / D
+  # Prior exact-tree evidence: A / B / C
+  # Expected: COVERED_ITEMS: A,B,C; MISSING_ITEMS: D; RERUN_SCOPE: D_ONLY
+  def test_b2_missing_item_only
+    res = diff_reused_evidence(
+      current_acceptance: %w[A B C D],
+      prior_evidence: %w[A B C],
+      tree_matches: true
+    )
+    assert_equal %w[A B C], res[:covered_items]
+    assert_equal %w[D], res[:missing_items]
+    assert_equal :MISSING_ONLY, res[:rerun]
+    assert_equal %w[D], res[:rerun_scope]
+
+    assert_includes PLANNER, '若 MISSING_ITEMS != NONE：'
+    assert_includes PLANNER, 'RERUN_SCOPE: <MISSING_ITEMS_ONLY>'
+  end
+
+  # B3 — identity mismatch
+  # Prior evidence from a different load-bearing tree/artifact must not be reused
+  # as covered merely because labels match.
+  def test_b3_identity_mismatch_reuse_prevented
+    res = diff_reused_evidence(
+      current_acceptance: %w[A B C],
+      prior_evidence: %w[A B C],
+      tree_matches: false
+    )
+    assert_empty res[:covered_items]
+    assert_equal %w[A B C], res[:missing_items]
+    assert_equal :identity_mismatch, res[:reason]
+
+    assert_includes PLANNER, 'Prior evidence 來自不同 load-bearing tree/artifact 時（identity mismatch），不得僅因 label 相符就當作 covered 重用。'
+  end
+
+  # C1 — cross-lane locator present
+  # Producer supplies exact locator and READY status.
+  # Consumer proceeds using that locator without broad discovery.
+  def test_c1_cross_lane_ready
+    res = resolve_upstream_locator(
+      locator: 'artifacts/lane-4/upstream_result.json',
+      status: 'READY'
+    )
+    assert_equal 'READY', res[:status]
+    assert_equal 'artifacts/lane-4/upstream_result.json', res[:locator]
+    assert res[:proceed]
+    refute res[:broad_discovery_required]
+
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_LOCATOR'
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_STATUS'
+    assert_includes PLANNER, 'READY | NOT_READY'
+    assert_includes PLANNER, 'consumer 直接依該 locator 存取，不進行廣泛搜尋（broad discovery）'
+  end
+
+  # C2 — cross-lane locator missing
+  # Expected: UPSTREAM_AUTHORITY_NOT_READY and no workspace-wide/worktree-wide reconstruction search.
+  def test_c2_upstream_authority_not_ready
+    res_missing = resolve_upstream_locator(locator: nil, status: 'READY')
+    assert_equal 'UPSTREAM_AUTHORITY_NOT_READY', res_missing[:status]
+    refute res_missing[:proceed]
+    refute res_missing[:broad_discovery_required]
+
+    res_not_ready = resolve_upstream_locator(locator: 'artifacts/lane-4/upstream.json', status: 'NOT_READY')
+    assert_equal 'UPSTREAM_AUTHORITY_NOT_READY', res_not_ready[:status]
+    refute res_not_ready[:proceed]
+    refute res_not_ready[:broad_discovery_required]
+
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_NOT_READY'
+    assert_includes PLANNER, 'Consumer 絕不得藉由廣泛掃描以下路徑自行重構（reconstruct）另一個 lane 的 deliverable'
+    assert_includes PLANNER, 'all worktrees；'
+    assert_includes PLANNER, 'all branches；'
+    assert_includes PLANNER, 'all `.task-data` roots；'
+    assert_includes PLANNER, 'historical scratch directories。'
+  end
+
+  # C3 — missing required input blocks consumer launch (Lane6 regression scenario)
+  # Task requires RECENT, K10, K2/K3/K5.
+  # Packet provides RECENT READY + locator, K10 READY + locator, K2/K3/K5 missing.
+  # Expected: INPUT_COMPLETENESS_CHECK: FAIL, CONSUMER_LAUNCH_READY: NO, MISSING_INPUT: K2_K3_K5_DRAW_LEVEL_EVIDENCE.
+  def test_c3_missing_required_input_blocks_launch
+    required = ['RECENT', 'K10', 'K2_K3_K5_DRAW_LEVEL_EVIDENCE']
+    provided = {
+      'RECENT' => { status: 'READY', locator: 'artifacts/lane6/recent_draws.json' },
+      'K10' => { status: 'READY', locator: 'artifacts/lane6/k10_evidence.json' }
+    }
+
+    res = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided)
+    assert_equal 'FAIL', res[:input_completeness_check]
+    assert_equal 'NO', res[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res[:missing_input]
+
+    # Also test when K2/K3/K5 is present in provided but NOT_READY or locator is MISSING
+    provided_not_ready = provided.merge('K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'NOT_READY', locator: 'artifacts/lane6/k2_k3_k5.json' })
+    res_nr = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided_not_ready)
+    assert_equal 'FAIL', res_nr[:input_completeness_check]
+    assert_equal 'NO', res_nr[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res_nr[:missing_input]
+
+    provided_unknown = provided.merge('K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'UNKNOWN', locator: 'artifacts/lane6/k2_k3_k5.json' })
+    res_unk = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided_unknown)
+    assert_equal 'FAIL', res_unk[:input_completeness_check]
+    assert_equal 'NO', res_unk[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res_unk[:missing_input]
+
+    provided_missing_loc = provided.merge('K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'READY', locator: 'MISSING' })
+    res_ml = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided_missing_loc)
+    assert_equal 'FAIL', res_ml[:input_completeness_check]
+    assert_equal 'NO', res_ml[:consumer_launch_ready]
+    assert_equal 'K2_K3_K5_DRAW_LEVEL_EVIDENCE', res_ml[:missing_input]
+
+    assert_includes PLANNER, 'REQUIRED_INPUTS:'
+    assert_includes PLANNER, 'STATUS:'
+    assert_includes PLANNER, 'READY | NOT_READY | UNKNOWN'
+    assert_includes PLANNER, 'LOCATOR:'
+    assert_includes PLANNER, '<exact | MISSING>'
+    assert_includes PLANNER, 'INPUT_COMPLETENESS_CHECK:'
+    assert_includes PLANNER, 'PASS | FAIL'
+    assert_includes PLANNER, 'CONSUMER_LAUNCH_READY:'
+    assert_includes PLANNER, 'YES | NO'
+    assert_includes PLANNER, 'MISSING_INPUT:'
+    assert_includes PLANNER, 'do not synthesize an executable consumer launch Packet as ready-to-run'
+  end
+
+  # C4 — all required inputs ready with exact locators allows consumer launch
+  # Task requires RECENT, K10, K2/K3/K5. All three READY + exact locator.
+  # Expected: INPUT_COMPLETENESS_CHECK: PASS, CONSUMER_LAUNCH_READY: YES, MISSING_INPUT: nil.
+  def test_c4_all_ready_inputs_allow_launch
+    required = ['RECENT', 'K10', 'K2_K3_K5_DRAW_LEVEL_EVIDENCE']
+    provided = {
+      'RECENT' => { status: 'READY', locator: 'artifacts/lane6/recent_draws.json' },
+      'K10' => { status: 'READY', locator: 'artifacts/lane6/k10_evidence.json' },
+      'K2_K3_K5_DRAW_LEVEL_EVIDENCE' => { status: 'READY', locator: 'artifacts/lane6/k2_k3_k5_draw_level_evidence.json' }
+    }
+
+    res = validate_packet_input_completeness(required_inputs: required, provided_inputs: provided)
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_empty res[:missing_inputs]
+  end
+
+  # C5 — tasks without upstream dependencies remain unburdened
+  # No cross-lane dependency -> no required inputs -> unburdened launch PASS.
+  def test_c5_no_upstream_dependencies_unburdened
+    res_empty = validate_packet_input_completeness(required_inputs: [], provided_inputs: {})
+    assert_equal 'PASS', res_empty[:input_completeness_check]
+    assert_equal 'YES', res_empty[:consumer_launch_ready]
+    assert res_empty[:unburdened]
+    assert_nil res_empty[:missing_input]
+
+    res_nil = validate_packet_input_completeness(required_inputs: nil, provided_inputs: {})
+    assert_equal 'PASS', res_nil[:input_completeness_check]
+    assert_equal 'YES', res_nil[:consumer_launch_ready]
+    assert res_nil[:unburdened]
+
+    assert_includes PLANNER, '無 cross-lane dependency 的一般任務不要求 upstream inputs，維持 unburdened'
+    assert_includes PLANNER, '依賴清單必須直接來自 actual task steps / task-specific authority'
+    assert_includes PLANNER, 'INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES'
+  end
+
+  # D1 — source ref exact + run artifact locator exact -> PASS (Case A)
+  def test_d1_source_and_run_artifact_exact_pass
+    res = resolve_typed_task_authority(
+      canonical_source_authority: 'origin/master',
+      run_artifact_authority_locator: 'artifacts/lane6/k10_evidence.json',
+      upstream_authority_status: 'READY',
+      required_types: [:source, :run_artifact]
+    )
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_empty res[:missing_inputs]
+
+    assert_includes PLANNER, 'CANONICAL_SOURCE_AUTHORITY:'
+    assert_includes PLANNER, '<exact Git/ref authority>'
+    assert_includes PLANNER, 'RUN_ARTIFACT_AUTHORITY_LOCATOR:'
+    assert_includes PLANNER, '<exact literal artifact locator>'
+    assert_includes PLANNER, 'UPSTREAM_AUTHORITY_STATUS:'
+    assert_includes PLANNER, 'READY | NOT_READY'
+    assert_includes PLANNER, 'Do not use the generic phrase "canonical authority" where source vs runtime'
+    assert_includes PLANNER, 'AUTHORITY_TYPING_DISTINGUISHED_IF_DEPENDENT: YES'
+  end
+
+  # D2 — source ref exact but required run artifact locator placeholder -> INPUT_COMPLETENESS_CHECK FAIL (Case B)
+  def test_d2_source_exact_but_run_artifact_placeholder_fails
+    res = resolve_typed_task_authority(
+      canonical_source_authority: 'origin/master',
+      run_artifact_authority_locator: '<exact path>',
+      upstream_authority_status: 'READY',
+      required_types: [:source, :run_artifact]
+    )
+    assert_equal 'FAIL', res[:input_completeness_check]
+    assert_equal 'NO', res[:consumer_launch_ready]
+    assert_equal 'RUN_ARTIFACT_AUTHORITY_LOCATOR', res[:missing_input]
+
+    # Test other placeholder variations
+    ['<exact>', '<exact literal artifact locator>', '<path>'].each do |placeholder|
+      res_ph = resolve_typed_task_authority(
+        canonical_source_authority: 'origin/master',
+        run_artifact_authority_locator: placeholder,
+        upstream_authority_status: 'READY',
+        required_types: [:source, :run_artifact]
+      )
+      assert_equal 'FAIL', res_ph[:input_completeness_check]
+      assert_equal 'NO', res_ph[:consumer_launch_ready]
+      assert_equal 'RUN_ARTIFACT_AUTHORITY_LOCATOR', res_ph[:missing_input]
+    end
+
+    assert_includes PLANNER, 'RUN_ARTIFACT_AUTHORITY_LOCATOR: <exact path>'
+    assert_includes PLANNER, 'executable Packet MUST contain the literal value'
+    assert_includes PLANNER, 'Forbidden executable placeholder'
+    assert_includes PLANNER, 'Do not launch consumer'
+  end
+
+  # D3 — run artifact locator exact but Worker searches Git for artifact -> forbidden by authority typing contract (Case C)
+  def test_d3_run_artifact_exact_worker_git_search_forbidden
+    access = evaluate_authority_access(authority_type: :run_artifact, access_surface: :git)
+    refute access[:allowed]
+    assert_equal 'FORBIDDEN', access[:status]
+    assert_match(/Worker searching Git for runtime artifact is forbidden by authority typing contract/, access[:reason])
+
+    fs_access = evaluate_authority_access(authority_type: :run_artifact, access_surface: :filesystem)
+    assert fs_access[:allowed]
+    assert_equal 'ALLOWED', fs_access[:status]
+
+    assert_includes PLANNER, 'Worker searching Git for runtime artifact is forbidden by authority typing contract'
+    assert_includes PLANNER, '絕不得在 Git 中搜尋 artifact'
+  end
+
+  # D4 — task with source-only dependency -> does not require run artifact locator (Case D)
+  def test_d4_source_only_task_unburdened
+    res = resolve_typed_task_authority(
+      canonical_source_authority: 'origin/master',
+      run_artifact_authority_locator: nil,
+      required_types: [:source]
+    )
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_nil res[:run_artifact_authority_locator]
+
+    assert_includes PLANNER, 'Source-only dependency'
+    assert_includes PLANNER, '不要求 `RUN_ARTIFACT_AUTHORITY_LOCATOR`，維持 unburdened'
+  end
+
+  # D5 — task with runtime-artifact-only dependency -> does not require a fake Git source locator (Case E)
+  def test_d5_artifact_only_task_unburdened
+    res = resolve_typed_task_authority(
+      canonical_source_authority: nil,
+      run_artifact_authority_locator: 'artifacts/lane6/k10_evidence.json',
+      upstream_authority_status: 'READY',
+      required_types: [:run_artifact]
+    )
+    assert_equal 'PASS', res[:input_completeness_check]
+    assert_equal 'YES', res[:consumer_launch_ready]
+    assert_nil res[:missing_input]
+    assert_nil res[:canonical_source_authority]
+
+    assert_includes PLANNER, 'Runtime-artifact-only dependency'
+    assert_includes PLANNER, '不要求捏造假 Git source locator'
+  end
+
+  def test_regression_existing_judge_depth_preserved
+    assert_includes PLANNER, 'JUDGE_DEPTH 不由 Planner 自行猜測。以本輪 acceptance criteria 對照 /fable-method'
+    assert_includes PLANNER, 'references/judge-handoff.md'
+    assert_includes PLANNER, 'JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES'
+  end
+
+  def test_regression_existing_publication_classifier_preserved
+    assert_includes PLANNER, 'PR_PUBLICATION_STATUS: NOT_APPLICABLE | NOT_CREATED | DRAFT_OPEN | READY_OPEN | MERGED | BLOCKED'
+    assert_includes PLANNER, 'FULL_PR_LIFECYCLE_CLOSED: YES | NO'
+  end
+
+  def test_regression_existing_temp_isolation_preserved
+    assert_includes PLANNER, '一般任務不建立未知'
+    assert_includes PLANNER, 'scratch script、tee log、generic /tmp output 或 evidence package'
+  end
+
+  def test_regression_planner_cto_signal_preserved
+    assert_includes PLANNER, 'CTO_REVIEW_NEEDED: YES | NO'
+    assert_includes PLANNER, 'CTO_REVIEW_REASON: <ONE_LOAD_BEARING_REASON | NONE>'
+    assert_includes PLANNER, 'CTO_REVIEW_SCOPE: <MINIMUM_TECHNICAL_DECISION_SCOPE | NOT_APPLICABLE>'
+    assert_includes PLANNER, 'PLANNER_NEXT_ROLE: CTO | WORKER | PLANNER'
+  end
+
+  def test_regression_worktree_reuse_and_project_path_preserved
+    assert_includes PLANNER, '為下一個 Worker 指定一個確定的 repo/worktree path 與 mode。'
+    assert_includes PLANNER, 'WORKTREE_MODE_SELECTED: YES'
+  end
+
+  def test_regression_no_second_governance_authority_created
+    refute_includes PLANNER, 'governance framework'
+    refute_includes PLANNER, 'evidence registry'
+    refute_includes PLANNER, 'cross-lane registry'
+    refute_includes PLANNER, 'path registry'
+    assert_includes PLANNER, 'Do not create conditional profiles, new governance files, unused artifacts or a'
+    assert_includes PLANNER, 'second authority layer.'
+  end
+end
+
+# These checks bind reporting semantics to the actual prompt, not a duplicate
+# Ruby decision model. Whitespace normalization permits harmless line wrapping.
+class PlannerReportingVocabularyTest < Minitest::Test
+  PLANNER = File.read(
+    File.expand_path('../../prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md', __dir__),
+    encoding: 'UTF-8'
+  )
+
+  def test_terminal_locator_distinguishes_external_and_inline_evidence
+    assert_section_contract('### 2.1 Terminal evidence locator', '## 3.',
+      'TERMINAL_EVIDENCE_LOCATOR: <exact locator | NONE>',
+      '依賴外部 load-bearing terminal evidence 時，提供 exact locator。',
+      'fully inline terminal result 且無 external evidence dependency 時，填 NONE。',
+      '無需 external evidence 時，NONE 本身不是 blocker。',
+      '只傳遞必要 locator，不新增 registry、indexer 或 evidence DB。'
+    )
+    assert_section_contract('## 7. Copyable Worker Packet', '## 8.',
+      'TERMINAL_EVIDENCE_LOCATOR: <exact locator | NONE> (apply §2.1).'
+    )
+  end
+
+  def test_terminal_continuation_stops_on_required_stale_or_missing_locator
+    assert_section_contract('### 2.1 Terminal evidence locator', '## 3.',
+      'Continuation 直接消費 exact locator，不進行 broad discovery。',
+      'stale locator 回報 STALE_LOCATOR。若 stale / missing locator 是下一個 ' \
+        'load-bearing decision 所必需，必須停止，不得透過 broad transcript/workspace ' \
+        'search 重構證據。'
+    )
+  end
+
+  def test_candidate_evidence_and_publication_do_not_imply_canonical_coverage
+    assert_section_contract('### 5.4 Verification', '### 5.5',
+      'CANDIDATE_REGRESSION_COVERAGE: <candidate identity + cited evidence + covered/missing checks>',
+      'CANONICAL_REGRESSION_COVERAGE: <canonical identity + cited evidence + covered/missing checks>',
+      'Candidate evidence、publication/containment 與 canonical evidence coverage 必須分開報告。',
+      'PR merged 或 containment 已確認，不會把 candidate test result 自動升格為 canonical coverage。'
+    )
+  end
+
+  def test_canonical_coverage_requires_identity_bound_evidence
+    assert_section_contract('### 5.4 Verification', '### 5.5',
+      '只有 cited evidence 實際覆蓋 load-bearing canonical content identity，才可宣告 ' \
+        'canonical coverage：可用合法的 exact identity reuse，或明確重新驗證該 canonical ' \
+        'content 的 evidence。'
+    )
+  end
+
+  def test_baseline_red_requires_comparable_failure_signatures_and_is_not_pass
+    assert_section_contract('### 5.4 Verification', '### 5.5',
+      'CHECK_STATUS: PASS | FAIL | BASELINE_RED_NO_REGRESSION',
+      'BASELINE_RED_NO_REGRESSION 只適用於 baseline 與 current 均 red、baseline/current ' \
+        'evidence 可比，且沒有新增 failure identity/signature 的情況。',
+      '相同 aggregate error counts 本身不足以證明 no regression；baseline-red check 不得稱為 PASS。'
+    )
+  end
+
+  def test_branch_cleanup_preserves_enum_and_reports_observed_state_without_authorizing_deletion
+    assert_section_contract('## 2. Evidence and state', '### 2.1',
+      'BRANCH_CLEANUP_STATUS: NOT_APPLICABLE | RETAINED_WHILE_PR_OPEN | DELETED | ALREADY_ABSENT | BLOCKED',
+      'open PR + retained branch → RETAINED_WHILE_PR_OPEN；',
+      'merged + cleanup out of scope / not requested → NOT_APPLICABLE；',
+      'successfully deleted → DELETED；',
+      'already absent → ALREADY_ABSENT；',
+      'cleanup required / authorized but unable to complete → BLOCKED。',
+      'Cleanup status never grants deletion authority；刪除仍需既有授權。'
+    )
+    assert_match(/\A# Personal Planner Handoff Prompt — Implementation-First v5\.4 Lean Final$/, PLANNER.lines.first.chomp)
+  end
+
+  private
+
+  def assert_section_contract(heading, next_heading, *snippets)
+    assert_includes PLANNER, heading
+    section = PLANNER.split(heading, 2).last.split(next_heading, 2).first.gsub(/\s+/, ' ')
+    snippets.each do |snippet|
+      assert_includes section, snippet, "#{heading} no longer contains #{snippet.inspect}"
+    end
+  end
+end

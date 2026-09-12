@@ -3,14 +3,19 @@
 ## Contents
 
 - [Packet and authority](#packet-and-authority)
+- [Authorization evidence and conversation boundary](#authorization-evidence-and-conversation-boundary)
 - [Runtime outputs](#runtime-outputs)
+- [Shared workstation resource budget](#shared-workstation-resource-budget)
 - [Attempts and process termination](#attempts-and-process-termination)
 - [Git action tiers](#git-action-tiers)
 - [Worktrees and mutation evidence](#worktrees-and-mutation-evidence)
 - [Continuity](#continuity)
 
 These are conditional details for the shared workflow. They do not broaden a
-Packet or authorize an action that the Packet forbids.
+Packet or authorize an action that the Packet forbids. An explicitly
+forbidden command, path, source, transcript, or evidence class must never be
+used as a fallback because preferred evidence is incomplete. Transcript is
+not an authority fallback by default.
 
 ## Packet and authority
 
@@ -43,6 +48,55 @@ that a branch, ruleset, review, resource, or previous mutation is absent. When
 a repository and ref are pinned, retain repository, exact ref, path, symbol,
 and evidence classification for every load-bearing conclusion.
 
+## Authorization evidence and conversation boundary
+
+A standalone Owner authorization is evidence only where the Worker can
+observe it directly. Distinguish the evidence source explicitly:
+
+```text
+AUTHORIZATION_SOURCE: CURRENT_WORKER_CONVERSATION_USER_MESSAGE
+```
+
+is valid when the exact Owner words are directly observable as a user
+message in this Worker's own conversation, the exact action is covered, the
+exact target is covered, and the authorization has not been superseded. By
+itself,
+
+```text
+AUTHORIZATION_SOURCE: QUOTED_IN_PACKET_OR_HANDOFF
+```
+
+is not valid: a token quoted inside a Packet, handoff report, Planner
+summary, or evidence file may bind or describe scope, but does not
+substitute for the direct Owner message when standalone authorization is
+required — whether the quote originated in an earlier turn, a different
+agent, or the current Planner.
+
+When the Packet and the Worker are not guaranteed to share a conversation,
+the Owner delivers standalone authorization as two separate messages: the
+exact token as its own message into the target Worker conversation first,
+then the Packet. The Packet may still quote the token for scope binding, but
+must state that the quote is not itself the evidence.
+
+When the current Worker conversation already contains the exact direct
+Owner authorization, the requested action stays within that exact scope, and
+every other live gate still passes:
+
+```text
+REDUNDANT_CONFIRMATION_REQUIRED: NO
+```
+
+Proceed rather than asking again merely because the action is high-risk or
+because a Packet also quotes the token. This stops applying the moment scope
+or target changes, a fallback was not authorized, the authorization is
+ambiguous, or the Worker has only ever seen a quoted token rather than a
+direct message. A newly discovered action, target, fallback, or remote
+mutation never inherits a prior authorization; treat it as
+`PENDING: <exact new action> - awaiting your authorization`. One direct
+standalone authorization may still name several exact high-risk actions in
+one envelope (see Git action tiers below) — the conversation boundary governs
+how that envelope must be delivered, not how many actions it may contain.
+
 ## Runtime outputs
 
 Before a test, browser, server, reporter, profile, cache, trace, video,
@@ -68,6 +122,68 @@ SMALLEST_SAFE_NEXT_ACTION:
 
 Cleanup does not retroactively authorize an output. A created-then-deleted
 artifact remains in the write ledger.
+
+## Shared workstation resource budget
+
+This budget applies only to CPU-heavy work; do not artificially limit ordinary
+low-CPU commands. CPU-heavy work includes replay, backtesting, simulation,
+optimization, statistical resampling, batch feature generation,
+multiprocessing/process pools, and CPU-heavy parallel test execution.
+
+```text
+RESOURCE_POLICY:
+SHARED_WORKSTATION
+
+CPU_BOUND_DEFAULT_WORKERS:
+2
+
+CPU_BOUND_MAX_WORKERS_WITHOUT_OWNER_AUTHORIZATION:
+2
+
+AUTO_CPU_SCALING:
+FORBIDDEN
+
+ALL_CORE_EXECUTION:
+FORBIDDEN
+
+WORKSTATION_SATURATION:
+FORBIDDEN
+
+LONGER_RUNTIME_PREFERRED_OVER_SATURATION:
+YES
+```
+
+A Worker may reduce CPU-heavy concurrency from 2 to 1 without authorization.
+It must not raise concurrency above 2 without direct Owner authorization; a
+10-worker request is rejected without that authorization. Do not silently
+increase concurrency.
+
+Never use unrestricted CPU-heavy worker selection such as `--workers auto`,
+`--workers > 2`, `-j auto`, `pytest -n auto`, `os.cpu_count()` worker pools,
+`multiprocessing.cpu_count()` worker pools, `nproc`-derived pools, or duplicate
+concurrent CPU-heavy runs for the same task.
+
+Process-worker limits do not prevent hidden BLAS/OpenMP thread
+oversubscription. Where technically applicable and semantics-preserving,
+constrain:
+
+```text
+OMP_NUM_THREADS=1
+MKL_NUM_THREADS=1
+OPENBLAS_NUM_THREADS=1
+NUMEXPR_NUM_THREADS=1
+```
+
+If more than 2 workers are genuinely required, stop and emit:
+
+```text
+RESOURCE_BUDGET_INCREASE_REQUIRED
+WORKLOAD:
+CURRENT_LIMIT: 2
+REQUESTED_WORKERS:
+WHY_TWO_WORKERS_ARE_INSUFFICIENT:
+SEMANTIC_EFFECT_OF_WORKER_COUNT:
+```
 
 ## Attempts and process termination
 
@@ -115,7 +231,9 @@ DRAFT_PR_AUTHORIZED: YES | NO
 MARK_READY_AUTHORIZED: YES | NO
 MERGE_AUTHORIZED: YES | NO
 LOCAL_INTEGRATION_AUTHORIZED: YES | NO
+LOCAL_WORKTREE_REMOVAL_AUTHORIZED: YES | NO
 LOCAL_BRANCH_DELETE_AUTHORIZED: YES | NO
+FORCE_FALLBACK_AUTHORIZED: YES | NO
 REMOTE_BRANCH_DELETE_AUTHORIZED: YES | NO
 ```
 
@@ -124,6 +242,83 @@ not imply push; push does not imply PR, readiness, merge, or deletion. Report
 unauthorized actions as `PENDING` or `NOT APPLICABLE` and never classify the
 local implementation as failed solely because publication was not authorized.
 
+These tiers stay independently permissioned — local worktree removal, local
+branch normal deletion, an exact force fallback, remote branch deletion, and
+PR mutation are five separate permissions — but one standalone Owner
+authorization may list several of them together in one exact envelope when
+every target, action, expected tip/identity, and fallback precondition in it
+is named explicitly. An action or fallback the envelope does not name stays
+unauthorized, and a newly discovered target is never authorized merely
+because it resembles a named one:
+
+```text
+UNLISTED_ACTION: NOT AUTHORIZED
+UNLISTED_FALLBACK: NOT AUTHORIZED
+NEWLY_DISCOVERED_TARGET: NOT AUTHORIZED
+```
+
+See [Authorization evidence and conversation
+boundary](#authorization-evidence-and-conversation-boundary) above for how
+that one standalone authorization must reach this Worker's own conversation
+before any of these permissions take effect.
+
+`FORCE_FALLBACK_AUTHORIZED: YES` takes effect only for the exact fallback the
+Packet names, and only while every gate below still holds live: the lineage
+or lifecycle verdict it depended on is unchanged, the target's tip is
+unchanged, any successor integration remains reachable, the target is not
+checked out or otherwise in active use, no new commits or task-owned
+dirty/untracked state exist on it, and the primary action's refusal is
+attributable only to expected Git ancestry/semantics rather than an
+unexplained state change. If any gate fails, stop or skip that target instead
+of falling back; a generic cleanup authorization never substitutes for this.
+
+`FORCE_FALLBACK_AUTHORIZED: NO` is the live NON_FORCE Git authorization.
+When it is `NO`, reject every Git force-family operation below. `-f` counts
+only on a `git` argv, not on unrelated tools:
+
+```text
+GIT_FORCE_FAMILY:
+--force
+-f
+--force-with-lease
+--force-if-includes
+```
+
+For a multi-target lifecycle bundle, default to skipping an unsafe or
+drifted target, recording the exact reason, and continuing the remaining
+independently authorized targets, unless the Packet declares the bundle
+atomic. Still stop the entire bundle for a wrong repository, authorization
+ambiguity, canonical authority instability, a shared destructive-scope
+mismatch, or evidence corruption that affects the whole bundle rather than
+one target.
+
+When the Packet marks prior lifecycle or lineage evidence reusable, apply the
+same bounded-check principle as any other pinned locator: verify the evidence
+source and the exact live target identities and gates it names, then act — do
+not rebuild the Planner's lineage analysis, run a generic authority search, or
+redo a full reconciliation. A contradiction invalidates only the affected
+evidence and stops or skips that target.
+
+For publication-bound work, the Final artifact gate's existing changed-path
+authorization requirement resolves at PR-equivalent scope, not commit-local
+scope. Fresh-resolve and freeze the intended canonical publication base and
+the exact candidate head, then compute the changed-path scope as `git diff
+--name-only <canonical-base>...<candidate-head>` (or an equivalent provider
+compare API with the same base/head semantics), and validate that path set
+against the task's authorized publication scope:
+
+```text
+PUBLICATION_SCOPE_AUTHORITY = INTENDED_CANONICAL_BASE ... CANDIDATE_HEAD
+COMMIT_LOCAL_DIFF != INTENDED_PR_DIFF
+```
+
+`COMMIT_LOCAL_DIFF` — candidate-parent → candidate-head — is commit-local
+evidence only and MUST NOT be accepted as proof that the intended PR is
+scope-clean. If canonical-base → candidate-head contains unauthorized
+ancestry paths, stop before push, PR creation, mark-ready, or merge. This
+replaces the prior changed-path interpretation; it is not a second
+publication-scope gate.
+
 ## Worktrees and mutation evidence
 
 Use the exact Packet worktree path. Never create fallback, backup, scratch,
@@ -131,6 +326,15 @@ sibling, or alternate workspaces. For an existing worktree, classify it as
 exact-head, behind remote, stable task-owned dirty, ownership unresolved,
 duplicate-dirty blocked, already released clean baseline, absent, or unsafe.
 Ownership unresolved and unsafe states stop execution.
+
+Writer evidence is scoped, not name-based. Use
+`TaskCheckpoint.scope_qualified_active_writer?` with before/after snapshots of
+the exact branch, HEAD, tree, status, and task-owned paths. Snapshot drift is
+active mutation. With stable snapshots, a process counts only when observed
+target paths overlap the selected worktree or ownership surface; an unrelated
+`pytest`, `python`, or Agent process elsewhere is not
+`ACTIVE_CONCURRENT_MUTATION`. The default quiescence observation is a bounded
+approximately-five-second interval, not a magic constant or a polling loop.
 
 Before each load-bearing mutation, retain:
 
@@ -161,3 +365,6 @@ Include exact repo/branch/HEAD/tree, worktree, dirty/staged paths, active
 processes, pending external mutations, next action/milestone, blockers,
 settled decisions, and unresolved Owner decisions. Continuation never expands
 authorization and never preserves private chain-of-thought.
+
+When persisting durable continuation state across sessions/models, use the
+contract and bounded live reconciliation algorithm in [task-checkpoint](task-checkpoint.md).

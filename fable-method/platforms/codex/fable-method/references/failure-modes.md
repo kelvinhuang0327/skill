@@ -17,12 +17,13 @@ needs diagnosis.
 | 10 | Option dump | No recommendation was made | One recommendation rule |
 | 11 | Scope creep | Drive-by refactors appeared | Exact scope/smallest change |
 | 12 | Silent step dropping | A required item quietly never happened | Written checklist and audit |
-| 13 | Retry thrash | Same fix was tried indefinitely | Three-attempt bound |
+| 13 | Retry thrash | Blind or speculative retries continued without reducing uncertainty | Falsifiable-hypothesis and exhaustion gates |
 | 14 | Verification theater | “Should work” replaced a run | Observed target + surrounding check |
 | 15 | Unauthorized action | Push/deploy/send followed documentation alone | Quoted authorization |
 | 16 | Dropped follow-up | Required deploy/restart was omitted from report | `PENDING` caveat |
 | 17 | Missed twins | One defect site was fixed without a sweep | `TWINS` search |
 | 18 | Costume rigor | Thorough-looking claims had no evidence | Fit gate and runnable checks |
+| 19 | Non-authoritative signal | A stale, cached, or wrong-scope source was trusted as current/ground truth | Authority-source check |
 
 Skipped steps create the corresponding risk. A claimed-but-unobserved step is
 verification theater, not a pass.

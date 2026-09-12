@@ -88,9 +88,13 @@ flowchart TD
     B -->|no| LADDER
     B -->|yes| TWIN["If defect fixed, search exact wrong construct"]
     TWIN --> REPORT["Report evidence and ledger"]
-    LADDER --> RETRY{"Evidence-backed attempts < 3?"}
-    RETRY -->|yes| FIX["Falsifiable correction and real rerun"]
-    RETRY -->|no| STOP["BLOCKED_AFTER_THREE_EVIDENCE_BACKED_ATTEMPTS"]
+    LADDER --> PROGRESS{"Next step tests a hypothesis<br/>and reduces uncertainty?"}
+    PROGRESS -->|yes| STEP["Test hypothesis; gather evidence or correct"]
+    STEP --> RUN
+    PROGRESS -->|no| EXHAUST{"Scope/safety/authority/capability/<br/>proportionality/evidence exhausted?"}
+    EXHAUST -->|yes| STOP["BLOCKED; report exhausted gate"]
+    EXHAUST -->|no| DISC["Gather discriminating evidence"]
+    DISC --> PROGRESS
     REPORT --> GATE{"Judge gate?"}
     GATE -->|no| HANDOFF["Worker handoff"]
     GATE -->|yes| DEPTH["BOUNDED / FULL / DELTA fresh Judge"]

@@ -1,0 +1,11 @@
+# TSD keeps zero Word binaries under Git authority.
+# The base template is an operator-supplied local build input, passed to
+# tools/materialize_runtime.py via --base-template. Generated TSD output is
+# never source. These rules exist to stop an accidental broad `git add`.
+assets/*.docx
+
+# Local, non-canonical working artifacts.
+examples/
+scripts/
+*_UPDATE_REPORT*.md
+*_SELF_CHECK*.md
