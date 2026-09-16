@@ -51,6 +51,12 @@ case "${{FAKE_MODE:-valid}}" in
   ordered)
     printf '%s\\n' '{{"sequence":1}}' '{{"sequence":2}}' '{{"sequence":3}}'
     ;;
+  surfaces-complete)
+    printf '%s\\n' '{{"type":"system","subtype":"init","skills":["reference-skill"],"output_style":"default","hooks":[],"agents_md":[],"user_rules":[],"instruction_sources":["cli-default"]}}'
+    ;;
+  surfaces-ambiguous)
+    printf '%s\\n' '{{"type":"system","subtype":"init","skills":["reference-skill"],"output_style":"default","outputStyle":"default","hooks":[],"agents_md":[],"user_rules":[],"instruction_sources":["cli-default"]}}'
+    ;;
   malformed)
     printf '%s\\n' '{{"sequence":1}}' '{{not-json}}'
     ;;
@@ -289,6 +295,80 @@ class ClaudeExecutorOfflineTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(result[0]["subtype"], "init")
         self.assertTrue(all(call[0] != REAL_PROVIDER for call in calls))
+
+    def test_11_provider_identity_binds_executable_and_observed_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+
+            result = claude_executor.ClaudeExecutor(str(provider))(invocation)
+
+            self.assertEqual(result.provider_identity, f"{provider}@{REQUIRED_VERSION}")
+
+    def test_12_provider_identity_is_stable_across_off_and_on_arms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            executor = claude_executor.ClaudeExecutor(str(provider))
+            off_invocation = make_invocation(provider, root, prompt="off arm prompt")
+            on_invocation = make_invocation(provider, root, prompt="on arm prompt")
+
+            off_result = executor(off_invocation)
+            on_result = executor(on_invocation)
+
+            self.assertEqual(off_result.provider_identity, on_result.provider_identity)
+
+    def test_13_instruction_surface_evidence_resolves_all_five_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(
+                provider, root, environment={"FAKE_MODE": "surfaces-complete"}
+            )
+
+            result = claude_executor.ClaudeExecutor(str(provider))(invocation)
+            evidence = claude_executor.instruction_surface_evidence(result)
+
+            self.assertTrue(
+                evidence.instruction_surfaces_resolved, evidence.instruction_surface_errors
+            )
+            self.assertEqual(set(evidence.instruction_surfaces), set(runner.INSTRUCTION_SURFACES))
+
+    def test_14_instruction_surface_evidence_fails_closed_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            # Default "valid" mode emits a bare init event with no instruction
+            # surfaces at all -- exactly the donor bug shape this must reject.
+            invocation = make_invocation(provider, root)
+
+            result = claude_executor.ClaudeExecutor(str(provider))(invocation)
+            evidence = claude_executor.instruction_surface_evidence(result)
+
+            self.assertFalse(evidence.instruction_surfaces_resolved)
+            self.assertEqual(
+                len(evidence.instruction_surface_errors), len(runner.INSTRUCTION_SURFACES)
+            )
+
+    def test_15_instruction_surface_evidence_rejects_ambiguous_alias_even_when_equal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(
+                provider, root, environment={"FAKE_MODE": "surfaces-ambiguous"}
+            )
+
+            result = claude_executor.ClaudeExecutor(str(provider))(invocation)
+            evidence = claude_executor.instruction_surface_evidence(result)
+
+            self.assertFalse(evidence.instruction_surfaces_resolved)
+            self.assertIn(
+                "ambiguous_instruction_surface_alias:output_style",
+                evidence.instruction_surface_errors,
+            )
 
 
 if __name__ == "__main__":

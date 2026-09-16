@@ -14,7 +14,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from runner import ModelInvocation
+import runner
+from runner import InitEvidence, ModelInvocation
 
 
 PROVIDER_EXECUTABLE = "/Users/kelvin/.local/bin/claude"
@@ -94,6 +95,11 @@ class ClaudeExecutionResult(Sequence[Mapping[str, Any]]):
     events: tuple[Mapping[str, Any], ...]
     stdout: bytes
     stderr: bytes
+    # Bound to the exact executable path and the version observed by this
+    # call's own preflight check (never a caller-supplied label), so the
+    # runner-owned cross-provider gate can confirm this provider's identity
+    # did not silently drift between its OFF and ON arms.
+    provider_identity: str
     returncode: int = 0
 
     def __iter__(self) -> Iterator[Mapping[str, Any]]:
@@ -267,7 +273,7 @@ class ClaudeExecutor:
                 "ModelInvocation environment must contain only strings"
             )
 
-        self.verify_provider_version()
+        observed_version = self.verify_provider_version()
         try:
             completed = subprocess.run(
                 invocation.argv,
@@ -301,8 +307,23 @@ class ClaudeExecutor:
             events=events,
             stdout=completed.stdout,
             stderr=completed.stderr,
+            provider_identity=f"{self.provider_executable}@{observed_version}",
             returncode=completed.returncode,
         )
+
+
+def instruction_surface_evidence(result: ClaudeExecutionResult) -> InitEvidence:
+    """Extract this Claude run's required instruction-surface evidence.
+
+    A thin, Claude-specific convenience over the provider-neutral decoder:
+    all alias resolution, content binding, and fail-closed semantics live in
+    ``runner.parse_init_events`` so there is exactly one place that decides
+    what counts as a resolved surface.  This function makes no pass/fail
+    judgement of its own -- it only exposes evidence for the runner-owned
+    gate to compare.
+    """
+
+    return runner.parse_init_events(list(result))
 
 
 __all__ = [
@@ -315,4 +336,5 @@ __all__ = [
     "ProviderProcessError",
     "ProviderVersionError",
     "REQUIRED_PROVIDER_VERSION",
+    "instruction_surface_evidence",
 ]
