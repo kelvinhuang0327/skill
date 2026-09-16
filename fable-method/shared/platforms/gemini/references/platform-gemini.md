@@ -122,11 +122,13 @@ decision rather than silently selecting one.
 
 ## Owner authorization and Git action gates
 
-A first non-empty line of the form Owner Authorization: TOKEN is valid embedded
-single-prompt authorization unless the Packet declares a higher-risk standalone
-requirement. Owner authorization and platform or harness permission are
-different. A harness permission failure is unresolved and must not be bypassed
-with a weaker command or alternate lifecycle path.
+A direct Owner authorization in the target Worker user message is valid even
+when embedded in the same message as the Worker Packet; a separate
+authorization-only message is not required. The Packet may still declare a
+higher-risk exact scope or target requirement. Owner authorization and
+platform or harness permission are different. A harness permission failure is
+unresolved and must not be bypassed with a weaker command or alternate
+lifecycle path.
 
 When an already-authorized action is blocked by an interactive permission gate, report:
 

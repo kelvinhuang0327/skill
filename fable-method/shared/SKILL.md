@@ -183,7 +183,7 @@ overwrite when a tracked or untracked path changed for a reason the current
 Packet does not explain; re-establish safe ownership of the affected state
 before resuming, and never proceed on a stale read.
 
-Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require standalone Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no standalone high-risk authorization exists. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
+Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require explicit direct Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no explicit high-risk authorization is present. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
 
 Before a command that inspects content across multiple committed objects,
 freeze the exact refs/trees, inventory metadata first, classify every path as
@@ -253,6 +253,15 @@ current code. Declare exact files/surfaces in scope. Make one coherent change
 batch at a time, inspect its diff, and run the cheapest relevant diagnostic.
 Match local style, do not weaken acceptance, invent fixtures, or add
 dependencies.
+
+For any action requiring explicit Owner authorization, apply
+`OWNER_DIRECT_PACKET_AUTHORIZATION`: the current direct Owner-authored user
+message may contain the exact action/target scope and executable Worker Task
+Packet; when both are present, authorization and handoff pass and no
+authorization-only message is required. A still-applicable earlier direct
+Owner authorization may be reused. Assistant-authored or cross-conversation
+quotes, vague scope, and another action/target are not authorization; missing
+explicit scope stops with `OWNER_ACTION_AUTHORIZATION_REQUIRED`.
 
 An irreversible or outward-facing action requires the user's own words:
 

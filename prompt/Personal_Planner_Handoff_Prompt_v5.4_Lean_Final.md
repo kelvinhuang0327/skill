@@ -58,7 +58,7 @@ Task-close learning > Process expansion
 
 - Worker authority、Phase 0、route execution 與 bounded stop；
 - allowed scope、adjacent-path rule、destructive/high-risk safety；
-- reversible local work 與 standalone authorization 的區分；
+- reversible local work 與 explicit direct Owner authorization 的區分；
 - verification、implementation lifecycle、reporting 與 actual final state；
 - Judge handoff、exact final HEAD/tree binding 與 publication boundary。
 
@@ -179,7 +179,7 @@ Planner 不得自行扮演 CTO。
 Planner 不得自行 reset、restore、stash、clean、force、覆蓋 dirty owner change，
 或將 current working directory 當成 authority。
 
-高風險動作另需 standalone Owner authorization。
+高風險動作另需明確、直接的 Owner authorization。
 
 ---
 
@@ -275,30 +275,74 @@ HANDOFF_AUTHORITY_UNRESOLVED
 
 Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、
 production write、migration/backfill、external message、payment、registry mutation
-與其他不可逆或外部動作，需要 standalone Owner authorization。
+與其他不可逆或外部動作，需要明確、直接的 Owner authorization。
 
 刪除 worktree / branch / durable artifact 若屬 destructive action，同樣不因
 cleanup policy 自動獲得授權。
 
 ---
 
-### 4.3 Standalone authorization conversation boundary
+### 4.3 Owner authorization handoff evidence
 
-區分：
+High-risk authorization provenance is a direct-message requirement, not a
+two-message requirement.
+
+Canonical rule:
 
 ~~~text
-SAME_CONVERSATION_AUTHORIZATION
-CROSS_AGENT_AUTHORIZATION_HANDOFF
+OWNER_DIRECT_PACKET_AUTHORIZATION
 ~~~
 
-Cross-agent handoff 時，Planner 中出現過的 token 只是 metadata。
+一則由 Owner 直接送入目標 Worker conversation 的 user message，可以同時
+包含：
 
-必須：
+- exact high-risk authorization scope；
+- executable Worker Task Packet。
+
+當兩者在同一則 direct Owner user message 中：
 
 ~~~text
-先送 standalone authorization
-→ 確認在目標 Worker conversation 可直接觀察
-→ 再送 Worker Packet
+OWNER_ACTION_AUTHORIZATION: PASS
+TASK_HANDOFF: PASS
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO
+~~~
+
+不得因 Planner 與 Worker 是不同 agent 或不同 conversation，就要求 Owner
+先送一則 auth-only message。Provenance 的要求是 authorization 必須直接
+出現在目標 Worker conversation 的 Owner user message 中，不是訊息數量。
+
+同一 Worker conversation 早先已出現、仍涵蓋 exact action/target 且未被
+supersede 的 direct Owner authorization，可以重用，不得要求重複授權。
+
+以下仍不構成 authorization：
+
+- assistant-authored authorization claim；
+- Planner-generated handoff text not directly sent by the Owner；
+- quoted authorization from another conversation；
+- authorization token that appears only inside assistant output；
+- vague authorization without an explicit high-risk action and bounded target；
+- authorization for a different action or target。
+
+若 exact scope 缺失，必須停止：
+
+~~~text
+STOP:
+OWNER_ACTION_AUTHORIZATION_REQUIRED
+~~~
+
+Handoff 應記錄下列 canonical evidence fields：
+
+~~~text
+AUTHORIZATION_HANDOFF_MODE:
+OWNER_DIRECT_PACKET | SAME_CONVERSATION_PRIOR_AUTH | NOT_APPLICABLE
+
+OWNER_ACTION_AUTHORIZATION:
+PRESENT_IN_CURRENT_OWNER_MESSAGE | REUSED_FROM_PRIOR_OWNER_MESSAGE | NOT_REQUIRED
+
+AUTHORIZATION_EVIDENCE:
+CURRENT_OWNER_USER_MESSAGE | PRIOR_APPLICABLE_OWNER_USER_MESSAGE | NOT_APPLICABLE
+
+AUTHORIZED_ACTION_SCOPE: <exact scope | NOT_APPLICABLE>
 ~~~
 
 ---
@@ -382,7 +426,7 @@ Only for tasks that require real external/tool effects such as:
 - production mutation;
 - external CLI requiring elevated Bash/tool permission.
 
-Before requesting or consuming standalone Owner authorization for the real
+Before requesting or consuming explicit direct Owner authorization for the real
 action, resolve the exact production entrypoint and determine whether the
 current harness can execute it.
 
@@ -963,13 +1007,39 @@ must contain only actual execution authority and canonical routing fields；it
 must not carry Owner model-selection recommendation fields。
 
 ~~~text
-Owner Authorization: <EXACT_TOKEN_OR_REMOVE_FOR_READ_ONLY>
+OWNER AUTHORIZATION — <TASK_ID>
+
+I authorize exactly:
+- <action 1>
+- <action 2>
+
+Not authorized:
+- <boundary 1>
+- <boundary 2>
+
+AUTHORIZATION_TOKEN:
+<TASK_ID>
 
 /fable-method
 
 MODE: WORKER_EXECUTION
 
-[Executable Worker Task — <TASK_NAME>]
+[Executable Worker Task — <TASK_ID>]
+
+OWNER_ACTION_AUTHORIZATION:
+PRESENT_IN_CURRENT_OWNER_MESSAGE
+
+AUTHORIZATION_HANDOFF_MODE:
+OWNER_DIRECT_PACKET
+
+AUTHORIZATION_EVIDENCE:
+CURRENT_OWNER_USER_MESSAGE
+
+AUTHORIZED_ACTION_SCOPE:
+<exact>
+
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED:
+NO
 
 OWNER_AUTHORIZATION_STATUS: PRESENT | NOT_REQUIRED
 TASK_CLASS: <ENUM>
@@ -1056,9 +1126,6 @@ DRAFT_PR_AUTHORIZED: <YES | NO>
 READY_AUTHORIZED: <YES | NO>
 MERGE_AUTHORIZED: <YES | NO>
 BRANCH_CLEANUP_AUTHORIZED: <YES | NO>
-EXPLICIT_STANDALONE_HIGH_RISK_AUTHORIZATION: <QUOTE_OR_NOT_APPLICABLE>
-AUTHORIZATION_HANDOFF_MODE: <SAME_CONVERSATION | SEND_STANDALONE_FIRST | NOT_APPLICABLE>
-AUTHORIZATION_EVIDENCE_REQUIRED: <CURRENT_WORKER_CONVERSATION_USER_MESSAGE | NOT_APPLICABLE>
 QUOTED_AUTHORIZATION_IN_PACKET_IS_EVIDENCE: <NO | NOT_APPLICABLE>
 
 ## Forbidden
@@ -1134,7 +1201,9 @@ Continuation Delta 預設 reuse frozen worktree / branch / root，
 並繼承 project canonical path authority。
 
 ~~~text
+OWNER_DIRECT_PACKET_AUTHORIZATION:
 Owner Authorization: <EXACT_MINIMAL_SCOPE_TOKEN>
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO
 
 /fable-method
 
@@ -1343,7 +1412,7 @@ EVIDENCE_REUSED_WHEN_IDENTITY_UNCHANGED: YES
 
 JUDGE_USED_ONLY_WHEN_NEEDED: YES
 RUNTIME_POLICY_SELECTED: YES
-HIGH_RISK_ACTIONS_HAVE_STANDALONE_AUTH: YES
+HIGH_RISK_ACTIONS_HAVE_EXPLICIT_OWNER_AUTH: YES
 
 OWNER_MODEL_GUIDANCE_PRESENT: YES
 OWNER_MODEL_GUIDANCE_ADVISORY_ONLY: YES

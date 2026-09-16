@@ -40,9 +40,11 @@ terminal state, not just the local ones.
 
 Run one bounded closure preflight to confirm the supersession still holds,
 then expose every remaining surface — worktree, local branch, remote branch —
-in one Lifecycle closure bundle. Wait for one standalone Owner authorization
-that names the exact worktree removal, the exact normal local delete, an
-exact force fallback with its gates, and the exact remote delete. Re-check
+in one Lifecycle closure bundle. Obtain one direct Owner authorization that
+names the exact worktree removal, the exact normal local delete, an exact
+force fallback with its gates, and the exact remote delete. That authorization
+may be in the same direct Owner user message as the executable Worker Packet.
+Re-check
 target identities, try the normal local delete first, and only use the force
 fallback if it refuses solely because of cherry-pick ancestry and every
 fallback gate still passes. If one target has drifted, skip it and continue
@@ -56,16 +58,19 @@ authorization never covers either one.
 
 ## 6. Authorization conversation boundary
 
-A Planner conversation records the Owner's standalone authorization, then
-hands a Worker Packet to a separate Worker conversation that only quotes the
-token. That quote is metadata, not evidence: the Worker has not observed the
-Owner say it, so it holds the high-risk step and asks the Owner to send the
-authorization directly into this conversation first. Once the Owner pastes
-that same standalone authorization as its own message here, then sends the
-Packet, the Worker checks the message against the exact action and target,
-treats it as valid evidence, and proceeds without asking a third time. Had
-Owner and Worker shared one conversation from the start, that same direct
-message would already have been sufficient — no separate handoff needed. In
-every case, an action outside the authorized envelope — an unlisted remote
-deletion, say — stays `PENDING` regardless of how the original authorization
-arrived.
+The Owner may send exactly one direct user message into the target Worker
+conversation containing both the explicit exact authorization scope and the
+executable Worker Packet. That one message is sufficient evidence and task
+handoff:
+
+```text
+OWNER_ACTION_AUTHORIZATION: PASS
+TASK_HANDOFF: PASS
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO
+```
+
+An earlier direct Owner authorization in the same Worker conversation may be
+reused while its exact action and target scope remain applicable. A Planner
+summary, assistant-authored claim, or quote from another conversation is
+metadata rather than authorization. In every case, an action outside the
+authorized envelope — an unlisted remote deletion, say — stays `PENDING`.

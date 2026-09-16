@@ -50,7 +50,7 @@ minimal load-bearing fields:
   "task_lifecycle_state": "IN_PROGRESS | BLOCKED | COMPLETED | ABORTED",
   "current_blocker": "<EXACT_BLOCKER_OR_NULL>",
   "next_action": "<EXACT_NEXT_ACTION>",
-  "authorization_boundary": "NONE | CURRENT_WORKER_CONVERSATION_STANDALONE_AUTH_REQUIRED | ...",
+  "authorization_boundary": "NONE | CURRENT_WORKER_CONVERSATION_OWNER_AUTH_REQUIRED | ...",
   "pr_state": "NONE | DRAFT_OPEN | READY_OPEN | MERGED | CLOSED | NULL",
   "pr_number": "<NUMBER_OR_NULL>",
   "pr_url": "<URL_OR_NULL>",
@@ -227,7 +227,7 @@ When a new Agent or session begins execution:
    - *Material conflict*: Conflicting modifications detected in task-owned files ->
      verdict is `STOP_UNRESOLVED` with exact conflicting paths and reasons.
 5. **Authorization boundary check**:
-   - If `next_action` requires standalone Owner authorization (e.g. merge, push,
+   - If `next_action` requires explicit Owner authorization (e.g. merge, push,
      deployment), inspect the current Worker conversation.
    - If direct user authorization is absent in the *current* conversation ->
      verdict is `AUTHORIZATION_REQUIRED`. Quoted tokens in the checkpoint or
@@ -253,7 +253,7 @@ The reconciliation mechanism emits exactly one verdict and a concise reason:
 | `CONTINUE` | Live state matches checkpoint or RCA blocker; proceed with `next_action`. |
 | `ALREADY_COMPLETED` | Task or next action has already been completed externally or merged. |
 | `RECONCILE_LIVE_STATE` | Live state advanced compatibly; update checkpoint to live state and continue. |
-| `AUTHORIZATION_REQUIRED` | Next action requires standalone Owner authorization in the current conversation. |
+| `AUTHORIZATION_REQUIRED` | Next action requires explicit Owner authorization in the current conversation. |
 | `STOP_UNRESOLVED` | Incompatible state, material conflict, or safety violation prevents continuation. |
 
 Each verdict must include `REASON: <concise explanation>` and `RECOMMENDED_ACTION: <step>`.
@@ -269,14 +269,19 @@ verdict or lifecycle enum:
 A checkpoint preserves known authorization boundaries and tokens for reference,
 but **authorization does not transfer across conversation boundaries**.
 
-- `AUTHORIZATION_BOUNDARY: CURRENT_WORKER_CONVERSATION_STANDALONE_AUTH_REQUIRED`
-- A new Worker session without direct standalone authorization in its own
+- `AUTHORIZATION_BOUNDARY: CURRENT_WORKER_CONVERSATION_OWNER_AUTH_REQUIRED`
+- A new Worker session without direct Owner authorization in its own
   conversation must emit `AUTHORIZATION_REQUIRED` rather than performing
   high-risk actions.
+- The current direct Owner user message may contain both the exact
+  authorization and the executable Worker Packet; an authorization-only
+  message is not required.
+- A still-applicable direct Owner authorization already present earlier in this
+  Worker conversation may be reused.
 - Quoted authorization strings inside the checkpoint or packet serve as scope
   specifications, not live execution permission.
 - A durable Task B Packet proves which task is authorized; it does not transfer
-  any standalone high-risk authorization into a fresh conversation.
+  any high-risk authorization into a fresh conversation.
 
 ## Terminal closure and archiving
 
