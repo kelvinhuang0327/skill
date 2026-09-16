@@ -134,6 +134,38 @@ class TaskCheckpointTest < Minitest::Test
     TEXT
   end
 
+  def multi_action_owner_authorization_token
+    <<~TEXT
+      OWNER AUTHORIZATION — TEST_TASK_001
+
+      I authorize exactly:
+      - ACTION=CLOSE_PR; TARGET=kelvinhuang0327/skill#46
+      - ACTION=MERGE_PR; TARGET=kelvinhuang0327/skill#48
+
+      Not authorized:
+      - PUSH
+
+      AUTHORIZATION_TOKEN:
+      TEST_TASK_001
+
+      OWNER_ACTION_AUTHORIZATION:
+      PRESENT_IN_CURRENT_OWNER_MESSAGE
+
+      AUTHORIZATION_HANDOFF_MODE:
+      OWNER_DIRECT_PACKET
+
+      AUTHORIZATION_EVIDENCE:
+      CURRENT_OWNER_USER_MESSAGE
+
+      AUTHORIZED_ACTION_SCOPE:
+      ACTION=CLOSE_PR; TARGET=kelvinhuang0327/skill#46
+      ACTION=MERGE_PR; TARGET=kelvinhuang0327/skill#48
+
+      SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED:
+      NO
+    TEXT
+  end
+
   def test_sync_guard_rejects_fake_git_from_caller_path
     source_fable_root = File.expand_path('..', __dir__)
     copied_repository = File.join(@tmpdir, 'copied-repository')
@@ -798,6 +830,48 @@ class TaskCheckpointTest < Minitest::Test
       authorization_boundary: 'NONE'
     ))
     result = TaskReconciler.new(ordinary, live_reconciliation_options).reconcile
+    assert_equal 'CONTINUE', result.verdict
+  end
+
+  def test_owner_authorization_binds_each_action_to_its_exact_target
+    token = multi_action_owner_authorization_token
+    cases = [
+      ['CLOSE_PR', 'kelvinhuang0327/skill#46', 'CONTINUE'],
+      ['MERGE_PR', 'kelvinhuang0327/skill#48', 'CONTINUE'],
+      ['MERGE_PR', 'kelvinhuang0327/skill#46', 'AUTHORIZATION_REQUIRED']
+    ]
+
+    observed = cases.to_h do |action, target, _expected|
+      checkpoint = TaskCheckpoint.new(@valid_attrs.merge(
+        next_action: action,
+        authorization_boundary: 'CURRENT_WORKER_CONVERSATION_OWNER_AUTH_REQUIRED'
+      ))
+      result = TaskReconciler.new(checkpoint, live_reconciliation_options(
+        conversation_authorizations: [token],
+        authorization_target: target
+      )).reconcile
+      ["#{action} + #{target}", result.verdict]
+    end
+
+    assert_equal({
+      'CLOSE_PR + kelvinhuang0327/skill#46' => 'CONTINUE',
+      'MERGE_PR + kelvinhuang0327/skill#48' => 'CONTINUE',
+      'MERGE_PR + kelvinhuang0327/skill#46' => 'AUTHORIZATION_REQUIRED'
+    }, observed)
+  end
+
+  def test_owner_authorization_allows_exact_target_containing_planner
+    target = 'agent/planner-fable-owner-auth-clean-successor-r1'
+    checkpoint = TaskCheckpoint.new(@valid_attrs.merge(
+      next_action: 'MERGE_PR',
+      authorization_boundary: 'CURRENT_WORKER_CONVERSATION_OWNER_AUTH_REQUIRED'
+    ))
+
+    result = TaskReconciler.new(checkpoint, live_reconciliation_options(
+      conversation_authorizations: [direct_owner_authorization_token(action: 'MERGE_PR', target: target)],
+      authorization_target: target
+    )).reconcile
+
     assert_equal 'CONTINUE', result.verdict
   end
 
