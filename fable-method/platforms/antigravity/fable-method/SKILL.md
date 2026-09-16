@@ -443,7 +443,7 @@ Load only the directly relevant reference:
 - [examples](references/examples.md) for a task shape, Packet fast path, or
   report format;
 - [failure modes](references/failure-modes.md) for audit, retry diagnosis, or unclear verification failure;
-- [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, or detailed authority checks;
+- [operational gates](references/operational-gates.md) for exact-pinned live-activation handoffs, runtime outputs, Git, worktrees, or authority checks;
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [memory boundary](references/memory-boundary.md) before reading project memory as authority or creating/modifying any memory, handoff, or checkpoint file, and [workspace containment](references/workspace-containment.md) before creating a worktree, clone, or sibling workspace directory;

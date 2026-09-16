@@ -46,7 +46,10 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge-only source change generates')
   check.call(method_before == digest.call('fable-method'), 'Judge-only operation leaves Method unchanged')
   judge_changed = digest.call('fable-judge')
-  File.open(File.join(tmp, 'fable-method/shared/SKILL.md'), 'a') { |f| f.write("\nMethod fixture change.\n") }
+  method_source = File.join(tmp, 'fable-method/shared/SKILL.md')
+  method_content = File.read(method_source)
+  method_content.sub!('# The Fable Method', '# The Fable Method fixture') || raise('Method fixture marker missing')
+  File.write(method_source, method_content)
   check.call(run.call('--write', '--skill', 'fable-method')[0], 'Method-only source change generates')
   check.call(judge_changed == digest.call('fable-judge'), 'Method-only change leaves Judge body unchanged')
   projection = File.join(tmp, 'fable-method/shared/references/judge-handoff.md')
