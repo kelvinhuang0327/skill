@@ -466,6 +466,50 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('SKILL.md', 'Authority and Packet fast path', clauses, weakenings)
   end
 
+  def test_canonical_destructive_action_provenance_contract
+    clauses = [
+      'When a Worker actually performs a destructive filesystem / durable-resource removal authorized by its Packet, terminal handoff must report the destructive action provenance.',
+      'DESTRUCTIVE_ACTION_OCCURRED: YES',
+      'DESTRUCTIVE_TARGET: <exact target or compact exact target set>',
+      'DESTRUCTIVE_TARGET_PRESTATE: <exact observed state>',
+      'DESTRUCTIVE_ACTION: <exact primitive/action>',
+      'DESTRUCTIVE_ACTION_AT: <timestamp>',
+      'DESTRUCTIVE_ACTION_AUTHORIZATION_SOURCE: <existing authorization evidence vocabulary>',
+      'DESTRUCTIVE_ACTION_TASK_OR_RUN_ID: <exact current task/run identity if naturally available>',
+      'DESTRUCTIVE_TARGET_POSTSTATE: <exact observed state>',
+      '`DESTRUCTIVE_ACTION_AUTHORIZATION_SOURCE` reuses the existing authorization evidence vocabulary; it does not define a second authority model.',
+      'DESTRUCTIVE_ACTION_OCCURRED: NO',
+      'Do not require the detailed YES-only fields for ordinary non-destructive tasks.',
+      'A target observed as `ALREADY_ABSENT` means the current Worker did not need to perform deletion; it must not be reported as evidence that this Worker executed a destructive action.',
+      'A later observer may report current absence, but must not infer who deleted the target without provenance evidence.',
+      'This is reporting provenance only; it never authorizes a destructive action, and authorization remains governed by [operational gates](operational-gates.md) and the existing authorization evidence vocabulary.',
+      'This contract does not require a new persistent receipt/evidence framework, registry, evidence database, receipt file, ledger service, or runtime storage.',
+      'Do not require an extra command solely for reporting when the Worker naturally knows the information from the action it just performed.'
+    ]
+    weakenings = {
+      'actually performs a destructive filesystem / durable-resource removal' => 'observes a target',
+      'DESTRUCTIVE_ACTION_OCCURRED: YES' => 'DESTRUCTIVE_ACTION_OCCURRED: NO',
+      'DESTRUCTIVE_TARGET: <exact target or compact exact target set>' => 'DESTRUCTIVE_TARGET: <target>',
+      'DESTRUCTIVE_TARGET_PRESTATE: <exact observed state>' => 'DESTRUCTIVE_TARGET_PRESTATE: <inferred state>',
+      'DESTRUCTIVE_ACTION: <exact primitive/action>' => 'DESTRUCTIVE_ACTION: <unspecified action>',
+      'DESTRUCTIVE_ACTION_AT: <timestamp>' => 'DESTRUCTIVE_ACTION_AT: <omitted>',
+      'DESTRUCTIVE_ACTION_AUTHORIZATION_SOURCE: <existing authorization evidence vocabulary>' => 'DESTRUCTIVE_ACTION_AUTHORIZATION_SOURCE: <new authorization vocabulary>',
+      'DESTRUCTIVE_ACTION_TASK_OR_RUN_ID: <exact current task/run identity if naturally available>' => 'DESTRUCTIVE_ACTION_TASK_OR_RUN_ID: <omitted>',
+      'DESTRUCTIVE_TARGET_POSTSTATE: <exact observed state>' => 'DESTRUCTIVE_TARGET_POSTSTATE: <inferred state>',
+      'reuses the existing authorization evidence vocabulary' => 'invents a new authorization evidence vocabulary',
+      'DESTRUCTIVE_ACTION_OCCURRED: NO' => 'DESTRUCTIVE_ACTION_OCCURRED: YES',
+      'Do not require the detailed YES-only fields for ordinary non-destructive tasks.' => 'Require the detailed YES-only fields for ordinary non-destructive tasks.',
+      'means the current Worker did not need to perform deletion; it must not be reported as evidence that this Worker executed a destructive action.' => 'means this Worker executed a destructive action.',
+      'must not infer who deleted the target without provenance evidence.' => 'may infer who deleted the target from current absence.',
+      'never authorizes a destructive action' => 'authorizes a destructive action',
+      'does not require a new persistent receipt/evidence framework' => 'requires a new persistent receipt/evidence framework',
+      'Do not require an extra command solely for reporting' => 'Require an extra command solely for reporting'
+    }
+    assert_canonical_contract_controls(
+      'references/reporting.md', 'Destructive action provenance', clauses, weakenings
+    )
+  end
+
   def test_canonical_large_structured_output_transport_contract
     clauses = [
       'For large structured command or tool output used as load-bearing authority: capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface;',
