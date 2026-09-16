@@ -1,0 +1,19 @@
+;; Runtime file-write policy for one opaque Fable ablation session.
+;;
+;; The global file-write denial covers generic temporary directories
+;; (/tmp, /private/tmp, /var/folders), real Claude/Codex/Gemini user state,
+;; historical R1/R2 roots, manifests, run evidence, ledgers, aggregates,
+;; canonical repositories, and sibling session roots.  Only the current
+;; independently-random SESSION_ROOT and /dev/null are path-based exceptions.
+;; Writes to already-inherited pipes remain governed by their descriptors.
+
+(version 1)
+(allow default)
+
+(deny file-write*)
+
+(allow file-write*
+    (subpath (param "SESSION_ROOT")))
+
+(allow file-write*
+    (literal "/dev/null"))
