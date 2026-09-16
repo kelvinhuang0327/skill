@@ -160,6 +160,90 @@ class ExplicitContractFailClosedTest < Minitest::Test
     refute Parser.judge_mode_accepted?('BOUNDED')
   end
 
+  def test_not_applicable_is_a_hard_worker_handoff_boundary
+    clauses = [
+      '`JUDGE_TRIGGER` answers whether an independent Judge is required at all.',
+      '`JUDGE_MODE` answers how that handoff occurs, or is `NOT_APPLICABLE` when no Judge applies.',
+      '`JUDGE_DEPTH` is `BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies.',
+      'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`;',
+      'The Worker terminal state remains the final task state.',
+      'Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.',
+      'When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is a contract conflict: `STOP: JUDGE_MODE_CONTRACT_CONFLICT`.',
+      'Do not suppress the mandatory Judge or silently override the Packet.',
+      'Check this boundary after `JUDGE_TRIGGER` resolution and before any Judge handoff or depth evaluation.',
+      '`FRESH_CONTEXT` and `SELF_CHECK_ONLY` retain their existing routing semantics.'
+    ]
+    weakenings = {
+      '`JUDGE_TRIGGER` answers whether an independent Judge is required at all.' => '`JUDGE_TRIGGER` is the Judge mode.',
+      '`JUDGE_MODE` answers how that handoff occurs, or is `NOT_APPLICABLE` when no Judge applies.' => '`JUDGE_MODE` always requires a Judge.',
+      '`JUDGE_DEPTH` is `BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies.' => '`JUDGE_DEPTH` may be evaluated before a Judge applies.',
+      'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`;' => 'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, launch a default Judge;',
+      'The Worker terminal state remains the final task state.' => 'The Worker terminal state is an intermediate state.',
+      'Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.' =>
+        'create, schedule, invoke, fall back to, or automatically escalate into a Judge when needed.',
+      'When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is a contract conflict: `STOP: JUDGE_MODE_CONTRACT_CONFLICT`.' =>
+        'When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` suppresses the Judge.',
+      'Do not suppress the mandatory Judge or silently override the Packet.' =>
+        'Suppress the mandatory Judge or silently override the Packet.',
+      'Check this boundary after `JUDGE_TRIGGER` resolution and before any Judge handoff or depth evaluation.' =>
+        'Check this boundary after Judge handoff or depth evaluation.',
+      'retain their existing routing semantics' => 'may be changed by this boundary'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Route once', clauses, weakenings)
+  end
+
+  def test_read_only_completion_review_obeys_the_resolved_judge_boundary
+    clauses = [
+      'Use `READ_ONLY_COMPLETION_REVIEW` for claimed-complete work. It is a task class, not an unconditional Judge trigger: resolve `JUDGE_TRIGGER` and `JUDGE_MODE` before dispatch.',
+      'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`; do not load or hand off to `fable-judge`.',
+      'When a named mandatory Judge trigger applies, use the resolved Judge mode and do not execute a Worker route.'
+    ]
+    weakenings = {
+      'not an unconditional Judge trigger' => 'an unconditional Judge trigger',
+      'resolve `JUDGE_TRIGGER` and `JUDGE_MODE` before dispatch' => 'dispatch before resolving `JUDGE_TRIGGER` and `JUDGE_MODE`',
+      'do not load or hand off to `fable-judge`' => 'load or hand off to `fable-judge`',
+      'use the resolved Judge mode and do not execute a Worker route' => 'ignore the resolved Judge mode and execute a Worker route'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'First output and task class', clauses, weakenings)
+  end
+
+  def test_planning_only_and_pure_qa_suppress_judge_dispatch
+    clauses = [
+      '`PLANNING_ONLY` and `PURE_QA` never dispatch a Judge; with `JUDGE_MODE: NOT_APPLICABLE`, `JUDGE_DISPATCH: SUPPRESSED` is the required terminal dispatch state.'
+    ]
+    weakenings = {
+      'never dispatch a Judge' => 'may dispatch a Judge',
+      '`JUDGE_DISPATCH: SUPPRESSED` is the required terminal dispatch state' => '`JUDGE_DISPATCH: SUPPRESSED` is optional'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'First output and task class', clauses, weakenings)
+  end
+
+  def test_fresh_context_trigger_keeps_independent_judge_behavior
+    clauses = [
+      'A named mandatory Judge trigger with `JUDGE_MODE: FRESH_CONTEXT` still requires an independent `fable-judge` handoff;',
+      'this boundary does not alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY` semantics.'
+    ]
+    weakenings = {
+      'still requires an independent `fable-judge` handoff' => 'may use a Worker self-check instead of an independent `fable-judge` handoff',
+      'does not alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY` semantics' => 'may alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY` semantics'
+    }
+    assert_canonical_contract_controls('references/judge-handoff.md', 'When the Judge gate fires', clauses, weakenings)
+  end
+
+  def test_self_check_cannot_claim_independent_verified
+    clauses = [
+      'A Worker with no fresh-context capability may self-check only,',
+      'must mark `JUDGE_MODE: SELF_CHECK_ONLY`,',
+      'must not claim independent `VERIFIED` for a Judge-gated task.'
+    ]
+    weakenings = {
+      'may self-check only' => 'may claim independent verification',
+      'must mark `JUDGE_MODE: SELF_CHECK_ONLY`' => 'may omit `JUDGE_MODE: SELF_CHECK_ONLY`',
+      'must not claim independent `VERIFIED`' => 'may claim independent `VERIFIED`'
+    }
+    assert_canonical_contract_controls('references/judge-handoff.md', 'When the Judge gate fires', clauses, weakenings)
+  end
+
   def test_unknown_judge_mode_does_not_silently_join_the_live_enum
     live = Parser.routing_enum('JUDGE_MODE')
     refute_includes live, 'AUTO_VERIFIED'

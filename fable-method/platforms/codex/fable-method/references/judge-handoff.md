@@ -21,10 +21,18 @@ The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
 category and material consequence together. Do not restate or widen that list
 here. `LOOP_JUDGED` is judged by route definition, not by category.
 
-`READ_ONLY_COMPLETION_REVIEW` goes directly to `fable-judge` and has no Worker
-route. A Worker with no fresh-context capability may self-check only, must mark
-`JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim independent `VERIFIED` for a
-Judge-gated task.
+`READ_ONLY_COMPLETION_REVIEW` is a task class, not an unconditional Judge
+trigger. Resolve the Judge trigger and mode before dispatch. When no named
+mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set
+`JUDGE_DISPATCH: SUPPRESSED` and do not dispatch `fable-judge`. When a named
+mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is
+`JUDGE_MODE_CONTRACT_CONFLICT`; stop instead of suppressing the mandatory
+Judge or silently launching one. A named mandatory Judge trigger with
+`JUDGE_MODE: FRESH_CONTEXT` still requires an independent `fable-judge`
+handoff; this boundary does not alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY`
+semantics. A Worker with no fresh-context capability may self-check only, must
+mark `JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim independent `VERIFIED`
+for a Judge-gated task.
 
 ## Depth and evidence reuse
 
