@@ -84,11 +84,10 @@ JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 
 Use `STATE_CHANGING_IMPLEMENTATION` when source, tests, configuration, Git
 lifecycle, deployment state, or another external system may change. Use
-`READ_ONLY_COMPLETION_REVIEW` for claimed-complete work; load the
-`fable-judge` contract and do not execute a Worker route. Use `PLANNING_ONLY`
-for a plan or recommendation with no execution. Use `PURE_QA` for a question
-or assessment that performs no verification command, runtime launch, evidence
-generation, or mutation. If later evidence disproves the class, emit:
+`READ_ONLY_COMPLETION_REVIEW` for claimed-complete work. It is a task class, not an unconditional Judge trigger: resolve `JUDGE_TRIGGER` and `JUDGE_MODE` before dispatch.
+When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`; do not load or hand off to `fable-judge`.
+When a named mandatory Judge trigger applies, use the resolved Judge mode and do not execute a Worker route. A Worker with no fresh-context capability may self-check only, must mark `JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim independent `VERIFIED` for a Judge-gated task.
+Use `PLANNING_ONLY` for a plan or recommendation with no execution. Use `PURE_QA` for a question or assessment that performs no verification command, runtime launch, evidence generation, or mutation. `PLANNING_ONLY` and `PURE_QA` never dispatch a Judge; with `JUDGE_MODE: NOT_APPLICABLE`, `JUDGE_DISPATCH: SUPPRESSED` is the required terminal dispatch state. If later evidence disproves the class, emit:
 
 ```text
 TASK_CLASS_RECLASSIFIED
@@ -237,15 +236,13 @@ Use the Packet route when present. Otherwise choose exactly one:
 - `STANDARD_JUDGED`: a Judge trigger applies and Loop is not eligible.
 - `LOOP_JUDGED`: every Loop capability and eligibility gate is `YES`.
 
-A Judge trigger requires both a listed category and material consequence: the
-change reaches an external consumer, a shared runtime, or production data, or
-is otherwise not cheaply reversible. The categories are
-security/authentication/authorization, finance/payment, database or
-production-data writes, shared-core or cross-runtime changes, real
-UI/browser/device validation, external side effects, explicit independent
-verification, or material unknown evidence. A single acceptance failure is not
-a trigger at any attempt number; material unknown still applies. Editing a
-prompt, template, or this Skill is not by itself a shared-core trigger.
+The three Judge axes remain distinct. `JUDGE_TRIGGER` answers whether an independent Judge is required at all. It is present only when both a listed category and material consequence apply: the change reaches an external consumer, a shared runtime, or production data, or is otherwise not cheaply reversible.
+The categories are security/authentication/authorization, finance/payment, database or production-data writes, shared-core or cross-runtime changes, real UI/browser/device validation, external side effects, explicit independent verification, or material unknown evidence. A single acceptance failure is not a trigger at any attempt number; material unknown still applies. Editing a prompt, template, or this Skill is not by itself a shared-core trigger.
+`JUDGE_MODE` answers how that handoff occurs, or is `NOT_APPLICABLE` when no Judge applies. `JUDGE_DEPTH` is `BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies.
+When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`;
+The Worker terminal state remains the final task state. Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.
+When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is a contract conflict: `STOP: JUDGE_MODE_CONTRACT_CONFLICT`. Do not suppress the mandatory Judge or silently override the Packet.
+Check this boundary after `JUDGE_TRIGGER` resolution and before any Judge handoff or depth evaluation. `FRESH_CONTEXT` and `SELF_CHECK_ONLY` retain their existing routing semantics.
 
 Loop requires a fixed scope, at least two genuinely independent cards with
 independent acceptance, isolated writes/state, usable subagent capability,
