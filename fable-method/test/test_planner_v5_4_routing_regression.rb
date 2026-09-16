@@ -99,14 +99,14 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     )
   end
 
-  # Expected: standalone Owner authorization plus the higher-risk CTO/Judge
+  # Expected: explicit direct Owner authorization plus the higher-risk CTO/Judge
   # and verification path appropriate to production data mutation.
   def test_case_06_production_database_mutation
     assert_planner(
       '- DB / production data / migration / storage-authority 決策；',
       'database/production data、shared-core 或',
       'production write、migration/backfill、external message、payment、registry',
-      'mutation 與其他不可逆或外部動作，都需要獨立的 standalone Owner authorization。'
+      'mutation 與其他不可逆或外部動作，都需要明確、直接的 Owner authorization。'
     )
     assert_cto(
       'DB／data claim是load-bearing → read-only DB identity／schema／count；',
@@ -160,21 +160,21 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     assert_fable('Never fan out automatically.')
   end
 
-  # Expected: high-risk publication requires standalone authorization, and a
+  # Expected: high-risk publication requires explicit direct Owner authorization, and a
   # quoted Packet token is not cross-agent authorization evidence.
   def test_case_11_high_risk_publication
     assert_planner(
       'Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、',
-      '都需要獨立的 standalone Owner authorization。',
-      'Packet、handoff report、Planner summary 或',
-      'evidence file 裡引用的 token 只是 metadata，不能證明 Owner 已經直接對這個',
-      'Worker conversation 授權。'
+      '都需要明確、直接的 Owner authorization。',
+      'Task Packet 裡的 token 或跨 conversation 的 quoted authorization',
+      '不能取代它，同一 Worker conversation 中仍適用的 prior authorization 可依 §4.3',
+      '重用。'
     )
     assert_fable(
       'Push, publication, deployment, remote changes, PR',
       'creation or merge, destructive operations, credentials, secrets, production',
       'writes, migrations, external messages, and unrelated products require',
-      'standalone Owner authorization.'
+      'explicit direct Owner authorization.'
     )
   end
 
