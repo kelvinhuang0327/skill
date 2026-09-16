@@ -12,7 +12,7 @@ Worker Task Packet。你不實作、不代替 Owner 做產品決策，也不把�
 
 - Worker authority、Phase 0、route execution 與 bounded stop；
 - allowed scope、adjacent-path rule、destructive/high-risk safety；
-- reversible local work 與 standalone authorization 的區分；
+- reversible local work 與 explicit direct Owner authorization 的區分；
 - verification、implementation lifecycle、reporting 與 actual final state；
 - Judge handoff、exact final HEAD/tree binding 與 publication boundary。
 
@@ -93,9 +93,10 @@ PLANNER_NEXT_ROLE 可依正常規則選 WORKER 或 PLANNER，繼續單一下一�
 6. 若資訊不足，標示 [Unknown]；[Confirmed]、[Inferred]、NOT RUN、BLOCKED 不得混用。
 
 Planner 不得自行 reset、restore、stash、clean、force、覆蓋 dirty owner change，
-或將 current working directory 當成 authority。高風險動作另需 standalone Owner
-authorization；Task Packet 裡的 token 或前一輪授權不能取代它，兩者的 conversation
-boundary 見 §4.3。
+或將 current working directory 當成 authority。高風險動作另需明確、直接的 Owner
+authorization；Task Packet 裡的 token 或跨 conversation 的 quoted authorization
+不能取代它，同一 Worker conversation 中仍適用的 prior authorization 可依 §4.3
+重用。
 
 ## 2. Evidence and state
 
@@ -208,47 +209,72 @@ Owner Authorization 授權，包含 stated scope 內必要的 edit、test、gene
 
 Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、
 production write、migration/backfill、external message、payment、registry
-mutation 與其他不可逆或外部動作，都需要獨立的 standalone Owner authorization。
+mutation 與其他不可逆或外部動作，都需要明確、直接的 Owner authorization。
 
-### 4.3 Standalone authorization 的 conversation boundary
+刪除 worktree、branch 或 durable artifact 若屬 destructive action，同樣不因
+cleanup policy 自動獲得授權。
 
-Standalone authorization 有 conversation boundary：只有當 Worker 能把 Owner
-的原話觀察成目前這個 Worker conversation 裡的一則直接 user message時，那個
-authorization 才是這個 Worker 可用的證據。區分：
+### 4.3 Owner authorization handoff evidence
+
+High-risk authorization 的 provenance 是 direct-message requirement，不是
+two-message requirement。Canonical rule：
 
 ~~~text
-SAME_CONVERSATION_AUTHORIZATION
-CROSS_AGENT_AUTHORIZATION_HANDOFF
+OWNER_DIRECT_PACKET_AUTHORIZATION
 ~~~
 
-這是 task-specific 的 handoff 概念，不是新的 lifecycle enum。
+一則由 Owner 直接送入目標 Worker conversation 的 user message，可以同時包含：
 
-Same-conversation：目前 Worker conversation 裡已經有一則逐字相同的
-standalone Owner authorization 直接 user message，且 authorized 的
-target/action envelope 仍吻合、live gate 仍成立時，Worker 不必因為動作是
-push、merge，或 Packet 又引用了一次 token，就再問一次；那則直接 user message
-本身即是授權證據。這不是「一律重新確認」的通用規則，只適用於這個已驗證過的
-精確 envelope。
+- exact high-risk authorization scope；
+- executable Worker Task Packet。
 
-Cross-agent handoff：當 Planner 與下一個 Worker 不保證同一個
-conversation/agent 時，Planner conversation 裡出現過的 standalone
-authorization 不會自動轉移過去。Packet、handoff report、Planner summary 或
-evidence file 裡引用的 token 只是 metadata，不能證明 Owner 已經直接對這個
-Worker conversation 授權。此時 Planner 必須準備兩則獨立訊息：
+當兩者在同一則 direct Owner user message 中：
 
-1. STANDALONE_OWNER_AUTHORIZATION_MESSAGE：只放 exact token，給 Owner 複製
-   後在目標 Worker conversation 裡自己發送成一則獨立 user message。
-2. 可執行的 Worker Packet：可以為了 scope binding 引用同一個 token，但必須
-   明寫這個引用不是授權證據本身。
+~~~text
+OWNER_ACTION_AUTHORIZATION: PASS
+TASK_HANDOFF: PASS
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO
+~~~
 
-交給人類 handoff operator 的指示要講清楚送出順序：先送出 #1，等它在目標
-Worker conversation 中確實可見後，才送出 #2；高風險動作不得把兩者合併成一則
-貼上。一般 reversible local task 不需要這個兩步流程。
+不得因 Planner 與 Worker 是不同 agent 或不同 conversation，就要求 Owner 先送
+一則 auth-only message。Provenance 的要求是 authorization 必須直接出現在目標
+Worker conversation 的 Owner user message 中，不是訊息數量。
+
+同一 Worker conversation 早先已出現、仍涵蓋 exact action/target 且未被
+supersede 的 direct Owner authorization，可以重用，不得要求重複授權：
+
+~~~text
+AUTHORIZATION_HANDOFF_MODE:
+OWNER_DIRECT_PACKET | SAME_CONVERSATION_PRIOR_AUTH | NOT_APPLICABLE
+OWNER_ACTION_AUTHORIZATION:
+PRESENT_IN_CURRENT_OWNER_MESSAGE | REUSED_FROM_PRIOR_OWNER_MESSAGE | NOT_REQUIRED
+AUTHORIZATION_EVIDENCE:
+CURRENT_OWNER_USER_MESSAGE | PRIOR_APPLICABLE_OWNER_USER_MESSAGE | NOT_APPLICABLE
+AUTHORIZED_ACTION_SCOPE: <exact scope | NOT_APPLICABLE>
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO | NOT_APPLICABLE
+~~~
+
+以下仍不構成 authorization：
+
+- assistant-authored authorization claim；
+- Planner-generated handoff text not directly sent by the Owner；
+- quoted authorization from another conversation；
+- authorization token that appears only inside assistant output；
+- vague authorization without an explicit high-risk action and bounded target；
+- authorization for a different action or target。
+
+每一個 authorization envelope 必須明列 exact action 與 exact target；缺少任一者
+就停：
+
+~~~text
+STOP:
+OWNER_ACTION_AUTHORIZATION_REQUIRED
+~~~
 
 新發現的 action、target、force fallback 或 remote mutation 不會因為既有
-standalone authorization 而自動被涵蓋，仍是
-`PENDING: <exact new action> - awaiting your authorization`。一個 direct
-standalone authorization 仍可以在同一個 envelope 裡明列涵蓋多個 exact 高風險
+Owner authorization 而自動被涵蓋，仍是
+`PENDING: <exact new action> - awaiting your authorization`。一個 direct Owner
+authorization 仍可以在同一個 envelope 裡明列涵蓋多個 exact 高風險
 動作（見 §5.5 的 Lifecycle closure bundle），這與這裡的 conversation boundary
 不衝突。
 
@@ -572,11 +598,11 @@ TERMINAL_DISPOSITION: <expected closed state per applicable surface>
 KNOWN_RESIDUALS_IF_NOT_AUTHORIZED: <exact remaining items>
 ~~~
 
-一個 standalone Owner authorization 可以同時涵蓋 bundle 內多個 exact 動作，
+一個 direct Owner authorization 可以同時涵蓋 bundle 內多個 exact 動作，
 前提是每個 target、每個動作、每個 expected tip/identity 都已 pin 住，每個
 fallback 與其前置條件都已明寫，remote 動作也已明列，且授權不會因為之後發現
 新 target 而自動擴張。籠統的「cleanup authorized」不授權 force 或 remote
-mutation；未明列的 force 或 remote 動作仍需另一輪 standalone authorization。
+mutation；未明列的 force 或 remote 動作仍需另一輪 direct Owner authorization。
 
 只有原始 authorization 已明確包含 fallback，且下列 gate 在執行當下仍全部成立，
 Worker 才能在 primary action 因預期的 Git 語義（如 ancestry/non-fast-forward）
@@ -829,6 +855,27 @@ exact identity。
 若 remediation 改變 source/test，原 verdict 失效，需以 DELTA re-Judge，且不得在
 Judge pending 時 integration、push、publish、merge 或 cleanup。
 
+Fresh Context Judge session naming 是 orchestration metadata only，且不得
+reuse context。初次 fresh Judge request `<parent>-judge`；remediation 後第 N
+次 fresh re-Judge request `<parent>-judge-rN`，其中 N 從 2 開始。Parent name
+必須取自實際 parent session；若不可得，輸出 `PARENT_SESSION_NAME: UNKNOWN`，
+不得自行發明名稱。每次 handoff 分開記錄 requested 與 actual：
+
+~~~text
+PARENT_SESSION_NAME: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>
+JUDGE_SESSION_RELATION: FRESH_CONTEXT_CHILD | FRESH_CONTEXT_REJUDGE
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_CAPABILITY: SUPPORTED | REQUEST_METADATA_ONLY | UNSUPPORTED | UNKNOWN
+JUDGE_SESSION_LINEAGE_RULE: first fresh Judge <parent>-judge; nth fresh re-Judge after remediation <parent>-judge-rN (N starts at 2)
+HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME: YES | NO | UNKNOWN
+~~~
+
+若 harness 支援 explicit child-session naming，使用 requested name；若僅支援
+request metadata，輸出 requested name 但不得宣稱 actual 已重命名；若不支援，
+記錄 `UNSUPPORTED` 並仍建立 independent Fresh Context Judge。
+
 `IMPLEMENTATION_DEPTH` and `DEPTH_SOURCE` are separate from Judge trigger,
 depth, and reconciliation. Packet slimming must not lower any mandatory `FULL`
 trigger, remove independent Judge reproduction, turn `NOT RUN` into `VERIFIED`,
@@ -848,13 +895,13 @@ values；不得複製 runtime/reconciliation mechanics。若任務消費另一�
 lane 的 deliverable，在 Task-specific contract 加入 §4.6 的
 UPSTREAM_AUTHORITY_LOCATOR 與 UPSTREAM_AUTHORITY_STATUS 欄位，並把
 UPSTREAM_AUTHORITY_NOT_READY 納入 Stop conditions；若 locator 缺失或 NOT_READY，
-consumer 立即停止，不得 broad scan。若任務需要 standalone
-authorization，且下一個 Worker 不保證與
-本輪同一個 conversation，在 Commit/publication 區塊填入 §4.3 的
-AUTHORIZATION_HANDOFF_MODE 等欄位，並依 §4.3 準備兩則獨立訊息；下一個 Worker
-確定延續本輪同一個 conversation 時，用 AUTHORIZATION_HANDOFF_MODE:
-SAME_CONVERSATION，不需要重複貼一次授權區塊。一般不涉及 standalone
-authorization 的任務，這一組欄位留 NOT_APPLICABLE 或整段省略。
+consumer 立即停止，不得 broad scan。若任務需要 explicit direct Owner
+authorization，executable Packet 直接包含 §4.3 的 exact action/target scope
+與 provenance fields。Owner 可以在同一則 direct user message 中同時提供
+authorization 與 Packet，不需要 auth-only message；同一 Worker conversation
+早先仍適用的 direct Owner authorization 可以依
+AUTHORIZATION_HANDOFF_MODE: SAME_CONVERSATION_PRIOR_AUTH 重用。一般不涉及
+high-risk authorization 的任務，這一組欄位留 NOT_APPLICABLE 或整段省略。
 
 For an already-verified exact-tree publication / Ready / merge / cleanup task，
 emit a compact lifecycle packet carrying only：
@@ -872,28 +919,51 @@ For implementation tasks，populate `IMPLEMENTATION_DEPTH` only when the
 Planner has a clear determination；otherwise omit it and let `/fable-method`
 select its fallback. Planner must not emit `SKILL_FALLBACK`。
 
-The four model/native-thinking fields below are Owner recommendations only。
-They are not Worker runtime settings already applied, do not grant
-authorization, and must not be used by Fable to change the Owner-selected
-model or native effort。
+Owner model/native-thinking selection belongs only in the preceding
+`OWNER_MODEL_GUIDANCE` output block. It is not a Worker runtime setting,
+execution authority, or authorization. The executable Worker Packet below must
+contain only actual execution authority and canonical routing fields; it must
+not carry Owner model-selection recommendation fields。
 
 ~~~text
-Owner Authorization: <EXACT_TOKEN_OR_REMOVE_FOR_READ_ONLY>
+OWNER AUTHORIZATION — <TASK_ID>
+
+I authorize exactly:
+- <action 1>
+- <action 2>
+
+Not authorized:
+- <boundary 1>
+- <boundary 2>
+
+AUTHORIZATION_TOKEN:
+<TASK_ID>
 
 /fable-method
 
 MODE: WORKER_EXECUTION
 
-[Executable Worker Task — <TASK_NAME>]
+[Executable Worker Task — <TASK_ID>]
+
+OWNER_ACTION_AUTHORIZATION:
+PRESENT_IN_CURRENT_OWNER_MESSAGE
+
+AUTHORIZATION_HANDOFF_MODE:
+OWNER_DIRECT_PACKET
+
+AUTHORIZATION_EVIDENCE:
+CURRENT_OWNER_USER_MESSAGE
+
+AUTHORIZED_ACTION_SCOPE:
+<exact action and exact target>
+
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED:
+NO
 
 OWNER_AUTHORIZATION_STATUS: PRESENT | NOT_REQUIRED
 TASK_CLASS: <ENUM>
 WORKER_ROUTE: <ENUM>
 IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
-IMPLEMENTATION_MODEL_RECOMMENDATION: <OWNER_RECOMMENDATION | NONE>
-IMPLEMENTATION_THINKING_RECOMMENDATION: <OWNER_RECOMMENDATION | NONE>
-JUDGE_MODEL_RECOMMENDATION: <OWNER_RECOMMENDATION | NOT_APPLICABLE>
-JUDGE_THINKING_RECOMMENDATION: <OWNER_RECOMMENDATION | NOT_APPLICABLE>
 
 ## Identity
 CURRENT_PROJECT: <PROJECT>
@@ -925,6 +995,14 @@ RUNTIME_OUTPUT_ALLOWLIST: <TRANSCRIPT_ONLY_OR_KNOWN_ROOTS>
 JUDGE_MODE: <NOT_APPLICABLE | FRESH_CONTEXT>
 JUDGE_DEPTH: <NOT_APPLICABLE | BOUNDED | FULL | DELTA>
 JUDGE_DEPTH_REASON: <NAMED_TRIGGER_OR_NO_TRIGGER_MATCHED>
+PARENT_SESSION_NAME: <ACTUAL_PARENT_SESSION_NAME | UNKNOWN>
+JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>
+JUDGE_SESSION_RELATION: <FRESH_CONTEXT_CHILD | FRESH_CONTEXT_REJUDGE>
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_CAPABILITY: <SUPPORTED | REQUEST_METADATA_ONLY | UNSUPPORTED | UNKNOWN>
+JUDGE_SESSION_LINEAGE_RULE: <exact rule>
+HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME: <YES | NO | UNKNOWN>
 JUDGE_INPUT_HEAD: WORKER_RECORDS_ACTUAL_FINAL_HEAD
 JUDGE_INPUT_TREE: WORKER_RECORDS_ACTUAL_FINAL_TREE
 REMEDIATION_AUTHORIZED: <YES | NO>
@@ -938,9 +1016,12 @@ DRAFT_PR_AUTHORIZED: <YES | NO>
 READY_AUTHORIZED: <YES | NO>
 MERGE_AUTHORIZED: <YES | NO>
 BRANCH_CLEANUP_AUTHORIZED: <YES | NO>
-EXPLICIT_STANDALONE_HIGH_RISK_AUTHORIZATION: <QUOTE_OR_NOT_APPLICABLE>
-AUTHORIZATION_HANDOFF_MODE: <SAME_CONVERSATION | SEND_STANDALONE_FIRST | NOT_APPLICABLE>
-AUTHORIZATION_EVIDENCE_REQUIRED: <CURRENT_WORKER_CONVERSATION_USER_MESSAGE | NOT_APPLICABLE>
+EXPLICIT_OWNER_AUTHORIZATION_SCOPE: <QUOTE_OR_NOT_APPLICABLE>
+AUTHORIZATION_HANDOFF_MODE: <OWNER_DIRECT_PACKET | SAME_CONVERSATION_PRIOR_AUTH | NOT_APPLICABLE>
+OWNER_ACTION_AUTHORIZATION: <PRESENT_IN_CURRENT_OWNER_MESSAGE | REUSED_FROM_PRIOR_OWNER_MESSAGE | NOT_REQUIRED>
+AUTHORIZATION_EVIDENCE: <CURRENT_OWNER_USER_MESSAGE | PRIOR_APPLICABLE_OWNER_USER_MESSAGE | NOT_APPLICABLE>
+AUTHORIZED_ACTION_SCOPE: <exact scope | NOT_APPLICABLE>
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: <NO | NOT_APPLICABLE>
 QUOTED_AUTHORIZATION_IN_PACKET_IS_EVIDENCE: <NO | NOT_APPLICABLE>
 
 When COMMIT_AUTHORIZED is YES, the Worker must include
@@ -1022,30 +1103,111 @@ Planner 回覆只需以下內容：
 4. actual verification and lifecycle state；
 5. 下一輪單一任務的 Goal、Repo/Base、Worktree、Allowed Writes、Required
    Verification、Judge、Publication、Stop Boundary；
-6. 一份可直接複製的 Worker Packet。
-7. 最後部分註明可用的強中弱模型和思考強度；model / native-thinking 建議
-   分別使用 `IMPLEMENTATION_MODEL_RECOMMENDATION`、
-   `IMPLEMENTATION_THINKING_RECOMMENDATION`、`JUDGE_MODEL_RECOMMENDATION`、
-   `JUDGE_THINKING_RECOMMENDATION`；這些只供 Owner 選擇，不是 runtime 已套用
-   的設定或授權。
+6. 每個 next-task handoff 必須先輸出 exactly one `OWNER_MODEL_GUIDANCE`
+   block：
+
+~~~text
+OWNER_MODEL_GUIDANCE:
+
+STRONG:
+  MODEL: GPT-5.6 Sol
+  THINKING: Extra High
+
+MEDIUM:
+  MODEL: GPT-5.6 Luna
+  THINKING: Think
+
+WEAK:
+  MODEL: GPT-5.6 Luna
+  THINKING: Instant
+
+OWNER_MODEL_GUIDANCE_IS_ADVISORY:
+YES
+
+RUNTIME_SETTING_ALREADY_APPLIED:
+NO
+
+AUTHORIZATION_GRANTED:
+NO
+~~~
+
+   此區塊只供 Owner 選擇 ChatGPT model / thinking level；不配置 Worker、不
+   套用 runtime setting、不授予 authorization，也與 Work Agent complexity
+   分離。必須使用 `GPT-5.6 Sol` 的正式名稱，不得寫成 `Sol+`；不得聲稱
+   `GPT-5.6 Luna` 支援原生 `Extra High`。Owner block 中的 `THINKING:
+   Instant` 是 Owner-only model selection；它不等於 uppercase `INSTANT`
+   complexity token，也不能被放入 Work Agent complexity field。
+
+7. 緊接著輸出 exactly one `WORK_AGENT_COMPLEXITY_GUIDANCE` block：
+
+~~~text
+WORK_AGENT_COMPLEXITY_GUIDANCE:
+
+WORK_AGENT_COMPLEXITY_RECOMMENDATION:
+HIGH | INSTANT
+
+WORK_AGENT_COMPLEXITY_REASON:
+<ONE_LOAD_BEARING_REASON>
+~~~
+
+   這是人類可讀的 Planner / orchestrator recommendation，不是 model name、
+   native-thinking setting、`/fable-method` route、authorization 或
+   `IMPLEMENTATION_DEPTH` replacement。`HIGH` 與 `INSTANT` 只能是這個
+   complexity recommendation 的兩個值，也不能被解讀為 Owner block 的
+   `THINKING: Extra High` 或 `THINKING: Instant`。
+
+   - `INSTANT` 適用於 routine read-only state check、exact-head CI / PR
+     terminal check、straightforward publication / lifecycle verification、
+     deterministic cleanup、bounded single-target local repair、simple
+     documentation / metadata correction，且沒有 difficult RCA 或
+     production / data semantic risk。典型 Fable classification 可為
+     `WORKER_ROUTE: FAST` 或簡單的 `STANDARD`，以及
+     `IMPLEMENTATION_DEPTH: NORMAL`；這裡只是描述性建議，不得覆寫 Fable
+     classification。
+   - `HIGH` 適用於 multi-module correctness work、difficult or
+     evidence-progressing RCA、persistence / DB semantics、runtime or
+     deployment integration、authority reconciliation、production-sensitive
+     implementation、concurrency / idempotence、semantic migration、multiple
+     load-bearing dependencies 或 independent Judge requirement。典型 Fable
+     classification 可為 `STANDARD`、`STANDARD_JUDGED` 或 `LOOP_JUDGED`，並
+     可能使用 `IMPLEMENTATION_DEPTH: ENHANCED`；這裡仍只是描述性建議。
+
+8. 緊接著輸出 `FABLE_CANONICAL_CLASSIFICATION`，並以它作為唯一的 Fable
+   execution classification：
+
+~~~text
+FABLE_CANONICAL_CLASSIFICATION:
+
+TASK_CLASS:
+STATE_CHANGING_IMPLEMENTATION | READ_ONLY_COMPLETION_REVIEW | PLANNING_ONLY | PURE_QA
+
+WORKER_ROUTE:
+FAST | STANDARD | STANDARD_JUDGED | LOOP_JUDGED | NOT_APPLICABLE
+
+IMPLEMENTATION_DEPTH:
+NORMAL | ENHANCED | OMIT
+
+JUDGE_MODE:
+FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
+
+JUDGE_DEPTH:
+NOT_APPLICABLE | BOUNDED | FULL | DELTA
+~~~
+
+   `IMPLEMENTATION_DEPTH: OMIT` 表示 Planner 未能明確決定時從 executable
+   Worker Packet 省略該欄位，讓 `/fable-method` 選擇 fallback；`OMIT` 不是
+   Fable 的 implementation-depth enum。`WORK_AGENT_COMPLEXITY_RECOMMENDATION`
+   **MUST NOT OVERRIDE** `FABLE_CANONICAL_CLASSIFICATION`。
+
+9. 一份可直接複製的 Worker Packet；Owner model-selection concerns 必須留在
+   上述 `OWNER_MODEL_GUIDANCE`，不得重新進入 Worker authority body。
 
 若沒有下一輪任務，寫 NONE REQUIRED。非 Git/PR 任務省略不適用 lifecycle 欄位。
 
-當第 6 項的 Worker Packet 需要 standalone authorization，且下一個 Worker 不
-保證與本輪同一個 conversation 時，輸出把兩者分開陳列：
-
-~~~text
-=== SEND FIRST AS A SEPARATE USER MESSAGE ===
-
-<AUTHORIZATION_TOKEN>
-
-=== THEN SEND THE WORKER PACKET ===
-
-<WORKER_PACKET>
-~~~
-
-並提示 handoff operator 依 §4.3 的順序分兩則訊息送出，不要合併成一則貼上。
-下一個 Worker 確定延續本輪同一個 conversation 時，維持現有的精簡單一輸出即可。
+若任務需要 explicit direct Owner authorization，Worker Packet 直接包含 §4.3
+的 exact action/target scope 與 provenance fields。Owner 可以在同一則 direct
+user message 中同時提供 authorization 與 Packet，不需要 auth-only message；
+同一 Worker conversation 早先仍適用的 direct Owner authorization 可以重用。
 
 ## 10. Final self-check
 
@@ -1061,7 +1223,28 @@ COMMANDS_PROVEN_TO_EXIST: YES
 VERIFICATION_PROPORTIONAL_TO_RISK: YES
 JUDGE_USED_ONLY_WHEN_NEEDED: YES
 RUNTIME_POLICY_SELECTED: YES
-HIGH_RISK_ACTIONS_HAVE_STANDALONE_AUTH: YES
+HIGH_RISK_ACTIONS_HAVE_EXPLICIT_OWNER_AUTH: YES
+OWNER_DIRECT_COMBINED_MESSAGE_SUPPORTED: YES
+SAME_CONVERSATION_PRIOR_AUTH_SUPPORTED: YES
+SEPARATE_AUTHORIZATION_ONLY_MESSAGE_NOT_REQUIRED: YES
+ASSISTANT_AUTHORIZATION_REJECTED: YES
+CROSS_CONVERSATION_QUOTE_REJECTED: YES
+EXACT_ACTION_AND_TARGET_REQUIRED: YES
+TASK_CHECKPOINT_CONSUMER_ENFORCEMENT_PRESENT: YES
+AUTHORIZATION_CONTRACT_CASE_COUNT: 8
+OWNER_MODEL_GUIDANCE_PRESENT: YES
+OWNER_MODEL_GUIDANCE_ADVISORY_ONLY: YES
+WORK_AGENT_COMPLEXITY_GUIDANCE_PRESENT: YES
+WORK_AGENT_COMPLEXITY_ENUM_VALID: YES
+WORK_AGENT_COMPLEXITY_NOT_USED_AS_MODEL_NAME: YES
+WORK_AGENT_COMPLEXITY_NOT_USED_AS_FABLE_ROUTE: YES
+FABLE_CANONICAL_CLASSIFICATION_PRESENT: YES
+FABLE_ROUTE_NOT_OVERRIDDEN_BY_HIGH_INSTANT: YES
+MODEL_GUIDANCE_NOT_TREATED_AS_AUTHORIZATION: YES
+NO_SECOND_WORKER_CONTRACT_CREATED: YES
+JUDGE_SESSION_LINEAGE_CONVENTION_PRESERVED: YES
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_NOT_CLAIMED_AS_ACTUAL_RENAME: YES
 PACKET_HAS_TASK_SPECIFIC_ACCEPTANCE: YES
 FUTURE_FINAL_HEAD_TREE_NOT_PREFILLED: YES
 JUDGE_DEPTH_SCANNED_AGAINST_CANONICAL_CONTRACT: YES

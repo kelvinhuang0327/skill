@@ -193,7 +193,7 @@ overwrite when a tracked or untracked path changed for a reason the current
 Packet does not explain; re-establish safe ownership of the affected state
 before resuming, and never proceed on a stale read.
 
-Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require standalone Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no standalone high-risk authorization exists. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
+Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require explicit direct Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no explicit high-risk authorization is present. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
 
 Before a command that inspects content across multiple committed objects,
 freeze the exact refs/trees, inventory metadata first, classify every path as
@@ -265,8 +265,7 @@ Open the spec, check, API, path, config key, or figure before relying on it.
 Explicit user direction beats the spec, the spec beats tests, and tests beat
 current code. Declare exact files/surfaces in scope. Make one coherent change
 batch at a time, inspect its diff, and run the cheapest relevant diagnostic.
-Match local style, do not weaken acceptance, invent fixtures, or add
-dependencies.
+Match local style, do not weaken acceptance, invent fixtures, or add dependencies. Explicit high-risk authorization uses `OWNER_DIRECT_PACKET_AUTHORIZATION`: one direct Owner message may combine exact action/target scope with the executable Worker Packet (no authorization-only message); reuse only a still-applicable prior direct authorization in the same Worker conversation. Assistant/Planner claims, cross-conversation quotes, vague scope, or another action/target are not authorization and stop with `OWNER_ACTION_AUTHORIZATION_REQUIRED`. Every envelope must name the exact action and exact target; action-only or target-only scope is insufficient.
 
 An irreversible or outward-facing action requires the user's own words:
 
@@ -361,9 +360,7 @@ input state reports the mismatch and stops — that is a stale input contract,
 not evidence against the work, and it does not authorize a repeat run against
 the same inputs.
 
-Planner specifies Judge mode/depth only; it must not invent a future final
-HEAD/tree. After implementation, the Worker records the observed final
-HEAD/tree, and the Judge evaluates exactly that tree read-only.
+Planner specifies Judge mode/depth only; it must not invent a future final HEAD/tree. After implementation, the Worker records the observed final HEAD/tree, and the Judge evaluates exactly that tree read-only. Fresh Context Judge naming is orchestration metadata and MUST NOT reuse context: request `<parent>-judge`, then `<parent>-judge-rN` (N starts at 2) after remediation; use `PARENT_SESSION_NAME: UNKNOWN` when unavailable, report requested/actual names separately, keep `JUDGE_SESSION_REUSED: NO`, and record relation, lineage rule, naming capability, and `HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME`. `REQUEST_METADATA_ONLY` or `UNSUPPORTED` never claims an actual rename; preserve the independent Judge.
 
 The handoff must contain the original Packet and forbidden actions,
 repository/branch/HEAD/tree and actual diff/status, scope and authorization,

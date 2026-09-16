@@ -713,14 +713,17 @@ class TaskReconciler
       )
     end
 
-    # Guard 4: Standalone Authorization Boundary Check
-    if action_requires_standalone_auth?(checkpoint.next_action, checkpoint.authorization_boundary)
+    # Guard 4: Direct Owner Authorization Boundary Check
+    if action_requires_owner_auth?(checkpoint.next_action, checkpoint.authorization_boundary)
       conversation_auths = options[:conversation_authorizations] || []
-      unless conversation_authorized?(checkpoint.next_action, conversation_auths)
+      authorization_target = options[:authorization_target].to_s.strip
+      unless !authorization_target.empty? &&
+             conversation_authorized?(checkpoint.next_action, conversation_auths,
+                                      authorization_target: authorization_target)
         return ReconciliationResult.new(
           verdict: 'AUTHORIZATION_REQUIRED',
-          reason: "Next action '#{checkpoint.next_action}' requires standalone Owner authorization in the current conversation; quoted tokens in checkpoint do not transfer",
-          recommended_action: "Request standalone Owner authorization for '#{checkpoint.next_action}' in the current conversation before proceeding",
+          reason: "Next action '#{checkpoint.next_action}' requires explicit Owner authorization naming its exact target identity in the current conversation; quoted tokens in checkpoint do not transfer",
+          recommended_action: "Request explicit Owner authorization for '#{checkpoint.next_action}' naming the exact target identity in the current conversation before proceeding",
           checkpoint: checkpoint,
           live_state: live
         )
@@ -933,20 +936,113 @@ class TaskReconciler
     'master'
   end
 
-  def action_requires_standalone_auth?(action, boundary)
-    return true if boundary =~ /CURRENT_WORKER_CONVERSATION_STANDALONE_AUTH_REQUIRED/i
-    return true if boundary =~ /STANDALONE_AUTH/i
+  def action_requires_owner_auth?(action, boundary)
+    # Accept the canonical boundary and the legacy alias for resumable
+    # checkpoints, but neither boundary requires an authorization-only message.
+    return true if boundary =~ /CURRENT_WORKER_CONVERSATION_(?:OWNER|STANDALONE)_AUTH_REQUIRED/i
+    return true if boundary =~ /(?:OWNER|STANDALONE)_AUTH/i
 
     high_risk_actions = %w[MERGE_PR PUSH PUSH_BRANCH DEPLOY DESTRUCTIVE_CLEANUP ACTIVATE_LIVE]
     high_risk_actions.any? { |hra| action.to_s.upcase.include?(hra) }
   end
 
-  def conversation_authorized?(action, auth_tokens)
+  def conversation_authorized?(action, auth_tokens, authorization_target: nil)
     return false if auth_tokens.nil? || auth_tokens.empty?
 
     auth_tokens.any? do |token|
-      token.to_s.strip.length > 3 && (token.to_s.upcase.include?('AUTHORIZED') || token.to_s.upcase.include?(action.to_s.upcase))
+      text = token.to_s.strip
+      normalized = text.upcase
+      next false if text.length <= 3
+      next false if authorization_provenance_invalid?(text)
+      next false if normalized.match?(/AUTHORIZATION_HANDOFF_MODE\s*:\s*SEND[_ -]?STANDALONE[_ -]?FIRST/)
+      next false if normalized.match?(/SEPARATE[_ -]?AUTHORIZATION[_ -]?ONLY[_ -]?MESSAGE_REQUIRED\s*:\s*YES/)
+      next false unless direct_owner_authorization?(normalized)
+      next false unless authorization_provenance_valid?(normalized)
+      next false unless explicit_authorization?(normalized)
+
+      authorized_scope = authorized_scope_text(text)
+      next false unless action_matches_authorized_scope?(
+        action,
+        authorized_scope,
+        authorization_target: authorization_target
+      )
+
+      true
     end
+  end
+
+  def authorization_provenance_invalid?(text)
+    normalized = text.to_s.strip.upcase
+    return true if normalized.match?(/\A(?:ASSISTANT|PLANNER|QUOTED|CROSS[\s_-]+CONVERSATION)(?:\b|[_ -])/)
+
+    normalized.each_line.any? do |line|
+      line.match?(/\A\s*(?:PROVENANCE|AUTHORIZATION_PROVENANCE|AUTHORIZATION_SOURCE)\s*[:=]\s*(?:ASSISTANT|PLANNER|QUOTED|CROSS[\s_-]+CONVERSATION)(?:\b|[_ -])/)
+    end
+  end
+
+  def direct_owner_authorization?(normalized)
+    normalized.match?(/\bOWNER_DIRECT_PACKET_AUTHORIZATION\b/) ||
+      normalized.match?(/OWNER\s+AUTHORIZATION\s*[—:-]/) ||
+      normalized.match?(/\bOWNER_DIRECT_MESSAGE\b/) ||
+      normalized.match?(/OWNER_ACTION_AUTHORIZATION\s*:\s*(?:PRESENT_IN_CURRENT_OWNER_MESSAGE|REUSED_FROM_PRIOR_OWNER_MESSAGE)/)
+  end
+
+  def authorization_provenance_valid?(normalized)
+    mode = normalized[/AUTHORIZATION_HANDOFF_MODE\s*:\s*(OWNER_DIRECT_PACKET|SAME_CONVERSATION_PRIOR_AUTH)\b/, 1]
+    owner_auth = normalized[/OWNER_ACTION_AUTHORIZATION\s*:\s*(PRESENT_IN_CURRENT_OWNER_MESSAGE|REUSED_FROM_PRIOR_OWNER_MESSAGE)\b/, 1]
+    evidence = normalized[/AUTHORIZATION_EVIDENCE\s*:\s*(CURRENT_OWNER_USER_MESSAGE|PRIOR_APPLICABLE_OWNER_USER_MESSAGE)\b/, 1]
+    return false unless mode && owner_auth && evidence
+
+    case mode
+    when 'OWNER_DIRECT_PACKET'
+      owner_auth == 'PRESENT_IN_CURRENT_OWNER_MESSAGE' && evidence == 'CURRENT_OWNER_USER_MESSAGE'
+    when 'SAME_CONVERSATION_PRIOR_AUTH'
+      owner_auth == 'REUSED_FROM_PRIOR_OWNER_MESSAGE' && evidence == 'PRIOR_APPLICABLE_OWNER_USER_MESSAGE'
+    else
+      false
+    end
+  end
+
+  def explicit_authorization?(normalized)
+    normalized.match?(/\bI\s+AUTHORIZE\s+EXACTLY\b/) ||
+      normalized.match?(/\bOWNER_DIRECT_PACKET_AUTHORIZATION\b/) ||
+      normalized.match?(/OWNER_ACTION_AUTHORIZATION\s*:\s*(?:PRESENT_IN_CURRENT_OWNER_MESSAGE|REUSED_FROM_PRIOR_OWNER_MESSAGE)/) ||
+      normalized.match?(/\bOWNER_DIRECT_MESSAGE\b.*\bAUTHORIZED\b/m)
+  end
+
+  def authorized_scope_text(text)
+    cutoff = text.match(/\bNOT\s+AUTHORIZED\s*:/i)
+    cutoff ? text[0...cutoff.begin(0)] : text
+  end
+
+  def action_matches_authorized_scope?(action, scope, authorization_target: nil)
+    requested_action = action.to_s.strip.upcase.tr('_', ' ')
+    return false if requested_action.empty?
+
+    requested_target = authorization_target.to_s.strip
+    return false if authorization_target && requested_target.empty?
+
+    authorized_action_target_pairs(scope).any? do |authorized_action, authorized_target|
+      next false unless authorized_action.upcase.tr('_', ' ') == requested_action
+
+      authorization_target.nil? || authorized_target == requested_target
+    end
+  end
+
+  def authorized_action_target_pairs(scope)
+    pairs = []
+    scope.to_s.each_line do |line|
+      action_match = line.match(
+        /(?:\A|[^\w])(?:AUTHORIZED_)?ACTION\s*[:=]\s*([A-Z][A-Z0-9_]*)/i
+      )
+      target_match = line.match(
+        /(?:\A|[^\w])(?:AUTHORIZED_)?TARGET\s*[:=]\s*(.+?)(?=\s*(?:;|\z))/i
+      )
+      next unless action_match && target_match
+
+      pairs << [action_match[1].strip.upcase, target_match[1].strip]
+    end
+    pairs.uniq
   end
 
   def evaluate_git_advancement(live)
@@ -1768,6 +1864,9 @@ if __FILE__ == $PROGRAM_NAME
     end
     opts.on('--auth TOKEN', 'Provide direct conversation authorization token') do |v|
       (options[:conversation_authorizations] ||= []) << v
+    end
+    opts.on('--auth-target TARGET', 'Require the authorization token to name the exact target') do |v|
+      options[:authorization_target] = v
     end
   end
 
