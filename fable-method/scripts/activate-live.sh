@@ -11,7 +11,7 @@ readonly SYNC_SCRIPT="${SCRIPT_DIR}/sync-platforms.sh"
 PLATFORMS=(codex claude gemini antigravity)
 SELECTED_SKILL=fable-method
 MANIFEST_RECORDS=""
-readonly REVIEWED_REPLACEMENT_PLATFORMS=(codex claude)
+readonly REVIEWED_REPLACEMENT_PLATFORMS=(codex claude antigravity)
 readonly TRUSTED_GIT_PATH='/usr/bin:/bin:/usr/sbin:/sbin'
 readonly ACTIVATION_LOCK="${USER_HOME}/.fable-method-activation.lock"
 
@@ -25,12 +25,15 @@ usage() {
 Usage:
   activate-live.sh --help
   All operations accept [--skill fable-method|fable-judge]; default fable-method.
+  Method reviewed replacement: codex|claude|antigravity.
   Judge platforms: codex|claude|gemini|antigravity (reviewed replacement: codex|claude|gemini).
   activate-live.sh --check [--platform codex|claude|gemini|antigravity]
   activate-live.sh --activate --platform codex|claude|gemini|antigravity
-  activate-live.sh --activate --platform codex|claude --replace-reviewed-local-drift \
+  activate-live.sh --activate --platform <supported-platform> --replace-reviewed-local-drift \
       --expected-live-sha256 <64-hex> --expected-canonical-head <40-hex> \
       --expected-canonical-tree <40-hex> --expected-materialization-tree <40-hex>
+  Ordinary activation refuses LOCAL_DRIFT. Reviewed replacement requires all four
+  exact identity bindings, each exactly once and revalidated before the first write.
 EOF
   exit 2
 }
@@ -43,7 +46,7 @@ activate-live.sh - repository-owned activation for managed Fable skill installs.
                                  Select one skill. Default: fable-method.
                                  Judge supports codex, claude, gemini, and antigravity.
                                  Judge reviewed replacement supports codex, claude, and gemini;
-                                 Method remains limited to codex and claude.
+                                 Method reviewed replacement supports codex, claude, and antigravity.
   --check                       Read-only. Classifies every configured platform's
                                  live installation against this repository's current
                                  and historical materializations. Never writes to
@@ -54,13 +57,14 @@ activate-live.sh - repository-owned activation for managed Fable skill installs.
                                  is provably ABSENT, an exact copy of the current
                                  repository materialization, or an exact copy of an
                                  earlier committed materialization. Any live state
-                                 this script cannot fully account for - local drift,
+                                 this script cannot fully account for - LOCAL_DRIFT,
                                  a symlink, or an unresolved read - is never
                                  overwritten, mirrored, or deleted.
   --help                        Show this help.
 
-  --activate --platform codex|claude --replace-reviewed-local-drift
-                                 Method: Codex or Claude; Judge: all three. Overwrites a live
+  --activate --platform <supported-platform> --replace-reviewed-local-drift
+                                 Method: codex|claude|antigravity.
+                                 Judge: codex|claude|gemini. Replaces a live
                                  installation the ordinary path refuses
                                  (LOCAL_DRIFT) provided the caller supplies the
                                  exact identity of what is being replaced: the
@@ -75,6 +79,9 @@ activate-live.sh - repository-owned activation for managed Fable skill installs.
                                  activation lock, immediately before the first
                                  write; any mismatch takes zero live writes. There
                                  is no target-path override, no unsupported pair, and no combination with --check.
+                                 Identity binding does not perform semantic review:
+                                 the Owner/Worker must separately review which
+                                 local changes may be discarded.
 
 Running --activate against a real installation requires authorization from the
 Owner obtained outside this script. This script performs no conversational or
@@ -814,7 +821,8 @@ do_activate() {
   printf 'LIVE_TARGET: %s\n' "$live"
 }
 
-# Codex or Claude only (REVIEWED_REPLACEMENT_PLATFORMS). Reuses the same
+# Method: Codex, Claude, or Antigravity; Judge: Codex, Claude, or Gemini.
+# Uses is_reviewed_replacement_platform and reuses the same
 # single activation lock, repository-identity guards, and rsync architecture
 # as do_activate, but replaces classify_platform eligibility with an
 # Owner-supplied identity binding (L/H/T/M), all bound to the one supplied
@@ -827,7 +835,7 @@ do_activate_replace_reviewed_local_drift() {
   acquire_activation_lock
   local platform="$1" expected_l="$2" expected_h="$3" expected_t="$4" expected_m="$5"
   is_reviewed_replacement_platform "$platform" \
-    || die "REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM: reviewed local drift replacement supports only ${REVIEWED_REPLACEMENT_PLATFORMS[*]} (got ${platform})"
+    || die "REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM: Method supports codex|claude|antigravity; Judge supports codex|claude|gemini (got ${SELECTED_SKILL}/${platform})"
   guard_repository_root
   verify_manifest_paths
   require_canonical_source_gate
@@ -1001,7 +1009,7 @@ main() {
     [[ -n "$platform" ]] \
       || die '--activate requires exactly one --platform'
     is_reviewed_replacement_platform "$platform" \
-      || die "REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM: --replace-reviewed-local-drift requires --platform codex or claude (got ${platform})"
+      || die "REVIEWED_REPLACEMENT_UNSUPPORTED_PLATFORM: Method supports codex|claude|antigravity; Judge supports codex|claude|gemini (got ${SELECTED_SKILL}/${platform})"
     (( expected_l_count == 1 )) \
       || die "REVIEWED_REPLACEMENT_MISSING_IDENTITY: --expected-live-sha256 must be given exactly once (got ${expected_l_count})"
     (( expected_h_count == 1 )) \
