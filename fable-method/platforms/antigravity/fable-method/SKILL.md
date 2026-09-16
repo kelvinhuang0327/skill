@@ -230,6 +230,9 @@ separate; labels do not turn inference into observation.
 
 Use the Packet route when present. Otherwise choose exactly one:
 
+When an executable task Packet explicitly declares `JUDGE_MODE: NOT_APPLICABLE`, that value is a hard execution boundary at the Worker handoff. The Worker terminal state remains the final task state. Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge. Do not select a default or fallback Judge mode or synthesize `BOUNDED`, `FULL`, or `DELTA` Judge depth.
+Check this boundary before any Judge-trigger or depth evaluation. `FRESH_CONTEXT` and `SELF_CHECK_ONLY` retain their existing routing semantics.
+
 - `FAST`: one known low-risk local target, one direct acceptance check, no new
   behavior, and no Judge trigger.
 - `STANDARD`: default for coupled work or one continuous runtime chain.

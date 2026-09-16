@@ -160,6 +160,29 @@ class ExplicitContractFailClosedTest < Minitest::Test
     refute Parser.judge_mode_accepted?('BOUNDED')
   end
 
+  def test_not_applicable_is_a_hard_worker_handoff_boundary
+    clauses = [
+      'When an executable task Packet explicitly declares `JUDGE_MODE: NOT_APPLICABLE`, that value is a hard execution boundary at the Worker handoff.',
+      'The Worker terminal state remains the final task state.',
+      'Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.',
+      'Do not select a default or fallback Judge mode or synthesize `BOUNDED`, `FULL`, or `DELTA` Judge depth.',
+      'Check this boundary before any Judge-trigger or depth evaluation.',
+      '`FRESH_CONTEXT` and `SELF_CHECK_ONLY` retain their existing routing semantics.'
+    ]
+    weakenings = {
+      'hard execution boundary at the Worker handoff' => 'an ordinary routing note at the Worker handoff',
+      'The Worker terminal state remains the final task state.' => 'The Worker terminal state is an intermediate state.',
+      'Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.' =>
+        'create, schedule, invoke, fall back to, or automatically escalate into a Judge when needed.',
+      'Do not select a default or fallback Judge mode or synthesize `BOUNDED`, `FULL`, or `DELTA` Judge depth.' =>
+        'Select a default or fallback Judge mode and synthesize Judge depth as needed.',
+      'Check this boundary before any Judge-trigger or depth evaluation.' =>
+        'Check this boundary after Judge-trigger or depth evaluation.',
+      'retain their existing routing semantics' => 'may be changed by this boundary'
+    }
+    assert_canonical_contract_controls('SKILL.md', 'Route once', clauses, weakenings)
+  end
+
   def test_unknown_judge_mode_does_not_silently_join_the_live_enum
     live = Parser.routing_enum('JUDGE_MODE')
     refute_includes live, 'AUTO_VERIFIED'
