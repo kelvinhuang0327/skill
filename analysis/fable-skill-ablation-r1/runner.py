@@ -15,6 +15,7 @@ keeps orchestrator identity separate from the explicitly model-visible view.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,32 @@ _INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers"})
 _DIMENSION_ALIASES = {
     "mcp_servers": ("mcp_servers", "mcpServers"),
 }
+
+# The runner-owned, provider-neutral instruction-surface floor.  Unlike the
+# manifest-declared ``frozen_dimensions`` (tools/agents/mcp_servers), this set
+# is never read from the manifest: a manifest or caller cannot narrow it,
+# because :func:`evaluate_global_instruction_surface` never accepts it as
+# input.  ``skills`` is deliberately absent -- it is the treatment carrier
+# surface asserted directionally by :func:`_carrier_delta_is_exact_treatment`
+# and is expected to differ between arms, not stay equal.
+INSTRUCTION_SURFACES = (
+    "output_style",
+    "hooks",
+    "agents_md",
+    "user_rules",
+    "instruction_sources",
+)
+_INSTRUCTION_SURFACE_ALIASES = {
+    "output_style": ("output_style", "outputStyle"),
+    "hooks": ("hooks",),
+    "agents_md": ("agents_md", "agentsMd"),
+    "user_rules": ("user_rules", "userRules"),
+    "instruction_sources": ("instruction_sources", "instructionSources"),
+}
+# The two treatment arms every expected provider must supply.  Fixed by the
+# runner, like ``INSTRUCTION_SURFACES``: a caller declares which providers are
+# in scope, never which arms a provider may skip.
+REQUIRED_TREATMENT_ARMS = ("OFF", "ON")
 _SEMANTIC_SKILL_PATHS = (
     ("skills",),
     ("available_skills",),
@@ -121,6 +148,17 @@ class InitEvidence:
     inventories: Mapping[str, Any] = field(default_factory=dict)
     skill_identities: frozenset[str] = frozenset()
     skills_resolved: bool = False
+    # Content-bound digests for every surface in INSTRUCTION_SURFACES that
+    # resolved cleanly (single alias present, non-null, canonically
+    # serializable).  A surface absent here was missing, null, malformed, or
+    # reached through more than one alias -- never coerced into a value.
+    # Kept independent of ``valid``/``errors``: the instruction-surface floor
+    # is a separate gate (see evaluate_global_instruction_surface) and must
+    # never change what ``evaluate_purity`` already means by a valid init
+    # event, the same way ``skills`` stays outside the frozen dimensions.
+    instruction_surfaces: Mapping[str, str] = field(default_factory=dict)
+    instruction_surfaces_resolved: bool = False
+    instruction_surface_errors: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
     @property
@@ -205,6 +243,10 @@ class RunEvidence:
     executor_called: bool
     materializer_error: str | None
     executor_error: str | None
+    # The runner-owned, provider-neutral cross-provider floor (see
+    # evaluate_global_instruction_surface).  Independent of `purity`: neither
+    # gate can compensate for the other's failure in `run_countable`.
+    global_instruction_surface: "GlobalInstructionSurfaceResult"
     run_countable: bool
 
     def as_record(self) -> dict[str, Any]:
@@ -222,6 +264,7 @@ class RunEvidence:
             "executor_called": self.executor_called,
             "materializer_error": self.materializer_error,
             "executor_error": self.executor_error,
+            "global_instruction_surface": self.global_instruction_surface.as_record(),
             "run_countable": self.run_countable,
         }
 
@@ -581,6 +624,54 @@ def _semantic_skills(init_event: Mapping[str, Any]) -> tuple[frozenset[str], boo
     return frozenset(identities), found_inventory and not errors, errors
 
 
+def _instruction_surface_digest(value: Any) -> str | None:
+    try:
+        return hashlib.sha256(
+            json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+            ).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_instruction_surfaces(
+    init_event: Mapping[str, Any],
+) -> tuple[dict[str, str], bool, list[str]]:
+    """Resolve every required instruction surface with strict alias decoding.
+
+    A surface is observed only when exactly one of its known spellings is
+    present with a non-null value: zero spellings is missing evidence, more
+    than one is an ambiguous alias even when both carry the same value, and
+    neither is ever coerced into an empty/absent observation.  The returned
+    digest binds the exact observed content (canonical JSON, so key order in
+    a mapping is irrelevant but list/sequence order is preserved).
+    """
+
+    digests: dict[str, str] = {}
+    errors: list[str] = []
+    for surface in INSTRUCTION_SURFACES:
+        aliases = _INSTRUCTION_SURFACE_ALIASES[surface]
+        present = [alias for alias in aliases if alias in init_event]
+        if not present:
+            errors.append(f"missing_instruction_surface:{surface}")
+            continue
+        if len(present) > 1:
+            errors.append(f"ambiguous_instruction_surface_alias:{surface}")
+            continue
+        value = init_event[present[0]]
+        if value is None:
+            errors.append(f"null_instruction_surface:{surface}")
+            continue
+        digest = _instruction_surface_digest(value)
+        if digest is None:
+            errors.append(f"malformed_instruction_surface:{surface}")
+            continue
+        digests[surface] = digest
+    resolved = not errors and len(digests) == len(INSTRUCTION_SURFACES)
+    return digests, resolved, errors
+
+
 def _dimension_value(init_event: Mapping[str, Any], dimension: str) -> tuple[Any, list[str]]:
     aliases = _DIMENSION_ALIASES.get(dimension, (dimension,))
     found: list[tuple[str, Any]] = []
@@ -687,6 +778,13 @@ def parse_init_events(
 
     skill_identities, skills_resolved, skill_errors = _semantic_skills(event)
     errors.extend(skill_errors)
+
+    # Deliberately not folded into `errors`/`valid`: see the field comment on
+    # InitEvidence.instruction_surfaces.
+    instruction_surfaces, instruction_surfaces_resolved, surface_errors = (
+        _resolve_instruction_surfaces(event)
+    )
+
     return InitEvidence(
         init_event_found=actual_shape,
         valid=actual_shape and not errors,
@@ -695,6 +793,9 @@ def parse_init_events(
         inventories=inventories,
         skill_identities=skill_identities,
         skills_resolved=skills_resolved,
+        instruction_surfaces=instruction_surfaces,
+        instruction_surfaces_resolved=instruction_surfaces_resolved,
+        instruction_surface_errors=tuple(surface_errors),
         errors=tuple(errors),
     )
 
@@ -778,6 +879,171 @@ def evaluate_purity(
     )
 
 
+@dataclass(frozen=True)
+class GlobalInstructionSurfaceResult:
+    """Runner-owned, provider-neutral verdict for the cross-provider floor.
+
+    ``resolved`` and ``passed`` are deliberately distinct: unresolved means
+    the expected provider/arm/surface coverage was never fully established
+    (so no comparison could even be attempted), failed means coverage was
+    established and the comparison itself did not hold.  A caller cannot
+    construct a passing result without going through
+    :func:`evaluate_global_instruction_surface`.
+    """
+
+    resolved: bool = False
+    passed: bool = False
+    checks: Mapping[str, bool] = field(default_factory=dict)
+    reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.passed and not self.resolved:
+            raise ValueError("passed cannot be true while unresolved")
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "resolved": self.resolved,
+            "passed": self.passed,
+            "checks": dict(self.checks),
+            "reasons": list(self.reasons),
+        }
+
+
+def _carrier_delta_is_exact_treatment(
+    off_skills: frozenset[str], on_skills: frozenset[str], allowed_fable_carrier: str
+) -> bool:
+    """OFF must lack the carrier; ON must add exactly it and nothing else.
+
+    A plain symmetric-difference-subset test (``off ^ on <= {carrier}``) is
+    direction-blind: it also accepts the carrier sitting in OFF and absent
+    from ON, as long as nothing else differs.  Both directions are checked
+    explicitly so that shape is rejected rather than silently accepted.
+    """
+
+    carrier = allowed_fable_carrier.strip().casefold()
+    return (
+        carrier not in off_skills
+        and carrier in on_skills
+        and (on_skills - {carrier}) == off_skills
+    )
+
+
+def evaluate_global_instruction_surface(
+    provider_events: Mapping[str, Mapping[str, Iterable[Event]]],
+    *,
+    expected_providers: Sequence[str],
+    allowed_fable_carrier: str = FABLE_SKILL_IDENTITY,
+) -> GlobalInstructionSurfaceResult:
+    """Evaluate the unavoidable, provider-neutral instruction-surface floor.
+
+    ``provider_events`` supplies only raw events per (provider, arm); every
+    init event is parsed here, so a caller can never substitute a
+    pre-computed pass/fail summary or reduced surface list for the
+    underlying raw evidence this gate requires.  ``expected_providers`` is
+    declared by the caller up front and is never narrowed to whichever
+    evidence happened to arrive: a provider or arm missing from
+    ``provider_events`` leaves the gate unresolved rather than silently
+    skipped.  Passing requires, for every expected provider, both arms
+    observed with every required surface resolved and byte-identical
+    (INSTRUCTION_SURFACES carries no carrier exception), the treatment
+    carrier delta present only and exactly on the ON arm, and the resulting
+    non-treatment representation identical across every expected provider.
+    Existing per-slot inventory checks (tools/agents/mcp_servers) are a
+    separate, independently-enforced gate and are not restated here.
+    """
+
+    checks: dict[str, bool] = {}
+    reasons: list[str] = []
+
+    unique_providers = tuple(dict.fromkeys(expected_providers))
+    if not expected_providers or len(unique_providers) != len(expected_providers):
+        return GlobalInstructionSurfaceResult(
+            resolved=False, reasons=("expected_provider_set_invalid",)
+        )
+
+    per_provider_evidence: dict[str, Mapping[str, InitEvidence]] = {}
+    for provider in expected_providers:
+        arms = provider_events.get(provider)
+        provider_present = isinstance(arms, Mapping)
+        checks[f"provider_present:{provider}"] = provider_present
+        if not provider_present:
+            reasons.append(f"missing_provider:{provider}")
+            continue
+
+        resolved_arms: dict[str, InitEvidence] = {}
+        for arm in REQUIRED_TREATMENT_ARMS:
+            events = arms.get(arm, _MISSING)
+            arm_present = events is not _MISSING and events is not None
+            checks[f"arm_present:{provider}:{arm}"] = arm_present
+            if not arm_present:
+                reasons.append(f"missing_arm:{provider}:{arm}")
+                continue
+            evidence = parse_init_events(list(events))
+            surfaces_ok = evidence.valid and evidence.instruction_surfaces_resolved
+            checks[f"surfaces_resolved:{provider}:{arm}"] = surfaces_ok
+            if not surfaces_ok:
+                reasons.append(f"unresolved_instruction_surfaces:{provider}:{arm}")
+                reasons.extend(
+                    f"unresolved_instruction_surfaces:{provider}:{arm}:{error}"
+                    for error in (*evidence.errors, *evidence.instruction_surface_errors)
+                )
+                continue
+            resolved_arms[arm] = evidence
+
+        if len(resolved_arms) != len(REQUIRED_TREATMENT_ARMS):
+            continue
+        per_provider_evidence[provider] = resolved_arms
+
+        off_evidence = resolved_arms["OFF"]
+        on_evidence = resolved_arms["ON"]
+        local_equal = off_evidence.instruction_surfaces == on_evidence.instruction_surfaces
+        checks[f"provider_local_surfaces_equal:{provider}"] = local_equal
+        if not local_equal:
+            reasons.append(f"provider_local_surface_drift:{provider}")
+
+        carrier_correct = (
+            off_evidence.skills_resolved
+            and on_evidence.skills_resolved
+            and _carrier_delta_is_exact_treatment(
+                off_evidence.skill_identities,
+                on_evidence.skill_identities,
+                allowed_fable_carrier,
+            )
+        )
+        checks[f"carrier_delta_is_exact_treatment:{provider}"] = carrier_correct
+        if not carrier_correct:
+            reasons.append(f"carrier_delta_incorrect:{provider}")
+
+    fully_covered = len(per_provider_evidence) == len(expected_providers)
+    checks["expected_provider_arm_set_fully_covered"] = fully_covered
+    if not fully_covered:
+        return GlobalInstructionSurfaceResult(
+            resolved=False, checks=checks, reasons=tuple(dict.fromkeys(reasons))
+        )
+
+    # Every expected provider resolved both arms and is locally OFF/ON
+    # consistent: the gate is now resolved.  Cross-provider equality of the
+    # non-treatment representation (OFF, since local equality already proved
+    # OFF == ON for every provider reaching this point) decides pass/fail.
+    reference_provider = expected_providers[0]
+    reference_surfaces = per_provider_evidence[reference_provider]["OFF"].instruction_surfaces
+    cross_provider_equal = all(
+        arms["OFF"].instruction_surfaces == reference_surfaces
+        for arms in per_provider_evidence.values()
+    )
+    checks["cross_provider_instruction_surfaces_equal"] = cross_provider_equal
+    if not cross_provider_equal:
+        reasons.append("cross_provider_instruction_surface_drift")
+
+    passed = bool(checks) and all(checks.values())
+    return GlobalInstructionSurfaceResult(
+        resolved=True,
+        passed=passed,
+        checks=checks,
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
+
+
 def _git(
     repository: Path, args: Sequence[str], allowed_returncodes: frozenset[int] = frozenset({0})
 ) -> subprocess.CompletedProcess[bytes]:
@@ -851,14 +1117,20 @@ def execute_manifest_slot(
     reference_events: Iterable[Event],
     materializer: Materializer,
     executor: Executor,
+    provider_instruction_surface_events: Mapping[str, Mapping[str, Iterable[Event]]],
+    expected_providers: Sequence[str],
     environment: Mapping[str, str] | None = None,
     opaque_id_factory: Callable[[], str] | None = None,
 ) -> RunEvidence:
     """Materialize and execute one slot through injected interfaces only.
 
     Invalid reference evidence or model-visible leakage prevents executor
-    invocation.  Executor failures, unresolved Git state, and purity failures
-    all make the final observation non-countable.
+    invocation.  Executor failures, unresolved Git state, purity failures,
+    and a failed or unresolved global instruction-surface gate (see
+    evaluate_global_instruction_surface) all make the final observation
+    non-countable.  ``provider_instruction_surface_events`` and
+    ``expected_providers`` are required, not defaulted: there is no call
+    shape that reaches ``run_countable`` without addressing the gate.
     """
 
     slot = select_manifest_slot(manifest, orchestrator_run_id)
@@ -917,12 +1189,21 @@ def execute_manifest_slot(
         surface_audit=surface_audit,
     )
     git_state = capture_git_state(workspace)
+    # Computed from the caller's raw per-provider events, never from a
+    # caller-supplied verdict: a manifest or caller cannot shortcut this gate
+    # by passing a pre-decided passed=True.
+    global_instruction_surface = evaluate_global_instruction_surface(
+        provider_instruction_surface_events,
+        expected_providers=expected_providers,
+    )
     countable = (
         purity.run_countable
         and git_state.state_resolved
         and executor_called
         and executor_error is None
         and materializer_error is None
+        and global_instruction_surface.resolved
+        and global_instruction_surface.passed
     )
 
     return RunEvidence(
@@ -937,6 +1218,7 @@ def execute_manifest_slot(
         executor_called=executor_called,
         materializer_error=materializer_error,
         executor_error=executor_error,
+        global_instruction_surface=global_instruction_surface,
         run_countable=countable,
     )
 
@@ -944,11 +1226,14 @@ def execute_manifest_slot(
 __all__ = [
     "FABLE_SKILL_IDENTITY",
     "GitState",
+    "GlobalInstructionSurfaceResult",
     "HarnessContractError",
+    "INSTRUCTION_SURFACES",
     "InitEvidence",
     "ManifestSlot",
     "ModelInvocation",
     "PurityResult",
+    "REQUIRED_TREATMENT_ARMS",
     "RunEvidence",
     "SurfaceAudit",
     "WorkspacePlan",
@@ -956,6 +1241,7 @@ __all__ = [
     "build_model_invocation",
     "capture_git_state",
     "create_condition_neutral_workspace",
+    "evaluate_global_instruction_surface",
     "evaluate_purity",
     "execute_manifest_slot",
     "load_manifest",
