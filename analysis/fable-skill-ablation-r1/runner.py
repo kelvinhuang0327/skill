@@ -248,6 +248,7 @@ class RunEvidence:
     # gate can compensate for the other's failure in `run_countable`.
     global_instruction_surface: "GlobalInstructionSurfaceResult"
     run_countable: bool
+    settlement_authority: "SettlementAuthorityResult"
 
     def as_record(self) -> dict[str, Any]:
         return {
@@ -265,6 +266,7 @@ class RunEvidence:
             "materializer_error": self.materializer_error,
             "executor_error": self.executor_error,
             "global_instruction_surface": self.global_instruction_surface.as_record(),
+            "settlement_authority": self.settlement_authority.as_record(),
             "run_countable": self.run_countable,
         }
 
@@ -1044,6 +1046,72 @@ def evaluate_global_instruction_surface(
     )
 
 
+@dataclass(frozen=True)
+class SettlementAuthorityResult:
+    """Runner-owned countability verdict for one composed slot's terminal cost.
+
+    Distinct from ``PurityResult``/``GlobalInstructionSurfaceResult``: this
+    gate never inspects what the provider said, only whether Card A's ledger
+    (``epoch_controller.BudgetLedger``) durably settled a terminal cost for
+    the exact slot that ran.  A slot is never countable merely because the
+    provider process succeeded -- an executor that was never called, that
+    errored, or whose terminal cost stayed unresolved all fail this closed,
+    the same way an unresolved instruction surface fails the global gate
+    closed rather than defaulting to a pass.
+    """
+
+    passed: bool = False
+    reasons: tuple[str, ...] = ()
+
+    def as_record(self) -> dict[str, Any]:
+        return {"passed": self.passed, "reasons": list(self.reasons)}
+
+
+def evaluate_settlement_authority(
+    *,
+    executor_called: bool,
+    executor_error: str | None,
+    slot_id: str | None = None,
+    invocation: ModelInvocation | None = None,
+    composition_result: Any = None,
+    settlement_record: Mapping[str, Any] | None = None,
+) -> SettlementAuthorityResult:
+    """Require the composed execution's exact, durably replayed settlement.
+
+    A bare ledger record (even a successful settlement) proves neither the
+    controller launch authority nor which invocation produced it.  Only the
+    sanctioned composition result can supply those proofs; the runner also
+    checks its own slot and full invocation, not a caller's passed flag.
+    """
+
+    reasons: list[str] = []
+    if not executor_called:
+        reasons.append("executor_not_called")
+    if executor_error is not None:
+        reasons.append(f"executor_error:{executor_error}")
+    if composition_result is None:
+        reasons.append("execution_authority_unresolved")
+        if settlement_record is None:
+            reasons.append("settlement_unresolved")
+        elif settlement_record.get("transition") != "settlement":
+            reasons.append("settlement_record_not_a_settlement_transition")
+    else:
+        # Deferred import keeps runner's provider-neutral evidence parsing
+        # usable on its own, without a circular import at module load time.
+        from epoch_provider_composition import CompositionResult
+
+        if type(composition_result) is not CompositionResult:
+            reasons.append("untrusted_composition_result")
+        elif slot_id is None or invocation is None:
+            reasons.append("execution_identity_unresolved")
+        else:
+            try:
+                reasons.extend(composition_result.verify_settlement(slot_id, invocation))
+            except Exception as exc:
+                reasons.append(f"settlement_verification_failed:{type(exc).__name__}:{exc}")
+    return SettlementAuthorityResult(passed=not reasons, reasons=tuple(dict.fromkeys(reasons)))
+
+
 def _git(
     repository: Path, args: Sequence[str], allowed_returncodes: frozenset[int] = frozenset({0})
 ) -> subprocess.CompletedProcess[bytes]:
@@ -1126,7 +1194,8 @@ def execute_manifest_slot(
 
     Invalid reference evidence or model-visible leakage prevents executor
     invocation.  Executor failures, unresolved Git state, purity failures,
-    and a failed or unresolved global instruction-surface gate (see
+    missing or mismatched settlement authority, and a failed or unresolved
+    global instruction-surface gate (see
     evaluate_global_instruction_surface) all make the final observation
     non-countable.  ``provider_instruction_surface_events`` and
     ``expected_providers`` are required, not defaulted: there is no call
@@ -1174,10 +1243,12 @@ def execute_manifest_slot(
     executor_called = False
     executor_error: str | None = None
     run_records: list[Event] = []
+    execution_result: Any = None
     if surface_audit.passed and reference_preflight_pass and materializer_error is None:
         executor_called = True
         try:
-            run_records = list(executor(invocation))
+            execution_result = executor(invocation)
+            run_records = list(execution_result)
         except Exception as exc:  # injected boundary: fail closed, retain evidence
             executor_error = f"{type(exc).__name__}: {exc}"
 
@@ -1196,6 +1267,15 @@ def execute_manifest_slot(
         provider_instruction_surface_events,
         expected_providers=expected_providers,
     )
+    settlement_authority = evaluate_settlement_authority(
+        executor_called=executor_called,
+        executor_error=executor_error,
+        slot_id=slot.orchestrator_run_id,
+        invocation=invocation,
+        composition_result=(
+            execution_result if hasattr(execution_result, "verify_settlement") else None
+        ),
+    )
     countable = (
         purity.run_countable
         and git_state.state_resolved
@@ -1204,6 +1284,7 @@ def execute_manifest_slot(
         and materializer_error is None
         and global_instruction_surface.resolved
         and global_instruction_surface.passed
+        and settlement_authority.passed
     )
 
     return RunEvidence(
@@ -1220,6 +1301,7 @@ def execute_manifest_slot(
         executor_error=executor_error,
         global_instruction_surface=global_instruction_surface,
         run_countable=countable,
+        settlement_authority=settlement_authority,
     )
 
 
@@ -1235,6 +1317,7 @@ __all__ = [
     "PurityResult",
     "REQUIRED_TREATMENT_ARMS",
     "RunEvidence",
+    "SettlementAuthorityResult",
     "SurfaceAudit",
     "WorkspacePlan",
     "audit_model_visible_surfaces",
@@ -1243,6 +1326,7 @@ __all__ = [
     "create_condition_neutral_workspace",
     "evaluate_global_instruction_surface",
     "evaluate_purity",
+    "evaluate_settlement_authority",
     "execute_manifest_slot",
     "load_manifest",
     "parse_init_events",

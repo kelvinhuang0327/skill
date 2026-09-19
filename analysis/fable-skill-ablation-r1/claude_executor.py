@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -189,27 +189,43 @@ class ClaudeExecutor:
         self,
         provider_executable: str = PROVIDER_EXECUTABLE,
         required_provider_version: str = REQUIRED_PROVIDER_VERSION,
+        *,
+        launch: Callable[..., subprocess.Popen[bytes]] | None = None,
+        version_probe: Callable[[], subprocess.CompletedProcess[bytes]] | None = None,
     ) -> None:
         if not isinstance(provider_executable, str) or not provider_executable:
             raise ValueError("provider_executable must be a non-empty string")
         if not isinstance(required_provider_version, str) or not required_provider_version:
             raise ValueError("required_provider_version must be a non-empty string")
+        if launch is not None and not callable(launch):
+            raise ValueError("launch must be callable when provided")
         self.provider_executable = provider_executable
         self.required_provider_version = required_provider_version
+        # The sanctioned sandbox composition (epoch_provider_composition.py)
+        # injects its launcher here.  None preserves the original direct
+        # subprocess.run path unchanged, byte for byte, for every existing
+        # offline caller and test.
+        self.launch = launch
+        if version_probe is not None and not callable(version_probe):
+            raise ValueError("version_probe must be callable when provided")
+        self.version_probe = version_probe
 
     def verify_provider_version(self) -> str:
         """Read the exact provider version without sending a model prompt."""
 
         argv = (self.provider_executable, "--version")
         try:
-            completed = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-                shell=False,
-            )
+            if self.version_probe is not None:
+                completed = self.version_probe()
+            else:
+                completed = subprocess.run(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    shell=False,
+                )
         except OSError as exc:
             raise ProviderVersionError(
                 f"provider version command failed to start: {exc}",
@@ -274,16 +290,71 @@ class ClaudeExecutor:
             )
 
         observed_version = self.verify_provider_version()
+        stdout, stderr, returncode = self._run_provider_process(invocation)
+
+        if returncode != 0:
+            raise ProviderProcessError(
+                f"provider process exited {returncode}",
+                argv=invocation.argv,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        events = _parse_required_jsonl(stdout, stderr)
+        return ClaudeExecutionResult(
+            argv=invocation.argv,
+            events=events,
+            stdout=stdout,
+            stderr=stderr,
+            provider_identity=f"{self.provider_executable}@{observed_version}",
+            returncode=returncode,
+        )
+
+    def _run_provider_process(
+        self, invocation: ModelInvocation
+    ) -> tuple[bytes, bytes, int]:
+        """Run the provider child directly, or through an injected launcher.
+
+        ``self.launch is None`` is byte-for-byte the original direct
+        ``subprocess.run`` call every existing offline test already mocks and
+        asserts against.  An injected launcher (see
+        ``epoch_provider_composition.SandboxedProviderLauncher``) receives
+        the exact same logical argv and owns turning it into whatever
+        physically runs; this method only learns how to collect the result.
+        """
+
+        if self.launch is None:
+            try:
+                completed = subprocess.run(
+                    invocation.argv,
+                    input=invocation.prompt.encode("utf-8"),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=invocation.cwd,
+                    env=dict(invocation.environment),
+                    check=False,
+                    shell=False,
+                )
+            except OSError as exc:
+                raise ProviderProcessError(
+                    f"provider process failed to start: {exc}",
+                    argv=invocation.argv,
+                    returncode=None,
+                ) from exc
+            return completed.stdout, completed.stderr, completed.returncode
+
         try:
-            completed = subprocess.run(
+            process = self.launch(
                 invocation.argv,
-                input=invocation.prompt.encode("utf-8"),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=invocation.cwd,
                 env=dict(invocation.environment),
-                check=False,
                 shell=False,
+                close_fds=True,
+                start_new_session=True,
             )
         except OSError as exc:
             raise ProviderProcessError(
@@ -291,25 +362,18 @@ class ClaudeExecutor:
                 argv=invocation.argv,
                 returncode=None,
             ) from exc
-
-        if completed.returncode != 0:
+        try:
+            stdout, stderr = process.communicate(input=invocation.prompt.encode("utf-8"))
+        except OSError as exc:
             raise ProviderProcessError(
-                f"provider process exited {completed.returncode}",
+                f"provider process communication failed: {exc}",
                 argv=invocation.argv,
-                returncode=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-            )
-
-        events = _parse_required_jsonl(completed.stdout, completed.stderr)
-        return ClaudeExecutionResult(
-            argv=invocation.argv,
-            events=events,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            provider_identity=f"{self.provider_executable}@{observed_version}",
-            returncode=completed.returncode,
-        )
+                returncode=None,
+            ) from exc
+        returncode = process.returncode
+        if returncode is None:
+            returncode = process.poll()
+        return stdout, stderr, returncode
 
 
 def instruction_surface_evidence(result: ClaudeExecutionResult) -> InitEvidence:

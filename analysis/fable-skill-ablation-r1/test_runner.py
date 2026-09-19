@@ -15,12 +15,14 @@ from typing import Any
 # Importing the sibling module must not leave __pycache__ in the repository.
 sys.dont_write_bytecode = True
 RUNNER_PATH = Path(__file__).with_name("runner.py")
-SPEC = importlib.util.spec_from_file_location("fable_ablation_runner", RUNNER_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError(f"cannot import {RUNNER_PATH}")
-runner = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = runner
-SPEC.loader.exec_module(runner)
+runner = sys.modules.get("runner")
+if runner is None:
+    SPEC = importlib.util.spec_from_file_location("runner", RUNNER_PATH)
+    if SPEC is None or SPEC.loader is None:
+        raise RuntimeError(f"cannot import {RUNNER_PATH}")
+    runner = importlib.util.module_from_spec(SPEC)
+    sys.modules[SPEC.name] = runner
+    SPEC.loader.exec_module(runner)
 
 
 FROZEN_DIMENSIONS = ("tools", "agents", "mcp_servers")
@@ -413,7 +415,8 @@ class CanonicalHarnessTests(unittest.TestCase):
         self.assertTrue(
             evidence.global_instruction_surface.passed, evidence.global_instruction_surface.reasons
         )
-        self.assertTrue(evidence.run_countable)
+        self.assertFalse(evidence.run_countable)
+        self.assertIn("execution_authority_unresolved", evidence.settlement_authority.reasons)
 
 
 SURFACES_WITH_ALTERNATE_ALIAS = {
@@ -758,6 +761,71 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
         self.assertTrue(evidence.purity.purity_pass, evidence.purity.reasons)
         self.assertFalse(evidence.global_instruction_surface.resolved)
         self.assertFalse(evidence.run_countable)
+
+
+class SettlementAuthorityTests(unittest.TestCase):
+    def test_01_bare_successful_settlement_cannot_create_execution_authority(self) -> None:
+        result = runner.evaluate_settlement_authority(
+            executor_called=True,
+            executor_error=None,
+            settlement_record={"transition": "settlement", "slot_id": "slot-a"},
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("execution_authority_unresolved", result.reasons)
+
+    def test_02_executor_never_called_fails_closed(self) -> None:
+        result = runner.evaluate_settlement_authority(
+            executor_called=False, executor_error=None, settlement_record=None
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("executor_not_called", result.reasons)
+        self.assertIn("settlement_unresolved", result.reasons)
+
+    def test_03_executor_error_fails_even_with_a_settlement_record(self) -> None:
+        # A settlement record here would mean a caller settled behind the
+        # executor's back -- still not countable, and worth surfacing both
+        # reasons rather than only one.
+        result = runner.evaluate_settlement_authority(
+            executor_called=True,
+            executor_error="ProviderProcessError: exited 1",
+            settlement_record={"transition": "settlement", "slot_id": "slot-a"},
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("executor_error:ProviderProcessError: exited 1", result.reasons)
+
+    def test_04_unresolved_terminal_cost_fails_closed(self) -> None:
+        result = runner.evaluate_settlement_authority(
+            executor_called=True, executor_error=None, settlement_record=None
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("settlement_unresolved", result.reasons)
+
+    def test_05_a_non_settlement_ledger_record_is_never_trusted(self) -> None:
+        # A caller passing a reservation or release record instead of the
+        # true settlement return value must not be able to shortcut this
+        # gate: only Card A's own settlement transition counts.
+        result = runner.evaluate_settlement_authority(
+            executor_called=True,
+            executor_error=None,
+            settlement_record={"transition": "reservation", "slot_id": "slot-a"},
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("settlement_record_not_a_settlement_transition", result.reasons)
+
+    def test_06_as_record_shape(self) -> None:
+        result = runner.evaluate_settlement_authority(
+            executor_called=False, executor_error=None, settlement_record=None
+        )
+
+        self.assertEqual(
+            result.as_record(),
+            {"passed": False, "reasons": list(result.reasons)},
+        )
 
 
 if __name__ == "__main__":
