@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 
@@ -369,6 +370,190 @@ class ClaudeExecutorOfflineTests(unittest.TestCase):
                 "ambiguous_instruction_surface_alias:output_style",
                 evidence.instruction_surface_errors,
             )
+
+
+class FakeLaunchedProcess:
+    """Stands in for a Popen an injected launcher would return."""
+
+    def __init__(
+        self,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        returncode: int | None = 0,
+    ) -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+        self.communicate_calls: list[bytes | None] = []
+
+    def communicate(
+        self, input: bytes | None = None, timeout: float | None = None
+    ) -> tuple[bytes, bytes]:
+        self.communicate_calls.append(input)
+        return self.stdout, self.stderr
+
+
+class ClaudeExecutorInjectedLaunchTests(unittest.TestCase):
+    """The seam epoch_provider_composition.SandboxedProviderLauncher uses."""
+
+    def test_16_injected_launch_receives_logical_argv_and_sanctioned_kwargs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root, environment={"FOO": "bar"})
+            recorded: dict[str, Any] = {}
+
+            def launch(argv: tuple[str, ...], **kwargs: Any) -> FakeLaunchedProcess:
+                recorded["argv"] = argv
+                recorded["kwargs"] = kwargs
+                return FakeLaunchedProcess(stdout=b'{"type":"system","subtype":"init"}\n')
+
+            executor = claude_executor.ClaudeExecutor(str(provider), launch=launch)
+            result = executor(invocation)
+
+            self.assertEqual(recorded["argv"], invocation.argv)
+            self.assertEqual(recorded["kwargs"]["cwd"], invocation.cwd)
+            self.assertEqual(recorded["kwargs"]["env"], dict(invocation.environment))
+            self.assertEqual(recorded["kwargs"]["shell"], False)
+            self.assertEqual(recorded["kwargs"]["close_fds"], True)
+            self.assertEqual(recorded["kwargs"]["start_new_session"], True)
+            self.assertEqual(recorded["kwargs"]["stdin"], subprocess.PIPE)
+            self.assertEqual(recorded["kwargs"]["stdout"], subprocess.PIPE)
+            self.assertEqual(recorded["kwargs"]["stderr"], subprocess.PIPE)
+            self.assertEqual(result[0]["subtype"], "init")
+
+    def test_17_injected_launch_writes_the_prompt_via_communicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            prompt = "an exact prompt\nwith a newline"
+            invocation = make_invocation(provider, root, prompt=prompt)
+            process = FakeLaunchedProcess(stdout=b'{"type":"system","subtype":"init"}\n')
+
+            executor = claude_executor.ClaudeExecutor(
+                str(provider), launch=lambda argv, **kwargs: process
+            )
+            executor(invocation)
+
+            self.assertEqual(process.communicate_calls, [prompt.encode("utf-8")])
+
+    def test_18_injected_launch_spawn_oserror_is_wrapped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+
+            def launch(argv: tuple[str, ...], **kwargs: Any) -> FakeLaunchedProcess:
+                raise OSError("induced spawn failure")
+
+            executor = claude_executor.ClaudeExecutor(str(provider), launch=launch)
+
+            with self.assertRaises(claude_executor.ProviderProcessError) as caught:
+                executor(invocation)
+
+            self.assertIsNone(caught.exception.returncode)
+            self.assertIn("induced spawn failure", str(caught.exception))
+
+    def test_19_injected_launch_communicate_oserror_is_wrapped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+
+            class RaisingProcess:
+                def communicate(
+                    self, input: bytes | None = None, timeout: float | None = None
+                ) -> Any:
+                    raise OSError("induced communicate failure")
+
+            executor = claude_executor.ClaudeExecutor(
+                str(provider), launch=lambda argv, **kwargs: RaisingProcess()
+            )
+
+            with self.assertRaises(claude_executor.ProviderProcessError) as caught:
+                executor(invocation)
+
+            self.assertIsNone(caught.exception.returncode)
+
+    def test_20_injected_launch_nonzero_returncode_is_surfaced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+            process = FakeLaunchedProcess(
+                stdout=b'{"sequence":1}\n', stderr=b"provider failed\n", returncode=23
+            )
+
+            executor = claude_executor.ClaudeExecutor(
+                str(provider), launch=lambda argv, **kwargs: process
+            )
+
+            with self.assertRaises(claude_executor.ProviderProcessError) as caught:
+                executor(invocation)
+
+            self.assertEqual(caught.exception.returncode, 23)
+            self.assertEqual(caught.exception.stderr, b"provider failed\n")
+
+    def test_21_default_executor_has_no_launch_seam_installed(self) -> None:
+        executor = claude_executor.ClaudeExecutor("/offline/fake-claude")
+
+        self.assertIsNone(executor.launch)
+
+    def test_22_default_path_still_uses_subprocess_run(self) -> None:
+        # Guards the refactor: the default, launch-less path must keep going
+        # through subprocess.run exactly as before (version check, then the
+        # invocation itself) rather than silently rerouting through Popen.
+        # subprocess.run is implemented in terms of Popen internally, so this
+        # wraps the real subprocess.run instead of replacing Popen outright.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+            executor = claude_executor.ClaudeExecutor(str(provider))
+            self.assertIsNone(executor.launch)
+
+            with mock.patch.object(
+                claude_executor.subprocess, "run", wraps=claude_executor.subprocess.run
+            ) as run:
+                result = executor(invocation)
+
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(result[0]["type"], "system")
+
+    def test_23_composed_version_probe_does_not_use_direct_subprocess_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+            process = FakeLaunchedProcess(stdout=b'{"type":"system","subtype":"init"}\n')
+            probe = mock.Mock(return_value=subprocess.CompletedProcess(
+                [str(provider), "--version"], 0,
+                (claude_executor.REQUIRED_PROVIDER_VERSION + "\n").encode(), b""
+            ))
+            executor = claude_executor.ClaudeExecutor(
+                str(provider), launch=lambda argv, **kwargs: process, version_probe=probe
+            )
+            with mock.patch.object(claude_executor.subprocess, "run") as direct:
+                result = executor(invocation)
+                direct.assert_not_called()
+            probe.assert_called_once_with()
+            self.assertEqual(result[0]["subtype"], "init")
+
+    def test_24_failed_composed_version_pin_prevents_prompt_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            provider = write_fake_provider(root)
+            invocation = make_invocation(provider, root)
+            launch = mock.Mock()
+            executor = claude_executor.ClaudeExecutor(
+                str(provider), launch=launch,
+                version_probe=lambda: subprocess.CompletedProcess([], 0, b"wrong-version\n", b""),
+            )
+            with self.assertRaises(claude_executor.ProviderVersionError):
+                executor(invocation)
+            launch.assert_not_called()
 
 
 if __name__ == "__main__":
