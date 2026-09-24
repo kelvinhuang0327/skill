@@ -13,6 +13,7 @@
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
+- [Production mutation recovery incidents](#production-mutation-recovery-incidents)
 - [Terminal closure and archiving](#terminal-closure-and-archiving)
 
 ## Overview and core principles
@@ -564,6 +565,48 @@ but **authorization does not transfer across conversation boundaries**.
   specifications, not live execution permission.
 - A durable Task B Packet proves which task is authorized; it does not transfer
   any standalone high-risk authorization into a fresh conversation.
+
+## Production mutation recovery incidents
+
+`RECOVERY_REQUIRED`, an unresolved `PARTIAL` still requiring recovery, an
+unresolved `ROLLBACK_IN_PROGRESS`, or an equivalent explicit production
+recovery state is not a lifecycle enum — it is a **fact about the target
+production system** that a Worker observes, the same way
+`EVALUATION_COMPLETE_UNSEALED` above is a fact about an evaluation's progress
+rather than a new lifecycle value. When an authorized production mutation
+reaches such a state and the task's intended successful production acceptance
+is not satisfied, treat the production incident as **OPEN** and persist it
+before session handoff using the existing checkpoint contract, with no schema
+or enum change:
+
+```text
+task_lifecycle_state: BLOCKED
+current_blocker: <the exact observed production recovery state and cause>
+next_action: <one exact next action or recovery-disposition action>
+authorization_boundary: <preserved unchanged from the task's existing boundary>
+```
+
+Hand off the exact literal runtime/receipt artifact locator when one exists
+(for example an `ExecutionRecord`/durable-capture path, a deployment receipt,
+or an equivalent exact identifier), and make explicit which current `task_id`
+owns the unresolved incident, so a resuming Worker or Owner never has to
+reconstruct ownership from chat history.
+
+The Worker that observes this state MUST NOT:
+
+- mark the production deployment/cutover itself successful;
+- silently leave the state for an ownerless future session — it must be
+  persisted as `BLOCKED` per above before handoff;
+- automatically retry, roll back, or reconcile the production mutation;
+- invent a new recovery task or a new `next_authorized_task_packet_ref`
+  without Planner/Owner authority;
+- add a new lifecycle enum or checkpoint schema field for this state.
+
+A Judge verdict that the Worker's failure handling was itself correct (for
+example `VERIFIED` or `VERIFIED_WITH_CAVEATS` on the incident-handling
+behavior) does NOT convert an open production recovery incident into
+deployment success; `task_lifecycle_state` stays `BLOCKED` until the
+production acceptance the task actually intended is independently satisfied.
 
 ## Terminal closure and archiving
 

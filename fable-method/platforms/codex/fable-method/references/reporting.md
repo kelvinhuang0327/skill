@@ -7,6 +7,7 @@
 - [Platform consumer evidence view](#platform-consumer-evidence-view)
 - [Runtime transition provenance](#runtime-transition-provenance)
 - [Destructive action provenance](#destructive-action-provenance)
+- [Ownership and quiescence blocker evidence](#ownership-and-quiescence-blocker-evidence)
 - [Lifecycle closure](#lifecycle-closure)
 
 Use the compact form for ordinary `FAST`/`STANDARD` work. Use the full
@@ -235,6 +236,40 @@ This contract does not require a new persistent receipt/evidence framework,
 registry, evidence database, receipt file, ledger service, or runtime storage.
 Do not require an extra command solely for reporting when the Worker naturally
 knows the information from the action it just performed.
+
+## Ownership and quiescence blocker evidence
+
+When a task-relevant runtime ownership or quiescence gate — [scope-qualified
+writer and quiescence checks](task-checkpoint.md#scope-qualified-writer-and-quiescence-checks),
+[worktrees and mutation evidence](operational-gates.md#worktrees-and-mutation-evidence),
+or an equivalent load-bearing observation — blocks execution, the terminal or
+blocked handoff must report the exact evidence naturally available from that
+observation, for every load-bearing matched owner:
+
+```text
+OWNER_PID:
+OWNER_PPID:
+OWNER_EXECUTABLE:
+OWNER_ARGV:
+OWNER_CWD:
+OWNER_MATCHED_EVIDENCE:
+OWNER_ROLE_MARKERS:
+OWNER_SOURCE_OR_RUNTIME_MATCH:
+OWNER_LOCK_STATES:
+OWNERSHIP_OBSERVED_AT:
+```
+
+Report `UNKNOWN` for a field that is genuinely unavailable rather than
+inventing a value. This is diagnostic reporting only: it must NOT define a
+second ownership classifier, exempt a process from an existing scoped
+ownership rule, alter role semantics, perform a workspace-wide process scan
+beyond what the blocking check already inspected, or weaken any existing
+scope-qualified ownership or quiescence rule. The purpose is that a later RCA
+can distinguish, for example, a real scheduler owner from a caller-chain
+observer, a wrapper, or a lock holder without reconstructing the failed
+process snapshot from chat history. Do not require an extra command solely
+for this report when the blocking check already naturally observed these
+fields.
 
 ## Lifecycle closure
 
