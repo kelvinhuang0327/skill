@@ -303,7 +303,7 @@ Capability preflight uses a strict tri-state:
 CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
 ```
 
-`ALLOWED` requires direct evidence that the current harness can perform the required execution path. `UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`. `BLOCKED` means direct evidence shows the required execution path is unavailable or denied; for a `BLOCKED` capability, do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block — retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged.
+`ALLOWED` requires direct evidence that the current harness can perform the required execution path. `UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`. `BLOCKED` means direct evidence shows the required execution path is unavailable or denied; for a `BLOCKED` capability, do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block — retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged. Before a production or deployment mutation, exercise this same tri-state through the exact harness/wrapper/launcher chain that will invoke the mutation — see [production mutation harness preflight](references/operational-gates.md#production-mutation-harness-preflight) for the same-chain probe contract and its fail-closed `UNKNOWN` behavior.
 
 A task framing such as “fix the code” is not a behavior spec. Never rely on
 recall: label an unverified fact `[Unknown]`. Use precise edits and never
@@ -437,7 +437,7 @@ Load only the directly relevant reference:
 - [examples](references/examples.md) for a task shape, Packet fast path, or
   report format;
 - [failure modes](references/failure-modes.md) for audit, retry diagnosis, or unclear verification failure;
-- [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, or detailed authority checks;
+- [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, a production-mutation harness preflight, or detailed authority checks;
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [memory boundary](references/memory-boundary.md) before reading project memory as authority or creating/modifying any memory, handoff, or checkpoint file, and [workspace containment](references/workspace-containment.md) before creating a worktree, clone, or sibling workspace directory;
@@ -446,7 +446,7 @@ Load only the directly relevant reference:
 - [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
 - [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;
 - [diff coverage](references/diff-coverage.md) for on-demand changed-line execution-adequacy measurement against an already-configured coverage run;
-- [reporting](references/reporting.md) for compact outcome-first fields and lifecycle reporting;
+- [reporting](references/reporting.md) for compact outcome-first fields, ownership/quiescence blocker evidence, and lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain: [business ops](references/domains/business-ops.md), [data analysis](references/domains/data-analysis.md), [design and UX](references/domains/design-ux.md), [devops](references/domains/devops.md), [finance](references/domains/finance.md), [legal and compliance](references/domains/legal-compliance.md), [marketing](references/domains/marketing.md), or [research](references/domains/research.md). `domains/TEMPLATE.md` is only for creating or updating an adapter.
 
 Preserve `/fable-method <task>`, `/fable-method plan <task>`,

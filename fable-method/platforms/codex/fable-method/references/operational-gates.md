@@ -4,6 +4,7 @@
 
 - [Packet and authority](#packet-and-authority)
 - [Authorization evidence and conversation boundary](#authorization-evidence-and-conversation-boundary)
+- [Production mutation harness preflight](#production-mutation-harness-preflight)
 - [Runtime outputs](#runtime-outputs)
 - [Shared workstation resource budget](#shared-workstation-resource-budget)
 - [Attempts and process termination](#attempts-and-process-termination)
@@ -96,6 +97,40 @@ mutation never inherits a prior authorization; treat it as
 standalone authorization may still name several exact high-risk actions in
 one envelope (see Git action tiers below) — the conversation boundary governs
 how that envelope must be delivered, not how many actions it may contain.
+
+## Production mutation harness preflight
+
+Before executing a production or deployment mutation, resolve the exact
+production entrypoint and the actual harness/wrapper/launcher chain that will
+invoke it. Before consuming the real mutation, exercise that same harness
+chain through a non-mutating execution-capability probe when the entrypoint
+supports one — a read-only plan, a dry-run, a `--help`/version/capability
+probe, or another explicitly non-mutating path through the same launcher.
+This contract does not prescribe one universal probe command; the Worker
+selects whichever non-mutating path the actual entrypoint supports, and this
+preflight does not apply to an ordinary non-production command.
+
+```text
+HARNESS_EXECUTION_PERMISSION: ALLOWED | UNKNOWN | BLOCKED
+```
+
+This is [`CAPABILITY_STATUS`](../SKILL.md#intent-authorization-and-surgical-execution)'s
+existing tri-state under one added constraint: the probe must run through the
+exact same harness/wrapper/launcher chain that will invoke the production
+mutation, not a different entry point merely assumed equivalent. If that
+identical chain cannot be exercised non-mutatingly, report
+
+```text
+HARNESS_EXECUTION_PERMISSION: UNKNOWN
+```
+
+and stop before the production mutation rather than switching to an alternate
+wrapper, introducing a heredoc/tmp-shell workaround, or assuming a different
+invocation shape is equivalent. Owner authorization and harness capability
+remain separate gates: a standalone Owner authorization for the mutation does
+not itself establish `HARNESS_EXECUTION_PERMISSION`, and an `ALLOWED` probe
+result never substitutes for standalone Owner authorization where one is
+required.
 
 ## Runtime outputs
 
