@@ -9,10 +9,12 @@
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
 - [Long-running execution recovery](#long-running-execution-recovery)
+- [Bounded launcher fallback](#bounded-launcher-fallback)
 - [Publication live-state classifier](#publication-live-state-classifier)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
+- [Post-attempt remote observation](#post-attempt-remote-observation)
 - [Production mutation recovery incidents](#production-mutation-recovery-incidents)
 - [Terminal closure and archiving](#terminal-closure-and-archiving)
 
@@ -395,6 +397,50 @@ installed SKILL text is insufficient when the installed package lacks the
 Ruby scripts. The placeholder above means the confirmed deployed checkout;
 an isolated task worktree is never the permanent canonical runtime path.
 
+## Bounded launcher fallback
+
+Before selecting an execution path for a task-owned expensive or long-running
+launch, record:
+
+```text
+LAUNCHER_STATUS: PRESENT_RUNNABLE | ABSENT_PROVEN_BEFORE_EXECUTION | UNAVAILABLE_PROVEN_BEFORE_EXECUTION | UNCERTAIN | FAILURE_AFTER_DISCOVERY
+EXACT_WORKTREE: <one exact absolute worktree authorized by the current Packet>
+EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorized by the current Packet>
+EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR
+```
+
+- When `PRESENT_RUNNABLE`, Workers MUST use the protected
+  `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not
+  allowed.
+- Direct-local fallback is permitted only when launcher absence or
+  unavailability is positively proven before execution begins. It requires
+  `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked
+  argv that exactly matches one allowlisted vector, and
+  `EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local
+  effects. When either pre-execution absence status is proven and every
+  precondition holds, bounded direct-local execution is permitted.
+- Fallback is forbidden when effects are external, high-risk, destructive,
+  production-mutating, runtime-mutating, or unclear. Existing high-risk and
+  external authorization and supported-execution requirements remain
+  unchanged.
+- Do not use command substitution, shell composition, wrappers invented to
+  bypass the launcher, or alternate equivalent commands intended to route
+  around a denial.
+- When launcher availability is uncertain, do not fall back; use existing
+  capability and STOP rules.
+- If launcher selection succeeded and its execution later fails, record
+  `FAILURE_AFTER_DISCOVERY`, preserve the original failure, follow existing
+  RCA/STOP rules, and do not switch to direct-local execution.
+- A direct-local fallback never overrides an actual harness or platform
+  permission denial.
+- Resume of a task previously blocked by launcher availability requires
+  evidence that the currently loaded policy revision contains this fallback
+  contract and that every fallback precondition still holds.
+
+This narrow exception does not weaken the normal requirement that high-risk
+or external actions use their existing authorization and supported execution
+path.
+
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
@@ -565,6 +611,27 @@ but **authorization does not transfer across conversation boundaries**.
   specifications, not live execution permission.
 - A durable Task B Packet proves which task is authorized; it does not transfer
   any standalone high-risk authorization into a fresh conversation.
+
+## Post-attempt remote observation
+
+After a remote mutation command returns nonzero or has an ambiguous result,
+exactly ONE read-only observation of the exact authorized target is permitted
+before deciding the mutation disposition. There is no retry loop. Observe only
+that target; do not add generic workspace or branch discovery.
+
+Classify the observation into exactly these outcomes:
+
+| Outcome | Observation | Required disposition |
+|---|---|---|
+| `AUTHORIZED_DESIRED_STATE` | The exact target is now exactly at the authorized desired state. | Treat the target as satisfied, but retain and report the original command result as failed or ambiguous. Do not rewrite that result as `PASS`, retry the mutation, or skip ordinary verification of the achieved desired state. |
+| `EXPECTED_PREVIOUS_STATE` | The exact target is still exactly at the expected pre-mutation state. | No advance was observed. Existing RCA and authorization rules determine continuation; this observation grants no retry permission. |
+| `ANOTHER_STATE` | The exact target is neither the authorized desired state nor the expected previous state. | Classify as drift or ambiguity and STOP. Do not retry or perform destructive reconciliation. |
+| `OBSERVATION_UNAVAILABLE` | The exact target cannot be observed reliably. | State is `UNKNOWN`. Do not infer no mutation, desired completion, or retry permission. |
+
+The rule is one observation, read-only, and exact-target scoped. It does not
+authorize a remote mutation, a retry, destructive reconciliation, production
+recovery, or a claim of deployment success. It does not change or replace
+production mutation recovery rules.
 
 ## Production mutation recovery incidents
 
