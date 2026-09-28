@@ -2089,6 +2089,12 @@ class TaskCheckpointRunTest < Minitest::Test
      '--application-state', @application_state, '--', *command]
   end
 
+  def retry_recovery_cli_args(prior_id, command)
+    ['--retry-recover-run', '--repo', @repo, '--worktree', @worktree,
+     '--task-id', TASK_ID, '--execution-id', prior_id,
+     '--application-state', @application_state, '--', *command]
+  end
+
   def cli_args(identity, command = upstream)
     ['--run', '--repo', @repo, '--worktree', @worktree,
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
@@ -2800,6 +2806,311 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, launch_records.size, 'duplicate recovery reuses the terminal successor capture'
     records = Dir.glob(File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions', '*.json'))
     assert_equal [record_path(old_id), record_path(successor_execution_id(old_id))].sort, records.sort
+  end
+
+  def test_failed_terminal_recovery_has_distinct_retry_and_immutable_prior_evidence
+    old_id = 'failed_retry_fixture'
+    seed_stale_execution(old_id)
+    first = run_cli(recovery_cli_args(old_id, upstream(result: '7')))
+    assert_equal 7, first[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    old_bytes = File.binread(record_path(old_id))
+    prior_record_bytes = File.binread(record_path(prior_id))
+    prior_capture_bytes = File.binread(capture_path(prior_id))
+    prior_transition_bytes = File.binread(recovery_transition_path(old_id))
+    state_bytes = File.binread(@application_state)
+
+    command = recovery_upstream(prior_id)
+    ordinary = run_cli(recovery_cli_args(old_id, command))
+    assert_equal 1, ordinary[2].exitstatus, 'ordinary recovery must not accept changed argv'
+    refute File.exist?(recovery_transition_path(prior_id))
+    result = run_cli(retry_recovery_cli_args(prior_id, command))
+
+    assert_equal 0, result[2].exitstatus, result[1]
+    retry_id = successor_execution_id(prior_id)
+    refute_equal prior_id, retry_id
+    retry_transition = ExecutionRecoveryTransition.load(recovery_transition_path(prior_id))
+    retry_record = ExecutionRecord.load(record_path(retry_id))
+    assert_equal prior_id, retry_transition.old_execution_id
+    assert_equal Digest::SHA256.hexdigest(prior_record_bytes), retry_transition.old_execution_sha256
+    assert_equal Digest::SHA256.hexdigest(prior_capture_bytes), retry_transition.old_capture_sha256
+    assert_equal ExecutionRecoveryTransition::DISPOSITION_FAILED_RECOVERY, retry_transition.old_disposition
+    assert_equal Digest::SHA256.hexdigest(JSON.generate(command)), retry_transition.successor_command_sha256
+    refute_equal ExecutionRecoveryTransition.load(recovery_transition_path(old_id)).successor_command_sha256,
+                 retry_transition.successor_command_sha256
+    assert_equal prior_id, retry_record.parent_execution_id
+    assert_equal old_id, retry_record.recovery_old_execution_id
+    assert_equal command, DurableCommandCapture.load(capture_path(retry_id)).command
+    assert_equal Digest::SHA256.hexdigest(state_bytes), JSON.parse(File.read(@recovery_observation)).fetch('state_sha256')
+    assert_equal state_bytes, File.binread(@application_state)
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    assert_equal prior_record_bytes, File.binread(record_path(prior_id))
+    assert_equal prior_capture_bytes, File.binread(capture_path(prior_id))
+    assert_equal prior_transition_bytes, File.binread(recovery_transition_path(old_id))
+    assert_equal 2, launch_records.size
+
+    replay = run_cli(retry_recovery_cli_args(prior_id, command))
+    assert_equal 0, replay[2].exitstatus
+    assert_equal 2, launch_records.size, 'same explicit edge replays its terminal capture'
+  end
+
+  def test_retry_accepts_changed_synthetic_interpreter_path
+    old_id = 'interpreter_retry_fixture'
+    seed_stale_execution(old_id)
+    python_a = File.join(@tmpdir, 'python-a')
+    python_b = File.join(@tmpdir, 'python-b')
+    File.symlink(RbConfig.ruby, python_a)
+    File.symlink(RbConfig.ruby, python_b)
+    old_command = [python_a, '-e', 'exit 3']
+    assert_equal 3, run_cli(recovery_cli_args(old_id, old_command))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    new_command = [python_b, '-e', 'exit 0']
+
+    assert_equal 0, run_cli(retry_recovery_cli_args(prior_id, new_command))[2].exitstatus
+    assert_equal old_command, DurableCommandCapture.load(capture_path(prior_id)).command
+    assert_equal new_command, DurableCommandCapture.load(capture_path(successor_execution_id(prior_id))).command
+    assert_equal Digest::SHA256.hexdigest(JSON.generate(new_command)),
+                 ExecutionRecoveryTransition.load(recovery_transition_path(prior_id)).successor_command_sha256
+  end
+
+  def test_retry_rejects_successful_and_non_recovery_prior_executions
+    old_id = 'successful_retry_source'
+    seed_stale_execution(old_id)
+    assert_equal 0, run_cli(recovery_cli_args(old_id))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    result = run_cli(retry_recovery_cli_args(prior_id, upstream))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], 'RECOVERY_SUCCESSOR_ALREADY_SUCCEEDED'
+    refute File.exist?(recovery_transition_path(prior_id))
+
+    normal_id = 'ordinary_failed_run'
+    assert_equal 3, run_cli(cli_args(normal_id, upstream(result: '3')))[2].exitstatus
+    normal_retry = run_cli(retry_recovery_cli_args(normal_id, upstream))
+    assert_equal 1, normal_retry[2].exitstatus
+    assert_includes normal_retry[1], 'not a terminal recovery successor'
+    refute File.exist?(recovery_transition_path(normal_id))
+  end
+
+  def test_retry_requires_complete_explicit_application_argv
+    old_id = 'retry_missing_argv'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    args = retry_recovery_cli_args(prior_id, upstream)
+    args = args.take(args.index('--') + 1)
+
+    result = run_cli(args)
+
+    assert_equal 2, result[2].exitstatus
+    assert_includes result[1], '--retry-recover-run requires upstream argv'
+    refute File.exist?(recovery_transition_path(prior_id))
+  end
+
+  def test_retry_rejects_active_and_incomplete_recovery_successors
+    old_id = 'active_retry_source'
+    seed_stale_execution(old_id)
+    first = start_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+    wait_until('recovery successor child did not start') { !launch_records.empty? }
+    prior_id = successor_execution_id(old_id)
+    active = run_cli(retry_recovery_cli_args(prior_id, upstream))
+    assert_equal 1, active[2].exitstatus
+    assert_includes active[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    refute File.exist?(recovery_transition_path(prior_id))
+    File.write(@release, 'go')
+    assert_equal 0, finish_cli(first)[2].exitstatus
+
+    second_old = 'incomplete_retry_source'
+    seed_stale_execution(second_old)
+    transition = ExecutionRecoveryTransition.reserve!(
+      repo_root: @repo, task_id: TASK_ID, old_execution_id: second_old,
+      application_state_path: @application_state, worktree_path: @worktree,
+      command: recovery_upstream(second_old)
+    )
+    ExecutionRecord.start!(record_path(transition.successor_execution_id), task_id: TASK_ID,
+                           execution_id: transition.successor_execution_id, pid: dead_pid)
+    incomplete = run_cli(retry_recovery_cli_args(transition.successor_execution_id, upstream))
+    assert_equal 1, incomplete[2].exitstatus
+    assert_includes incomplete[1], 'not a terminal recovery successor'
+  end
+
+  def test_retry_rejects_competing_writer_wrong_task_and_broken_lineage
+    old_id = 'retry_identity_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    competitor = Process.spawn(RbConfig.ruby, '-e', 'sleep 5')
+    begin
+      ExecutionRecord.start!(record_path('competing_writer'), task_id: TASK_ID,
+                             execution_id: 'competing_writer', pid: competitor)
+      blocked = run_cli(retry_recovery_cli_args(prior_id, upstream))
+      assert_equal 1, blocked[2].exitstatus
+      assert_includes blocked[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+      refute File.exist?(recovery_transition_path(prior_id))
+    ensure
+      Process.kill('TERM', competitor)
+      Process.wait(competitor)
+    end
+
+    wrong_task = retry_recovery_cli_args(prior_id, upstream)
+    wrong_task[wrong_task.index('--task-id') + 1] = 'OTHER_TASK'
+    assert_equal 1, run_cli(wrong_task)[2].exitstatus
+    refute File.exist?(ExecutionRecoveryTransition.default_path(@repo, 'OTHER_TASK', prior_id))
+
+    prior = ExecutionRecord.load(record_path(prior_id))
+    prior.recovery_old_execution_id = 'wrong_root'
+    prior.save(record_path(prior_id))
+    broken = run_cli(retry_recovery_cli_args(prior_id, upstream))
+    assert_equal 1, broken[2].exitstatus
+    assert_includes broken[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(recovery_transition_path(prior_id))
+  end
+
+  def test_retry_setup_preserves_application_checkpoint_before_spawn
+    old_id = 'retry_state_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    before = File.binread(@application_state)
+    launches_before = launch_records.size
+
+    recovery = ExecutionRecoveryTransition.acquire_successor!(
+      repo_root: @repo, task_id: TASK_ID, old_execution_id: prior_id,
+      application_state_path: @application_state, worktree_path: @worktree,
+      command: recovery_upstream(prior_id), pid: Process.pid, retry_attempt: true
+    )
+
+    assert_nil recovery.classification
+    assert_equal before, File.binread(@application_state)
+    assert_equal Digest::SHA256.hexdigest(before), recovery.recovery_transition.application_state_sha256
+    assert_equal launches_before, launch_records.size, 'retry setup must not start the application'
+  end
+
+  def test_retry_refuses_checkpoint_drift_and_prior_capture_change_after_reservation
+    old_id = 'retry_drift_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    command = recovery_upstream(prior_id)
+    transition = ExecutionRecoveryTransition.reserve_retry!(
+      repo_root: @repo, task_id: TASK_ID, prior_execution_id: prior_id,
+      application_state_path: @application_state, worktree_path: @worktree, command: command
+    )
+    assert_equal Digest::SHA256.hexdigest(File.binread(capture_path(prior_id))), transition.old_capture_sha256
+    File.binwrite(@application_state, "synthetic-checkpoint\0v2\n")
+
+    drift = run_cli(retry_recovery_cli_args(prior_id, command))
+    assert_equal 1, drift[2].exitstatus
+    assert_includes drift[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(successor_execution_id(prior_id)))
+
+    File.binwrite(@application_state, "synthetic-checkpoint\0v1\n")
+    capture = DurableCommandCapture.load(capture_path(prior_id))
+    capture.stderr = "tampered prior evidence\n"
+    capture.save(capture_path(prior_id))
+    changed_capture = run_cli(retry_recovery_cli_args(prior_id, command))
+    assert_equal 1, changed_capture[2].exitstatus
+    assert_includes changed_capture[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(successor_execution_id(prior_id)))
+  end
+
+  def test_retry_refuses_changed_checkpoint_locator_worktree_and_preexisting_successor
+    old_id = 'retry_locator_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    command = recovery_upstream(prior_id)
+    alternate_state = File.join(@tmpdir, 'alternate-checkpoint.bin')
+    File.binwrite(alternate_state, File.binread(@application_state))
+    wrong_state = retry_recovery_cli_args(prior_id, command)
+    wrong_state[wrong_state.index('--application-state') + 1] = alternate_state
+    assert_equal 1, run_cli(wrong_state)[2].exitstatus
+
+    alternate_worktree = File.join(@tmpdir, 'alternate-worktree')
+    FileUtils.mkdir_p(alternate_worktree)
+    wrong_worktree = retry_recovery_cli_args(prior_id, command)
+    wrong_worktree[wrong_worktree.index('--worktree') + 1] = alternate_worktree
+    assert_equal 1, run_cli(wrong_worktree)[2].exitstatus
+    refute File.exist?(recovery_transition_path(prior_id))
+
+    retry_id = successor_execution_id(prior_id)
+    ExecutionRecord.start!(record_path(retry_id), task_id: TASK_ID,
+                           execution_id: retry_id, pid: dead_pid)
+    existing = run_cli(retry_recovery_cli_args(prior_id, command))
+    assert_equal 1, existing[2].exitstatus
+    assert_includes existing[1], 'already exists without a recovery transition'
+    refute File.exist?(recovery_transition_path(prior_id))
+  end
+
+  def test_retry_successor_keeps_nested_child_and_rejects_independent_writer
+    old_id = 'retry_nested_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    owner = start_cli(retry_recovery_cli_args(prior_id, nested_recovery_upstream(barrier: true)))
+    wait_until('retry driver did not start') { File.file?(@recovery_observation) }
+    retry_id = successor_execution_id(prior_id)
+
+    competitor = run_cli(cli_args('retry_competing_writer'))
+    assert_equal 1, competitor[2].exitstatus
+    assert_includes competitor[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    refute File.exist?(record_path('retry_competing_writer'))
+
+    File.write(@release, 'go')
+    assert_equal 0, finish_cli(owner)[2].exitstatus
+    observation = JSON.parse(File.read(@recovery_observation))
+    assert_equal 0, observation.fetch('child_exit'), observation.fetch('child_stderr')
+    assert_equal retry_id, observation.fetch('inherited').fetch('FABLE_RECOVERY_SUCCESSOR_ID')
+    assert_equal old_id, observation.fetch('inherited').fetch('FABLE_RECOVERY_OLD_EXECUTION_ID')
+    child = ExecutionRecord.load(record_path('nested_child'))
+    assert_equal retry_id, child.parent_execution_id
+    assert_equal old_id, child.recovery_old_execution_id
+  end
+
+  def test_two_explicit_retry_callers_share_one_successor_identity
+    old_id = 'retry_contenders_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    prior_id = successor_execution_id(old_id)
+    command = recovery_barrier_upstream(prior_id)
+    first = start_cli(retry_recovery_cli_args(prior_id, command))
+    wait_until('retry successor child did not start') { launch_records.size == 2 }
+
+    second = run_cli(retry_recovery_cli_args(prior_id, command))
+    assert_equal 1, second[2].exitstatus
+    assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 2, launch_records.size
+
+    File.write(@release, 'go')
+    assert_equal 0, finish_cli(first)[2].exitstatus
+    replay = run_cli(retry_recovery_cli_args(prior_id, command))
+    assert_equal 0, replay[2].exitstatus
+    assert_equal 2, launch_records.size
+    retry_id = successor_execution_id(prior_id)
+    records = Dir.glob(File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions', '*.json'))
+    assert_equal [record_path(old_id), record_path(prior_id), record_path(retry_id)].sort, records.sort
+  end
+
+  def test_each_failed_retry_requires_another_explicit_source
+    old_id = 'retry_chain_fixture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    first_id = successor_execution_id(old_id)
+    assert_equal 8, run_cli(retry_recovery_cli_args(first_id, upstream(result: '8')))[2].exitstatus
+    second_id = successor_execution_id(first_id)
+    refute File.exist?(recovery_transition_path(second_id))
+
+    third = run_cli(retry_recovery_cli_args(second_id, nested_recovery_upstream))
+    assert_equal 0, third[2].exitstatus, third[1]
+    third_id = successor_execution_id(second_id)
+    assert_equal second_id, ExecutionRecord.load(record_path(third_id)).parent_execution_id
+    assert_equal old_id, ExecutionRecord.load(record_path(third_id)).recovery_old_execution_id
+    assert_equal 0, JSON.parse(File.read(@recovery_observation)).fetch('child_exit')
+    assert_equal third_id, ExecutionRecord.load(record_path('nested_child')).parent_execution_id
+    assert_equal 3, launch_records.size
+    after_success = run_cli(retry_recovery_cli_args(third_id, upstream))
+    assert_equal 1, after_success[2].exitstatus
+    assert_includes after_success[1], 'RECOVERY_SUCCESSOR_ALREADY_SUCCEEDED'
+    refute File.exist?(recovery_transition_path(third_id))
   end
 
   def test_second_recovery_refuses_an_active_successor
