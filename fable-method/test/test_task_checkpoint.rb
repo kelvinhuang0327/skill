@@ -1951,6 +1951,33 @@ class TaskCheckpointRunTest < Minitest::Test
     STDOUT.write("protected recovery\n")
     exit 0
   RUBY
+  NESTED_RECOVERY_UPSTREAM = <<~'RUBY'
+    state, observation_path, launches, release, ruby, cli, repo, worktree, task_id, child_task_id, child_id = ARGV
+    keys = %w[FABLE_RECOVERY_TASK_ID FABLE_RECOVERY_OLD_EXECUTION_ID
+              FABLE_RECOVERY_SUCCESSOR_ID FABLE_RECOVERY_CAPABILITY]
+    inherited = keys.to_h { |key| [key, ENV[key]] }
+    observation = { 'state_sha256' => Digest::SHA256.hexdigest(File.binread(state)),
+                    'inherited' => inherited }
+    File.write(observation_path, JSON.generate(observation))
+    File.open(launches, 'a') { |file| file.puts Process.pid }
+    unless release == '-'
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
+      until File.file?(release)
+        abort 'nested recovery barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+    end
+    command = [ruby, cli, '--run', '--repo', repo, '--worktree', worktree,
+               '--task-id', child_task_id, '--execution-id', child_id, '--',
+               ruby, '-e', 'abort "capability leaked" if ENV.key?("FABLE_RECOVERY_CAPABILITY"); STDOUT.write("nested child\\n")']
+    out, err, status = Open3.capture3(*command)
+    observation['child_exit'] = status.exitstatus
+    observation['child_stderr'] = err
+    File.write(observation_path, JSON.generate(observation))
+    STDOUT.write(out)
+    STDERR.write(err)
+    exit(status.exitstatus || 1)
+  RUBY
 
   def setup
     @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
@@ -2049,6 +2076,12 @@ class TaskCheckpointRunTest < Minitest::Test
      @recovery_observation, @launches, @release]
   end
 
+  def nested_recovery_upstream(child_task: TASK_ID, barrier: false)
+    [RbConfig.ruby, '-rjson', '-rdigest', '-ropen3', '-e', NESTED_RECOVERY_UPSTREAM,
+     @application_state, @recovery_observation, @launches, barrier ? @release : '-',
+     RbConfig.ruby, CLI, @repo, @worktree, TASK_ID, child_task, 'nested_child']
+  end
+
   def recovery_cli_args(identity, command = nil)
     command ||= recovery_upstream(identity)
     ['--recover-run', '--repo', @repo, '--worktree', @worktree,
@@ -2061,8 +2094,11 @@ class TaskCheckpointRunTest < Minitest::Test
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
   end
 
-  def start_cli(args, cwd: @caller, pgroup: true)
-    stdin, stdout, stderr, wait = Open3.popen3(RbConfig.ruby, CLI, *args, chdir: cwd, pgroup: pgroup)
+  def start_cli(args, cwd: @caller, pgroup: true, env: nil)
+    command = []
+    command << env if env
+    stdin, stdout, stderr, wait = Open3.popen3(*command, RbConfig.ruby, CLI, *args,
+                                                chdir: cwd, pgroup: pgroup)
     stdin.close
     readers = [stdout, stderr].map { |io| Thread.new { begin; io.read; ensure; io.close; end } }
     child = { wait: wait, readers: readers }
@@ -2430,6 +2466,105 @@ class TaskCheckpointRunTest < Minitest::Test
     successor = ExecutionRecord.load(record_path(successor_id))
     assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
     assert_equal recovery_upstream(old_id), DurableCommandCapture.load(successor.durable_capture_path).command
+  end
+
+  def test_recovery_successor_launches_same_lineage_nested_protected_child
+    old_id = 'nested_stale_fixture'
+    seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+    state_bytes = File.binread(@application_state)
+
+    result = run_cli(recovery_cli_args(old_id, nested_recovery_upstream))
+
+    assert_equal 0, result[2].exitstatus, result[1]
+    assert_equal "nested child\n", result[0]
+    assert_equal state_bytes, File.binread(@application_state)
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    observation = JSON.parse(File.read(@recovery_observation))
+    assert_equal Digest::SHA256.hexdigest(state_bytes), observation.fetch('state_sha256')
+    assert_equal 0, observation.fetch('child_exit')
+    successor_id = successor_execution_id(old_id)
+    transition = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    assert_equal successor_id, transition.successor_execution_id
+    successor = ExecutionRecord.load(record_path(successor_id))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
+    assert_equal old_id, successor.recovery_old_execution_id
+    assert_equal ExecutionRecord.nested_capability_digest(TASK_ID, successor_id,
+                                                          observation.fetch('inherited').fetch('FABLE_RECOVERY_CAPABILITY')),
+                 successor.nested_capability_sha256
+    refute_includes File.binread(record_path(successor_id)),
+                    observation.fetch('inherited').fetch('FABLE_RECOVERY_CAPABILITY')
+    refute_includes File.binread(recovery_transition_path(old_id)),
+                    observation.fetch('inherited').fetch('FABLE_RECOVERY_CAPABILITY')
+    child = ExecutionRecord.load(record_path('nested_child'))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, child.status
+    assert_equal successor_id, child.parent_execution_id
+    assert_equal old_id, child.recovery_old_execution_id
+    assert_equal "nested child\n", DurableCommandCapture.load(child.durable_capture_path).stdout
+  end
+
+  def test_independent_writer_is_rejected_during_nested_recovery
+    old_id = 'nested_competitor_fixture'
+    seed_stale_execution(old_id)
+    owner = start_cli(recovery_cli_args(old_id, nested_recovery_upstream(barrier: true)))
+    wait_until('recovered driver did not start') { File.file?(@recovery_observation) }
+
+    competitor = run_cli(cli_args('independent_writer'))
+    assert_equal 1, competitor[2].exitstatus
+    assert_includes competitor[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    refute File.exist?(record_path('independent_writer'))
+
+    File.write(@release, 'go')
+    assert_equal 0, finish_cli(owner)[2].exitstatus
+  end
+
+  def test_nested_capability_cannot_cross_task_identity
+    old_id = 'nested_wrong_task_fixture'
+    seed_stale_execution(old_id)
+    other_task = 'OTHER_TASK'
+
+    result = run_cli(recovery_cli_args(old_id, nested_recovery_upstream(child_task: other_task)))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], 'nested recovery task or execution identity does not match'
+    refute File.exist?(ExecutionRecord.default_path(@repo, other_task, 'nested_child'))
+  end
+
+  def test_copied_environment_cannot_spoof_recovery_ancestry
+    old_id = 'nested_spoof_fixture'
+    seed_stale_execution(old_id)
+    owner = start_cli(recovery_cli_args(old_id, nested_recovery_upstream(barrier: true)))
+    wait_until('recovered driver did not expose test capability') { File.file?(@recovery_observation) }
+    copied_env = JSON.parse(File.read(@recovery_observation)).fetch('inherited')
+
+    spoof = run_cli(cli_args('spoofed_writer'), env: copied_env)
+    assert_equal 1, spoof[2].exitstatus
+    assert_includes spoof[1], 'nested recovery owner capability or ancestry is invalid'
+    refute File.exist?(record_path('spoofed_writer'))
+
+    File.write(@release, 'go')
+    assert_equal 0, finish_cli(owner)[2].exitstatus
+  end
+
+  def test_partial_recovery_environment_fails_closed
+    result = run_cli(cli_args('partial_capability'),
+                     env: { 'FABLE_RECOVERY_TASK_ID' => TASK_ID })
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], 'nested recovery capability is incomplete or malformed'
+    refute File.exist?(record_path('partial_capability'))
+  end
+
+  def test_nested_child_lease_blocks_new_top_level_writer
+    nested_lock = ExecutionRecord.acquire_nested_lock!(@repo, TASK_ID)
+    begin
+      result = run_cli(cli_args('writer_during_orphaned_child'))
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+      refute File.exist?(record_path('writer_during_orphaned_child'))
+    ensure
+      nested_lock.close
+    end
   end
 
   def test_recover_run_refuses_live_stale_pid
