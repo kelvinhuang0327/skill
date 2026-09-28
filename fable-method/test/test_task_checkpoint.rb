@@ -1921,6 +1921,36 @@ class TaskCheckpointRunTest < Minitest::Test
     end
     exit(received ? 130 : 0)
   RUBY
+  RECOVERY_UPSTREAM = <<~'RUBY'
+    state_path, transition_path, observation_path, launches = ARGV
+    transition = JSON.parse(File.read(transition_path))
+    observation = {
+      'state_sha256' => Digest::SHA256.hexdigest(File.binread(state_path)),
+      'old_execution_id' => transition.fetch('old_execution_id'),
+      'successor_execution_id' => transition.fetch('successor_execution_id'),
+      'old_disposition' => transition.fetch('old_disposition'),
+      'worktree_path' => transition.fetch('worktree_path'),
+      'observed_working_directory' => File.realpath(Dir.pwd),
+      'successor_command_sha256' => transition.fetch('successor_command_sha256')
+    }
+    File.write(observation_path, JSON.generate(observation))
+    File.open(launches, 'a') { |file| file.puts Process.pid }
+    STDOUT.write("protected recovery\n")
+    exit 0
+  RUBY
+  RECOVERY_BARRIER_UPSTREAM = <<~'RUBY'
+    state_path, transition_path, observation_path, launches, release = ARGV
+    transition = JSON.parse(File.read(transition_path))
+    File.write(observation_path, Digest::SHA256.hexdigest(File.binread(state_path)))
+    File.open(launches, 'a') { |file| file.puts Process.pid }
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
+    until File.file?(release)
+      abort 'recovery barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep 0.01
+    end
+    STDOUT.write("protected recovery\n")
+    exit 0
+  RUBY
 
   def setup
     @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
@@ -1930,6 +1960,9 @@ class TaskCheckpointRunTest < Minitest::Test
     [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
     @launches = File.join(@tmpdir, 'launches')
     @release = File.join(@tmpdir, 'release')
+    @application_state = File.join(@tmpdir, 'application-checkpoint.bin')
+    @recovery_observation = File.join(@tmpdir, 'recovery-observation.json')
+    File.binwrite(@application_state, "synthetic-checkpoint\0v1\n")
     @children = []
     @sentinels = []
     @managed_pids = []
@@ -2004,6 +2037,25 @@ class TaskCheckpointRunTest < Minitest::Test
     [RbConfig.ruby, '-e', STREAM_RACE_UPSTREAM, @launches, @release]
   end
 
+  def recovery_upstream(identity)
+    [RbConfig.ruby, '-rjson', '-rdigest', '-e', RECOVERY_UPSTREAM,
+     @application_state, ExecutionRecoveryTransition.default_path(@repo, TASK_ID, identity),
+     @recovery_observation, @launches]
+  end
+
+  def recovery_barrier_upstream(identity)
+    [RbConfig.ruby, '-rjson', '-rdigest', '-e', RECOVERY_BARRIER_UPSTREAM,
+     @application_state, ExecutionRecoveryTransition.default_path(@repo, TASK_ID, identity),
+     @recovery_observation, @launches, @release]
+  end
+
+  def recovery_cli_args(identity, command = nil)
+    command ||= recovery_upstream(identity)
+    ['--recover-run', '--repo', @repo, '--worktree', @worktree,
+     '--task-id', TASK_ID, '--execution-id', identity,
+     '--application-state', @application_state, '--', *command]
+  end
+
   def cli_args(identity, command = upstream)
     ['--run', '--repo', @repo, '--worktree', @worktree,
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
@@ -2034,6 +2086,25 @@ class TaskCheckpointRunTest < Minitest::Test
 
   def capture_path(identity)
     DurableCommandCapture.default_path(@repo, TASK_ID, identity)
+  end
+
+  def recovery_transition_path(identity)
+    ExecutionRecoveryTransition.default_path(@repo, TASK_ID, identity)
+  end
+
+  def successor_execution_id(identity)
+    ExecutionRecoveryTransition.successor_id_for(TASK_ID, identity)
+  end
+
+  def dead_pid
+    pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
+    Process.wait(pid)
+    pid
+  end
+
+  def seed_stale_execution(identity, pid: dead_pid)
+    ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
+                           execution_id: identity, pid: pid)
   end
 
   def launch_records
@@ -2245,6 +2316,21 @@ class TaskCheckpointRunTest < Minitest::Test
     [@caller, @worktree].each { |path| refute File.exist?(File.join(path, '.fable')) }
   end
 
+  def test_run_rejects_different_execution_id_while_task_writer_is_active
+    first = start_cli(cli_args('writer_first', upstream(barrier: true)))
+    wait_until('first task writer did not start') { !launch_records.empty? }
+
+    second = run_cli(cli_args('writer_second'))
+
+    assert_equal 1, second[2].exitstatus
+    assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, launch_records.size
+    File.write(@release, 'go')
+    first_result = finish_cli(first)
+    assert_output(first_result, 0)
+    assert_equal 1, launch_records.size
+  end
+
   def test_run_nonzero_result_replay_does_not_launch_again
     args = cli_args('nonzero', upstream(result: '7'))
     original = run_cli(args)
@@ -2276,11 +2362,23 @@ class TaskCheckpointRunTest < Minitest::Test
     wait_until('test upstream did not start') { !launch_records.empty? }
     before = File.binread(record_path(identity))
     # Abrupt loss must bypass Open3's TERM ensure, which waits for upstream.
-    # Only this test-owned foreground PID is killed; teardown stops its child.
+    # Only this test-owned foreground PID is killed; the inherited task lease
+    # blocks retry until the test releases the surviving application child.
     Process.kill('KILL', owner[:wait].pid)
-    result = finish_cli(owner)
-    assert result[2].signaled?
-    assert_equal Signal.list.fetch('KILL'), result[2].termsig
+    assert owner[:wait].join(5), 'killed wrapper was not reaped'
+    assert owner[:wait].value.signaled?
+    assert_equal Signal.list.fetch('KILL'), owner[:wait].value.termsig
+    upstream_pid = Integer(launch_records.first.split(':').first)
+
+    retry_while_child_live = run_cli(args)
+    assert_equal 1, retry_while_child_live[2].exitstatus
+    assert_includes retry_while_child_live[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, launch_records.size
+
+    File.write(@release, 'go')
+    wait_until('test upstream did not exit after release') { ExecutionRecord.pid_alive?(upstream_pid) == false }
+    owner[:readers].each { |reader| assert reader.join(5), 'test upstream output pipe did not close' }
+
     retry_result = run_cli(args)
     assert_equal '', retry_result[0]
     assert_equal 1, retry_result[2].exitstatus
@@ -2289,7 +2387,411 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE, ExecutionRecord.load(record_path(identity)).classify
     assert_equal 1, launch_records.size
     refute File.exist?(capture_path(identity))
-    assert_equal [record_path(identity)], Dir.glob(File.join(@repo, '**', '*'), File::FNM_DOTMATCH).select { |path| File.file?(path) }
+    assert_equal [ExecutionRecord.task_lock_path(@repo, TASK_ID), record_path(identity)].sort,
+                 Dir.glob(File.join(@repo, '**', '*'), File::FNM_DOTMATCH).select { |path| File.file?(path) }.sort
+  end
+
+  def test_recover_run_stale_dead_execution_preserves_history_and_checkpoint_before_child
+    old_id = 'stale_fixture_a'
+    seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+    state_bytes = File.binread(@application_state)
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal "protected recovery\n", result[0]
+    assert_equal '', result[1]
+    assert_equal 0, result[2].exitstatus
+    successor_id = successor_execution_id(old_id)
+    transition = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    assert_equal old_id, transition.old_execution_id
+    assert_equal successor_id, transition.successor_execution_id
+    assert_equal ExecutionRecoveryTransition::DISPOSITION_TERMINATED_INCOMPLETE, transition.old_disposition
+    assert_equal Digest::SHA256.hexdigest(old_bytes), transition.old_execution_sha256
+    assert_equal File.expand_path(@application_state), transition.application_state_path
+    assert_equal Digest::SHA256.hexdigest(state_bytes), transition.application_state_sha256
+    assert_equal File.realpath(@worktree), transition.worktree_path
+    assert_equal Digest::SHA256.hexdigest(JSON.generate(recovery_upstream(old_id))),
+                 transition.successor_command_sha256
+    assert_equal old_bytes, File.binread(record_path(old_id)), 'the stale execution record remains immutable'
+    assert_equal state_bytes, File.binread(@application_state), 'the recovery wrapper never edits application state'
+
+    observed = JSON.parse(File.read(@recovery_observation))
+    assert_equal Digest::SHA256.hexdigest(state_bytes), observed.fetch('state_sha256'),
+                 'the child sees the exact bytes hashed before recovery'
+    assert_equal old_id, observed.fetch('old_execution_id')
+    assert_equal successor_id, observed.fetch('successor_execution_id')
+    assert_equal ExecutionRecoveryTransition::DISPOSITION_TERMINATED_INCOMPLETE,
+                 observed.fetch('old_disposition'), 'the durable link exists before child launch'
+    assert_equal File.realpath(@worktree), observed.fetch('worktree_path')
+    assert_equal observed.fetch('worktree_path'), observed.fetch('observed_working_directory')
+    assert_equal transition.successor_command_sha256, observed.fetch('successor_command_sha256')
+    assert_equal 1, launch_records.size
+    successor = ExecutionRecord.load(record_path(successor_id))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
+    assert_equal recovery_upstream(old_id), DurableCommandCapture.load(successor.durable_capture_path).command
+  end
+
+  def test_recover_run_refuses_live_stale_pid
+    old_id = 'stale_fixture_live'
+    pid = Process.spawn(RbConfig.ruby, '-e', 'sleep 5')
+    begin
+      ExecutionRecord.start!(record_path(old_id), task_id: TASK_ID, execution_id: old_id, pid: pid)
+      old_bytes = File.binread(record_path(old_id))
+
+      result = run_cli(recovery_cli_args(old_id))
+
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+      assert_equal old_bytes, File.binread(record_path(old_id))
+      refute File.exist?(recovery_transition_path(old_id))
+      assert_empty launch_records
+    ensure
+      Process.kill('TERM', pid)
+      Process.wait(pid)
+    end
+  end
+
+  def test_recover_run_refuses_competing_active_task_owner
+    old_id = 'stale_fixture_competing'
+    seed_stale_execution(old_id)
+    competitor_id = 'other_active_execution'
+    pid = Process.spawn(RbConfig.ruby, '-e', 'sleep 5')
+    begin
+      ExecutionRecord.start!(record_path(competitor_id), task_id: TASK_ID,
+                             execution_id: competitor_id, pid: pid)
+
+      result = run_cli(recovery_cli_args(old_id))
+
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+      refute File.exist?(recovery_transition_path(old_id))
+      assert_empty launch_records
+    ensure
+      Process.kill('TERM', pid)
+      Process.wait(pid)
+    end
+  end
+
+  def test_recover_run_refuses_terminal_old_execution
+    old_id = 'terminal_old_execution'
+    capture_file = capture_path(old_id)
+    DurableCommandCapture.run_and_capture([RbConfig.ruby, '-e', 'exit 0'], file_path: capture_file)
+    record = ExecutionRecord.start!(record_path(old_id), task_id: TASK_ID,
+                                    execution_id: old_id, pid: dead_pid)
+    record.complete!(record_path(old_id), durable_capture_path: capture_file)
+    old_bytes = File.binread(record_path(old_id))
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    refute File.exist?(recovery_transition_path(old_id))
+    assert_empty launch_records
+  end
+
+  def test_recover_run_fails_closed_for_missing_malformed_and_ambiguous_old_identity
+    cases = [
+      ['missing_old', :missing],
+      ['malformed_old', :malformed],
+      ['wrong_task_old', :wrong_task],
+      ['missing_pid_old', :missing_pid]
+    ]
+    originals = {}
+    cases.each do |identity, kind|
+      path = record_path(identity)
+      case kind
+      when :malformed
+        FileUtils.mkdir_p(File.dirname(path))
+        File.binwrite(path, '{broken stale record')
+      when :wrong_task
+        ExecutionRecord.start!(path, task_id: 'OTHER_TASK', execution_id: identity, pid: dead_pid)
+      when :missing_pid
+        ExecutionRecord.start!(path, task_id: TASK_ID, execution_id: identity, pid: nil)
+      end
+      originals[identity] = File.binread(path) if File.file?(path)
+
+      result = run_cli(recovery_cli_args(identity))
+
+      assert_equal 1, result[2].exitstatus, kind.to_s
+      assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED, kind.to_s
+      refute File.exist?(recovery_transition_path(identity)), kind.to_s
+      assert_equal originals[identity], File.binread(path) if originals.key?(identity)
+    end
+    assert_empty launch_records
+  end
+
+  def test_recover_caller_death_after_transition_reuses_same_successor
+    old_id = 'caller_died_after_transition'
+    seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+    library = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+    script = <<~'RUBY'
+      require ARGV.fetch(0)
+      repo, task, old_id, state, worktree, command_json = ARGV.drop(1)
+      ExecutionRecoveryTransition.reserve!(repo_root: repo, task_id: task,
+                                            old_execution_id: old_id,
+                                            application_state_path: state,
+                                            worktree_path: worktree,
+                                            command: JSON.parse(command_json))
+      Process.kill('KILL', Process.pid)
+    RUBY
+    command_json = JSON.generate(recovery_upstream(old_id))
+    pid = Process.spawn(RbConfig.ruby, '-e', script, library, @repo, TASK_ID, old_id,
+                        @application_state, @worktree, command_json)
+    _waited_pid, status = Process.wait2(pid)
+    assert status.signaled?
+    assert_equal Signal.list.fetch('KILL'), status.termsig
+    assert old_bytes == File.binread(record_path(old_id))
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    transition_before = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal 0, result[2].exitstatus, result[1]
+    transition_after = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    assert_equal transition_before.successor_execution_id, transition_after.successor_execution_id
+    assert_equal 1, launch_records.size
+    assert_equal old_bytes, File.binread(record_path(old_id))
+  end
+
+  def test_recover_run_refuses_checkpoint_bytes_changed_after_transition
+    old_id = 'changed_checkpoint_fixture'
+    seed_stale_execution(old_id)
+    transition = ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
+                                                       old_execution_id: old_id,
+                                                       application_state_path: @application_state,
+                                                       worktree_path: @worktree,
+                                                       command: recovery_upstream(old_id))
+    File.binwrite(@application_state, "unexpected-checkpoint-change\0v2\n")
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(transition.successor_execution_id))
+    assert_empty launch_records
+  end
+
+  def test_recover_run_refuses_changed_application_state_locator
+    old_id = 'changed_locator_fixture'
+    seed_stale_execution(old_id)
+    ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
+                                         old_execution_id: old_id,
+                                         application_state_path: @application_state,
+                                         worktree_path: @worktree,
+                                         command: recovery_upstream(old_id))
+    alternate_state = File.join(@tmpdir, 'alternate-application-checkpoint.bin')
+    File.binwrite(alternate_state, File.binread(@application_state))
+    args = recovery_cli_args(old_id)
+    args[args.index('--application-state') + 1] = alternate_state
+
+    result = run_cli(args)
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
+  end
+
+  def test_recover_run_refuses_changed_original_command
+    old_id = 'changed_command_fixture'
+    seed_stale_execution(old_id)
+    ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
+                                         old_execution_id: old_id,
+                                         application_state_path: @application_state,
+                                         worktree_path: @worktree,
+                                         command: recovery_upstream(old_id))
+
+    result = run_cli(recovery_cli_args(old_id, [RbConfig.ruby, '-e', 'exit 0']))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
+  end
+
+  def test_recover_run_refuses_changed_original_worktree
+    old_id = 'changed_worktree_fixture'
+    seed_stale_execution(old_id)
+    ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
+                                         old_execution_id: old_id,
+                                         application_state_path: @application_state,
+                                         worktree_path: @worktree,
+                                         command: recovery_upstream(old_id))
+    alternate_worktree = File.join(@tmpdir, 'alternate-worktree')
+    FileUtils.mkdir_p(alternate_worktree)
+    args = recovery_cli_args(old_id)
+    args[args.index('--worktree') + 1] = alternate_worktree
+
+    result = run_cli(args)
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
+  end
+
+  def test_normal_run_stale_record_remains_fail_closed_without_transition
+    old_id = 'normal_run_stale_fixture'
+    seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+
+    result = run_cli(cli_args(old_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    refute File.exist?(recovery_transition_path(old_id))
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
+  end
+
+  def test_normal_run_cannot_bypass_unrecovered_stale_execution_with_new_id
+    old_id = 'rotated_id_stale_fixture'
+    new_id = 'rotated_id_bypass_fixture'
+    seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+
+    result = run_cli(cli_args(new_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    refute File.exist?(record_path(new_id))
+    refute File.exist?(recovery_transition_path(old_id))
+    assert_empty launch_records
+  end
+
+  def test_normal_run_cannot_bypass_reserved_recovery_transition_before_successor_exists
+    old_id = 'reserved_transition_stale_fixture'
+    new_id = 'reserved_transition_bypass_fixture'
+    seed_stale_execution(old_id)
+    ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
+                                         old_execution_id: old_id,
+                                         application_state_path: @application_state,
+                                         worktree_path: @worktree,
+                                         command: recovery_upstream(old_id))
+
+    result = run_cli(cli_args(new_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path(new_id))
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
+  end
+
+  def test_normal_run_replays_completed_recovery_successor
+    old_id = 'completed_recovery_replay_fixture'
+    seed_stale_execution(old_id)
+    recovered = run_cli(recovery_cli_args(old_id))
+    successor_id = successor_execution_id(old_id)
+
+    replay = run_cli(cli_args(successor_id))
+
+    assert_equal 0, recovered[2].exitstatus
+    assert_equal recovered[0], replay[0]
+    assert_equal recovered[1], replay[1]
+    assert_equal 0, replay[2].exitstatus
+    assert_equal 1, launch_records.size, 'normal replay must reuse the completed explicit recovery successor'
+  end
+
+  def test_duplicate_recovery_replays_one_terminal_successor
+    old_id = 'duplicate_recovery_fixture'
+    seed_stale_execution(old_id)
+
+    first = run_cli(recovery_cli_args(old_id))
+    transition_before = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    second = run_cli(recovery_cli_args(old_id))
+    transition_after = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+
+    assert_equal 0, first[2].exitstatus
+    assert_equal first[0], second[0]
+    assert_equal first[1], second[1]
+    assert_equal 0, second[2].exitstatus
+    assert_equal transition_before.successor_execution_id, transition_after.successor_execution_id
+    assert_equal 1, launch_records.size, 'duplicate recovery reuses the terminal successor capture'
+    records = Dir.glob(File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions', '*.json'))
+    assert_equal [record_path(old_id), record_path(successor_execution_id(old_id))].sort, records.sort
+  end
+
+  def test_second_recovery_refuses_an_active_successor
+    old_id = 'active_successor_fixture'
+    seed_stale_execution(old_id)
+    first = start_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+    wait_until('recovery successor child did not start') { !launch_records.empty? }
+
+    second = run_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+
+    assert_equal 1, second[2].exitstatus
+    assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, launch_records.size
+    transition = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    assert_equal successor_execution_id(old_id), transition.successor_execution_id
+    File.write(@release, 'go')
+    first_result = finish_cli(first)
+    assert_equal 0, first_result[2].exitstatus, first_result[1]
+    assert_equal 1, launch_records.size
+  end
+
+  def test_recover_run_keeps_task_lease_in_orphaned_child_after_wrapper_death
+    old_id = 'orphaned_child_fixture'
+    seed_stale_execution(old_id)
+    first = start_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+    wait_until('recovery successor child did not start') { !launch_records.empty? }
+    child_pid = Integer(launch_records.first)
+    wrapper_pid = first[:wait].pid
+
+    Process.kill('KILL', wrapper_pid)
+    assert first[:wait].join(5), 'killed recovery wrapper was not reaped'
+    assert first[:wait].value.signaled?
+    assert_equal Signal.list.fetch('KILL'), first[:wait].value.termsig
+    assert_equal false, ExecutionRecord.pid_alive?(wrapper_pid)
+    assert_equal true, ExecutionRecord.pid_alive?(child_pid), 'the application child intentionally outlives its wrapper'
+
+    retry_while_orphaned = run_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+    assert_equal 1, retry_while_orphaned[2].exitstatus
+    assert_includes retry_while_orphaned[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, launch_records.size, 'an orphaned child must retain the single-writer lease'
+    successor_id = successor_execution_id(old_id)
+    assert_equal successor_id, ExecutionRecoveryTransition.load(recovery_transition_path(old_id)).successor_execution_id
+
+    File.write(@release, 'go')
+    wait_until('orphaned application child did not exit') { ExecutionRecord.pid_alive?(child_pid) == false }
+    first[:readers].each { |reader| assert reader.join(5), 'orphaned child output pipe did not close' }
+
+    resumed = run_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+    assert_equal 0, resumed[2].exitstatus, resumed[1]
+    assert_equal 2, launch_records.size, 'a later retry may resume only after the orphaned child exits'
+    assert_equal successor_id, ExecutionRecoveryTransition.load(recovery_transition_path(old_id)).successor_execution_id
+    records = Dir.glob(File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions', '*.json'))
+    assert_equal [record_path(old_id), record_path(successor_id)].sort, records.sort
+  end
+
+  def test_dead_started_successor_resumes_only_under_same_identity_and_checkpoint
+    old_id = 'dead_successor_fixture'
+    seed_stale_execution(old_id)
+    transition = ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
+                                                       old_execution_id: old_id,
+                                                       application_state_path: @application_state,
+                                                       worktree_path: @worktree,
+                                                       command: recovery_upstream(old_id))
+    stale_successor = ExecutionRecord.acquire!(record_path(transition.successor_execution_id),
+                                               task_id: TASK_ID,
+                                               execution_id: transition.successor_execution_id,
+                                               pid: dead_pid)
+    assert_nil stale_successor.classification
+    stale_successor_bytes = File.binread(record_path(transition.successor_execution_id))
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal 0, result[2].exitstatus, result[1]
+    reread = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    assert_equal transition.successor_execution_id, reread.successor_execution_id
+    assert_equal [stale_successor_bytes], reread.successor_attempt_history.map { |entry| entry.fetch('record_json') }
+    assert_equal 1, launch_records.size
   end
 
   def test_run_unresolved_and_malformed_states_fail_closed
@@ -2358,6 +2860,10 @@ class TaskCheckpointRunTest < Minitest::Test
       args
     end
     cases += [valid.reject { |arg| arg == '--' }, valid.take(valid.index('--') + 1), ['--show', *valid]]
+    recovery_valid = recovery_cli_args('invalid_recovery')
+    missing_state = recovery_valid.dup
+    missing_state.slice!(missing_state.index('--application-state'), 2)
+    cases << missing_state
     { '--repo' => '.', '--worktree' => '.', '--task-id' => '../escape', '--execution-id' => '' }.each do |flag, value|
       args = valid.dup
       args[args.index(flag) + 1] = value
