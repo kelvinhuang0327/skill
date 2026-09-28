@@ -330,6 +330,17 @@ caller must not proceed, under the exact same rules `recover_before_execution`
 already applies to that existing record. The CLI below owns this sequence for
 Worker launches; Workers must not manually compose acquire/run/complete.
 
+The protected CLI also serializes task-scoped ownership checks with
+`.fable/checkpoints/<task_id>/execution.lock`. While holding this lock it
+checks the other execution records for a live or unresolved owner, then
+acquires the requested identity atomically. Before launching an upstream
+child, it reacquires the lock and passes the open lock descriptor to that
+child. The OS lock therefore stays held if the wrapper dies while the
+application child is still running, and a retry fails closed until that child
+exits. The lock file is retained; the OS releases the lock when the last
+inherited descriptor closes. This protects one task writer across distinct
+execution IDs and wrapper crashes.
+
 ### Protected run entrypoint
 
 Resolve a confirmed Fable checkout that contains the Ruby script, then invoke:
@@ -383,7 +394,8 @@ rotates identity, or automatically reruns. Rerun authority remains with the
 original task contract. Invalid CLI arguments exit `2` before acquisition.
 
 **Protection boundary**: only long-running commands routed through
-`task_checkpoint.rb --run` receive this technical duplicate-execution
+`task_checkpoint.rb --run` or an explicitly authorized
+`task_checkpoint.rb --recover-run` receive this technical duplicate-execution
 protection. Arbitrary direct shell bypasses remain outside that enforcement
 boundary. Applicable Worker launches MUST use this CLI and must stop if it
 cannot be resolved, rather than silently fall back to a direct command.
@@ -393,6 +405,56 @@ can resolve a Fable checkout containing the merged Ruby CLI. Updating only
 installed SKILL text is insufficient when the installed package lacks the
 Ruby scripts. The placeholder above means the confirmed deployed checkout;
 an isolated task worktree is never the permanent canonical runtime path.
+
+### Explicit stale recovery
+
+`--run` never recovers a stale record. A separate, explicitly authorized
+recovery may use:
+
+```text
+ruby task_checkpoint.rb \
+  --recover-run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --execution-id <old-execution-id> \
+  --application-state <absolute-durable-checkpoint-file> \
+  -- <original argv...>
+```
+
+The old record must be an exact, valid `STARTED` identity with a positive
+recorded PID that is definitely dead, no terminal capture, and unchanged
+historical bytes. Recovery fails closed for a live or indeterminate PID,
+terminal old execution, malformed identity, missing/non-regular/symlinked or
+non-owned application state, a competing active task owner, or any ambiguous
+successor state. The application-state file is never parsed or modified.
+
+Recovery preserves the old execution JSON byte-for-byte and writes its
+`PRIOR_PROCESS_TERMINATED_INCOMPLETE` disposition and old-record SHA-256 in
+`.fable/checkpoints/<task_id>/recoveries/<old_execution_id>.json`. The link
+uses one deterministic successor ID:
+`recovery-<SHA256(task_id + NUL + old_execution_id)>`. A pre-existing
+successor file without its matching transition is ambiguous and blocks
+recovery. The transition file is created with a same-directory atomic link,
+file and directory synchronization, then read back and identity-checked
+before the protected child can start. It also pins the resolved worktree and a
+SHA-256 of the original argv vector; a retry with a different command or
+worktree fails closed.
+
+After the transition is committed, recovery verifies the checkpoint SHA-256
+again immediately before child spawn. It must equal the bytes hashed when the
+transition was first reserved. If the recovery caller dies before child
+launch, retry reads the existing transition and reuses its exact successor
+identity. An active successor blocks a second recovery. A completed successor
+uses the normal durable-capture replay behavior. A dead `STARTED` successor
+may reuse that same identity only when no terminal capture exists and the
+application-state bytes still match; its prior record bytes are retained in
+the transition's attempt history before the successor record is renewed.
+Changed application state or any other ambiguous successor condition fails
+closed. The task-scoped lock serializes this transition and successor claim
+with normal protected `--run` acquisition. The launched child inherits the
+task-lock descriptor, so an orphaned child continues to own the task and a
+retry cannot launch another child until the orphan exits.
 
 ## Publication live-state classifier
 
