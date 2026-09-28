@@ -409,6 +409,45 @@ installed SKILL text is insufficient when the installed package lacks the
 Ruby scripts. The placeholder above means the confirmed deployed checkout;
 an isolated task worktree is never the permanent canonical runtime path.
 
+### Nested protected runs
+
+A protected application may launch another `--run` for the same task ID and
+record root only through the task-lock descriptor it inherited. The same task
+ID, or a copied environment, is never sufficient. A normal `--run` writes its
+execution ID, task ID, resolved record root, and the SHA-256 of a new random
+lineage secret into the held `execution.lock`, passes that descriptor to its
+child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
+`FABLE_PROTECTED_RUN_RECORD_ROOT`, `FABLE_PROTECTED_RUN_LOCK_FD`,
+`FABLE_PROTECTED_RUN_LOCK_IDENTITY` (`<dev>:<inode>`),
+`FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID`, and
+`FABLE_PROTECTED_RUN_LINEAGE_SECRET`. The secret exists only in the lineage's
+environment. The application must keep that exact descriptor open for the
+nested launcher (for example, Python `subprocess` needs `pass_fds`).
+
+When those variables name this exact task and resolved root, the nested
+launcher exits `1` with the existing classifications unless: the descriptor is
+this task's owned regular `execution.lock` with the named identity; a fresh
+open of that path cannot take the lock while the inherited descriptor can
+re-assert it; the lock's lineage names this task and root and matches the
+secret; and the parent chain reaches that lineage owner through `STARTED`
+records. It then takes no second task-lock ownership, records its own execution
+with `parent_execution_id` and its own durable capture, and passes the same
+descriptor and secret on with itself as parent. Only the ancestors on that
+chain are exempt from the owner check; every record outside it keeps the normal
+active, stale, or unresolved refusal. Variables scoped to another task or root
+grant nothing there; that caller gets ordinary top-level acquisition. Every
+conforming lock acquisition clears an earlier lineage, and `--recover-run`
+passes no capability, so a dead lineage cannot be revived to skip stale
+recovery.
+
+Wrapper death keeps its single-writer meaning: the surviving application child
+still holds the task lock, so unrelated `--run` and `--recover-run` attempts
+stay blocked while its descendants may still nest through the inherited
+descriptor. Lineage members are already the task's single writer and name their
+own parent chain; the shared lock does not serialize them. Each nested launcher
+re-checks after its own record is durable, so of two concurrent siblings at
+least one refuses. Launch nested runs sequentially.
+
 ## Bounded launcher fallback
 
 Before selecting an execution path for a task-owned expensive or long-running

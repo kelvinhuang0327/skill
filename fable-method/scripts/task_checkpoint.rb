@@ -8,6 +8,7 @@ require 'pathname'
 require 'time'
 require 'digest'
 require 'tempfile'
+require 'securerandom'
 
 # TaskCheckpoint encapsulates the minimal, durable, authoritative continuation state
 # for Fable Worker execution across sessions and model boundaries.
@@ -1495,8 +1496,10 @@ class DurableCommandCapture
   # verdict. Never reads or persists ENV; stdout/stderr are captured exactly
   # as the command produced them. When a block is given, signal handling stays
   # installed until the block finishes its durable finalization and output
-  # work; the block must not propagate a signal itself.
-  def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil)
+  # work; the block must not propagate a signal itself. child_env only sets or
+  # unsets the named variables for the child; it is never persisted.
+  def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil,
+                           child_env: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
@@ -1550,7 +1553,8 @@ class DurableCommandCapture
       # fallback when the upstream argv contains only an executable name.
       # Pass spawn options as a positional hash because the inherited task-lock
       # descriptor uses an integer key on Ruby versions that reject it in **.
-      Open3.popen3([command.first, command.first], *command.drop(1), spawn_opts) do |stdin, stdout, stderr, wait_thr|
+      spawn_env = child_env ? [child_env] : []
+      Open3.popen3(*spawn_env, [command.first, command.first], *command.drop(1), spawn_opts) do |stdin, stdout, stderr, wait_thr|
         upstream_pgid = wait_thr.pid
         stdin.close
         forward_signal.call(pending_signal) if pending_signal
@@ -1618,8 +1622,25 @@ class ExecutionRecord
   CLASSIFICATION_TERMINATED_INCOMPLETE = 'PRIOR_PROCESS_TERMINATED_INCOMPLETE'
   CLASSIFICATION_STATE_UNRESOLVED = 'PRIOR_PROCESS_STATE_UNRESOLVED'
 
+  # A nested protected run may launch only from a descendant that still holds
+  # the inherited task-lock descriptor. These variables name it; the lineage
+  # secret exists only in the lineage's environment, never on disk.
+  NESTED_TASK_ID_ENV = 'FABLE_PROTECTED_RUN_TASK_ID'
+  NESTED_RECORD_ROOT_ENV = 'FABLE_PROTECTED_RUN_RECORD_ROOT'
+  NESTED_LOCK_FD_ENV = 'FABLE_PROTECTED_RUN_LOCK_FD'
+  NESTED_LOCK_IDENTITY_ENV = 'FABLE_PROTECTED_RUN_LOCK_IDENTITY'
+  NESTED_PARENT_ENV = 'FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID'
+  NESTED_SECRET_ENV = 'FABLE_PROTECTED_RUN_LINEAGE_SECRET'
+  NESTED_ENV_KEYS = [NESTED_TASK_ID_ENV, NESTED_RECORD_ROOT_ENV, NESTED_LOCK_FD_ENV,
+                     NESTED_LOCK_IDENTITY_ENV, NESTED_PARENT_ENV, NESTED_SECRET_ENV].freeze
+  NESTED_MAX_DEPTH = 16
+  TASK_LINEAGE_MAX_BYTES = 4096
+
+  NestedCapability = Struct.new(:lock, :parent_execution_id, :ancestor_execution_ids, :secret,
+                                keyword_init: true)
+
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
-                :durable_capture_path, :started_at, :ended_at
+                :durable_capture_path, :started_at, :ended_at, :parent_execution_id
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1630,10 +1651,11 @@ class ExecutionRecord
     @durable_capture_path = (attrs[:durable_capture_path] || attrs['durable_capture_path'])&.to_s
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
+    @parent_execution_id = (attrs[:parent_execution_id] || attrs['parent_execution_id'])&.to_s
   end
 
   def to_h
-    {
+    data = {
       'schema_version' => @schema_version,
       'task_id' => @task_id,
       'execution_id' => @execution_id,
@@ -1643,6 +1665,9 @@ class ExecutionRecord
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
+    # Only nested records carry lineage, so top-level record bytes are unchanged.
+    data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
+    data
   end
 
   def to_json(*args)
@@ -1723,6 +1748,8 @@ class ExecutionRecord
       unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         raise DuplicateExecutionError, "task '#{task_id}' has another execution claim in progress"
       end
+      # A new hold ends any earlier lineage, so its record cannot be reused.
+      lock.truncate(0)
 
       yield lock
     end
@@ -1861,6 +1888,188 @@ class ExecutionRecord
     end
   end
 
+  # Records which top-level --run owns the held task lock and returns the new
+  # lineage secret, whose SHA-256 alone is stored. Only the lock holder writes
+  # it, just before launching its child; nil leaves the lineage empty.
+  def self.write_task_lineage!(lock, repo_root, task_id, execution_id)
+    lock.truncate(0)
+    secret = nil
+    unless execution_id.nil?
+      secret = SecureRandom.hex(32)
+      lock.pwrite(JSON.generate('schema_version' => SCHEMA_VERSION, 'task_id' => task_id.to_s,
+                                'record_root' => File.realpath(repo_root),
+                                'execution_id' => execution_id.to_s,
+                                'capability_sha256' => Digest::SHA256.hexdigest(secret)), 0)
+    end
+    lock.fsync
+    secret
+  end
+
+  def self.nested_capability_env(repo_root, task_id, lock, parent_execution_id, secret)
+    stat = lock.stat
+    {
+      NESTED_TASK_ID_ENV => task_id.to_s,
+      NESTED_RECORD_ROOT_ENV => File.realpath(repo_root),
+      NESTED_LOCK_FD_ENV => lock.fileno.to_s,
+      NESTED_LOCK_IDENTITY_ENV => "#{stat.dev}:#{stat.ino}",
+      NESTED_PARENT_ENV => parent_execution_id.to_s,
+      NESTED_SECRET_ENV => secret.to_s
+    }
+  end
+
+  def self.without_nested_capability_env
+    NESTED_ENV_KEYS.map { |key| [key, nil] }.to_h
+  end
+
+  # Returns nil when env names no protected lineage for this exact task and
+  # record root. A lineage scoped elsewhere grants nothing here, so the caller
+  # keeps ordinary top-level acquisition; an unscoped capability fails closed.
+  def self.nested_capability_request(env, repo_root, task_id)
+    values = NESTED_ENV_KEYS.map { |key| env[key] }
+    return nil if values.all?(&:nil?)
+
+    scope_task, scope_root = values.first(2)
+    unless stable_component?(scope_task) && scope_root && Pathname.new(scope_root).absolute?
+      raise UnresolvedExecutionStateError, 'nested protected-run capability does not name its task and record root'
+    end
+    resolved_scope_root = begin
+                            File.realpath(scope_root)
+                          rescue SystemCallError
+                            nil
+                          end
+    return nil unless scope_task == task_id.to_s && resolved_scope_root == File.realpath(repo_root)
+
+    NESTED_ENV_KEYS.zip(values).to_h
+  end
+
+  # Proves the caller already holds this task's lock through an inherited
+  # descriptor: it must be the exact owned lock file, a fresh open of that path
+  # must be excluded, and the inherited description must re-assert the same
+  # exclusive lock. Because a process can also take a free lock itself, the
+  # lineage secret must match the held lineage too. Environment values alone
+  # never pass, and nothing here waits for or takes a second task-lock ownership.
+  def self.verify_nested_capability!(repo_root, task_id, execution_id, request)
+    fd_text = request[NESTED_LOCK_FD_ENV].to_s
+    identity = request[NESTED_LOCK_IDENTITY_ENV].to_s
+    parent_id = request[NESTED_PARENT_ENV]
+    secret = request[NESTED_SECRET_ENV].to_s
+    unless fd_text.match?(/\A[1-9]\d{0,8}\z/) && Integer(fd_text) > 2 && identity.match?(/\A\d+:\d+\z/) &&
+           stable_component?(parent_id) && parent_id != execution_id.to_s && secret.match?(/\A[0-9a-f]{64}\z/)
+      raise UnresolvedExecutionStateError, 'nested protected-run capability is incomplete or malformed'
+    end
+
+    lock_path = task_lock_path(repo_root, task_id)
+    if File.symlink?(lock_path) || !File.file?(lock_path)
+      raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' is missing or not a regular file"
+    end
+    lock = begin
+             File.for_fd(Integer(fd_text), autoclose: false)
+           rescue Errno::EBADF
+             raise UnresolvedExecutionStateError, 'inherited task-lock descriptor is not open'
+           end
+    lock_stat = lock.stat
+    path_stat = File.lstat(lock_path)
+    unless lock_stat.file? && lock_stat.uid == Process.uid && "#{lock_stat.dev}:#{lock_stat.ino}" == identity &&
+           [lock_stat.dev, lock_stat.ino] == [path_stat.dev, path_stat.ino]
+      raise UnresolvedExecutionStateError, "inherited descriptor is not task '#{task_id}' owned execution lock"
+    end
+
+    File.open(lock_path, File::RDONLY) do |probe|
+      unless [probe.stat.dev, probe.stat.ino] == [lock_stat.dev, lock_stat.ino]
+        raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' changed during verification"
+      end
+      if probe.flock(File::LOCK_EX | File::LOCK_NB)
+        raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock is not held by a protected lineage"
+      end
+    end
+    unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+      raise DuplicateExecutionError, "task '#{task_id}' execution lock is held outside this protected lineage"
+    end
+
+    lineage_id, capability_sha256 = read_task_lineage!(lock, repo_root, task_id)
+    unless Digest::SHA256.hexdigest(secret) == capability_sha256
+      raise UnresolvedExecutionStateError, "nested protected-run capability does not match task '#{task_id}' lineage"
+    end
+    ancestors = verify_lineage_ancestry!(repo_root, task_id, parent_id, lineage_id)
+    if ancestors.include?(execution_id.to_s)
+      raise UnresolvedExecutionStateError, "nested execution '#{execution_id}' reuses a protected ancestor identity"
+    end
+    NestedCapability.new(lock: lock, parent_execution_id: parent_id, ancestor_execution_ids: ancestors,
+                         secret: secret)
+  rescue SystemCallError => e
+    raise UnresolvedExecutionStateError, "nested protected-run capability could not be verified: #{e.message}"
+  end
+
+  def self.read_task_lineage!(lock, repo_root, task_id)
+    size = lock.stat.size
+    unless size.positive? && size <= TASK_LINEAGE_MAX_BYTES
+      raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock names no nested-capable lineage"
+    end
+    lineage = JSON.parse(lock.pread(size, 0))
+    unless lineage.is_a?(Hash) && lineage['schema_version'] == SCHEMA_VERSION &&
+           lineage['task_id'] == task_id.to_s && lineage['record_root'] == File.realpath(repo_root) &&
+           stable_component?(lineage['execution_id']) && lineage['capability_sha256'].to_s.match?(/\A[0-9a-f]{64}\z/)
+      raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock lineage is ambiguous"
+    end
+    lineage.values_at('execution_id', 'capability_sha256')
+  rescue JSON::ParserError, EOFError => e
+    raise UnresolvedExecutionStateError, "task execution lock lineage is unreadable: #{e.message}"
+  end
+
+  # Walks the caller's protected parents up to the top-level execution named
+  # by the held lock's lineage. Only these in-progress ancestors are exempt
+  # from the owner check. The chain is named by lineage members, which are
+  # already the task's single writer; every record outside it keeps protection.
+  def self.verify_lineage_ancestry!(repo_root, task_id, parent_execution_id, lineage_execution_id)
+    ancestors = []
+    current_id = parent_execution_id
+    loop do
+      if ancestors.include?(current_id) || ancestors.length >= NESTED_MAX_DEPTH
+        raise UnresolvedExecutionStateError, 'nested protected-run ancestry is cyclic or too deep'
+      end
+      path = default_path(repo_root, task_id, current_id)
+      if File.symlink?(path) || !File.file?(path)
+        raise UnresolvedExecutionStateError,
+              "protected parent execution '#{current_id}' is missing or not a regular file"
+      end
+      record = load(path)
+      unless record.schema_version == SCHEMA_VERSION && record.task_id == task_id.to_s &&
+             record.execution_id == current_id && record.status == STATUS_STARTED &&
+             record.pid.is_a?(Integer) && record.pid.positive? && record.durable_capture_path.to_s.empty?
+        raise UnresolvedExecutionStateError,
+              "protected parent execution '#{current_id}' is not an in-progress member of this lineage"
+      end
+      ancestors << current_id
+      if current_id == lineage_execution_id
+        return ancestors if record.parent_execution_id.nil?
+
+        raise UnresolvedExecutionStateError, "lineage owner execution '#{current_id}' is not a top-level execution"
+      end
+      current_id = record.parent_execution_id
+      unless stable_component?(current_id)
+        raise UnresolvedExecutionStateError,
+              "protected parent execution '#{ancestors.last}' does not descend from the task-lock lineage"
+      end
+    end
+  rescue ValidationError, LoadError => e
+    raise UnresolvedExecutionStateError, "protected parent execution is unreadable: #{e.message}"
+  end
+
+  # Nested acquisition takes no second task-lock ownership: the caller has
+  # already proved it holds the lineage lock. It records its own identity and
+  # parent after the normal owner check, excluding only verified ancestors.
+  def self.acquire_nested_owned!(repo_root, task_id, execution_id, capability, pid:)
+    verify_no_active_owner!(repo_root, task_id,
+                            except_execution_ids: [execution_id.to_s, *capability.ancestor_execution_ids],
+                            reject_unrecovered_stale: true)
+    acquire!(default_path(repo_root, task_id, execution_id), task_id: task_id, execution_id: execution_id,
+             pid: pid, parent_execution_id: capability.parent_execution_id)
+  end
+
+  def self.stable_component?(value)
+    value.is_a?(String) && !value.strip.empty? && !%w[. ..].include?(value) && !value.match?(/[\/\\\x00]/)
+  end
+
   def self.start!(file_path, task_id:, execution_id:, pid:)
     record = new(
       task_id: task_id,
@@ -1986,13 +2195,15 @@ class ExecutionRecord
   # already existed (a concurrent winner or an earlier session); the losing
   # caller must not proceed, under the exact same rules
   # recover_before_execution already applies to that existing record.
-  def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?))
+  def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?),
+                    parent_execution_id: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
       pid: pid,
       status: STATUS_STARTED,
-      started_at: Time.now.utc.iso8601
+      started_at: Time.now.utc.iso8601,
+      parent_execution_id: parent_execution_id
     )
 
     begin
@@ -2487,6 +2698,7 @@ if __FILE__ == $PROGRAM_NAME
 
   if %i[run recover_run].include?(mode)
     begin
+      nested_request = nil
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
       if mode == :recover_run
         recovery = ExecutionRecoveryTransition.acquire_successor!(
@@ -2499,9 +2711,18 @@ if __FILE__ == $PROGRAM_NAME
           options[:repository], options[:task_id], recovery.execution_record.execution_id
         )
       else
-        recovery = ExecutionRecord.acquire_task_owned!(
-          options[:repository], options[:task_id], options[:execution_id], pid: Process.pid
-        )
+        nested_request = ExecutionRecord.nested_capability_request(ENV, options[:repository], options[:task_id])
+        recovery = if nested_request
+                     nested = ExecutionRecord.verify_nested_capability!(
+                       options[:repository], options[:task_id], options[:execution_id], nested_request
+                     )
+                     ExecutionRecord.acquire_nested_owned!(options[:repository], options[:task_id],
+                                                          options[:execution_id], nested, pid: Process.pid)
+                   else
+                     ExecutionRecord.acquire_task_owned!(
+                       options[:repository], options[:task_id], options[:execution_id], pid: Process.pid
+                     )
+                   end
       end
       record = recovery.execution_record
       unless record && record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
@@ -2550,18 +2771,47 @@ if __FILE__ == $PROGRAM_NAME
                            transition.verify_application_state!
                          end
                        end
-        capture = ExecutionRecord.with_task_lock(options[:repository], options[:task_id]) do |task_lock|
-          ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
-                                                  except_execution_ids: [record.execution_id],
-                                                  reject_unrecovered_stale: mode == :run)
+        capture_command = lambda do |task_lock, child_env|
           DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
                                                 chdir: options[:worktree], before_spawn: before_spawn,
-                                                inherited_lock: task_lock) do |candidate|
+                                                inherited_lock: task_lock, child_env: child_env) do |candidate|
             result, capture_signal = validate_capture.call(candidate)
             record.complete!(record_path, durable_capture_path: capture_path)
             emit_capture.call(candidate)
           end
         end
+        capture = if nested_request
+                    # Re-prove the lineage after this record is durable, so of two
+                    # concurrently claimed siblings at least one observes the other.
+                    nested = ExecutionRecord.verify_nested_capability!(
+                      options[:repository], options[:task_id], record.execution_id, nested_request
+                    )
+                    ExecutionRecord.verify_no_active_owner!(
+                      options[:repository], options[:task_id],
+                      except_execution_ids: [record.execution_id, *nested.ancestor_execution_ids],
+                      reject_unrecovered_stale: true
+                    )
+                    capture_command.call(nested.lock, ExecutionRecord.nested_capability_env(
+                      options[:repository], options[:task_id], nested.lock, record.execution_id, nested.secret
+                    ))
+                  else
+                    ExecutionRecord.with_task_lock(options[:repository], options[:task_id]) do |task_lock|
+                      ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
+                                                              except_execution_ids: [record.execution_id],
+                                                              reject_unrecovered_stale: mode == :run)
+                      # Only a normal --run lineage may delegate nested execution.
+                      lineage_owner = mode == :run ? record.execution_id : nil
+                      lineage_secret = ExecutionRecord.write_task_lineage!(task_lock, options[:repository],
+                                                                           options[:task_id], lineage_owner)
+                      child_env = if lineage_owner
+                                    ExecutionRecord.nested_capability_env(options[:repository], options[:task_id],
+                                                                          task_lock, lineage_owner, lineage_secret)
+                                  else
+                                    ExecutionRecord.without_nested_capability_env
+                                  end
+                      capture_command.call(task_lock, child_env)
+                    end
+                  end
       when ExecutionRecord::CLASSIFICATION_COMPLETED
         capture = recovery.durable_capture
         result, capture_signal = validate_capture.call(capture)

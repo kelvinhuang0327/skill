@@ -1951,6 +1951,55 @@ class TaskCheckpointRunTest < Minitest::Test
     STDOUT.write("protected recovery\n")
     exit 0
   RUBY
+  # A synthetic protected application that launches further protected runs.
+  # Like a well-behaved application, it forwards the named inherited task-lock
+  # descriptor unless a step models one that closes its descriptors.
+  NESTED_PARENT_UPSTREAM = <<~'RUBY'
+    spec = JSON.parse(File.read(ARGV.fetch(0)))
+    File.open(spec.fetch('launches'), 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    await = lambda do |path|
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 20
+      until File.file?(path)
+        abort "nested parent barrier timed out: #{path}" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+    end
+    spec.fetch('steps').each do |step|
+      await.call(step['go']) if step['go']
+      options = {}
+      fd = ENV['FABLE_PROTECTED_RUN_LOCK_FD']
+      if !step.fetch('pass_fd')
+        options[:close_others] = true
+      elsif fd
+        options[Integer(fd)] = Integer(fd)
+      end
+      stdout, stderr, status = Open3.capture3(step.fetch('env'), *step.fetch('argv'), options)
+      temp = "#{step.fetch('result')}.tmp"
+      File.write(temp, JSON.generate('stdout' => stdout, 'stderr' => stderr, 'exitstatus' => status.exitstatus))
+      File.rename(temp, step.fetch('result'))
+    end
+    await.call(spec['release']) if spec['release']
+    STDOUT.write("nested parent done\n")
+    exit 0
+  RUBY
+  ENV_DUMP_UPSTREAM = <<~'RUBY'
+    dump, launches, release = ARGV
+    File.write("#{dump}.tmp", JSON.generate(ENV.to_h.select { |key, _| key.start_with?('FABLE_PROTECTED_RUN_') }))
+    File.rename("#{dump}.tmp", dump)
+    File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
+    until File.file?(release)
+      abort 'env dump barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep 0.01
+    end
+    exit 0
+  RUBY
+  NESTED_LEAF_UPSTREAM = <<~'RUBY'
+    launches, label = ARGV
+    File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+    STDOUT.write("leaf #{label}\n")
+    exit 0
+  RUBY
 
   def setup
     @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
@@ -2061,8 +2110,11 @@ class TaskCheckpointRunTest < Minitest::Test
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
   end
 
-  def start_cli(args, cwd: @caller, pgroup: true)
-    stdin, stdout, stderr, wait = Open3.popen3(RbConfig.ruby, CLI, *args, chdir: cwd, pgroup: pgroup)
+  def start_cli(args, cwd: @caller, pgroup: true, env: nil, inherit_fds: [])
+    spawn_env = env ? [env] : []
+    spawn_opts = { chdir: cwd, pgroup: pgroup }
+    inherit_fds.each { |fd| spawn_opts[fd] = fd }
+    stdin, stdout, stderr, wait = Open3.popen3(*spawn_env, RbConfig.ruby, CLI, *args, spawn_opts)
     stdin.close
     readers = [stdout, stderr].map { |io| Thread.new { begin; io.read; ensure; io.close; end } }
     child = { wait: wait, readers: readers }
@@ -2876,6 +2928,387 @@ class TaskCheckpointRunTest < Minitest::Test
     end
     assert_empty launch_records
     [@repo, @worktree, @caller].each { |path| assert_empty Dir.children(path) }
+  end
+
+  def nested_leaf(label)
+    [RbConfig.ruby, '-e', NESTED_LEAF_UPSTREAM, @launches, label]
+  end
+
+  def inner_cli_args(identity, command, task_id: TASK_ID, repo: @repo)
+    [RbConfig.ruby, CLI, '--run', '--repo', repo, '--worktree', @worktree,
+     '--task-id', task_id, '--execution-id', identity, '--', *command]
+  end
+
+  def nested_step(argv, result:, env: {}, go: nil, pass_fd: true)
+    { 'argv' => argv, 'result' => result, 'env' => env, 'go' => go, 'pass_fd' => pass_fd }
+  end
+
+  def nested_parent(steps, release: nil)
+    @nested_specs = (@nested_specs || 0) + 1
+    spec_path = File.join(@tmpdir, "nested-parent-#{@nested_specs}.json")
+    File.write(spec_path, JSON.generate('launches' => @launches, 'steps' => steps, 'release' => release))
+    [RbConfig.ruby, '-rjson', '-ropen3', '-e', NESTED_PARENT_UPSTREAM, spec_path]
+  end
+
+  def nested_result(path)
+    wait_until("nested step did not report: #{path}") { File.file?(path) }
+    JSON.parse(File.read(path))
+  end
+
+  def assert_nested_refused(result, classification)
+    assert_equal 1, result.fetch('exitstatus'), result.fetch('stderr')
+    assert_equal '', result.fetch('stdout')
+    assert_includes result.fetch('stderr'), classification
+  end
+
+  def test_nested_run_from_protected_parent_is_independently_auditable
+    leaf = nested_leaf('inner')
+    inner_result = File.join(@tmpdir, 'inner-result.json')
+    parent = nested_parent([nested_step(inner_cli_args('nested_inner', leaf), result: inner_result)])
+
+    outer = run_cli(cli_args('nested_outer', parent))
+
+    assert_equal 0, outer[2].exitstatus, outer[1]
+    assert_equal "nested parent done\n", outer[0]
+    inner = nested_result(inner_result)
+    assert_equal 0, inner.fetch('exitstatus'), inner.fetch('stderr')
+    assert_equal "leaf inner\n", inner.fetch('stdout')
+    outer_record = ExecutionRecord.load(record_path('nested_outer'))
+    inner_record = ExecutionRecord.load(record_path('nested_inner'))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, outer_record.status
+    refute JSON.parse(File.read(record_path('nested_outer'))).key?('parent_execution_id'),
+           'a top-level record keeps its existing shape'
+    assert_equal ExecutionRecord::STATUS_COMPLETED, inner_record.status
+    assert_equal 'nested_outer', inner_record.parent_execution_id
+    refute_equal outer_record.pid, inner_record.pid
+    assert_equal capture_path('nested_inner'), inner_record.durable_capture_path
+    assert_equal leaf, DurableCommandCapture.load(capture_path('nested_inner')).command
+    assert_equal "leaf inner\n", DurableCommandCapture.load(capture_path('nested_inner')).stdout
+    assert_equal parent, DurableCommandCapture.load(capture_path('nested_outer')).command
+    parent_line, leaf_line = launch_records
+    assert_equal outer_record.pid, Integer(parent_line.split(':').last), 'the parent is the outer launcher child'
+    assert_equal inner_record.pid, Integer(leaf_line.split(':').last), 'the leaf is the nested launcher child'
+    lineage = JSON.parse(File.read(ExecutionRecord.task_lock_path(@repo, TASK_ID)))
+    assert_equal({ 'schema_version' => ExecutionRecord::SCHEMA_VERSION, 'task_id' => TASK_ID,
+                   'record_root' => File.realpath(@repo), 'execution_id' => 'nested_outer' },
+                 lineage.reject { |key, _| key == 'capability_sha256' })
+    assert_match(/\A[0-9a-f]{64}\z/, lineage.fetch('capability_sha256'))
+
+    later = run_cli(cli_args('after_nested_lineage'))
+    assert_output(later, 0)
+    replay = run_cli(cli_args('nested_inner', leaf))
+    assert_equal ["leaf inner\n", ''], replay[0, 2]
+    assert_equal 0, replay[2].exitstatus
+    assert_equal 3, launch_records.size, 'a completed nested record replays without relaunch'
+  end
+
+  def test_nested_run_survives_wrapper_death_while_unrelated_owners_stay_blocked
+    go = File.join(@tmpdir, 'nested-go')
+    inner_result = File.join(@tmpdir, 'orphan-inner-result.json')
+    step = nested_step(inner_cli_args('orphan_inner', nested_leaf('after_wrapper_death')),
+                       result: inner_result, go: go)
+    owner = start_cli(cli_args('orphan_outer', nested_parent([step], release: @release)))
+    wait_until('protected parent did not start') { launch_records.size == 1 }
+    parent_pid = Integer(launch_records.first.split(':').first)
+
+    live_wrapper_contender = run_cli(cli_args('rotated_while_wrapper_lives'))
+    assert_equal 1, live_wrapper_contender[2].exitstatus
+    assert_includes live_wrapper_contender[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+
+    Process.kill('KILL', owner[:wait].pid)
+    assert owner[:wait].join(5), 'killed outer wrapper was not reaped'
+    assert_equal true, ExecutionRecord.pid_alive?(parent_pid), 'the protected parent outlives its wrapper'
+    [cli_args('rotated_after_wrapper_death'), cli_args('orphan_outer')].each do |args|
+      refused = run_cli(args)
+      assert_equal 1, refused[2].exitstatus
+      assert_includes refused[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    end
+    recovery = run_cli(recovery_cli_args('orphan_outer'))
+    assert_equal 1, recovery[2].exitstatus
+    assert_includes recovery[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    refute File.exist?(recovery_transition_path('orphan_outer'))
+    %w[rotated_while_wrapper_lives rotated_after_wrapper_death].each { |id| refute File.exist?(record_path(id)) }
+    assert_equal 1, launch_records.size
+
+    File.write(go, 'go')
+    inner = nested_result(inner_result)
+    assert_equal 0, inner.fetch('exitstatus'), inner.fetch('stderr')
+    assert_equal "leaf after_wrapper_death\n", inner.fetch('stdout')
+    inner_record = ExecutionRecord.load(record_path('orphan_inner'))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, inner_record.status
+    assert_equal 'orphan_outer', inner_record.parent_execution_id
+    assert_equal 2, launch_records.size
+
+    File.write(@release, 'go')
+    wait_until('protected parent did not exit') { ExecutionRecord.pid_alive?(parent_pid) == false }
+    owner[:readers].each { |reader| assert reader.join(5), 'orphaned parent output pipe did not close' }
+    after_parent = run_cli(cli_args('rotated_after_parent_exit'))
+    assert_equal 1, after_parent[2].exitstatus
+    assert_includes after_parent[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(record_path('rotated_after_parent_exit'))
+    assert_equal 2, launch_records.size
+  end
+
+  def test_nested_capability_environment_without_inherited_lock_is_refused
+    owner = start_cli(cli_args('forgery_owner', upstream(barrier: true)))
+    wait_until('forgery owner did not start') { !launch_records.empty? }
+    lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    stat = File.stat(lock_path)
+    forged = {
+      ExecutionRecord::NESTED_TASK_ID_ENV => TASK_ID,
+      ExecutionRecord::NESTED_RECORD_ROOT_ENV => File.realpath(@repo),
+      ExecutionRecord::NESTED_LOCK_FD_ENV => '200',
+      ExecutionRecord::NESTED_LOCK_IDENTITY_ENV => "#{stat.dev}:#{stat.ino}",
+      ExecutionRecord::NESTED_PARENT_ENV => 'forgery_owner',
+      ExecutionRecord::NESTED_SECRET_ENV => 'f' * 64
+    }
+
+    without_descriptor = run_cli(cli_args('forged_without_fd'), env: forged)
+    assert_equal 1, without_descriptor[2].exitstatus
+    assert_includes without_descriptor[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    File.open(lock_path, File::RDWR) do |unlocked|
+      held_elsewhere = run_cli(cli_args('forged_unlocked_fd'),
+                               env: forged.merge(ExecutionRecord::NESTED_LOCK_FD_ENV => unlocked.fileno.to_s),
+                               inherit_fds: [unlocked.fileno])
+      assert_equal 1, held_elsewhere[2].exitstatus
+      assert_includes held_elsewhere[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    end
+    %w[forged_without_fd forged_unlocked_fd].each { |id| refute File.exist?(record_path(id)) }
+    assert_equal 1, launch_records.size
+
+    File.write(@release, 'go')
+    assert_output(finish_cli(owner), 0)
+    File.open(lock_path, File::RDWR) do |unlocked|
+      unheld = run_cli(cli_args('forged_after_release'),
+                       env: forged.merge(ExecutionRecord::NESTED_LOCK_FD_ENV => unlocked.fileno.to_s),
+                       inherit_fds: [unlocked.fileno])
+      assert_equal 1, unheld[2].exitstatus
+      assert_includes unheld[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    end
+    refute File.exist?(record_path('forged_after_release'))
+    assert_output(run_cli(cli_args('ordinary_after_forgery')), 0)
+    assert_equal 2, launch_records.size
+  end
+
+  def test_nested_capability_is_bound_to_its_task_and_record_root
+    other_task = 'CLI_TASK_OTHER'
+    free_task = 'CLI_TASK_FREE'
+    other_root = File.join(@tmpdir, 'other-record-root')
+    FileUtils.mkdir_p(other_root)
+    other_release = File.join(@tmpdir, 'other-release')
+    other_command = [RbConfig.ruby, '-e', UPSTREAM, @launches, other_release, '0']
+    other_owners = [[@repo, other_task, 'other_task_owner'], [other_root, TASK_ID, 'other_root_owner']].map do |repo, task, id|
+      start_cli(['--run', '--repo', repo, '--worktree', @worktree, '--task-id', task,
+                 '--execution-id', id, '--', *other_command])
+    end
+    wait_until('other scope owners did not start') { launch_records.size == 2 }
+    leaf = nested_leaf('other_scope')
+    results = 5.times.map { |index| File.join(@tmpdir, "scope-result-#{index}.json") }
+    steps = [
+      nested_step(inner_cli_args('inherited_scope_other_task', leaf, task_id: other_task), result: results[0]),
+      nested_step(inner_cli_args('forged_scope_other_task', leaf, task_id: other_task), result: results[1],
+                  env: { ExecutionRecord::NESTED_TASK_ID_ENV => other_task }),
+      nested_step(inner_cli_args('inherited_scope_other_root', leaf, repo: other_root), result: results[2]),
+      nested_step(inner_cli_args('forged_scope_other_root', leaf, repo: other_root), result: results[3],
+                  env: { ExecutionRecord::NESTED_RECORD_ROOT_ENV => File.realpath(other_root) }),
+      nested_step(inner_cli_args('inherited_scope_free_task', leaf, task_id: free_task), result: results[4])
+    ]
+
+    outer = run_cli(cli_args('scope_outer', nested_parent(steps)))
+
+    assert_equal 0, outer[2].exitstatus, outer[1]
+    expected = [ExecutionRecord::CLASSIFICATION_ACTIVE, ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED] * 2
+    results.first(4).zip(expected).each { |path, classification| assert_nested_refused(nested_result(path), classification) }
+    %w[inherited_scope_other_task forged_scope_other_task].each do |id|
+      refute File.exist?(ExecutionRecord.default_path(@repo, other_task, id))
+    end
+    %w[inherited_scope_other_root forged_scope_other_root].each do |id|
+      refute File.exist?(ExecutionRecord.default_path(other_root, TASK_ID, id))
+    end
+    free = nested_result(results[4])
+    assert_equal 0, free.fetch('exitstatus'), free.fetch('stderr')
+    free_record = ExecutionRecord.load(ExecutionRecord.default_path(@repo, free_task, 'inherited_scope_free_task'))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, free_record.status
+    assert_nil free_record.parent_execution_id, 'another scope only gets ordinary top-level acquisition'
+    assert_equal 4, launch_records.size
+
+    File.write(other_release, 'go')
+    other_owners.each { |owner| assert_output(finish_cli(owner), 0) }
+  end
+
+  def test_nested_capability_requires_inherited_descriptor_and_lineage_parent
+    unrelated_completed = 'unrelated_completed'
+    capture_file = capture_path(unrelated_completed)
+    DurableCommandCapture.run_and_capture([RbConfig.ruby, '-e', 'exit 0'], file_path: capture_file)
+    ExecutionRecord.start!(record_path(unrelated_completed), task_id: TASK_ID,
+                           execution_id: unrelated_completed, pid: dead_pid)
+                   .complete!(record_path(unrelated_completed), durable_capture_path: capture_file)
+    go_stale = File.join(@tmpdir, 'descriptor-go-stale')
+    go_valid = File.join(@tmpdir, 'descriptor-go-valid')
+    leaf = nested_leaf('valid_after_refusals')
+    cases = [
+      ['closed_descriptor', {}, false],
+      ['malformed_descriptor', { ExecutionRecord::NESTED_LOCK_FD_ENV => 'not-a-descriptor' }, true],
+      ['standard_descriptor', { ExecutionRecord::NESTED_LOCK_FD_ENV => '2' }, true],
+      ['missing_descriptor', { ExecutionRecord::NESTED_LOCK_FD_ENV => nil }, true],
+      ['wrong_lock_identity', { ExecutionRecord::NESTED_LOCK_IDENTITY_ENV => '0:0' }, true],
+      ['missing_parent', { ExecutionRecord::NESTED_PARENT_ENV => 'not_in_lineage' }, true],
+      ['completed_parent', { ExecutionRecord::NESTED_PARENT_ENV => unrelated_completed }, true],
+      ['missing_lineage_secret', { ExecutionRecord::NESTED_SECRET_ENV => nil }, true],
+      ['wrong_lineage_secret', { ExecutionRecord::NESTED_SECRET_ENV => '0' * 64 }, true],
+      ['descriptor_outer', {}, true],
+      ['stale_top_level_parent', { ExecutionRecord::NESTED_PARENT_ENV => 'unrelated_stale' }, true]
+    ]
+    steps = cases.each_with_index.map do |(id, env, pass_fd), index|
+      nested_step(inner_cli_args(id, leaf), result: File.join(@tmpdir, "descriptor-#{index}.json"),
+                                            env: env, pass_fd: pass_fd,
+                                            go: id == 'stale_top_level_parent' ? go_stale : nil)
+    end
+    valid_result = File.join(@tmpdir, 'descriptor-valid.json')
+    steps << nested_step(inner_cli_args('valid_after_refusals', leaf), result: valid_result, go: go_valid)
+    owner = start_cli(cli_args('descriptor_outer', nested_parent(steps)))
+    wait_until('descriptor parent did not start') { launch_records.size == 1 }
+    steps.first(cases.length - 1).each do |step|
+      assert_nested_refused(nested_result(step['result']), ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED)
+    end
+    # A top-level stale record seeded outside the running lineage cannot be named as its parent.
+    seed_stale_execution('unrelated_stale')
+    File.write(go_stale, 'go')
+    assert_nested_refused(nested_result(steps[cases.length - 1]['result']),
+                          ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED)
+    FileUtils.rm_f(record_path('unrelated_stale'))
+    File.write(go_valid, 'go')
+
+    outer = finish_cli(owner)
+    assert_equal 0, outer[2].exitstatus, outer[1]
+    cases.map(&:first).each do |id|
+      next if id == 'descriptor_outer'
+
+      refute File.exist?(record_path(id)), id
+    end
+    assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path('descriptor_outer')).status
+    valid = nested_result(valid_result)
+    assert_equal 0, valid.fetch('exitstatus'), valid.fetch('stderr')
+    assert_equal 'descriptor_outer', ExecutionRecord.load(record_path('valid_after_refusals')).parent_execution_id
+    assert_equal 2, launch_records.size, 'refused nested requests never launch and never release the lineage'
+  end
+
+  def test_nested_run_keeps_unrelated_active_and_stale_records_protective
+    go_active = File.join(@tmpdir, 'go-active')
+    go_stale = File.join(@tmpdir, 'go-stale')
+    results = [File.join(@tmpdir, 'blocked-active.json'), File.join(@tmpdir, 'blocked-stale.json')]
+    leaf = nested_leaf('must_not_run')
+    steps = [
+      nested_step(inner_cli_args('blocked_by_active', leaf), result: results[0], go: go_active),
+      nested_step(inner_cli_args('blocked_by_stale', leaf), result: results[1], go: go_stale)
+    ]
+    owner = start_cli(cli_args('protective_outer', nested_parent(steps)))
+    wait_until('protective parent did not start') { launch_records.size == 1 }
+    sleeper = Process.spawn(RbConfig.ruby, '-e', 'sleep 30')
+    begin
+      ExecutionRecord.start!(record_path('unrelated_owner'), task_id: TASK_ID,
+                             execution_id: 'unrelated_owner', pid: sleeper)
+      File.write(go_active, 'go')
+      assert_nested_refused(nested_result(results[0]), ExecutionRecord::CLASSIFICATION_ACTIVE)
+    ensure
+      Process.kill('TERM', sleeper)
+      Process.wait(sleeper)
+    end
+    File.write(go_stale, 'go')
+    assert_nested_refused(nested_result(results[1]), ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE)
+
+    outer = finish_cli(owner)
+    assert_equal 0, outer[2].exitstatus, outer[1]
+    %w[blocked_by_active blocked_by_stale].each { |id| refute File.exist?(record_path(id)) }
+    assert_equal 1, launch_records.size
+  end
+
+  def test_nested_capability_propagates_through_a_protected_nested_child
+    deep_result = File.join(@tmpdir, 'depth-two.json')
+    middle_result = File.join(@tmpdir, 'depth-one.json')
+    middle_parent = nested_parent([nested_step(inner_cli_args('depth_two', nested_leaf('deepest')),
+                                               result: deep_result)])
+    outer_parent = nested_parent([nested_step(inner_cli_args('depth_one', middle_parent), result: middle_result)])
+
+    outer = run_cli(cli_args('depth_zero', outer_parent))
+
+    assert_equal 0, outer[2].exitstatus, outer[1]
+    middle = nested_result(middle_result)
+    assert_equal [0, "nested parent done\n"], [middle.fetch('exitstatus'), middle.fetch('stdout')], middle.fetch('stderr')
+    deep = nested_result(deep_result)
+    assert_equal [0, "leaf deepest\n"], [deep.fetch('exitstatus'), deep.fetch('stdout')], deep.fetch('stderr')
+    { 'depth_zero' => nil, 'depth_one' => 'depth_zero', 'depth_two' => 'depth_one' }.each do |id, parent_id|
+      record = ExecutionRecord.load(record_path(id))
+      assert_equal ExecutionRecord::STATUS_COMPLETED, record.status, id
+      parent_id ? assert_equal(parent_id, record.parent_execution_id, id) : assert_nil(record.parent_execution_id, id)
+    end
+    assert_equal 3, launch_records.size
+  end
+
+  def test_dead_lineage_cannot_be_reused_by_a_self_acquired_lock
+    dump = File.join(@tmpdir, 'lineage-env.json')
+    command = [RbConfig.ruby, '-rjson', '-e', ENV_DUMP_UPSTREAM, dump, @launches, @release]
+    owner = start_cli(cli_args('dead_lineage_root', command))
+    wait_until('lineage child did not start') { File.file?(dump) && launch_records.size == 1 }
+    child_pid = Integer(launch_records.first.split(':').first)
+    harvested = JSON.parse(File.read(dump))
+    secret = harvested.fetch(ExecutionRecord::NESTED_SECRET_ENV)
+    lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    assert_match(/\A[0-9a-f]{64}\z/, secret)
+    refute_includes File.read(lock_path), secret, 'only the secret digest is stored'
+    # The lineage dies abnormally: wrapper killed, then its child exits.
+    Process.kill('KILL', owner[:wait].pid)
+    assert owner[:wait].join(5), 'killed wrapper was not reaped'
+    File.write(@release, 'go')
+    wait_until('lineage child did not exit') { ExecutionRecord.pid_alive?(child_pid) == false }
+    owner[:readers].each { |reader| assert reader.join(5), 'lineage child output pipe did not close' }
+    root_bytes = File.binread(record_path('dead_lineage_root'))
+    refute_equal 0, File.size(lock_path), 'the dead lineage record is still on disk'
+
+    forge = lambda do |identity, env|
+      File.open(lock_path, File::RDWR) do |own_lock|
+        assert own_lock.flock(File::LOCK_EX | File::LOCK_NB), 'no lineage holds the lock any more'
+        run_cli(cli_args(identity), env: env.merge(ExecutionRecord::NESTED_LOCK_FD_ENV => own_lock.fileno.to_s),
+                                    inherit_fds: [own_lock.fileno])
+      end
+    end
+    [['forged_without_secret', harvested.merge(ExecutionRecord::NESTED_SECRET_ENV => nil)],
+     ['forged_guessed_secret', harvested.merge(ExecutionRecord::NESTED_SECRET_ENV => '0' * 64)]].each do |id, env|
+      forged = forge.call(id, env)
+      assert_equal 1, forged[2].exitstatus, forged[1]
+      assert_includes forged[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    end
+
+    rotated = run_cli(cli_args('rotated_after_dead_lineage'))
+    assert_equal 1, rotated[2].exitstatus
+    assert_includes rotated[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    assert_equal 0, File.size(lock_path), 'a conforming acquisition clears the dead lineage'
+    replayed = forge.call('forged_harvested_secret', harvested)
+    assert_equal 1, replayed[2].exitstatus, replayed[1]
+    assert_includes replayed[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+
+    %w[forged_without_secret forged_guessed_secret rotated_after_dead_lineage forged_harvested_secret].each do |id|
+      refute File.exist?(record_path(id)), id
+    end
+    assert_equal root_bytes, File.binread(record_path('dead_lineage_root'))
+    assert_equal 1, launch_records.size, 'no forged nested run may bypass the unrecovered stale owner'
+  end
+
+  def test_recovery_lineage_does_not_delegate_nested_execution
+    old_id = 'recovery_lineage_stale'
+    seed_stale_execution(old_id)
+    nested_attempt = File.join(@tmpdir, 'under-recovery.json')
+    command = nested_parent([nested_step(inner_cli_args('nested_under_recovery', nested_leaf('must_not_run')),
+                                         result: nested_attempt)], release: @release)
+    recovery = start_cli(recovery_cli_args(old_id, command))
+
+    assert_nested_refused(nested_result(nested_attempt), ExecutionRecord::CLASSIFICATION_ACTIVE)
+    assert_equal 0, File.size(ExecutionRecord.task_lock_path(@repo, TASK_ID)), 'recovery names no nested lineage'
+    File.write(@release, 'go')
+    recovered = finish_cli(recovery)
+    assert_equal 0, recovered[2].exitstatus, recovered[1]
+    refute File.exist?(record_path('nested_under_recovery'))
+    assert_equal 1, launch_records.size
   end
 end
 
