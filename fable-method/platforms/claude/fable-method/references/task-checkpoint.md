@@ -346,7 +346,8 @@ execution IDs and wrapper crashes.
 
 ### Protected run entrypoint
 
-Resolve a confirmed Fable checkout that contains the Ruby script, then invoke:
+Select the launcher checkout under SKILL.md's launcher-selection rule, then
+invoke:
 
 ```text
 ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb \
@@ -406,8 +407,9 @@ cannot be resolved, rather than silently fall back to a direct command.
 **Deployment requirement**: publication/activation is incomplete until a Worker
 can resolve a Fable checkout containing the merged Ruby CLI. Updating only
 installed SKILL text is insufficient when the installed package lacks the
-Ruby scripts. The placeholder above means the confirmed deployed checkout;
-an isolated task worktree is never the permanent canonical runtime path.
+Ruby scripts. The placeholder above means that selected launcher, which
+defaults to the confirmed deployed checkout; an isolated task worktree is
+never the permanent canonical runtime path.
 
 ### Nested protected runs
 
