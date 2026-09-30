@@ -415,10 +415,11 @@ never the permanent canonical runtime path.
 
 A protected application may launch another `--run` for the same task ID and
 record root only through the task-lock descriptor it inherited. The same task
-ID, or a copied environment, is never sufficient. A normal `--run` writes its
-execution ID, task ID, resolved record root, and the SHA-256 of a new random
-lineage secret into the held `execution.lock`, passes that descriptor to its
-child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
+ID, or a copied environment, is never sufficient. A normal `--run`, or a
+validated `--recover-run` successor, writes its own execution ID (the
+successor ID for a recovery), task ID, resolved record root, and the SHA-256 of
+a new random lineage secret into the held `execution.lock`, passes that
+descriptor to its child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
 `FABLE_PROTECTED_RUN_RECORD_ROOT`, `FABLE_PROTECTED_RUN_LOCK_FD`,
 `FABLE_PROTECTED_RUN_LOCK_IDENTITY` (`<dev>:<inode>`),
 `FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID`, and
@@ -436,11 +437,18 @@ records. It then takes no second task-lock ownership, records its own execution
 with `parent_execution_id` and its own durable capture, and passes the same
 descriptor and secret on with itself as parent. Only the ancestors on that
 chain are exempt from the owner check; every record outside it keeps the normal
-active, stale, or unresolved refusal. Variables scoped to another task or root
-grant nothing there; that caller gets ordinary top-level acquisition. Every
-conforming lock acquisition clears an earlier lineage, and `--recover-run`
-passes no capability, so a dead lineage cannot be revived to skip stale
-recovery.
+active, stale, or unresolved refusal. A stale record whose valid recovery chain
+reaches an active successor on that verified chain is resolved for that
+lineage's own nested runs only. Variables scoped to another task or root grant
+nothing there; that caller gets ordinary top-level acquisition. Every
+conforming lock acquisition clears an earlier lineage, so a dead lineage cannot
+be revived, by copying its environment or otherwise, to skip stale recovery.
+`--recover-run` does not act on an inherited capability, and the stale
+predecessor stays historical evidence and never delegates. Once the recovery
+transition is valid, its deterministic successor takes the lock and establishes
+its own lineage from the successor execution ID, as a normal `--run` does; a
+retry of the same transition reuses that successor identity and therefore the
+same semantics. Independent writers remain refused.
 
 Wrapper death keeps its single-writer meaning: the surviving application child
 still holds the task lock, so unrelated `--run` and `--recover-run` attempts
