@@ -1756,9 +1756,10 @@ class ExecutionRecord
   end
 
   # Finds any live or unresolved record that could own this task's writer
-  # scope. Completed and definitely-dead records remain historical evidence.
+  # scope. Completed and definitely-dead records remain historical evidence;
+  # a live recovery successor is exempt only inside its verified nested lineage.
   def self.verify_no_active_owner!(repo_root, task_id, except_execution_ids: [],
-                                  reject_unrecovered_stale: false)
+                                  reject_unrecovered_stale: false, nested_lineage_execution_ids: [])
     execution_dir = File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'executions')
     return true unless File.directory?(execution_dir)
 
@@ -1793,7 +1794,10 @@ class ExecutionRecord
           raise UnresolvedExecutionStateError,
                 "task '#{task_id}' execution '#{record.execution_id}' liveness is unresolved"
         elsif reject_unrecovered_stale &&
-              !recovered_stale_chain_completed?(repo_root, task_id, record)
+              !recovered_stale_chain_exempt_for_writer?(
+                repo_root, task_id, record,
+                allowed_active_successor_ids: nested_lineage_execution_ids
+              )
           raise UnresolvedExecutionStateError,
                 "#{CLASSIFICATION_TERMINATED_INCOMPLETE}: task '#{task_id}' has an unrecovered stale execution " \
                 "'#{record.execution_id}'; only --recover-run may continue that execution"
@@ -1808,10 +1812,11 @@ class ExecutionRecord
   end
 
   # A stale record under another execution ID must not be bypassed by starting
-  # the same task again with a rotated ID. Once an explicit recovery chain has
-  # reached a completed successor, the stale ancestors are historical and
-  # normal replay/new-attempt behavior can proceed.
-  def self.recovered_stale_chain_completed?(repo_root, task_id, record)
+  # the same task again with a rotated ID. A completed chain is historical;
+  # while its successor is active, only that successor's verified nested
+  # lineage may treat the stale ancestor as resolved for its writer check.
+  def self.recovered_stale_chain_exempt_for_writer?(repo_root, task_id, record,
+                                                    allowed_active_successor_ids: [])
     current = record
     visited = {}
 
@@ -1857,6 +1862,8 @@ class ExecutionRecord
       when CLASSIFICATION_COMPLETED
         return true
       when CLASSIFICATION_ACTIVE
+        return true if Array(allowed_active_successor_ids).include?(successor_id)
+
         raise DuplicateExecutionError,
               "task '#{task_id}' is owned by recovery successor '#{successor_id}' (pid=#{successor.pid})"
       when CLASSIFICATION_STATE_UNRESOLVED
@@ -2061,7 +2068,8 @@ class ExecutionRecord
   def self.acquire_nested_owned!(repo_root, task_id, execution_id, capability, pid:)
     verify_no_active_owner!(repo_root, task_id,
                             except_execution_ids: [execution_id.to_s, *capability.ancestor_execution_ids],
-                            reject_unrecovered_stale: true)
+                            reject_unrecovered_stale: true,
+                            nested_lineage_execution_ids: capability.ancestor_execution_ids)
     acquire!(default_path(repo_root, task_id, execution_id), task_id: task_id, execution_id: execution_id,
              pid: pid, parent_execution_id: capability.parent_execution_id)
   end
@@ -2789,7 +2797,8 @@ if __FILE__ == $PROGRAM_NAME
                     ExecutionRecord.verify_no_active_owner!(
                       options[:repository], options[:task_id],
                       except_execution_ids: [record.execution_id, *nested.ancestor_execution_ids],
-                      reject_unrecovered_stale: true
+                      reject_unrecovered_stale: true,
+                      nested_lineage_execution_ids: nested.ancestor_execution_ids
                     )
                     capture_command.call(nested.lock, ExecutionRecord.nested_capability_env(
                       options[:repository], options[:task_id], nested.lock, record.execution_id, nested.secret
@@ -2799,8 +2808,10 @@ if __FILE__ == $PROGRAM_NAME
                       ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
                                                               except_execution_ids: [record.execution_id],
                                                               reject_unrecovered_stale: mode == :run)
-                      # Only a normal --run lineage may delegate nested execution.
-                      lineage_owner = mode == :run ? record.execution_id : nil
+                      # A normal run and a recovery successor both own this lock
+                      # while their upstream command runs, so each may delegate
+                      # nested execution through its protected lineage.
+                      lineage_owner = record.execution_id
                       lineage_secret = ExecutionRecord.write_task_lineage!(task_lock, options[:repository],
                                                                            options[:task_id], lineage_owner)
                       child_env = if lineage_owner
