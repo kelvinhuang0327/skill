@@ -74,10 +74,11 @@ required — whether the quote originated in an earlier turn, a different
 agent, or the current Planner.
 
 When the Packet and the Worker are not guaranteed to share a conversation,
-the Owner delivers standalone authorization as two separate messages: the
-exact token as its own message into the target Worker conversation first,
-then the Packet. The Packet may still quote the token for scope binding, but
-must state that the quote is not itself the evidence.
+the Owner sends one direct message into the target Worker conversation that
+carries the Packet together with the exact action and target
+(`AUTHORIZATION_HANDOFF_MODE: OWNER_DIRECT_PACKET`); a separate
+authorization-only message is never required. A token the Packet quotes from
+another conversation binds scope only and is not itself the evidence.
 
 When the current Worker conversation already contains the exact direct
 Owner authorization, the requested action stays within that exact scope, and
