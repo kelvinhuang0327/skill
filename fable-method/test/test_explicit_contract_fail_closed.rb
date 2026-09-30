@@ -395,6 +395,26 @@ class ExplicitContractFailClosedTest < Minitest::Test
     )
   end
 
+  def test_nested_recovery_lineage_contract
+    checkpoint_path = File.expand_path('../shared/references/task-checkpoint.md', __dir__)
+    checkpoint = File.read(checkpoint_path, encoding: 'UTF-8')
+    _, nested_section = checkpoint.split("### Nested protected runs\n", 2)
+    refute_nil nested_section, 'missing canonical section: Nested protected runs'
+    nested_section = nested_section.split(/^## /, 2).first.gsub(/\s+/, ' ')
+
+    [
+      'A normal `--run` establishes a protected lineage rooted at its execution ID.',
+      'After validating the persisted recovery transition and claiming its deterministic successor under the task lock, `--recover-run` may establish the same kind of lineage rooted at the **successor execution ID**.',
+      'The stale predecessor remains historical evidence: it is not the active lineage owner and never delegates nested authority.',
+      'A nested run under a recovery successor must prove the same inherited task-lock descriptor, matching lock identity and lineage secret, same task ID and resolved record root, and valid `STARTED` parent chain described above.',
+      'A matching task ID or copied environment alone grants nothing.',
+      'Only verified descendants may nest; other normal or recovery attempts remain subject to the task-wide active, stale, or unresolved owner checks.',
+      'Retrying the same deterministic recovery successor keeps that successor as the lineage root and preserves prior successor-attempt bytes in the recovery transition history.',
+      "the recovery application's surviving child still holds the inherited task-lock descriptor, so unrelated `--run` and `--recover-run` attempts stay blocked while verified descendants may still nest through it."
+    ].each { |clause| assert_includes nested_section, clause }
+    refute_match(/`--recover-run` passes no capability/, nested_section)
+  end
+
   def test_canonical_verification_provenance_contract
     clauses = [
       '`RUN_THIS_TASK` for checks actually executed during the current task/current execution phase',

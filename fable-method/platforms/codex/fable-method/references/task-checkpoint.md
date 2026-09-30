@@ -438,17 +438,31 @@ descriptor and secret on with itself as parent. Only the ancestors on that
 chain are exempt from the owner check; every record outside it keeps the normal
 active, stale, or unresolved refusal. Variables scoped to another task or root
 grant nothing there; that caller gets ordinary top-level acquisition. Every
-conforming lock acquisition clears an earlier lineage, and `--recover-run`
-passes no capability, so a dead lineage cannot be revived to skip stale
-recovery.
+conforming lock acquisition clears an earlier lineage.
 
-Wrapper death keeps its single-writer meaning: the surviving application child
-still holds the task lock, so unrelated `--run` and `--recover-run` attempts
-stay blocked while its descendants may still nest through the inherited
-descriptor. Lineage members are already the task's single writer and name their
-own parent chain; the shared lock does not serialize them. Each nested launcher
-re-checks after its own record is durable, so of two concurrent siblings at
-least one refuses. Launch nested runs sequentially.
+A normal `--run` establishes a protected lineage rooted at its execution ID.
+After validating the persisted recovery transition and claiming its deterministic
+successor under the task lock, `--recover-run` may establish the same kind of
+lineage rooted at the **successor execution ID**. The stale predecessor remains
+historical evidence: it is not the active lineage owner and never delegates
+nested authority.
+
+A nested run under a recovery successor must prove the same inherited task-lock
+descriptor, matching lock identity and lineage secret, same task ID and resolved
+record root, and valid `STARTED` parent chain described above. A matching task ID
+or copied environment alone grants nothing. Only verified descendants may
+nest; other normal or recovery attempts remain subject to the task-wide active,
+stale, or unresolved owner checks. Retrying the same deterministic recovery
+successor keeps that successor as the lineage root and preserves prior
+successor-attempt bytes in the recovery transition history.
+
+Wrapper death keeps its single-writer meaning: the recovery application's
+surviving child still holds the inherited task-lock descriptor, so unrelated
+`--run` and `--recover-run` attempts stay blocked while verified descendants
+may still nest through it. Lineage members are already the task's single writer
+and name their own parent chain; the shared lock does not serialize them. Each
+nested launcher re-checks after its own record is durable, so of two concurrent
+siblings at least one refuses. Launch nested runs sequentially.
 
 ## Bounded launcher fallback
 

@@ -2822,14 +2822,21 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal [record_path(old_id), record_path(successor_id)].sort, records.sort
   end
 
-  def test_dead_started_successor_resumes_only_under_same_identity_and_checkpoint
+  def test_dead_started_recovery_successor_retry_preserves_nested_lineage_and_history
     old_id = 'dead_successor_fixture'
     seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+    nested_attempt = File.join(@tmpdir, 'retried-recovery-nested.json')
+    command = nested_parent(
+      [nested_step(inner_cli_args('retried_recovery_nested', nested_leaf('retry')),
+                   result: nested_attempt)],
+      release: @release
+    )
     transition = ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
                                                        old_execution_id: old_id,
                                                        application_state_path: @application_state,
                                                        worktree_path: @worktree,
-                                                       command: recovery_upstream(old_id))
+                                                       command: command)
     stale_successor = ExecutionRecord.acquire!(record_path(transition.successor_execution_id),
                                                task_id: TASK_ID,
                                                execution_id: transition.successor_execution_id,
@@ -2837,13 +2844,29 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_nil stale_successor.classification
     stale_successor_bytes = File.binread(record_path(transition.successor_execution_id))
 
-    result = run_cli(recovery_cli_args(old_id))
+    recovery = start_cli(recovery_cli_args(old_id, command))
+    wait_until('retried recovery application did not start') { launch_records.size == 1 }
+    nested = nested_result(nested_attempt)
+    assert_equal 0, nested.fetch('exitstatus'), nested.fetch('stderr')
+    assert_equal "leaf retry\n", nested.fetch('stdout')
+    successor_id = transition.successor_execution_id
+    nested_record = ExecutionRecord.load(record_path('retried_recovery_nested'))
+    assert_equal successor_id, nested_record.parent_execution_id
+    transition_during_run = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
+    assert_equal [stale_successor_bytes],
+                 transition_during_run.successor_attempt_history.map { |entry| entry.fetch('record_json') }
+    assert_equal old_bytes, File.binread(record_path(old_id))
+
+    File.write(@release, 'go')
+    result = finish_cli(recovery)
 
     assert_equal 0, result[2].exitstatus, result[1]
     reread = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
-    assert_equal transition.successor_execution_id, reread.successor_execution_id
+    assert_equal successor_id, reread.successor_execution_id
     assert_equal [stale_successor_bytes], reread.successor_attempt_history.map { |entry| entry.fetch('record_json') }
-    assert_equal 1, launch_records.size
+    assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path(successor_id)).status
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    assert_equal 2, launch_records.size
   end
 
   def test_run_unresolved_and_malformed_states_fail_closed
@@ -3294,21 +3317,45 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, launch_records.size, 'no forged nested run may bypass the unrecovered stale owner'
   end
 
-  def test_recovery_lineage_does_not_delegate_nested_execution
+  def test_recover_run_successor_delegates_nested_execution_and_rejects_independent_writer
     old_id = 'recovery_lineage_stale'
     seed_stale_execution(old_id)
+    old_bytes = File.binread(record_path(old_id))
+    state_bytes = File.binread(@application_state)
     nested_attempt = File.join(@tmpdir, 'under-recovery.json')
-    command = nested_parent([nested_step(inner_cli_args('nested_under_recovery', nested_leaf('must_not_run')),
+    command = nested_parent([nested_step(inner_cli_args('nested_under_recovery', nested_leaf('recovered')),
                                          result: nested_attempt)], release: @release)
     recovery = start_cli(recovery_cli_args(old_id, command))
 
-    assert_nested_refused(nested_result(nested_attempt), ExecutionRecord::CLASSIFICATION_ACTIVE)
-    assert_equal 0, File.size(ExecutionRecord.task_lock_path(@repo, TASK_ID)), 'recovery names no nested lineage'
+    wait_until('recovered application did not start') { launch_records.size == 1 }
+    nested = nested_result(nested_attempt)
+    assert_equal 0, nested.fetch('exitstatus'), nested.fetch('stderr')
+    assert_equal "leaf recovered\n", nested.fetch('stdout')
+    successor_id = successor_execution_id(old_id)
+    successor = ExecutionRecord.load(record_path(successor_id))
+    nested_record = ExecutionRecord.load(record_path('nested_under_recovery'))
+    assert_equal ExecutionRecord::STATUS_STARTED, successor.status
+    assert_nil successor.parent_execution_id
+    assert_equal successor_id, nested_record.parent_execution_id
+    lineage = JSON.parse(File.read(ExecutionRecord.task_lock_path(@repo, TASK_ID)))
+    assert_equal successor_id, lineage.fetch('execution_id')
+    assert_match(/\A[0-9a-f]{64}\z/, lineage.fetch('capability_sha256'))
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    assert_equal state_bytes, File.binread(@application_state)
+
+    independent = run_cli(cli_args('independent_during_recovery'))
+    assert_equal 1, independent[2].exitstatus
+    assert_includes independent[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    refute File.exist?(record_path('independent_during_recovery'))
+    assert_equal 2, launch_records.size, 'an independent writer cannot join the recovered lineage'
+
     File.write(@release, 'go')
     recovered = finish_cli(recovery)
     assert_equal 0, recovered[2].exitstatus, recovered[1]
-    refute File.exist?(record_path('nested_under_recovery'))
-    assert_equal 1, launch_records.size
+    assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path(successor_id)).status
+    assert_equal old_bytes, File.binread(record_path(old_id))
+    assert_equal state_bytes, File.binread(@application_state)
+    assert_equal 2, launch_records.size
   end
 end
 
