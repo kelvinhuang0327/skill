@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "command": [
+    "gh",
+    "pr",
+    "create",
+    "--repo",
+    "kelvinhuang0327/skill",
+    "--draft",
+    "--base",
+    "master",
+    "--head",
+    "codex/fable-canonicalize-bounded-fallback-and-remote-observation-r1",
+    "--title",
+    "fix(fable): canonicalize bounded fallback and remote observation",
+    "--body",
+    "TASK: FABLE_CANONICALIZE_BOUNDED_FALLBACK_AND_REMOTE_OBSERVATION_R1\n\nBASE_HEAD: daa360716aa963649362084a918ffee1f463c5f1\n\nCANDIDATE_HEAD: 6746e4f1c3967be1ec361b7ff7d400747df58159\n\nCANDIDATE_TREE: f21e5ec9e3c9f32137a56e083ecba818fbca0678\n\nSEMANTICS:\n- bounded launcher fallback only after proven pre-execution launcher unavailability and exact low-risk local preconditions;\n- no fallback after launcher selection failure;\n- no wrapper/composition/high-risk/harness-denial bypass;\n- exactly one read-only exact-target observation after ambiguous/nonzero remote mutation result;\n- observed desired state does not rewrite original command result as PASS;\n- no automatic retry permission;\n- unexpected state STOPs;\n- unavailable observation remains UNKNOWN.\n\nUNCHANGED:\n- Judge sealing;\n- runtime-transition provenance;\n- production recovery contract.\n\nFOUR_PLATFORM_MATERIALIZATION:\nPASS\n\nMATERIALIZATION_CHECK:\nPASS\n\nFOCUSED_CONTRACT_TESTS:\nPASS\n\nDIFF_CHECK:\nPASS\n\nJUDGE_MODE:\nFresh Context FULL\n\nJUDGE:\nVERIFIED\n\nLIVE_INSTALLATION_MUTATION:\nNONE\n\nACTIVATION:\nNOT RUN"
+  ],
+  "stdout": "https://github.com/kelvinhuang0327/skill/pull/56\n",
+  "stderr": "",
+  "exit_status": 0,
+  "started_at": "2026-09-24T09:59:26Z",
+  "ended_at": "2026-09-24T09:59:28Z"
+}

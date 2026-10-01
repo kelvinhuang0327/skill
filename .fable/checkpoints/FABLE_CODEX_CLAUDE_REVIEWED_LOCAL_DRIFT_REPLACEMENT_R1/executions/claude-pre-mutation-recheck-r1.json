@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": "FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1",
+  "execution_id": "claude-pre-mutation-recheck-r1",
+  "pid": 59147,
+  "status": "COMPLETED",
+  "durable_capture_path": "/Users/kelvin/VibeCoding-WorkSpace/skill/.fable/checkpoints/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/captures/claude-pre-mutation-recheck-r1.json",
+  "started_at": "2026-09-24T12:27:11Z",
+  "ended_at": "2026-09-24T12:27:14Z"
+}

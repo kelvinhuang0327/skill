@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "command": [
+    "/bin/bash",
+    "/Users/kelvin/VibeCoding-WorkSpace/.worktrees/skill/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/fable-method/scripts/activate-live.sh",
+    "--check",
+    "--platform",
+    "codex",
+    "--skill",
+    "fable-method"
+  ],
+  "stdout": "SKILL: fable-method\nPLATFORM: codex\nSTATE: EXACT_CURRENT_MATERIALIZATION\nMATCHED_COMMIT: 51a543997739249933e36d9acce23c212f7d5053\nREFERENCE_CLASS: CANONICAL_MASTER\nCANONICAL_HEAD: 51a543997739249933e36d9acce23c212f7d5053\nREFERENCE_HEAD: 51a543997739249933e36d9acce23c212f7d5053\nCANONICAL_MASTER_HEAD: 51a543997739249933e36d9acce23c212f7d5053\nLIVE_TARGET: /Users/kelvin/.codex/skills/fable-method\nACTIVATION_READY: YES\n",
+  "stderr": "",
+  "exit_status": 0,
+  "started_at": "2026-09-24T12:27:53Z",
+  "ended_at": "2026-09-24T12:27:57Z"
+}

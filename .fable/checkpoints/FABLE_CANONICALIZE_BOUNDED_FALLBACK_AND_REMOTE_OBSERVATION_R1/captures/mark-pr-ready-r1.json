@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "command": [
+    "gh",
+    "pr",
+    "ready",
+    "56",
+    "--repo",
+    "kelvinhuang0327/skill"
+  ],
+  "stdout": "",
+  "stderr": "✓ Pull request kelvinhuang0327/skill#56 is marked as \"ready for review\"\n",
+  "exit_status": 0,
+  "started_at": "2026-09-24T10:24:43Z",
+  "ended_at": "2026-09-24T10:24:45Z"
+}

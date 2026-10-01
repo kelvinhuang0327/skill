@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": "FABLE_CANONICALIZE_BOUNDED_FALLBACK_AND_REMOTE_OBSERVATION_R1",
+  "execution_id": "create-draft-pr-r1",
+  "pid": 32200,
+  "status": "COMPLETED",
+  "durable_capture_path": "/Users/kelvin/VibeCoding-WorkSpace/skill/.fable/checkpoints/FABLE_CANONICALIZE_BOUNDED_FALLBACK_AND_REMOTE_OBSERVATION_R1/captures/create-draft-pr-r1.json",
+  "started_at": "2026-09-24T09:59:26Z",
+  "ended_at": "2026-09-24T09:59:28Z"
+}

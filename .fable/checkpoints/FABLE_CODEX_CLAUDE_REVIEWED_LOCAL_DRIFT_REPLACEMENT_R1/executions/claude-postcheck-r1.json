@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "task_id": "FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1",
+  "execution_id": "claude-postcheck-r1",
+  "pid": 60093,
+  "status": "COMPLETED",
+  "durable_capture_path": "/Users/kelvin/VibeCoding-WorkSpace/skill/.fable/checkpoints/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/captures/claude-postcheck-r1.json",
+  "started_at": "2026-09-24T12:27:53Z",
+  "ended_at": "2026-09-24T12:27:57Z"
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "command": [
+    "/bin/bash",
+    "-c",
+    "source \"$1\"; SELECTED_SKILL=\"$4\"; compute_live_bundle_sha256 \"$2\" \"$3\"",
+    "_",
+    "/Users/kelvin/VibeCoding-WorkSpace/.worktrees/skill/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/fable-method/scripts/activate-live.sh",
+    "/Users/kelvin/.claude/skills/fable-judge",
+    "claude",
+    "fable-judge"
+  ],
+  "stdout": "0513e85956e66fce136f859c70d25afd3c06ab66df092e1d83b5951709084f3f\n",
+  "stderr": "",
+  "exit_status": 0,
+  "started_at": "2026-09-24T12:26:20Z",
+  "ended_at": "2026-09-24T12:26:21Z"
+}
