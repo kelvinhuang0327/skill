@@ -9,10 +9,13 @@
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
 - [Long-running execution recovery](#long-running-execution-recovery)
+- [Bounded launcher fallback](#bounded-launcher-fallback)
 - [Publication live-state classifier](#publication-live-state-classifier)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
+- [Post-attempt remote observation](#post-attempt-remote-observation)
+- [Production mutation recovery incidents](#production-mutation-recovery-incidents)
 - [Terminal closure and archiving](#terminal-closure-and-archiving)
 
 ## Overview and core principles
@@ -343,7 +346,8 @@ execution IDs and wrapper crashes.
 
 ### Protected run entrypoint
 
-Resolve a confirmed Fable checkout that contains the Ruby script, then invoke:
+Select the launcher checkout under SKILL.md's launcher-selection rule, then
+invoke:
 
 ```text
 ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb \
@@ -403,13 +407,114 @@ cannot be resolved, rather than silently fall back to a direct command.
 **Deployment requirement**: publication/activation is incomplete until a Worker
 can resolve a Fable checkout containing the merged Ruby CLI. Updating only
 installed SKILL text is insufficient when the installed package lacks the
-Ruby scripts. The placeholder above means the confirmed deployed checkout;
-an isolated task worktree is never the permanent canonical runtime path.
+Ruby scripts. The placeholder above means that selected launcher, which
+defaults to the confirmed deployed checkout; an isolated task worktree is
+never the permanent canonical runtime path.
 
+<<<<<<< HEAD
 ### Explicit stale recovery
 
 `--run` never recovers a stale record. A separate, explicitly authorized
 recovery may use:
+=======
+### Nested protected runs
+
+A protected application may launch another `--run` for the same task ID and
+record root only through the task-lock descriptor it inherited. The same task
+ID, or a copied environment, is never sufficient. A normal `--run`, or a
+validated `--recover-run` successor, writes its own execution ID (the
+successor ID for a recovery), task ID, resolved record root, and the SHA-256 of
+a new random lineage secret into the held `execution.lock`, passes that
+descriptor to its child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
+`FABLE_PROTECTED_RUN_RECORD_ROOT`, `FABLE_PROTECTED_RUN_LOCK_FD`,
+`FABLE_PROTECTED_RUN_LOCK_IDENTITY` (`<dev>:<inode>`),
+`FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID`, and
+`FABLE_PROTECTED_RUN_LINEAGE_SECRET`. The secret exists only in the lineage's
+environment. The application must keep that exact descriptor open for the
+nested launcher (for example, Python `subprocess` needs `pass_fds`).
+
+When those variables name this exact task and resolved root, the nested
+launcher exits `1` with the existing classifications unless: the descriptor is
+this task's owned regular `execution.lock` with the named identity; a fresh
+open of that path cannot take the lock while the inherited descriptor can
+re-assert it; the lock's lineage names this task and root and matches the
+secret; and the parent chain reaches that lineage owner through `STARTED`
+records. It then takes no second task-lock ownership, records its own execution
+with `parent_execution_id` and its own durable capture, and passes the same
+descriptor and secret on with itself as parent. Only the ancestors on that
+chain are exempt from the owner check; every record outside it keeps the normal
+active, stale, or unresolved refusal. A stale record whose valid recovery chain
+reaches an active successor on that verified chain is resolved for that
+lineage's own nested runs only. Variables scoped to another task or root grant
+nothing there; that caller gets ordinary top-level acquisition. Every
+conforming lock acquisition clears an earlier lineage, so a dead lineage cannot
+be revived, by copying its environment or otherwise, to skip stale recovery.
+`--recover-run` does not act on an inherited capability, and the stale
+predecessor stays historical evidence and never delegates. Once the recovery
+transition is valid, its deterministic successor takes the lock and establishes
+its own lineage from the successor execution ID, as a normal `--run` does; a
+retry of the same transition reuses that successor identity and therefore the
+same semantics. Independent writers remain refused.
+
+Wrapper death keeps its single-writer meaning: the surviving application child
+still holds the task lock, so unrelated `--run` and `--recover-run` attempts
+stay blocked while its descendants may still nest through the inherited
+descriptor. Lineage members are already the task's single writer and name their
+own parent chain; the shared lock does not serialize them. Each nested launcher
+re-checks after its own record is durable, so of two concurrent siblings at
+least one refuses. Launch nested runs sequentially.
+
+## Bounded launcher fallback
+
+Before selecting an execution path for a task-owned expensive or long-running
+launch, record:
+
+```text
+LAUNCHER_STATUS: PRESENT_RUNNABLE | ABSENT_PROVEN_BEFORE_EXECUTION | UNAVAILABLE_PROVEN_BEFORE_EXECUTION | UNCERTAIN | FAILURE_AFTER_DISCOVERY
+EXACT_WORKTREE: <one exact absolute worktree authorized by the current Packet>
+EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorized by the current Packet>
+EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR
+```
+
+- When `PRESENT_RUNNABLE`, Workers MUST use the protected
+  `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not
+  allowed.
+- Direct-local fallback is permitted only when launcher absence or
+  unavailability is positively proven before execution begins. It requires
+  `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked
+  argv that exactly matches one allowlisted vector, and
+  `EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local
+  effects. When either pre-execution absence status is proven and every
+  precondition holds, bounded direct-local execution is permitted.
+- Fallback is forbidden when effects are external, high-risk, destructive,
+  production-mutating, runtime-mutating, or unclear. Existing high-risk and
+  external authorization and supported-execution requirements remain
+  unchanged.
+- Do not use command substitution, shell composition, wrappers invented to
+  bypass the launcher, or alternate equivalent commands intended to route
+  around a denial.
+- When launcher availability is uncertain, do not fall back; use existing
+  capability and STOP rules.
+- If launcher selection succeeded and its execution later fails, record
+  `FAILURE_AFTER_DISCOVERY`, preserve the original failure, follow existing
+  RCA/STOP rules, and do not switch to direct-local execution.
+- A direct-local fallback never overrides an actual harness or platform
+  permission denial.
+- Resume of a task previously blocked by launcher availability requires
+  evidence that the currently loaded policy revision contains this fallback
+  contract and that every fallback precondition still holds.
+
+This narrow exception does not weaken the normal requirement that high-risk
+or external actions use their existing authorization and supported execution
+path.
+## Explicit stale recovery
+
+`--run` never recovers a stale record. A stale `STARTED` record blocks normal
+`--run` for the task even if the caller supplies a different execution ID;
+changing IDs cannot bypass the stale stop. After an explicit recovery chain
+reaches a completed successor, the successor remains available through normal
+durable-capture replay. A separate, explicitly authorized recovery may use:
+>>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 
 ```text
 ruby task_checkpoint.rb \
@@ -455,7 +560,10 @@ closed. The task-scoped lock serializes this transition and successor claim
 with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
+<<<<<<< HEAD
 
+=======
+>>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
@@ -626,6 +734,69 @@ but **authorization does not transfer across conversation boundaries**.
   specifications, not live execution permission.
 - A durable Task B Packet proves which task is authorized; it does not transfer
   any standalone high-risk authorization into a fresh conversation.
+
+## Post-attempt remote observation
+
+After a remote mutation command returns nonzero or has an ambiguous result,
+exactly ONE read-only observation of the exact authorized target is permitted
+before deciding the mutation disposition. There is no retry loop. Observe only
+that target; do not add generic workspace or branch discovery.
+
+Classify the observation into exactly these outcomes:
+
+| Outcome | Observation | Required disposition |
+|---|---|---|
+| `AUTHORIZED_DESIRED_STATE` | The exact target is now exactly at the authorized desired state. | Treat the target as satisfied, but retain and report the original command result as failed or ambiguous. Do not rewrite that result as `PASS`, retry the mutation, or skip ordinary verification of the achieved desired state. |
+| `EXPECTED_PREVIOUS_STATE` | The exact target is still exactly at the expected pre-mutation state. | No advance was observed. Existing RCA and authorization rules determine continuation; this observation grants no retry permission. |
+| `ANOTHER_STATE` | The exact target is neither the authorized desired state nor the expected previous state. | Classify as drift or ambiguity and STOP. Do not retry or perform destructive reconciliation. |
+| `OBSERVATION_UNAVAILABLE` | The exact target cannot be observed reliably. | State is `UNKNOWN`. Do not infer no mutation, desired completion, or retry permission. |
+
+The rule is one observation, read-only, and exact-target scoped. It does not
+authorize a remote mutation, a retry, destructive reconciliation, production
+recovery, or a claim of deployment success. It does not change or replace
+production mutation recovery rules.
+
+## Production mutation recovery incidents
+
+`RECOVERY_REQUIRED`, an unresolved `PARTIAL` still requiring recovery, an
+unresolved `ROLLBACK_IN_PROGRESS`, or an equivalent explicit production
+recovery state is not a lifecycle enum — it is a **fact about the target
+production system** that a Worker observes, the same way
+`EVALUATION_COMPLETE_UNSEALED` above is a fact about an evaluation's progress
+rather than a new lifecycle value. When an authorized production mutation
+reaches such a state and the task's intended successful production acceptance
+is not satisfied, treat the production incident as **OPEN** and persist it
+before session handoff using the existing checkpoint contract, with no schema
+or enum change:
+
+```text
+task_lifecycle_state: BLOCKED
+current_blocker: <the exact observed production recovery state and cause>
+next_action: <one exact next action or recovery-disposition action>
+authorization_boundary: <preserved unchanged from the task's existing boundary>
+```
+
+Hand off the exact literal runtime/receipt artifact locator when one exists
+(for example an `ExecutionRecord`/durable-capture path, a deployment receipt,
+or an equivalent exact identifier), and make explicit which current `task_id`
+owns the unresolved incident, so a resuming Worker or Owner never has to
+reconstruct ownership from chat history.
+
+The Worker that observes this state MUST NOT:
+
+- mark the production deployment/cutover itself successful;
+- silently leave the state for an ownerless future session — it must be
+  persisted as `BLOCKED` per above before handoff;
+- automatically retry, roll back, or reconcile the production mutation;
+- invent a new recovery task or a new `next_authorized_task_packet_ref`
+  without Planner/Owner authority;
+- add a new lifecycle enum or checkpoint schema field for this state.
+
+A Judge verdict that the Worker's failure handling was itself correct (for
+example `VERIFIED` or `VERIFIED_WITH_CAVEATS` on the incident-handling
+behavior) does NOT convert an open production recovery incident into
+deployment success; `task_lifecycle_state` stays `BLOCKED` until the
+production acceptance the task actually intended is independently satisfied.
 
 ## Terminal closure and archiving
 

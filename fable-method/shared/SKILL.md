@@ -206,7 +206,11 @@ deleted temporary files, checkout materialization, Git metadata, and harness
 metadata. Do not create a handoff, report, log, or scratch file outside an
 explicitly allowlisted path.
 
+<<<<<<< HEAD
 For task-owned expensive / long-running launches, Workers MUST use `ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb --run --repo <original-stable-record-root> --worktree <upstream-cwd> --task-id <stable-task-id> --execution-id <stable-execution-id> -- <upstream argv...>`; follow [protected execution](references/task-checkpoint.md#protected-run-entrypoint) for recovery and exit behavior. Resolve a Fable checkout containing this Ruby CLI; installed SKILL text alone is insufficient. Keep the original task's stable record root and caller-supplied IDs across sessions; never derive them from cwd, PID, timestamp, session, or model. Only launches routed through `--run`, or through `--recover-run` explicitly authorized by the original task authority, receive technical duplicate-execution protection; arbitrary direct shell bypasses remain outside that boundary. `--run` never silently recovers stale work. Do not manually compose acquire/run/complete or silently fall back to a direct launch when the CLI is unavailable.
+=======
+For task-owned expensive / long-running launches, Workers MUST use the protected `task_checkpoint.rb --run` [entrypoint](references/task-checkpoint.md#protected-run-entrypoint) whenever it is present and runnable. Use the launcher checkout named by the Packet or exact command; when neither names one, use the deployed launcher that existing deployment evidence uniquely confirms, else record `LAUNCHER_STATUS: UNCERTAIN`. Never substitute any other checkout — the primary checkout whether clean or dirty, a task worktree, or a recently used checkout — and never switch builds mid-execution; the handoff records the actual launcher path and commit. Installed Skill text alone is insufficient. Keep the original task's stable record root and caller-supplied IDs across sessions; never derive them from cwd, PID, timestamp, session, or model. The runtime also blocks a different execution ID while the task has an unrecovered stale execution, so callers cannot rotate IDs to bypass a stop. Only launches routed through `--run`, or through `--recover-run` explicitly authorized by the original task authority, receive technical duplicate-execution protection; arbitrary direct shell bypasses remain outside that boundary. `--run` never silently recovers stale work. Do not manually compose acquire/run/complete. A named launcher that is unavailable or fails its identity check never licenses another checkout; a direct-local fallback is permitted only when launcher absence or unavailability is proven before execution and all [bounded launcher fallback](references/task-checkpoint.md#bounded-launcher-fallback) preconditions hold; do not silently fall back after selecting a launcher, or after a harness/platform permission denial. After a nonzero or ambiguous remote mutation result, allow one read-only observation of the exact authorized target under [post-attempt remote observation](references/task-checkpoint.md#post-attempt-remote-observation); it grants no retry permission or production-recovery status.
+>>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 
 CPU-heavy work uses the `SHARED_WORKSTATION` budget in [operational gates](references/operational-gates.md): two workers by default and at most two without direct Owner authorization; the Worker may reduce to one but never auto-scale, use all cores, or saturate the workstation.
 
@@ -293,13 +297,13 @@ Capability preflight uses a strict tri-state:
 CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
 ```
 
-`ALLOWED` requires direct evidence that the current harness can perform the required execution path. `UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`. `BLOCKED` means direct evidence shows the required execution path is unavailable or denied; for a `BLOCKED` capability, do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block — retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged.
+`ALLOWED` requires direct evidence that the current harness can perform the required execution path. `UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`. `BLOCKED` means direct evidence shows the required execution path is unavailable or denied; for a `BLOCKED` capability, do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block — retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged. Before a production or deployment mutation, exercise this same tri-state through the exact harness/wrapper/launcher chain that will invoke the mutation — see [production mutation harness preflight](references/operational-gates.md#production-mutation-harness-preflight) for the same-chain probe contract and its fail-closed `UNKNOWN` behavior.
 
 A task framing such as “fix the code” is not a behavior spec. Never rely on
 recall: label an unverified fact `[Unknown]`. Use precise edits and never
 overwrite without looking first.
 
-A stop token is final for the current task authority: no mutation, no equivalent command substitution, no metadata workaround, no upstream rewrite, and no retry under a different action class until a new authoritative Owner instruction or valid Continuation Delta.
+A stop token is final for the current task authority: no mutation, no equivalent command substitution, no metadata workaround, no upstream rewrite, and no retry under a different action class until a new authoritative Owner instruction or valid Continuation Delta. `DO_NOT_POLL`: report the stop and end the turn; do not sleep, poll, schedule a wakeup, or re-check while waiting for the blocker to clear, apart from the deferred queue's one recheck.
 
 Documentation or task completion is not authorization.
 
@@ -427,7 +431,7 @@ Load only the directly relevant reference:
 - [examples](references/examples.md) for a task shape, Packet fast path, or
   report format;
 - [failure modes](references/failure-modes.md) for audit, retry diagnosis, or unclear verification failure;
-- [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, or detailed authority checks;
+- [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, a production-mutation harness preflight, or detailed authority checks;
 - [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
 - [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
 - [memory boundary](references/memory-boundary.md) before reading project memory as authority or creating/modifying any memory, handoff, or checkpoint file, and [workspace containment](references/workspace-containment.md) before creating a worktree, clone, or sibling workspace directory;
@@ -436,7 +440,7 @@ Load only the directly relevant reference:
 - [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
 - [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;
 - [diff coverage](references/diff-coverage.md) for on-demand changed-line execution-adequacy measurement against an already-configured coverage run;
-- [reporting](references/reporting.md) for compact outcome-first fields and lifecycle reporting;
+- [reporting](references/reporting.md) for compact outcome-first fields, ownership/quiescence blocker evidence, and lifecycle reporting;
 - exactly one matching domain reference before Step 2 for a non-coding domain: [business ops](references/domains/business-ops.md), [data analysis](references/domains/data-analysis.md), [design and UX](references/domains/design-ux.md), [devops](references/domains/devops.md), [finance](references/domains/finance.md), [legal and compliance](references/domains/legal-compliance.md), [marketing](references/domains/marketing.md), or [research](references/domains/research.md). `domains/TEMPLATE.md` is only for creating or updating an adapter.
 
 Preserve `/fable-method <task>`, `/fable-method plan <task>`,

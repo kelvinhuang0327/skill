@@ -679,6 +679,93 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
   end
 
+  def test_canonical_bounded_launcher_fallback_contract
+    clauses = [
+      'Before selecting an execution path for a task-owned expensive or long-running launch, record:',
+      'LAUNCHER_STATUS: PRESENT_RUNNABLE | ABSENT_PROVEN_BEFORE_EXECUTION | UNAVAILABLE_PROVEN_BEFORE_EXECUTION | UNCERTAIN | FAILURE_AFTER_DISCOVERY',
+      'EXACT_WORKTREE: <one exact absolute worktree authorized by the current Packet>',
+      'EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorized by the current Packet>',
+      'EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR',
+      'When `PRESENT_RUNNABLE`, Workers MUST use the protected `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not allowed.',
+      'Direct-local fallback is permitted only when launcher absence or unavailability is positively proven before execution begins.',
+      'It requires `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked argv that exactly matches one allowlisted vector, and `EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local effects.',
+      'When either pre-execution absence status is proven and every precondition holds, bounded direct-local execution is permitted.',
+      'Fallback is forbidden when effects are external, high-risk, destructive, production-mutating, runtime-mutating, or unclear.',
+      'Existing high-risk and external authorization and supported-execution requirements remain unchanged.',
+      'Do not use command substitution, shell composition, wrappers invented to bypass the launcher, or alternate equivalent commands intended to route around a denial.',
+      'When launcher availability is uncertain, do not fall back; use existing capability and STOP rules.',
+      'If launcher selection succeeded and its execution later fails, record `FAILURE_AFTER_DISCOVERY`, preserve the original failure, follow existing RCA/STOP rules, and do not switch to direct-local execution.',
+      'A direct-local fallback never overrides an actual harness or platform permission denial.',
+      'Resume of a task previously blocked by launcher availability requires evidence that the currently loaded policy revision contains this fallback contract and that every fallback precondition still holds.',
+      'This narrow exception does not weaken the normal requirement that high-risk or external actions use their existing authorization and supported execution path.'
+    ]
+    weakenings = {
+      'Workers MUST use' => 'Workers may use',
+      'Direct-local fallback is not allowed.' => 'Direct-local fallback is allowed.',
+      'positively proven before execution begins' => 'assumed at any time',
+      'argv that exactly matches one allowlisted vector' => 'argv that is broadly equivalent to an allowlisted vector',
+      'LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local effects' => 'LOCAL_ONLY_NO_HIGH_RISK` optional for external effects',
+      'Fallback is forbidden when effects are external, high-risk, destructive, production-mutating, runtime-mutating, or unclear.' =>
+        'Fallback may run when effects are external, high-risk, destructive, production-mutating, runtime-mutating, or unclear.',
+      'Do not use command substitution, shell composition, wrappers invented to bypass the launcher, or alternate equivalent commands intended to route around a denial.' =>
+        'Use command substitution, shell composition, wrappers, or alternate commands to route around a denial.',
+      'do not fall back; use existing capability and STOP rules' => 'fall back when launcher availability is uncertain',
+      'do not switch to direct-local execution' => 'switch to direct-local execution',
+      'never overrides an actual harness or platform permission denial' =>
+        'may override an actual harness or platform permission denial',
+      'currently loaded policy revision contains this fallback contract' =>
+        'the fallback contract need not be in the currently loaded policy revision',
+      'does not weaken the normal requirement' => 'overrides the normal requirement'
+    }
+    assert_canonical_contract_controls('references/task-checkpoint.md', 'Bounded launcher fallback', clauses, weakenings)
+    assert_includes Parser.skill, '[entrypoint](references/task-checkpoint.md#protected-run-entrypoint)'
+    assert_includes Parser.skill, '[bounded launcher fallback](references/task-checkpoint.md#bounded-launcher-fallback)'
+  end
+
+  def test_canonical_post_attempt_remote_observation_contract
+    clauses = [
+      'After a remote mutation command returns nonzero or has an ambiguous result, exactly ONE read-only observation of the exact authorized target is permitted before deciding the mutation disposition.',
+      'There is no retry loop. Observe only that target; do not add generic workspace or branch discovery.',
+      'Classify the observation into exactly these outcomes:',
+      'The exact target is now exactly at the authorized desired state.',
+      '| `AUTHORIZED_DESIRED_STATE` |',
+      'Treat the target as satisfied, but retain and report the original command result as failed or ambiguous.',
+      'Do not rewrite that result as `PASS`, retry the mutation, or skip ordinary verification of the achieved desired state.',
+      'The exact target is still exactly at the expected pre-mutation state.',
+      '| `EXPECTED_PREVIOUS_STATE` |',
+      'No advance was observed. Existing RCA and authorization rules determine continuation; this observation grants no retry permission.',
+      'The exact target is neither the authorized desired state nor the expected previous state.',
+      '| `ANOTHER_STATE` |',
+      'Classify as drift or ambiguity and STOP. Do not retry or perform destructive reconciliation.',
+      'The exact target cannot be observed reliably.',
+      '| `OBSERVATION_UNAVAILABLE` |',
+      'State is `UNKNOWN`. Do not infer no mutation, desired completion, or retry permission.',
+      'The rule is one observation, read-only, and exact-target scoped.',
+      'It does not authorize a remote mutation, a retry, destructive reconciliation, production recovery, or a claim of deployment success.',
+      'It does not change or replace production mutation recovery rules.'
+    ]
+    weakenings = {
+      'exactly ONE read-only observation' => 'one or more read-write observations',
+      'do not add generic workspace or branch discovery' => 'discover generic workspace or branch state',
+      'retain and report the original command result as failed or ambiguous' =>
+        'replace the original command result with a successful result',
+      'Do not rewrite that result as `PASS`, retry the mutation' =>
+        'rewrite that result as `PASS` and retry the mutation',
+      'this observation grants no retry permission' => 'this observation grants retry permission',
+      'Classify as drift or ambiguity and STOP.' => 'Classify as drift and continue.',
+      'State is `UNKNOWN`. Do not infer no mutation, desired completion, or retry permission.' =>
+        'Infer no mutation, desired completion, and retry permission.',
+      'one observation, read-only, and exact-target scoped' =>
+        'repeated observations, including write checks, across targets',
+      'does not change or replace production mutation recovery rules' =>
+        'changes and replaces production mutation recovery rules'
+    }
+    assert_canonical_contract_controls(
+      'references/task-checkpoint.md', 'Post-attempt remote observation', clauses, weakenings
+    )
+    assert_includes Parser.skill, '[post-attempt remote observation](references/task-checkpoint.md#post-attempt-remote-observation)'
+  end
+
   private
 
   def canonical_contract_section(relative_path, heading)
