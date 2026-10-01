@@ -166,7 +166,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       '`JUDGE_MODE` answers how that handoff occurs, or is `NOT_APPLICABLE` when no Judge applies.',
       '`JUDGE_DEPTH` is `BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies.',
       'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`;',
-      'The Worker terminal state remains the final task state.',
+      'the Worker terminal state remains the final task state.',
       'Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.',
       'When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is a contract conflict: `STOP: JUDGE_MODE_CONTRACT_CONFLICT`.',
       'Do not suppress the mandatory Judge or silently override the Packet.',
@@ -178,7 +178,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       '`JUDGE_MODE` answers how that handoff occurs, or is `NOT_APPLICABLE` when no Judge applies.' => '`JUDGE_MODE` always requires a Judge.',
       '`JUDGE_DEPTH` is `BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies.' => '`JUDGE_DEPTH` may be evaluated before a Judge applies.',
       'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`;' => 'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, launch a default Judge;',
-      'The Worker terminal state remains the final task state.' => 'The Worker terminal state is an intermediate state.',
+      'the Worker terminal state remains the final task state.' => 'the Worker terminal state is an intermediate state.',
       'Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.' =>
         'create, schedule, invoke, fall back to, or automatically escalate into a Judge when needed.',
       'When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is a contract conflict: `STOP: JUDGE_MODE_CONTRACT_CONFLICT`.' =>
@@ -189,43 +189,46 @@ class ExplicitContractFailClosedTest < Minitest::Test
         'Check this boundary after Judge handoff or depth evaluation.',
       'retain their existing routing semantics' => 'may be changed by this boundary'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Route once', clauses, weakenings)
+    assert_canonical_contract_controls(
+      'references/judge-handoff.md', 'When the Judge gate fires', clauses, weakenings
+    )
   end
 
   def test_read_only_completion_review_obeys_the_resolved_judge_boundary
     clauses = [
-      'Use `READ_ONLY_COMPLETION_REVIEW` for claimed-complete work. It is a task class, not an unconditional Judge trigger: resolve `JUDGE_TRIGGER` and `JUDGE_MODE` before dispatch.',
-      'When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`; do not load or hand off to `fable-judge`.',
-      'When a named mandatory Judge trigger applies, use the resolved Judge mode and do not execute a Worker route.'
+      'Use `READ_ONLY_COMPLETION_REVIEW` for claimed-complete work; it is not itself a Judge trigger. Resolve its trigger and mode before dispatch.',
+      'With a mandatory trigger, use the resolved Judge mode and no Worker route; without fresh-context capability, self-check only and do not claim independent `VERIFIED`.',
+      'When no mandatory Judge trigger applies and mode is `NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`. A mandatory Judge trigger cannot be suppressed or silently overridden.'
     ]
     weakenings = {
-      'not an unconditional Judge trigger' => 'an unconditional Judge trigger',
-      'resolve `JUDGE_TRIGGER` and `JUDGE_MODE` before dispatch' => 'dispatch before resolving `JUDGE_TRIGGER` and `JUDGE_MODE`',
-      'do not load or hand off to `fable-judge`' => 'load or hand off to `fable-judge`',
-      'use the resolved Judge mode and do not execute a Worker route' => 'ignore the resolved Judge mode and execute a Worker route'
+      'it is not itself a Judge trigger' => 'it is itself a Judge trigger',
+      'Resolve its trigger and mode before dispatch' => 'Dispatch before resolving its trigger and mode',
+      'use the resolved Judge mode and no Worker route' => 'ignore the resolved Judge mode and choose a Worker route',
+      'cannot be suppressed or silently overridden' => 'may be suppressed or silently overridden'
     }
     assert_canonical_contract_controls('SKILL.md', 'First output and task class', clauses, weakenings)
   end
 
   def test_planning_only_and_pure_qa_suppress_judge_dispatch
     clauses = [
-      '`PLANNING_ONLY` and `PURE_QA` never dispatch a Judge; with `JUDGE_MODE: NOT_APPLICABLE`, `JUDGE_DISPATCH: SUPPRESSED` is the required terminal dispatch state.'
+      'Planning and pure QA never dispatch a Judge.',
+      'When no mandatory Judge trigger applies and mode is `NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`.'
     ]
     weakenings = {
       'never dispatch a Judge' => 'may dispatch a Judge',
-      '`JUDGE_DISPATCH: SUPPRESSED` is the required terminal dispatch state' => '`JUDGE_DISPATCH: SUPPRESSED` is optional'
+      'set `JUDGE_DISPATCH: SUPPRESSED`' => 'set `JUDGE_DISPATCH: REQUIRED`'
     }
     assert_canonical_contract_controls('SKILL.md', 'First output and task class', clauses, weakenings)
   end
 
   def test_fresh_context_trigger_keeps_independent_judge_behavior
     clauses = [
-      'A named mandatory Judge trigger with `JUDGE_MODE: FRESH_CONTEXT` still requires an independent `fable-judge` handoff;',
-      'this boundary does not alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY` semantics.'
+      'A named mandatory Judge trigger with `JUDGE_MODE: FRESH_CONTEXT` still requires an independent `fable-judge` handoff.',
+      '`FRESH_CONTEXT` and `SELF_CHECK_ONLY` retain their existing routing semantics.'
     ]
     weakenings = {
       'still requires an independent `fable-judge` handoff' => 'may use a Worker self-check instead of an independent `fable-judge` handoff',
-      'does not alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY` semantics' => 'may alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY` semantics'
+      'retain their existing routing semantics' => 'may change routing semantics'
     }
     assert_canonical_contract_controls('references/judge-handoff.md', 'When the Judge gate fires', clauses, weakenings)
   end
@@ -321,22 +324,22 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_includes judge_handoff, 'DEPTH_SOURCE'
   end
 
-  # Text-only regression against the real shared Skill; no runtime enforcement.
+  # Text-only regression against canonical operational guidance; no runtime enforcement.
   def test_exact_locator_first_and_absence_contract
-    assert_exact_locator_contract(Parser.skill)
+    assert_exact_locator_contract(Parser.operational_gates)
   end
 
   def test_exact_locator_contract_rejects_broad_discovery_weakening
-    live = Parser.skill
+    live = Parser.operational_gates
     assert_exact_locator_contract(live)
     weakened = live.sub(
-      'use it directly and stop broad discovery for the same authority.',
-      'use it directly and allow broad discovery for the same authority.'
+      'stop broad discovery for that authority;',
+      'continue broad discovery for that authority;'
     )
     refute_equal live, weakened, 'negative control must change the live clause'
     error = assert_raises(Minitest::Assertion) { assert_exact_locator_contract(weakened) }
-    assert_includes error.message, 'stop broad discovery for the same authority'
-    assert_exact_locator_contract(Parser.skill)
+    assert_includes error.message, 'stop broad discovery for that authority'
+    assert_exact_locator_contract(Parser.operational_gates)
   end
 
   # Text-only A/B/C regressions; all negative controls are in-memory copies.
@@ -397,75 +400,50 @@ class ExplicitContractFailClosedTest < Minitest::Test
 
   def test_canonical_verification_provenance_contract
     clauses = [
-      '`RUN_THIS_TASK` for checks actually executed during the current task/current execution phase',
-      '`REUSED_EXACT_TREE_EVIDENCE` for prior verification reused because the exact load-bearing tree/artifact identity remains valid.',
-      'Reused evidence must never be reported as a check rerun this task or labeled `RUN_THIS_TASK`.',
-      'Reuse does not require rerunning a check merely to obtain a fresh `PASS` label.',
-      'Keep `NOT RUN` distinct from `PASS`;',
-      'provenance accuracy does not increase verification volume.',
-      '`NOT RUN` is never `PASS`'
+      '`RUN_THIS_TASK` for checks actually executed this task/current phase',
+      '`REUSED_EXACT_TREE_EVIDENCE` when valid evidence is reused for an identical command, environment, HEAD, and tree.',
+      'Never call reused evidence a rerun.',
+      'Reuse does not require rerunning a check solely to obtain a fresh label; keep `NOT RUN` distinct from `PASS`.'
     ]
     weakenings = {
-      'checks actually executed during the current task/current execution phase' => 'checks executed during any previous task',
-      'the exact load-bearing tree/artifact identity remains valid' => 'a similar tree/artifact identity seems valid',
-      'must never be reported as a check rerun this task or labeled `RUN_THIS_TASK`' => 'may be reported as a check rerun this task or labeled `RUN_THIS_TASK`',
+      'checks actually executed this task/current phase' => 'checks executed during any previous task',
+      'identical command, environment, HEAD, and tree' => 'a similar command, environment, HEAD, or tree',
+      'Never call reused evidence a rerun.' => 'Reused evidence may be called a rerun.',
       'Reuse does not require rerunning' => 'Reuse requires rerunning',
-      'Keep `NOT RUN` distinct from `PASS`' => 'Report `NOT RUN` as `PASS`',
-      'does not increase verification volume' => 'requires increased verification volume',
-      '`NOT RUN` is never `PASS`' => '`NOT RUN` may be `PASS`'
+      'keep `NOT RUN` distinct from `PASS`' => 'report `NOT RUN` as `PASS`'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, weakenings)
+    assert_canonical_contract_controls('references/reporting.md', 'Evidence labels', clauses, weakenings)
+    assert_includes Parser.skill, '`NOT RUN` is never `PASS`'
   end
 
   # Cleanup/mutation guidance only; no scheduler, worktree, or preservation-ref mutation.
   def test_canonical_recurring_scheduler_runtime_ownership_contract
     clauses = [
-      'For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` exists when EITHER a currently running process owns or depends on the target OR a loaded or enabled recurring scheduler is bound to the target or its runtime source.',
-      'Task-relevant mechanisms include launchd, cron, systemd, or an equivalent recurring scheduler.',
-      'When applicable, cleanup or mutation preflight must inspect task-relevant binding data, including at least loaded/enabled schedule state; WorkingDirectory; executable / interpreter; script path; and import path / module root / PYTHONPATH binding.',
-      '`NO_CURRENT_PROCESS` does NOT imply `NO_ACTIVE_RUNTIME_OWNERSHIP`.',
-      'A loaded or enabled recurring scheduler bound to the target worktree/source retains active ownership for cleanup or mutation unless an authorized ownership transition explicitly removes or repoints the binding.',
-      'Inspection remains task-relevant and bounded; do not require a workspace-wide scheduler audit.'
+      'For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` includes either a running process owning or depending on the target, or a loaded/enabled recurring scheduler bound to the target or its runtime source.',
+      'Task-relevant schedulers include launchd, cron, systemd, or an equivalent recurring scheduler.',
+      'When applicable, inspect only task-relevant schedule state, WorkingDirectory, executable/interpreter, script path, and import/module-root/PYTHONPATH bindings.',
+      'A loaded/enabled scheduler bound to the target worktree/source retains active ownership unless an authorized ownership transition removes or repoints the binding.',
+      '`NO_CURRENT_PROCESS` does not establish `NO_ACTIVE_RUNTIME_OWNERSHIP`;',
+      'do not turn this into a workspace-wide audit.'
     ]
     weakenings = {
-      # Preserve enabled schedulers and both cleanup/mutation entry points.
-      'loaded or enabled recurring scheduler' => 'loaded recurring scheduler',
-      'runtime/worktree cleanup or mutation' => 'runtime/worktree cleanup',
-      'cleanup or mutation preflight' => 'cleanup preflight',
-      'ownership for cleanup or mutation' => 'ownership for cleanup',
-      # A1: reduce ownership to current processes only.
-      ' OR a loaded or enabled recurring scheduler is bound to the target or its runtime source' => '',
-      'EITHER a currently running process owns or depends on the target OR' => 'BOTH a currently running process owns or depends on the target AND',
-      ' or its runtime source' => '',
-      'launchd, ' => '',
-      'cron, ' => '',
-      'systemd, ' => '',
-      ', or an equivalent recurring scheduler' => '',
-      # A2: retain the binding but deny active ownership.
-      'retains active ownership for cleanup or mutation' => 'does not count as active ownership for cleanup',
-      'does NOT imply' => 'implies',
-      'an authorized ownership transition explicitly removes or repoints the binding' => 'the Worker assumes the binding is idle',
-      # A3: remove each load-bearing binding surface independently.
-      'loaded/enabled schedule state; ' => '',
-      'WorkingDirectory; ' => '',
-      'executable / ' => '',
-      'interpreter; ' => '',
-      'script path; ' => '',
-      'import path / ' => '',
-      'module root / ' => '',
-      'PYTHONPATH binding' => 'unspecified binding',
-      'must inspect task-relevant binding data' => 'may skip task-relevant binding data',
-      'Inspection remains task-relevant and bounded; do not require a workspace-wide scheduler audit.' => 'Require a workspace-wide scheduler audit.'
+      'or a loaded/enabled recurring scheduler bound to the target or its runtime source' => 'with no recurring scheduler ownership',
+      'launchd, cron, systemd, or an equivalent recurring scheduler' => 'one-time process only',
+      'inspect only task-relevant schedule state' => 'skip task-relevant schedule state',
+      'retains active ownership unless an authorized ownership transition removes or repoints the binding' => 'does not count as active ownership',
+      'does not establish `NO_ACTIVE_RUNTIME_OWNERSHIP`' => 'establishes `NO_ACTIVE_RUNTIME_OWNERSHIP`',
+      'do not turn this into a workspace-wide audit' => 'require a workspace-wide audit'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+    assert_canonical_contract_controls(
+      'references/operational-gates.md', 'Bounded preflight and write boundary', clauses, weakenings
+    )
   end
 
   def test_canonical_deployed_head_durable_source_authority_contract
     refute_includes Parser.skill.gsub(/\s+/, ' '), 'where exact deployment reproducibility matters'
     refute_includes Parser.skill, 'DEPLOYED_SOURCE_DURABILITY_REQUIRED'
     clauses = [
-      'Before deleting or replacing a checkout/worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`:',
-      'the exact deployed commit must remain reachable through an explicitly recognized durable Git source authority appropriate to the task.',
+      'Before deleting or replacing a checkout/worktree that is or was the exact deployed runtime source, require `DEPLOYED_HEAD` to remain reachable through an explicitly recognized durable Git source authority appropriate to the task.',
       'Content-equivalent code/tree on main is NOT sufficient evidence that the exact deployed source may be discarded.',
       'If exact `DEPLOYED_HEAD` has no durable source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`.',
       'The Worker MUST NOT automatically create a branch/tag/ref to satisfy this gate.',
@@ -473,25 +451,15 @@ class ExplicitContractFailClosedTest < Minitest::Test
     ]
     weakenings = {
       'Before deleting or replacing' => 'After deleting or replacing',
-      'deleting or replacing' => 'deleting',
-      'a checkout/worktree that is or was' => 'a detached worktree that is or was',
-      'that is or was' => 'that is',
-      'the exact deployed runtime source, `DEPLOYED_HEAD`' => 'the exact deployed runtime source where exact deployment reproducibility matters, `DEPLOYED_HEAD`',
-      'DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING' => 'DEPLOYED_SOURCE_DURABILITY_REQUIRED',
-      'that is or was the exact deployed runtime source' => 'that is currently the deployed runtime source',
-      # B1: substitute content equivalence for exact deployed-head durability.
-      '`DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`' => 'content-equivalent main is sufficient',
-      'the exact deployed commit must remain reachable' => 'a content-equivalent commit on main must remain reachable',
-      'an explicitly recognized durable Git source authority appropriate to the task' => 'any available Git object',
+      '`DEPLOYED_HEAD` to remain reachable' => 'main equivalence is sufficient',
       'is NOT sufficient evidence' => 'is sufficient evidence',
-      # B2: remove the fail-closed gate.
-      'STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`' => 'continue cleanup',
-      # B3: allow automatic branch/tag/ref creation or waive its authority.
+      'STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`' => 'continue with cleanup',
       'MUST NOT automatically create a branch/tag/ref' => 'may automatically create a branch/tag/ref',
-      'Creating or changing a preservation ref' => 'Creating a preservation ref',
-      'requires applicable task authority / authorization' => 'requires no separate authority / authorization'
+      'requires applicable task authority / authorization' => 'requires no separate authorization'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+    assert_canonical_contract_controls(
+      'references/operational-gates.md', 'Bounded preflight and write boundary', clauses, weakenings
+    )
   end
 
   def test_canonical_publication_scope_authority_contract
@@ -516,38 +484,65 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
-  def test_canonical_exact_untracked_cardinality_contract
+  def test_shared_front_door_skips_git_tier_load_only_for_resolved_local_commit
     clauses = [
-      'When acceptance or safety depends on the exact file-level count or identity of untracked content, use a file-complete inventory such as `git status --porcelain=v1 --untracked-files=all` or another command proven to expose every individual file;',
-      'directory-collapsed untracked output is insufficient evidence for an exact file count,',
-      'nine files represented by one collapsed untracked directory entry must not be reported as exact cardinality one.',
-      'Do not require `--untracked-files=all` for every task;',
-      'trigger it only when exact cardinality or file identity is load-bearing.'
+      'Consult [operational gates](references/operational-gates.md#git-action-tiers) before any Git lifecycle action except an ordinary local commit on an already-resolved FAST task',
+      '`COMMIT_AUTHORIZED: YES`, the exact repository/worktree and write scope are known, and the commit target/history identity is unambiguous.',
+      'The exception applies only to a non-destructive local commit with no force/fallback, local branch/worktree deletion, remote mutation (including push, Draft/Ready PR, or merge), or authorization conflict; commit directly without loading the detailed Git-action tiers.',
+      'Consult the reference for every other Git action or whenever authorization, scope, or identity is missing, ambiguous, or conflicted.'
     ]
     weakenings = {
-      'use a file-complete inventory such as' => 'use a directory-level summary such as',
-      'is insufficient evidence for an exact file count' => 'is sufficient evidence for an exact file count',
-      'must not be reported as exact cardinality one' => 'may be reported as exact cardinality one',
-      'Do not require `--untracked-files=all` for every task' => 'Require `--untracked-files=all` for every task',
-      'trigger it only when exact cardinality or file identity is load-bearing' => 'trigger it for every preflight regardless of relevance'
+      'before any Git lifecycle action except an ordinary local commit' => 'before every Git lifecycle action, including an ordinary local commit',
+      'on an already-resolved FAST task' => 'on any task',
+      'COMMIT_AUTHORIZED: YES' => 'COMMIT_AUTHORIZED: NO',
+      'no force/fallback, local branch/worktree deletion, remote mutation' => 'force/fallback, local branch/worktree deletion, remote mutation',
+      'without loading the detailed Git-action tiers' => 'only after loading the detailed Git-action tiers',
+      'for every other Git action' => 'only for remote Git actions'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+    assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
+  end
+
+  def test_canonical_exact_untracked_cardinality_contract
+    clauses = [
+      'When exact untracked-file count or identity is load-bearing, use a file-complete inventory such as `git status --porcelain=v1 --untracked-files=all`;',
+      'a collapsed directory entry does not establish file cardinality.',
+      'Do not require this inventory when exact count or identity is immaterial.'
+    ]
+    weakenings = {
+      'use a file-complete inventory' => 'use a directory-level summary',
+      'does not establish file cardinality' => 'establishes exact file cardinality',
+      'when exact count or identity is immaterial' => 'for every preflight regardless of relevance'
+    }
+    assert_canonical_contract_controls(
+      'references/operational-gates.md', 'Bounded preflight and write boundary', clauses, weakenings
+    )
   end
 
   def test_canonical_destructive_result_provenance_contract
-    clauses = [
-      'Terminal absence proves current state only:',
+    provenance_clauses = [
+      'Terminal absence proves current state only.',
       '`ALREADY_ABSENT` does not by itself prove `DELETED_BY_THIS_TASK`.',
-      'A handoff claim that this task deleted, removed, changed, or otherwise caused a destructive mutation must be supported by an exact entry in the existing task command or filesystem ledger recording the action and its actual observed result or exit status, not by terminal-state evidence alone;',
-      'when the target is already absent before action, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.'
+      'A handoff claim that this task deleted, removed, changed, or otherwise caused a destructive mutation must be supported by an exact entry in the existing task command or filesystem ledger recording the action and its actual observed result or exit status, not by terminal-state evidence alone.'
     ]
-    weakenings = {
+    provenance_weakenings = {
       'does not by itself prove `DELETED_BY_THIS_TASK`' => 'is sufficient to prove `DELETED_BY_THIS_TASK`',
       'must be supported by an exact entry in the existing task command or filesystem ledger' => 'may be inferred without an entry in the existing task command or filesystem ledger',
-      'not by terminal-state evidence alone' => 'and terminal-state evidence alone is sufficient',
-      'do not execute delete, and do not claim this task caused the absence' => 'execute delete and report that this task caused the absence'
+      'not by terminal-state evidence alone' => 'and terminal-state evidence alone is sufficient'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Authority and Packet fast path', clauses, weakenings)
+    assert_canonical_contract_controls(
+      'references/reporting.md', 'Filesystem accounting', provenance_clauses, provenance_weakenings
+    )
+    absence_clauses = [
+      'Once confirmed absent, stop searching and do not call delete; current absence alone does not prove this task deleted the target.',
+      'For a confirmed-absent target, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.'
+    ]
+    absence_weakenings = {
+      'do not call delete' => 'call delete',
+      'do not execute delete, and do not claim this task caused the absence' => 'execute delete and claim this task caused the absence'
+    }
+    assert_canonical_contract_controls(
+      'references/operational-gates.md', 'Packet and authority', absence_clauses, absence_weakenings
+    )
   end
 
   def test_canonical_destructive_action_provenance_contract
@@ -596,39 +591,44 @@ class ExplicitContractFailClosedTest < Minitest::Test
 
   def test_canonical_large_structured_output_transport_contract
     clauses = [
-      'For large structured command or tool output used as load-bearing authority: capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface;',
+      'For large structured command/tool output used as authority, capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface;',
       'never derive an authority, count, identity, or completeness claim from display output that may have been truncated.',
       'If complete capture cannot be established and the missing portion could alter the decision, state `UNKNOWN` rather than treat the displayed subset as complete.',
-      'This does not require a new durable evidence store',
-      'use in-process parsing or an existing safe temporary mechanism.'
+      'This does not require a new durable evidence store; use in-process parsing or an existing safe temporary mechanism.'
     ]
     weakenings = {
       'capture it completely, parse or filter it internally, then project only a bounded summary' => 'display it directly without capturing it completely',
       'never derive an authority, count, identity, or completeness claim from display output that may have been truncated' => 'deriving an authority, count, identity, or completeness claim from possibly truncated display output is acceptable',
       'state `UNKNOWN` rather than treat the displayed subset as complete' => 'treat the displayed subset as complete',
-      'This does not require a new durable evidence store' => 'This requires a new durable evidence store'
+      'does not require a new durable evidence store' => 'requires a new durable evidence store'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, weakenings)
+    assert_canonical_contract_controls(
+      'references/operational-gates.md', 'Bounded preflight and write boundary', clauses, weakenings
+    )
   end
 
   def test_canonical_capability_strict_tri_state_contract
     clauses = [
-      'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED',
-      '`ALLOWED` requires direct evidence that the current harness can perform the required execution path.',
-      '`UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`.',
-      '`BLOCKED` means direct evidence shows the required execution path is unavailable or denied;',
-      'do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block',
-      'retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`.',
-      'Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged.'
+      'Use the front-door `CAPABILITY_STATUS`: `ALLOWED` requires direct evidence; `UNKNOWN` is never allowed.',
+      '`BLOCKED` means direct evidence shows the required execution path is unavailable or denied.',
+      'After `BLOCKED`, do not repeat the same preflight, seek repeated authorization as a substitute, or change execution path to bypass the block.',
+      'Retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`.',
+      'Owner authorization and harness capability are separate facts; capability status does not change Planner routing semantics.'
     ]
     weakenings = {
-      'must never be treated as `ALLOWED`' => 'may be treated as `ALLOWED`',
-      'do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block' => 'repeat the same capability preflight or request repeated Owner action authorization as a substitute',
-      'retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`' => 'retry at any time regardless of evidence',
-      'Owner action authorization and harness capability remain separate facts' => 'Owner action authorization is equivalent to harness capability',
-      'this leaves Planner routing semantics unchanged' => 'this changes Planner routing semantics'
+      '`ALLOWED` requires direct evidence' => '`ALLOWED` needs no direct evidence',
+      '`UNKNOWN` is never allowed' => '`UNKNOWN` is allowed',
+      'unavailable or denied' => 'available and permitted',
+      'do not repeat the same preflight' => 'repeat the same preflight',
+      'Retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`' => 'Retry without state-change evidence',
+      'Owner authorization and harness capability are separate facts' => 'Owner authorization and harness capability are equivalent facts',
+      'does not change Planner routing semantics' => 'changes Planner routing semantics'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Intent, authorization, and surgical execution', clauses, weakenings)
+    assert_includes Parser.skill, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
+    assert_canonical_contract_controls(
+      'references/operational-gates.md', 'Authorization evidence and conversation boundary',
+      clauses, weakenings
+    )
   end
 
   def test_canonical_dependency_topology_falsifiability_contract
@@ -657,26 +657,28 @@ class ExplicitContractFailClosedTest < Minitest::Test
 
   def test_canonical_blocked_terminal_inline_handoff_contract
     clauses = [
-      'Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, `SMALLEST_NEXT_ACTION:` (or a named-gate prefix, e.g. `A2_BLOCKER_CODE:`) — so a downstream Agent can pick the next action without local filesystem access to the originating Agent.',
-      'The inline record is a transfer summary, not a second authority:',
-      'a durable artifact or exact locator remains canonical for full evidence, but it must never be the sole carrier of the fact needed to decide what happens next,',
-      'and this does not replace artifact paths, hashes, full evidence, runtime receipts, or exact authority locators.',
-      '`BLOCKER_DETAIL` states the actual missing or invalid fact when known — a missing strategy, draw, config, seed, unsupported capability, or unresolved authority — never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed;',
-      'when genuinely unknown, state `UNKNOWN` honestly and name the smallest bounded resolution action instead.',
-      '`SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap,',
-      'and each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases.',
-      'A `COMPLETE` handoff is not required to carry these fields.'
+      'Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, and `SMALLEST_NEXT_ACTION:` (or a named-gate prefix, such as `A2_BLOCKER_CODE:`) — so a downstream Agent can select the next action without local filesystem access to the originating Agent.',
+      'The inline record is a transfer summary, not a second authority: a durable artifact or exact locator remains canonical for full evidence, but must never be the sole carrier of the fact needed to decide what happens next.',
+      'It does not replace artifact paths, hashes, full evidence, runtime receipts, or exact authority locators.',
+      '`BLOCKER_DETAIL` states the actual missing or invalid fact when known — for example, a missing strategy, draw, config, seed, unsupported capability, or unresolved authority — never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was observed.',
+      'When genuinely unknown, state `UNKNOWN` and name the smallest bounded resolution action.',
+      '`SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap.',
+      'Each independently blocked gate carries its own record rather than one blocker duplicated under aliases.',
+      'A `COMPLETE` handoff needs no blocker record.'
     ]
     weakenings = {
       'includes exactly one compact inline blocker record' => 'may omit an inline blocker record',
       'must never be the sole carrier of the fact needed to decide what happens next' => 'may be the sole carrier of the fact needed to decide what happens next',
       'states the actual missing or invalid fact when known' => 'may state a vague placeholder even when the fact is known',
-      'never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed' => 'a vague `see artifact`, `blocked`, or `needs investigation` is acceptable even once the exact blocking fact was already observed',
+      'never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was observed' => 'a vague `see artifact`, `blocked`, or `needs investigation` is acceptable when the fact was observed',
+      'When genuinely unknown' => 'Even when the fact is known',
       'is one bounded progress action, not a roadmap' => 'may be an open-ended roadmap',
-      'each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases' => 'one blocker may be duplicated under multiple aliases',
-      'A `COMPLETE` handoff is not required to carry these fields' => 'A `COMPLETE` handoff is required to carry these fields'
+      'carries its own record rather than one blocker duplicated under aliases' => 'may duplicate one blocker under aliases',
+      'A `COMPLETE` handoff needs no blocker record' => 'A `COMPLETE` handoff requires a blocker record'
     }
-    assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
+    assert_canonical_contract_controls(
+      'references/reporting.md', 'Filesystem accounting', clauses, weakenings
+    )
   end
 
   def test_canonical_bounded_launcher_fallback_contract
@@ -718,7 +720,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'does not weaken the normal requirement' => 'overrides the normal requirement'
     }
     assert_canonical_contract_controls('references/task-checkpoint.md', 'Bounded launcher fallback', clauses, weakenings)
-    assert_includes Parser.skill, '[entrypoint](references/task-checkpoint.md#protected-run-entrypoint)'
+    assert_includes Parser.skill, '[protected run entrypoint](references/task-checkpoint.md#protected-run-entrypoint)'
     assert_includes Parser.skill, '[bounded launcher fallback](references/task-checkpoint.md#bounded-launcher-fallback)'
   end
 
@@ -808,23 +810,22 @@ class ExplicitContractFailClosedTest < Minitest::Test
   end
 
   def assert_exact_locator_contract(text)
-    authority = text.split('## Authority and Packet fast path', 2).last
-                    .to_s.split('## Bounded preflight and write boundary', 2).first
+    authority = text.split('### Exact Packet resolution', 2).last
+                    .to_s.split(/^### /, 2).first
                     .to_s.gsub(/\s+/, ' ')
     [
-      'After required routing, authorization, and repository identity confirmation, the first content lookup for a Packet-specified input must directly use its exact locator.',
-      'Existing safety rules and required project-guidance reads still apply.',
-      'If the exact locator is readable and its identity matches, use it directly and stop broad discovery for the same authority.',
-      'Do not scan the workspace, all worktrees/branches, or historical transcripts to reconstruct that supplied authority.',
-      'This does not prohibit scoped ordinary source lookup required by the task.',
-      'If the locator is unreadable or mismatched, distinguish `ABSENT`, permission denied, network/read error, and identity mismatch.',
-      'Only bounded adjacent resolution already supported by the original Packet is allowed; do not guess another path as substitute authority or bypass an existing STOP.',
-      'Missing required cross-lane input returns `UPSTREAM_AUTHORITY_NOT_READY`; do not replan another task.',
-      'Only for exact targets already in cleanup scope: a worktree is `ALREADY_ABSENT` only when both its filesystem path and Git registration are confirmed absent;',
-      'an exact local branch ref confirmed absent makes that branch `ALREADY_ABSENT`.',
-      'For a confirmed-absent target, stop searching and do not call delete.',
-      'One absent branch does not imply another worktree is absent.',
-      'Read errors or insufficient permissions are not absence.'
+      'After routing, authorization, and repository identity are confirmed, read a Packet-named input through its exact locator first.',
+      'If it is readable and matches, stop broad discovery for that authority;',
+      'do not scan workspaces, branches, worktrees, or transcripts to reconstruct it.',
+      'This only forbids reconstructing Packet authority; it does not prohibit task-scoped source lookup after authority is resolved.',
+      'When the locator is unreadable or mismatched, distinguish `ABSENT`, permission denied, network/read error, and identity mismatch.',
+      'Only use bounded adjacent resolution already allowed by the Packet; a missing cross-lane input is `UPSTREAM_AUTHORITY_NOT_READY`.',
+      'Do not guess a substitute or bypass a STOP.',
+      'For a target already in exact cleanup scope, `ALREADY_ABSENT` requires both its filesystem path and Git registration to be absent;',
+      'An exact local branch ref confirmed absent makes only that branch `ALREADY_ABSENT`; it does not establish another worktree\'s absence.',
+      'Read errors or insufficient permissions are not absence.',
+      'Once confirmed absent, stop searching and do not call delete; current absence alone does not prove this task deleted the target.',
+      'For a confirmed-absent target, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.'
     ].each { |clause| assert_includes authority, clause }
   end
 end

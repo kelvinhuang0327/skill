@@ -27,3 +27,34 @@ needs diagnosis.
 
 Skipped steps create the corresponding risk. A claimed-but-unobserved step is
 verification theater, not a pass.
+
+## Acceptance failures, retries, and stop tokens
+
+On acceptance failure, attribute in order: harness/fixture/command, then the
+deployment or execution chain, then the product invariant. Each continuation
+must test a falsifiable hypothesis and materially reduce uncertainty. When a
+correction is applied, rerun the real check and retain its actual output. Keep
+an `ATTEMPT_LEDGER` for failures, retries, timeouts, terminations, overwritten
+or deleted artifacts, and superseded evidence.
+
+Identical blind retries and speculative patches are not evidence progress.
+Evidence-progressing RCA has no arbitrary numeric ceiling, but stop when scope,
+safety, authority, capability, proportionality, or discriminating evidence is
+exhausted. External credentials, permissions, missing runtimes, and unresolved
+authority remain blockers.
+
+A stop token is final for the current task authority: no mutation, equivalent
+command substitution, metadata workaround, upstream rewrite, or retry under a
+different action class until a new authoritative Owner instruction or valid
+Continuation Delta. `DO_NOT_POLL`: report the stop and end the turn; do not
+sleep, poll, schedule a wakeup, or re-check while waiting, except for the
+deferred queue's single required recheck.
+
+When a fixed defect came from a construct that could plausibly recur elsewhere,
+search the safe project for it and report:
+
+```text
+TWINS: searched <pattern> - found <N> other sites: <files or none>
+```
+
+Skip that search for a one-off or locally scoped defect.

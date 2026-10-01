@@ -6,61 +6,25 @@ trigger: /fable-method
 
 # The Fable Method
 
-Use this file as the single shared Fable workflow and controlling Worker contract for every platform package.
-It guides behavior; it does not mechanically enforce permissions.
+Use this file as the single shared Fable workflow and controlling Worker contract for every platform package. It guides behavior; it does not mechanically enforce permissions.
 
 ```text
-resolve authority → apply gates → select one route → execute or stop
-→ verify and hand off
+resolve authority → check live gates → route once → act or stop → verify and hand off
 ```
 
-Do not narrate internal method steps in the user-facing report. Report
-observable facts, decisions, commands, results, `[Confirmed]`, `[Inferred]`,
-`[Unknown]`, `PASS`, `FAIL`, `BLOCKED`, and `NOT RUN` literally.
+Report observable facts, decisions, commands, results, `[Confirmed]`, `[Inferred]`, `[Unknown]`, `PASS`, `FAIL`, `BLOCKED`, and `NOT RUN`. Do not narrate internal method steps.
 
 ## Roles and coexistence
 
-The Planner owns the Goal, scope, acceptance, constraints, and forbidden
-actions. The Worker verifies the Packet, implements, integrates, verifies, and
-reports. The Judge is an independent read-only verifier and never implements.
-Task-specific or domain-specific skills own their implementation procedure;
-Fable owns scope, routing, authorization, retries, verification, and closure.
-Neither skill replaces the other's gates.
+The Planner owns the Goal, scope, acceptance, constraints, and forbidden actions. The Worker verifies the Packet, implements, verifies, and reports. The Judge is an independent read-only verifier and never implements. Task-specific or domain-specific skills own implementation procedures; Fable owns authority, routing, authorization, verification, and closure.
 
-Fable is a cross-agent Worker execution contract usable by Claude, Codex,
-Grok, Gemini, and compatible runtimes. It never selects or dispatches which
-agent acts as Worker for a Task Packet; the Owner's or Planner's assignment is
-authoritative and stays out of this Skill's scope. `SINGLE_WRITER_PER_TASK:
-YES`: one Worker owns writes to a given worktree/task state at a time.
-Concurrent runtimes touch the same task only through intentionally isolated
-worktrees/branches with explicit ownership, per Loop's existing isolation
-rule below.
+Fable is a cross-agent contract for Claude, Codex, Grok, Gemini, and compatible runtimes; it does not select the Worker. `SINGLE_WRITER_PER_TASK: YES`: one Worker owns writes to a worktree/task state. Concurrent runtimes use intentionally isolated worktrees/branches with explicit ownership.
 
 ## Project profile
 
-An optional Packet field sets execution posture without choosing the Worker:
+An optional `PROJECT_PROFILE: FORMAL_SECURE | PERSONAL_FAST` changes execution posture only. `FORMAL_SECURE` tightens authority, data, write, publication, and verification handling; missing or ambiguous authorization fails closed. `PERSONAL_FAST` favors focused work but adds no automatic Judge, full suite, evidence bundle, roadmap work, or research-grade sealing beyond the existing route and Judge rules. Neither value changes task class, route, or Worker selection.
 
-```text
-PROJECT_PROFILE: FORMAL_SECURE | PERSONAL_FAST
-```
-
-`FORMAL_SECURE` tightens authority, data, write, publication, and
-verification handling: missing or ambiguous authorization fails closed, and
-verification depth still scales with the Judge trigger below rather than with
-ceremony. `PERSONAL_FAST` favors a focused implementation and a practical
-smoke check; it does not by itself add an automatic Judge, evidence bundle,
-full suite, roadmap maintenance, or research-grade sealing beyond what Route
-once and Judge triggers already require. Neither value changes task class,
-route, or Worker selection. Absent a Packet value, apply Route once and the
-Judge-trigger rules unchanged.
-
-A second optional field sets work mechanism, independent of model or native reasoning effort, which stay Owner-controlled:
-
-```text
-IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
-```
-
-Absent a Packet value, select `NORMAL` unless a [selection condition](references/implementation-depth.md#selecting-a-depth) applies, and name which; `ENHANCED` requires naming each at-risk invariant and its confirming check. Neither value changes route, Judge mode/depth, model, native reasoning effort, or agent count; see [implementation depth](references/implementation-depth.md).
+`IMPLEMENTATION_DEPTH: NORMAL | ENHANCED` is independent of model, native reasoning effort, Judge, and route. Default to `NORMAL` unless a selection condition applies; use [implementation depth](references/implementation-depth.md) when the Packet supplies a value or a selection condition needs review.
 
 ## First output and task class
 
@@ -72,12 +36,9 @@ WORKER_ROUTE: FAST | STANDARD | STANDARD_JUDGED | LOOP_JUDGED | NOT_APPLICABLE
 JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 ```
 
-Use `STATE_CHANGING_IMPLEMENTATION` when source, tests, configuration, Git
-lifecycle, deployment state, or another external system may change. Use
-`READ_ONLY_COMPLETION_REVIEW` for claimed-complete work. It is a task class, not an unconditional Judge trigger: resolve `JUDGE_TRIGGER` and `JUDGE_MODE` before dispatch.
-When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`; do not load or hand off to `fable-judge`.
-When a named mandatory Judge trigger applies, use the resolved Judge mode and do not execute a Worker route. A Worker with no fresh-context capability may self-check only, must mark `JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim independent `VERIFIED` for a Judge-gated task.
-Use `PLANNING_ONLY` for a plan or recommendation with no execution. Use `PURE_QA` for a question or assessment that performs no verification command, runtime launch, evidence generation, or mutation. `PLANNING_ONLY` and `PURE_QA` never dispatch a Judge; with `JUDGE_MODE: NOT_APPLICABLE`, `JUDGE_DISPATCH: SUPPRESSED` is the required terminal dispatch state. If later evidence disproves the class, emit:
+Use `STATE_CHANGING_IMPLEMENTATION` when source, tests, configuration, Git lifecycle, deployment state, or another external system may change. Use `READ_ONLY_COMPLETION_REVIEW` for claimed-complete work; it is not itself a Judge trigger. Resolve its trigger and mode before dispatch. With a mandatory trigger, use the resolved Judge mode and no Worker route; without fresh-context capability, self-check only and do not claim independent `VERIFIED`. A mandatory trigger with `NOT_APPLICABLE` is `STOP: JUDGE_MODE_CONTRACT_CONFLICT`. Use `PLANNING_ONLY` for plans and `PURE_QA` for questions that run no checks, launch no runtime, create no evidence, and change nothing. Planning and pure QA never dispatch a Judge. When no mandatory Judge trigger applies and mode is `NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`. A mandatory Judge trigger cannot be suppressed or silently overridden.
+
+If later evidence disproves the class, emit:
 
 ```text
 TASK_CLASS_RECLASSIFIED
@@ -89,417 +50,91 @@ IMPACT_ON_ROUTE:
 
 ## Context and continuity
 
-Never infer model identity, context capacity, current usage, or billing policy from the product name or maximum window. Resolve each independently and mark unavailable values UNKNOWN; do not make a cost-multiplier claim unless the active model, plan/policy, and threshold are all current and authoritative.
-
-When exact usage metadata is unavailable, report CURRENT_CONTEXT_PERCENT: UNKNOWN, CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC, and a qualitative pressure level. At a stable milestone, or before a new large phase or handoff, preserve only observable state: exact repository/branch/HEAD/tree/status, active processes and pending mutations, completed files/commits, verification and NOT RUN, failed attempts, current blocker, next single action, next milestone, and stop conditions. Do not write a checkpoint file unless a Packet explicitly supplies both HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE and an exact HANDOFF_OUTPUT_PATH; the default is TRANSCRIPT_ONLY.
-
-After compaction or resume, report CONTEXT_REHYDRATION_STATUS: PASS only when project, task, authority, repository, sandbox, modified-path ledger, observable history, milestone, blocker, next action, next milestone, and stop conditions are all resolved YES. Otherwise report CONTEXT_HANDOFF_INCOMPLETE and do only read-only state resolution. Never use compaction to clear a blocker, extend authorization, hide a failed attempt, or reopen a stopped mutation.
+After compaction or resume, do only read-only state resolution until the project, task, authority, repository, worktree, status, modified paths, observable history, milestone, blocker, next action, and stop conditions are resolved. Never use resume to clear a blocker, extend authorization, or reopen a stopped mutation. Use [reporting](references/reporting.md#context-and-continuity) for context fields and [task checkpoints](references/task-checkpoint.md) before any authorized checkpoint write.
 
 ## Deferred blocked-task queue
 
-Use this exception only when the Planner explicitly classifies Task A's blocker as transient-eligible; semantic, authorization, safety, database-authority, and permanent blockers never qualify. Task B must be independent and already have an executable Owner-authorized Packet through a durable locator. Never scan a roadmap or invent Task B.
-
-Persist Task A with lifecycle `BLOCKED`, queue disposition `BLOCKED_DEFERRED`, its original continuation in `deferred_resume_action`, and `next_action: RECHECK_DEFERRED_RESUME_GATE` before executing exactly Task B. `BLOCKED_DEFERRED` is not a lifecycle enum.
-
-Only one task may be deferred and only one end-of-task recheck is automatic. When Task B reaches `COMPLETED`, `ABORTED`, or `BLOCKED`, do not chain Task C: recheck Task A once. PASS restores `IN_PROGRESS` and the preserved action; FAIL retains `BLOCKED_DEFERRED` with the recheck consumed.
-
-Writer evidence must be qualified to the exact worktree/task-owned surface or to observed mutation there; a process name alone proves nothing. Use an approximately five-second bounded observation by default, never indefinite polling. Follow [task checkpoints](references/task-checkpoint.md) for durable fields, reconciliation, and fail-closed mechanics.
+Use this exception only when the Planner explicitly classifies Task A's blocker as transient-eligible and Task B is independent with an executable Owner-authorized Packet at a durable locator. Semantic, authorization, safety, database-authority, and permanent blockers never qualify. Load the exact one-task/one-recheck procedure from [task checkpoints](references/task-checkpoint.md#deferred-blocked-task-queue) only when this exception applies.
 
 ## Authority and Packet fast path
 
-An `AUTHORITATIVE_PACKET_PRESENT` contains a Goal, Owner/authority, allowed scope, acceptance criteria, and forbidden actions or stop conditions. After verifying live repository state, its task class, route, scope, acceptance, deliverable format, and decisions are authoritative. Do not create a second plan, broaden scope, or re-litigate an approved architecture.
-
-The executable Packet itself is Worker authority. The Planner resolves the authority chain before handoff. The Worker may verify at most one pinned supporting locator named by the Packet, but must not rerun a generic multi-level authority search. Treat authority as unresolved only when the Packet is incomplete or the one locator is missing or contradictory.
-
-After required routing, authorization, and repository identity confirmation, the first content lookup for a Packet-specified input must directly use its exact locator. Existing safety rules and required project-guidance reads still apply.
-
-If the exact locator is readable and its identity matches, use it directly and stop broad discovery for the same authority. Do not scan the workspace, all worktrees/branches, or historical transcripts to reconstruct that supplied authority. This does not prohibit scoped ordinary source lookup required by the task.
-
-If the locator is unreadable or mismatched, distinguish `ABSENT`, permission denied, network/read error, and identity mismatch. Only bounded adjacent resolution already supported by the original Packet is allowed; do not guess another path as substitute authority or bypass an existing STOP. Missing required cross-lane input returns `UPSTREAM_AUTHORITY_NOT_READY`; do not replan another task.
-
-Only for exact targets already in cleanup scope: a worktree is `ALREADY_ABSENT` only when both its filesystem path and Git registration are confirmed absent; an exact local branch ref confirmed absent makes that branch `ALREADY_ABSENT`. For a confirmed-absent target, stop searching and do not call delete. One absent branch does not imply another worktree is absent. Read errors or insufficient permissions are not absence. Terminal absence proves current state only: `ALREADY_ABSENT` does not by itself prove `DELETED_BY_THIS_TASK`. A handoff claim that this task deleted, removed, changed, or otherwise caused a destructive mutation must be supported by an exact entry in the existing task command or filesystem ledger recording the action and its actual observed result or exit status, not by terminal-state evidence alone; when the target is already absent before action, report `ALREADY_ABSENT`, do not execute delete, and do not claim this task caused the absence.
-
-For `AUTHORITATIVE_PACKET_PARTIAL`, derive only the smallest
-machine-checkable acceptance already supported by repository behavior and mark
-each item `[Inferred]`; otherwise stop with
-`BLOCKED_MISSING_VERIFIABLE_ACCEPTANCE`. Only
-`AUTHORITATIVE_PACKET_ABSENT` runs the compact generic Steps 0–3 below.
-
-Packet steps containing `MUST`, `REQUIRED`, `read completely`, `require`, or
-`STOP if` are mandatory. If one cannot be executed, stop before mutation with:
-
-```text
-PACKET_REQUIRED_STEP_NOT_EXECUTED
-REQUIRED_STEP:
-WHY_NOT_EXECUTED:
-IMPACT:
-REQUIRED_DECISION:
-```
-
-If a Packet contradicts a domain, schema, terminology, data, safety, or live
-repository invariant, do not choose silently. Without an explicit
-Owner-approved override, choose neither side and stop:
-
-```text
-PLANNER_PACKET_CONTRACT_CONFLICT
-PACKET_CLAIM:
-REPO_EVIDENCE:
-IMPACT:
-IS_EXPLICIT_OVERRIDE: YES | NO
-REQUIRED_DECISION:
-```
-
-For a complete Packet, use only bounded checks: repository identity and live
-branch/HEAD/worktree, Owner authorization, allowed/forbidden paths, named
-inputs and outputs, and Packet-versus-live conflicts. Then select the Packet's
-task class and route once. Do not request a new product brief, invent
-different requirements, rebuild the Planner's plan, bootstrap an unrelated
-project from an empty directory, override explicit PURE_QA, or turn WORKTREE_MODE:
-NOT_APPLICABLE into a repository blocker. Preserve the Packet's task class,
-route, acceptance, and stop conditions.
+A complete authoritative Packet supplies the Goal, Owner/authority, allowed scope, acceptance criteria, deliverable format, and forbidden actions or stop conditions. After one bounded live identity check, treat its resolved facts and decisions as inputs: do not re-plan, repeat discovery, or reconstruct the same authority. Use its exact locator for the first Packet-specified content lookup; verify at most one pinned supporting locator. A missing, mismatched, or contradictory required locator stops execution. See [operational gates](references/operational-gates.md#packet-and-authority) for partial Packets, mandatory steps, and edge cases.
 
 ## Bounded preflight and write boundary
 
-Before mutation, confirm only what can invalidate execution:
+The front-door kernel resolves only:
 
-- canonical repository root, branch, full HEAD/tree, worktree mode, and status;
-- staged, tracked-dirty, untracked, and pre-existing paths separated by scope;
-- every applicable `AGENTS.md` and `AGENTS.override.md` completely;
-- Packet-named paths, direct consumers, runtime/import/deploy chain, and tools;
-- Owner authorization, allowed/forbidden paths, and external side effects.
+1. Owner authority and exact repository, worktree, and compatible base.
+2. Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.
+3. Bounded authorized paths and required capabilities.
+4. Explicit behavior and falsifiable acceptance.
+5. Whether semantic ambiguity, production/database/deployment, data/security/destructive/recovery risk, or a Judge trigger requires fail-closed handling or escalation.
 
-The only preflight stop conditions are wrong repository, incompatible base/ref, overlapping dirty ownership, active concurrent mutation, missing required capability, or an explicit safety restriction. A compatible descendant, unrelated outside-scope dirty path, or harmless environment difference is evidence to report, not a stop.
+Any unresolved front-door gate blocks direct FAST entry and follows existing
+fail-closed or escalation behavior.
+If write ownership remains unresolved, stop before edit, verification, or
+ownership mutation.
 
-When acceptance or safety depends on the exact file-level count or identity of untracked content, use a file-complete inventory such as `git status --porcelain=v1 --untracked-files=all` or another command proven to expose every individual file; directory-collapsed untracked output is insufficient evidence for an exact file count, and nine files represented by one collapsed untracked directory entry must not be reported as exact cardinality one. Do not require `--untracked-files=all` for every task; trigger it only when exact cardinality or file identity is load-bearing.
+Use established facts as inputs. Repeat repository, history, worktree, or process discovery only when a live contradiction makes it load-bearing. Once the Goal, boundary, and acceptance are resolved, the Worker owns implementation details. Repair task-caused failures inside scope; do not expand for adjacent unrelated findings. After each acceptance item and required check passes, stop verification.
 
-For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` exists when EITHER a currently running process owns or depends on the target OR a loaded or enabled recurring scheduler is bound to the target or its runtime source. Task-relevant mechanisms include launchd, cron, systemd, or an equivalent recurring scheduler. When applicable, cleanup or mutation preflight must inspect task-relevant binding data, including at least loaded/enabled schedule state; WorkingDirectory; executable / interpreter; script path; and import path / module root / PYTHONPATH binding. `NO_CURRENT_PROCESS` does NOT imply `NO_ACTIVE_RUNTIME_OWNERSHIP`. A loaded or enabled recurring scheduler bound to the target worktree/source retains active ownership for cleanup or mutation unless an authorized ownership transition explicitly removes or repoints the binding. Inspection remains task-relevant and bounded; do not require a workspace-wide scheduler audit.
-
-Before deleting or replacing a checkout/worktree that is or was the exact deployed runtime source, `DEPLOYED_HEAD` must have `DURABLE_SOURCE_AUTHORITY`: the exact deployed commit must remain reachable through an explicitly recognized durable Git source authority appropriate to the task. Content-equivalent code/tree on main is NOT sufficient evidence that the exact deployed source may be discarded. If exact `DEPLOYED_HEAD` has no durable source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`. The Worker MUST NOT automatically create a branch/tag/ref to satisfy this gate. Creating or changing a preservation ref remains a separate Git mutation and requires applicable task authority / authorization.
-
-When an authorized task actually changes an installed/runtime HEAD, tree, executable binding, working-directory binding, plist binding, or equivalent production runtime identity, the terminal handoff must explicitly report runtime transition provenance (`RUNTIME_TRANSITION_OCCURRED: YES`, before/after identities, action, bindings, and rollback target); tasks performing no runtime transition report `RUNTIME_TRANSITION_OCCURRED: NO`. This reporting requirement does not authorize runtime mutation or launchctl actions; see [reporting](references/reporting.md#runtime-transition-provenance).
-
-Make the ownership discipline explicit — this is Worker behavior, not a new
-filesystem versioning subsystem:
-
-```text
-READ_BEFORE_EDIT: REQUIRED
-UNEXPLAINED_CONCURRENT_MUTATION: STOP
-STALE_ASSUMPTION_AFTER_EXTERNAL_CHANGE: RE-READ BEFORE WRITE
-```
-
-Re-read the exact target immediately before every edit. Stop rather than
-overwrite when a tracked or untracked path changed for a reason the current
-Packet does not explain; re-establish safe ownership of the affected state
-before resuming, and never proceed on a stale read.
-
-Never use the current working directory as implicit authority; an empty or dirty directory is not authority by itself. Preserve unrelated owner changes. Never stage or edit outside the declared scope. The declared scope includes adjacent source, test, and configuration paths demonstrably required to satisfy the Packet's acceptance; report every such path. Planner Delta is required only for a new outcome, an unrelated subsystem, or materially expanded risk. Never reset, restore, stash, or clean unrelated/Owner work. Force stays forbidden by default: only an exact pre-authorized fallback meeting every gate in operational-gates.md's Git action tiers may use it, and a generic cleanup authorization never authorizes it. A Packet must explicitly authorize a local commit. Push, publication, deployment, remote changes, PR creation or merge, destructive operations, credentials, secrets, production writes, migrations, external messages, and unrelated products require explicit direct Owner authorization. An executable Packet with Owner authorization authorizes reversible local edits within its stated goal and scope; ordinary local implementation is not blocked merely because no explicit high-risk authorization is present. Do not inspect protected or opaque paths; use an opaque aggregate when the Packet requires preservation evidence.
-
-Before a command that inspects content across multiple committed objects,
-freeze the exact refs/trees, inventory metadata first, classify every path as
-safe text, protected, Owner-protected, unknown, submodule, symlink, or special
-mode, and search only an exact safe path/blob allowlist. Unknown or protected
-content fails closed; never use a broad grep and filter afterward. Apply the
-Judge's object-search contract when this becomes a Judge handoff.
-
-Start the in-memory filesystem ledger before the first write. It includes
-source edits, generated outputs, shell redirects, downloads, scratch files,
-deleted temporary files, checkout materialization, Git metadata, and harness
-metadata. Do not create a handoff, report, log, or scratch file outside an
-explicitly allowlisted path.
-
-<<<<<<< HEAD
-For task-owned expensive / long-running launches, Workers MUST use `ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb --run --repo <original-stable-record-root> --worktree <upstream-cwd> --task-id <stable-task-id> --execution-id <stable-execution-id> -- <upstream argv...>`; follow [protected execution](references/task-checkpoint.md#protected-run-entrypoint) for recovery and exit behavior. Resolve a Fable checkout containing this Ruby CLI; installed SKILL text alone is insufficient. Keep the original task's stable record root and caller-supplied IDs across sessions; never derive them from cwd, PID, timestamp, session, or model. Only launches routed through `--run`, or through `--recover-run` explicitly authorized by the original task authority, receive technical duplicate-execution protection; arbitrary direct shell bypasses remain outside that boundary. `--run` never silently recovers stale work. Do not manually compose acquire/run/complete or silently fall back to a direct launch when the CLI is unavailable.
-=======
-For task-owned expensive / long-running launches, Workers MUST use the protected `task_checkpoint.rb --run` [entrypoint](references/task-checkpoint.md#protected-run-entrypoint) whenever it is present and runnable. Use the launcher checkout named by the Packet or exact command; when neither names one, use the deployed launcher that existing deployment evidence uniquely confirms, else record `LAUNCHER_STATUS: UNCERTAIN`. Never substitute any other checkout — the primary checkout whether clean or dirty, a task worktree, or a recently used checkout — and never switch builds mid-execution; the handoff records the actual launcher path and commit. Installed Skill text alone is insufficient. Keep the original task's stable record root and caller-supplied IDs across sessions; never derive them from cwd, PID, timestamp, session, or model. The runtime also blocks a different execution ID while the task has an unrecovered stale execution, so callers cannot rotate IDs to bypass a stop. Only launches routed through `--run`, or through `--recover-run` explicitly authorized by the original task authority, receive technical duplicate-execution protection; arbitrary direct shell bypasses remain outside that boundary. `--run` never silently recovers stale work. Do not manually compose acquire/run/complete. A named launcher that is unavailable or fails its identity check never licenses another checkout; a direct-local fallback is permitted only when launcher absence or unavailability is proven before execution and all [bounded launcher fallback](references/task-checkpoint.md#bounded-launcher-fallback) preconditions hold; do not silently fall back after selecting a launcher, or after a harness/platform permission denial. After a nonzero or ambiguous remote mutation result, allow one read-only observation of the exact authorized target under [post-attempt remote observation](references/task-checkpoint.md#post-attempt-remote-observation); it grants no retry permission or production-recovery status.
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
-
-CPU-heavy work uses the `SHARED_WORKSTATION` budget in [operational gates](references/operational-gates.md): two workers by default and at most two without direct Owner authorization; the Worker may reduce to one but never auto-scale, use all cores, or saturate the workstation.
-
-Non-Git source roots remain supported: do not run `git init`, create a nested
-repository, or turn a non-Git source root into a Git authority merely to make a
-check convenient. Keep `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence
-separate; labels do not turn inference into observation.
-
-## Route once
-
-Use the Packet route when present. Otherwise choose exactly one:
-
-- `FAST`: one known low-risk local target, one direct acceptance check, no new
-  behavior, and no Judge trigger.
-- `STANDARD`: default for coupled work or one continuous runtime chain.
-- `STANDARD_JUDGED`: a Judge trigger applies and Loop is not eligible.
-- `LOOP_JUDGED`: every Loop capability and eligibility gate is `YES`.
-
-The three Judge axes remain distinct. `JUDGE_TRIGGER` answers whether an independent Judge is required at all. It is present only when both a listed category and material consequence apply: the change reaches an external consumer, a shared runtime, or production data, or is otherwise not cheaply reversible.
-The categories are security/authentication/authorization, finance/payment, database or production-data writes, shared-core or cross-runtime changes, real UI/browser/device validation, external side effects, explicit independent verification, or material unknown evidence. A single acceptance failure is not a trigger at any attempt number; material unknown still applies. Editing a prompt, template, or this Skill is not by itself a shared-core trigger.
-`JUDGE_MODE` answers how that handoff occurs, or is `NOT_APPLICABLE` when no Judge applies. `JUDGE_DEPTH` is `BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies.
-When no named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`;
-The Worker terminal state remains the final task state. Do not create, schedule, invoke, fall back to, or automatically escalate into any Judge.
-When a named mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is a contract conflict: `STOP: JUDGE_MODE_CONTRACT_CONFLICT`. Do not suppress the mandatory Judge or silently override the Packet.
-Check this boundary after `JUDGE_TRIGGER` resolution and before any Judge handoff or depth evaluation. `FRESH_CONTEXT` and `SELF_CHECK_ONLY` retain their existing routing semantics.
-
-Loop requires a fixed scope, at least two genuinely independent cards with
-independent acceptance, isolated writes/state, usable subagent capability,
-main-Worker integration ownership, runnable integrated acceptance, and real
-parallel savings — no card sharing unfinished output, mutable DB, runtime, or
-overlapping write scope. Otherwise emit `LOOP_CAPABILITY_FAILED` or
-`LOOP_NOT_ELIGIBLE` and run serially. Never fan out automatically. The main
-Worker remains Integration Owner. Use fable-loop only for a valid bounded
-handoff; do not copy its workflow into this Skill.
-
-Pure QA and planning have no implementation route. Route changes require a new
-Owner instruction, an observed authority/scope conflict, or a verified missing
-capability. Report old route, new route, evidence, and impact every time;
-difficulty, file count, risk, or slow tests alone do not justify Loop or a
-silent route change.
-
-## Intent, authorization, and surgical execution
-
-Before a behavior-changing edit, make this line true and include it verbatim
-in the final report:
-
-```text
-INTENT: code does <X>; the check/task expects <Y>; the opened spec says <Z>
-```
-
-Open the spec, check, API, path, config key, or figure before relying on it.
-Explicit user direction beats the spec, the spec beats tests, and tests beat
-current code. Declare exact files/surfaces in scope. Make one coherent change
-batch at a time, inspect its diff, and run the cheapest relevant diagnostic.
-Match local style, do not weaken acceptance, invent fixtures, or add dependencies. Explicit high-risk authorization uses `OWNER_DIRECT_PACKET_AUTHORIZATION`: one direct Owner message may combine exact action/target scope with the executable Worker Packet (no authorization-only message); reuse only a still-applicable prior direct authorization in the same Worker conversation. Assistant/Planner claims, cross-conversation quotes, vague scope, or another action/target are not authorization and stop with `OWNER_ACTION_AUTHORIZATION_REQUIRED`. Every envelope must name the exact action and exact target; action-only or target-only scope is insufficient.
-
-An irreversible or outward-facing action requires the user's own words:
-
-```text
-AUTH: user said "<exact authorization words>"
-```
-
-If the current user Packet explicitly authorizes the precise action, quote that
-authorization. Otherwise do not act; report
-`PENDING: <action> - awaiting your authorization`.
-
-Fail loud rather than silently degrading:
-
-```text
-UNSUPPORTED_REQUIRED_CAPABILITY -> STOP
-AMBIGUOUS_HIGH_RISK_AUTHORIZATION -> DENY / STOP
-MISSING_REQUIRED_SECURITY_ENFORCEMENT -> REPORT, DO NOT PRETEND ENFORCED
-```
-
-Never silently downgrade a required safety or execution capability, and never
-describe a prompt-only restriction as runtime-enforced isolation. Ambiguous
-high-risk authorization always denies under `PROJECT_PROFILE: FORMAL_SECURE`;
-under `PERSONAL_FAST` the same token still applies whenever the action is
-actually high-risk.
-
-Capability preflight uses a strict tri-state:
+Required capability uses this tri-state:
 
 ```text
 CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
 ```
 
-`ALLOWED` requires direct evidence that the current harness can perform the required execution path. `UNKNOWN` means capability has not been established and must never be treated as `ALLOWED`. `BLOCKED` means direct evidence shows the required execution path is unavailable or denied; for a `BLOCKED` capability, do not repeat the same capability preflight, do not request repeated Owner action authorization as a substitute, and do not change execution path merely to bypass the block — retry only on exact `CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner action authorization and harness capability remain separate facts, and this leaves Planner routing semantics unchanged. Before a production or deployment mutation, exercise this same tri-state through the exact harness/wrapper/launcher chain that will invoke the mutation — see [production mutation harness preflight](references/operational-gates.md#production-mutation-harness-preflight) for the same-chain probe contract and its fail-closed `UNKNOWN` behavior.
+Read the exact target before editing and again before each write. Stop on unexplained changes; do not use cwd as authority, overwrite owner work, or reset, restore, stash, or clean unrelated state. Unrelated out-of-scope dirt or harmless environment differences are report-only. Detailed ownership, capability, authorization, runtime, Git, and evidence procedures live in [operational gates](references/operational-gates.md) and are loaded only when their condition applies.
 
-A task framing such as “fix the code” is not a behavior spec. Never rely on
-recall: label an unverified fact `[Unknown]`. Use precise edits and never
-overwrite without looking first.
+Do not stage or edit outside the declared scope. Adjacent source, test, or configuration paths are in scope only when demonstrably required by acceptance; a new outcome, unrelated subsystem, or material risk expansion requires a Planner Delta. Do not inspect protected or opaque paths.
 
-A stop token is final for the current task authority: no mutation, no equivalent command substitution, no metadata workaround, no upstream rewrite, and no retry under a different action class until a new authoritative Owner instruction or valid Continuation Delta. `DO_NOT_POLL`: report the stop and end the turn; do not sleep, poll, schedule a wakeup, or re-check while waiting for the blocker to clear, apart from the deferred queue's one recheck.
+A task framed only as “fix the code” lacks a behavior specification. Label unverified facts `[Unknown]`. Required capability is `ALLOWED` only with direct evidence; `UNKNOWN` and `BLOCKED` never qualify. Fail loudly rather than silently degrading or substituting an execution path.
 
-Documentation or task completion is not authorization.
+## Route once
+
+Use the Packet route when its gates pass. Otherwise choose exactly one existing route:
+
+- `FAST`: one known low-risk local target, one direct acceptance check, no new behavior, and no Judge trigger.
+- `STANDARD`: default for coupled work or one continuous runtime chain.
+- `STANDARD_JUDGED`: a Judge trigger applies and Loop is not eligible.
+- `LOOP_JUDGED`: every capability and eligibility gate is `YES`, including fixed scope, independent cards and acceptance, isolated writes, main-Worker integration ownership, and real parallel savings. Never fan out automatically.
+
+A Judge trigger requires both a listed category and a material consequence: the change reaches an external consumer, shared runtime, production data, or is not cheaply reversible. Categories are security/authentication/authorization, finance/payment, database or production-data writes, shared-core or cross-runtime changes, real UI/browser/device validation, external side effects, explicit independent verification, or material unknown evidence. A single acceptance failure is not a trigger by itself. If no mandatory Judge applies and mode is `NOT_APPLICABLE`, set `JUDGE_DISPATCH: SUPPRESSED`; do not auto-create or escalate a Judge.
+
+After a passing FAST gate, proceed directly from named inputs → implement → required acceptance → specifically authorized local commit/publication if applicable → handoff. Do not process non-applicable references or repeat discovery. FAST reduces unnecessary work, never safety.
+
+Planning and pure QA have no implementation route. Route changes require a new Owner instruction, an observed authority/scope conflict, or verified missing capability; difficulty, file count, risk, or slow checks alone do not justify a change. For route-order ambiguity, use [flowcharts](references/flowcharts.md).
+
+## Intent, authorization, and surgical execution
+
+Keep every write inside the authorized scope. An executable Owner Packet authorizes reversible local edits within that scope; an outward-facing, irreversible, destructive, production, deployment, or other high-risk action requires direct Owner authorization for the exact action and target. A stop token is final for the current task authority: no mutation, no equivalent command substitution, no metadata workaround, no upstream rewrite, and no retry under a different action class until a new authoritative Owner instruction or valid Continuation Delta. Documentation or task completion is not authorization.
+
+Before a production or deployment mutation, exercise this same tri-state through the exact harness/wrapper/launcher chain that will invoke the mutation; see [production mutation harness preflight](references/operational-gates.md#production-mutation-harness-preflight). Read [operational gates](references/operational-gates.md#authorization-evidence-and-conversation-boundary) for authorization evidence, capability enforcement, Git action tiers, and stop details.
 
 ## Execution failures and retries
 
-On acceptance failure, attribute in order: harness/fixture/command, then the
-deployment or execution chain, then the product invariant. Each continuation
-must test a falsifiable hypothesis and materially reduce uncertainty. When it
-applies a correction, rerun the real check and retain actual output. Keep an `ATTEMPT_LEDGER` for failures, retries,
-timeouts, terminations, overwritten or deleted artifacts, and superseded evidence.
-Identical blind retries and speculative patches are not evidence progress.
-Evidence-progressing RCA has no arbitrary numeric ceiling, so a fourth or later
-evidence-progressing step is permitted. This is not unlimited retry permission:
-stop when scope, safety, authority, capability, proportionality, or
-discriminating evidence is exhausted. External credentials, permissions, missing
-runtimes, and unresolved authority remain blockers.
+A failed acceptance is attributed and retried only through a falsifiable hypothesis that reduces uncertainty. Repair task-caused failures within scope; stop when scope, safety, authority, capability, proportionality, or discriminating evidence is exhausted. See [failure modes](references/failure-modes.md) for retry, stop, and recurrence-search details.
 
 ## Verification and Judge handoff
 
-Verify by observation: the named done criterion actually ran or rendered, the surrounding build/test/lint or equivalent remains healthy, and required runtime or external evidence exists. `NOT RUN` is never `PASS`, and source inspection is not runtime evidence. Command execution alone is not `PASS`; a load-bearing `PASS` requires the exact observed result to satisfy acceptance; a non-zero `git diff --check` cannot be reported `PASS`.
-
-Label verification provenance as `RUN_THIS_TASK` for checks actually executed during the current task/current execution phase, or `REUSED_EXACT_TREE_EVIDENCE` for prior verification reused because the exact load-bearing tree/artifact identity remains valid.
-Reused evidence must never be reported as a check rerun this task or labeled `RUN_THIS_TASK`. Reuse does not require rerunning a check merely to obtain a fresh `PASS` label. Keep `NOT RUN` distinct from `PASS`; provenance accuracy does not increase verification volume.
-
-`VERIFY_WORLD_NOT_SELF_REPORT`: prefer an external observation of the changed
-behavior over a textual claim whenever one is practical — call the endpoint,
-exercise the affected UI, re-read or diff the mutated file, run a read-only
-query when database state is load-bearing, or exercise the real entry path.
-A Worker stating that it works is not verification by itself, but this does
-not add an automatic requirement for a browser, database, full suite, or
-Judge when none is otherwise relevant to the change.
-
-For large structured command or tool output used as load-bearing authority: capture it completely, parse or filter it internally, then project only a bounded summary to the conversational or harness surface; never derive an authority, count, identity, or completeness claim from display output that may have been truncated. If complete capture cannot be established and the missing portion could alter the decision, state `UNKNOWN` rather than treat the displayed subset as complete. This does not require a new durable evidence store — use in-process parsing or an existing safe temporary mechanism.
-
-`DONOR_CHARACTERIZATION_PROBE`: before frozen behavior semantics are finalized for a legacy-donor migration, one small executable characterization probe is `REQUIRED_BY_DEFAULT` when donor execution is cheap, bounded, safe, and dependency-feasible — all four, or the default does not apply. Run exactly one minimum probe sufficient to test the load-bearing observed behavior, because source-only reading has already mistaken a dead path for a live operator and a degenerate parameter for deterministic behavior. The probe is characterization, not benchmarking: it never requires a full donor replay, exhaustive parameter sweep, performance benchmark, production mutation, external spend, or broad historical reconstruction. `SOURCE_ONLY` stays acceptable when the probe is `BLOCKED`, `DISPROPORTIONATE`, `UNSAFE`, or `DEPENDENCY_INFEASIBLE`, and the limitation must be reported. This sets the default characterization discipline only; `LEGACY_DONOR_AUTHORITY_MODE`, `DONOR_EXECUTION_STATUS`, and the existing frozen-semantics and provenance rules stay Planner-owned and unchanged.
-
-When a fixed defect came from a construct that could plausibly recur elsewhere, search the safe project for it and report; skip the search for a one-off or locally scoped defect:
-
-```text
-TWINS: searched <pattern> - found <N> other sites: <files or none>
-```
-
-Run the complete local suite at most once per final tree unless load-bearing
-edits invalidate it. When merge or publication acceptance depends on exact-head verification and canonical main has advanced since that verification: inspect bounded path overlap and bounded direct consumers/dependencies of candidate-modified canonical state; if a direct dependency exists, run only the focused prospective integration verification required for that consumer; no automatic full-suite escalation solely because main advanced. When a Judge trigger applies, hand off to a separate
-fresh-context read-only Judge rather than duplicating Judge logic. Initial
-Judge depth is `BOUNDED` unless a named full trigger or explicit Owner
-requirement requires `FULL`; use `DELTA` only after the one permitted bounded
-remediation. The Worker never repairs inside the Judge.
-
-One Judge verdict per exact tree is terminal. When a tree already carries a
-`VERIFIED` verdict, do not open another Judge on it; re-judge only after the
-tree changes, and then only as `DELTA`. A Judge that cannot reach its expected
-input state reports the mismatch and stops — that is a stale input contract,
-not evidence against the work, and it does not authorize a repeat run against
-the same inputs.
-
-Planner specifies Judge mode/depth only; it must not invent a future final HEAD/tree. After implementation, the Worker records the observed final HEAD/tree, and the Judge evaluates exactly that tree read-only. Fresh Context Judge naming is orchestration metadata and MUST NOT reuse context: request `<parent>-judge`, then `<parent>-judge-rN` (N starts at 2) after remediation; use `PARENT_SESSION_NAME: UNKNOWN` when unavailable, report requested/actual names separately, keep `JUDGE_SESSION_REUSED: NO`, and record relation, lineage rule, naming capability, and `HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME`. `REQUEST_METADATA_ONLY` or `UNSUPPORTED` never claims an actual rename; preserve the independent Judge.
-
-The handoff must contain the original Packet and forbidden actions,
-repository/branch/HEAD/tree and actual diff/status, scope and authorization,
-acceptance criteria, route and Judge mode/depth, command exit statuses and
-raw summaries, runtime evidence, filesystem ledger, unknowns, failed attempts,
-and final-tree identity. A separate Judge is not a Worker verdict.
+Verify by observation; source inspection or command execution alone is not a passing result. `NOT RUN` is never `PASS`. Run the named acceptance and only directly relevant surrounding checks. Stop after acceptance and required checks pass. For Judge triggers, evidence reuse, depth, Fresh Context handoff, and the one-remediation limit, use [Judge handoff](references/judge-handoff.md).
 
 ## Lifecycle and filesystem accounting
 
-Keep these axes distinct:
-
-```text
-IMPLEMENTATION_LIFECYCLE_STATUS: NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED | NOT_APPLICABLE
-PR_PUBLICATION_STATUS: NOT_APPLICABLE | NOT_CREATED | DRAFT_OPEN | READY_OPEN | MERGED | BLOCKED
-POSTMERGE_LIFECYCLE_STATUS: NOT_APPLICABLE | NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED
-BRANCH_CLEANUP_STATUS: NOT_APPLICABLE | RETAINED_WHILE_PR_OPEN | DELETED | ALREADY_ABSENT | BLOCKED
-FULL_PR_LIFECYCLE_CLOSED: YES | NO
-```
-
-`FULL_PR_LIFECYCLE_CLOSED: YES` requires verified merge containment,
-post-merge checks, cleanup, and a clean/restored workspace. Local completion
-without publication is not a publication failure. Keep unauthorized work
-under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
-Before entering a long Ready / merge / publication lifecycle for a PR, preflight overlapping authority: inspect only open PRs in the same repository for overlap with the target PR's already-known load-bearing changed paths; do not perform a repository-wide audit. If there is no overlapping open PR, continue normally. If there is path overlap alone, normal live-state and base-drift handling applies (do not STOP solely because files overlap). If an overlapping open PR also carries a competing CTO architecture decision, successor claim, canonical-authority claim, or supersession claim, do not begin the long publication lifecycle; stop with `OVERLAPPING_AUTHORITY_PUBLICATION_ORDER_REQUIRED` for Planner/Owner publication order resolution. Do not create a second governance authority to track these relationships.
-
-Before an authorized lifecycle mutation (publication, existing PR reuse, Ready, merge-state, exact cleanup), read live state: if desired state is already reached and exact identity matches, accept it as `SKIP_ALREADY_COMPLETE` / `ALREADY_SATISFIED` without repeating mutation or treating prior completion as an error; if a same-role resource exists with conflicting identity, stop with `STOP_UNRESOLVED`.
-
-Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, `SMALLEST_NEXT_ACTION:` (or a named-gate prefix, e.g. `A2_BLOCKER_CODE:`) — so a downstream Agent can pick the next action without local filesystem access to the originating Agent. The inline record is a transfer summary, not a second authority: a durable artifact or exact locator remains canonical for full evidence, but it must never be the sole carrier of the fact needed to decide what happens next, and this does not replace artifact paths, hashes, full evidence, runtime receipts, or exact authority locators.
-
-`BLOCKER_DETAIL` states the actual missing or invalid fact when known — a missing strategy, draw, config, seed, unsupported capability, or unresolved authority — never a vague `see artifact`, `blocked`, or `needs investigation` once the exact blocking fact was already observed; when genuinely unknown, state `UNKNOWN` honestly and name the smallest bounded resolution action instead. `SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap, and each independently blocked gate carries its own record rather than one blocker duplicated under multiple aliases. A `COMPLETE` handoff is not required to carry these fields.
-
-For `FAST` and `STANDARD` work, report the compact form in
-[reporting](references/reporting.md). Report the full ledger partitions below
-only for judged, publication-bound, or Tier-2 runtime work, using `NONE` only
-when truly empty:
-
-```text
-FILES_WRITTEN_DURING_TASK:
-FILES_RETAINED_AT_END:
-FILES_DELETED_BEFORE_END:
-TASK_CREATED_FILES_RETAINED:
-TASK_CREATED_FILES_DELETED:
-PRE_EXISTING_FILES_RETAINED_UNCHANGED:
-PRE_EXISTING_FILES_MODIFIED_AND_RATIFIED:
-FILES_MODIFIED_DURING_TASK:
-REPOSITORY_FILES_MODIFIED:
-TOOLCHAIN_RUNTIME_OUTPUTS_CREATED:
-TOOLCHAIN_RUNTIME_OUTPUTS_MODIFIED:
-PRE_EXISTING_RUNTIME_OUTPUTS_RETAINED_UNCHANGED:
-WORKTREE_MATERIALIZATION_CREATED:
-WORKTREE_MATERIALIZATION_UPDATED:
-WORKTREE_MATERIALIZATION_REMOVED:
-GIT_NETWORK_METADATA_WRITES:
-GIT_WORKTREE_METADATA_WRITES:
-HARNESS_GIT_METADATA_WRITES:
-```
-
-Keep `TASK_COMMIT`, `TASK_TREE`, `FINAL_HEAD`, `FINAL_TREE`,
-`CANONICAL_FINAL_HEAD`, `CANONICAL_FINAL_TREE`, and `COMMIT_LINK` distinct.
-Local-only commits use `COMMIT_LINK: NOT_APPLICABLE`.
+Keep implementation, publication, post-merge, cleanup, and full-closure statuses distinct. Local completion without publication is not a publication failure. Use [reporting](references/reporting.md) for blocker records, filesystem ledgers, runtime provenance, and lifecycle closure. Consult [operational gates](references/operational-gates.md#git-action-tiers) before any Git lifecycle action except an ordinary local commit on an already-resolved FAST task when `COMMIT_AUTHORIZED: YES`, the exact repository/worktree and write scope are known, and the commit target/history identity is unambiguous. The exception applies only to a non-destructive local commit with no force/fallback, local branch/worktree deletion, remote mutation (including push, Draft/Ready PR, or merge), or authorization conflict; commit directly without loading the detailed Git-action tiers. Consult the reference for every other Git action or whenever authorization, scope, or identity is missing, ambiguous, or conflicted.
 
 ## Progressive disclosure and entry points
 
-Load only the directly relevant reference:
+Load only the directly relevant reference: [examples](references/examples.md) for a missing Packet or task shape; [operational gates](references/operational-gates.md) for authority, authorization, capability, writers, worktrees, production, publication, runtime, or CPU procedures; [task checkpoints](references/task-checkpoint.md) for deferred work and protected-run recovery; [protected run entrypoint](references/task-checkpoint.md#protected-run-entrypoint) when a required protected launch applies; [bounded launcher fallback](references/task-checkpoint.md#bounded-launcher-fallback) for an authorized long-running launch; [post-attempt remote observation](references/task-checkpoint.md#post-attempt-remote-observation) after an ambiguous remote mutation; [Judge handoff](references/judge-handoff.md) for Judge decisions; [failure modes](references/failure-modes.md) for audit or retries; [reporting](references/reporting.md) for handoff and lifecycle details; [implementation depth](references/implementation-depth.md) for a supplied value or selection trigger; [authority sources](references/authority-sources.md) when a load-bearing signal may not be authoritative; [workspace containment](references/workspace-containment.md) before a new worktree or sibling workspace; [memory boundary](references/memory-boundary.md) before memory or checkpoint files; and [test falsifiability](references/test-falsifiability.md) before citing changed checks. Use one matching domain reference before Step 2 for non-coding work. Use property-based verification, regression bisection, diff coverage, or generic ranking only when their named condition applies.
 
-- [flowcharts](references/flowcharts.md) for route, gate-order, lifecycle, or
-  family-routing ambiguity;
-- [examples](references/examples.md) for a task shape, Packet fast path, or
-  report format;
-- [failure modes](references/failure-modes.md) for audit, retry diagnosis, or unclear verification failure;
-- [operational gates](references/operational-gates.md) for runtime outputs, process termination, Git action tiers, worktrees, a production-mutation harness preflight, or detailed authority checks;
-- [generic ranking](references/generic-ranking.md) before ranking, scoring, or comparing candidates, so the comparison contract stays caller-declared;
-- [Judge handoff](references/judge-handoff.md) before a fresh Judge handoff;
-- [memory boundary](references/memory-boundary.md) before reading project memory as authority or creating/modifying any memory, handoff, or checkpoint file, and [workspace containment](references/workspace-containment.md) before creating a worktree, clone, or sibling workspace directory;
-- [authority sources](references/authority-sources.md) when a load-bearing signal might not be authoritative, and [implementation depth](references/implementation-depth.md) before selecting or defaulting `IMPLEMENTATION_DEPTH`;
-- [test falsifiability](references/test-falsifiability.md) before citing newly-added test/check coverage as completion evidence;
-- [property-based verification](references/property-based-verification.md) for on-demand domain, invariant, and shrinking patterns;
-- [regression bisection](references/regression-bisection.md) for locating which commit or change set introduced an observed regression;
-- [diff coverage](references/diff-coverage.md) for on-demand changed-line execution-adequacy measurement against an already-configured coverage run;
-- [reporting](references/reporting.md) for compact outcome-first fields, ownership/quiescence blocker evidence, and lifecycle reporting;
-- exactly one matching domain reference before Step 2 for a non-coding domain: [business ops](references/domains/business-ops.md), [data analysis](references/domains/data-analysis.md), [design and UX](references/domains/design-ux.md), [devops](references/domains/devops.md), [finance](references/domains/finance.md), [legal and compliance](references/domains/legal-compliance.md), [marketing](references/domains/marketing.md), or [research](references/domains/research.md). `domains/TEMPLATE.md` is only for creating or updating an adapter.
-
-Preserve `/fable-method <task>`, `/fable-method plan <task>`,
-`/fable-method audit`, `/fable-method report`, `$fable-method`, and the sibling
-`fable-judge` entry point. `plan` stops before mutation; `audit` is read-only;
-direct completion review uses `fable-judge`, never a Worker route.
+Preserve `/fable-method <task>`, `/fable-method plan <task>`, `/fable-method audit`, `/fable-method report`, `$fable-method`, and the sibling `fable-judge` entry point. `plan` stops before mutation; `audit` is read-only; direct completion review uses `fable-judge`, never a Worker route.
 
 ## Compact flow when no Packet exists
 
-1. Classify the ask: plan-first beats task; a mixed “why and fix” is a task;
-   a pure question changes nothing. Ask one pointed question only when
-   evidence cannot resolve materially different deliverables.
-2. Define done as an observable result and name its verification. Check
-   assumptions instead of assuming them.
-3. Orient by enumerating files and sources, read primary sources, parallelize
-   independent expensive reads, time-box lookups, surface surprises, and make
-   one evidence-backed recommendation.
-
-The triviality gate requires one file, under about ten changed lines, no new
-behavior, and no searching. Otherwise use the full loop. For an implementation,
-continue with intent → smallest coherent change → acceptance → surrounding
-verification → handoff/report.
-
-State checkable assumptions and load the applicable domain adapter before Step
-2. The Fit gate routes reachable-source questions through the loop, researchable
-unknown techniques through bounded research first, pure inference to an
-explicitly low-confidence answer or one pointed question, and recurring
-specialized procedures to the installed skill-creator Skill. Name any such
-detour; never silently skip the loop.
+Use the bounded no-Packet flow in [worked examples](references/examples.md#compact-flow-without-a-packet); do not turn it into a second plan when an authoritative Packet already resolves the work.
 
 ## Final artifact gate
 
-Hostile-review the final report against the Packet and actual diff/status.
-Every changed path must be authorized; every `PASS` needs a command,
-observation, or valid same-tree evidence; no claim may rest only on inference.
-Do not return a terminal success classification while a mandatory criterion is
-`NOT RUN`, unresolved, or contradicted.
-Add the required INTENT:, AUTH:, PENDING:, or TWINS: line when its condition
-applies. Lead with what happened, distinguish NOT RUN, BLOCKED, and UNKNOWN,
-and never claim deployment, publication, runtime success, equality, or cleanup
-without observing it. FULL_PR_LIFECYCLE_CLOSED: YES additionally requires a
-verified merge commit, target containment, required post-merge checks, cleanup,
-and a clean/restored workspace. When the task performed a runtime identity transition, include the transition provenance block (`RUNTIME_TRANSITION_OCCURRED: YES`, before/after HEAD/tree/bindings, action, timestamp, task/run ID, rollback target); otherwise report `RUNTIME_TRANSITION_OCCURRED: NO`.
-
-For judged or publication-bound work, also include:
-
-```text
-LOCAL_FULL_SUITE_RUNS:
-FOCUSED_TEST_RUNS:
-INITIAL_JUDGE_RUNS:
-DELTA_REJUDGE_RUNS:
-FULL_JUDGE_RUNS:
-EXACT_HEAD_CI_RUNS:
-REUSED_EVIDENCE:
-INVALIDATED_EVIDENCE:
-```
-
-Leave no task-created scratch debris.
+Every changed path must be authorized and every `PASS` tied to observed evidence. Do not report terminal success while a mandatory criterion is `NOT RUN`, unresolved, or contradicted. Distinguish `NOT RUN`, `BLOCKED`, and `UNKNOWN`; never claim publication, runtime success, or cleanup without observing it. See [outcome-first reporting](references/reporting.md#final-artifact-gate) and [Judge handoff](references/judge-handoff.md).
 
 ## Gemini integration
 

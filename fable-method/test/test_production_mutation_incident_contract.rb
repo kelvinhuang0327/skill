@@ -154,9 +154,9 @@ class ProductionMutationIncidentContractTest < Minitest::Test
   end
 
   def test_no_new_lifecycle_status_enum_added_to_worker_lifecycle_axes
-    assert_includes SKILL,
+    assert_includes REPORTING,
       'IMPLEMENTATION_LIFECYCLE_STATUS: NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED | NOT_APPLICABLE'
-    refute_match(/RECOVERY_REQUIRED \|/, SKILL)
-    refute_match(/\| RECOVERY_REQUIRED/, SKILL)
+    refute_match(/RECOVERY_REQUIRED \|/, SKILL + REPORTING)
+    refute_match(/\| RECOVERY_REQUIRED/, SKILL + REPORTING)
   end
 end
