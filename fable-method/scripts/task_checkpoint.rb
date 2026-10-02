@@ -1406,8 +1406,8 @@ class DurableCommandCapture
   EVIDENCE_COMPLETE = 'EVIDENCE_COMPLETE'
   EVIDENCE_UNKNOWN_UNVERIFIABLE = 'EVIDENCE_UNKNOWN_UNVERIFIABLE'
 
-  attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :started_at, :ended_at,
-                :wrapper_signal
+  attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :terminating_signal,
+                :started_at, :ended_at, :wrapper_signal
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1415,20 +1415,21 @@ class DurableCommandCapture
     @stdout = (attrs[:stdout] || attrs['stdout']).to_s
     @stderr = (attrs[:stderr] || attrs['stderr']).to_s
     @exit_status = attrs.key?(:exit_status) ? attrs[:exit_status] : attrs['exit_status']
+    @terminating_signal = attrs.key?(:terminating_signal) ? attrs[:terminating_signal] : attrs['terminating_signal']
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @wrapper_signal = attrs[:wrapper_signal] || attrs['wrapper_signal']
   end
 
   def complete?
-    !@command.empty? && !@exit_status.nil? &&
+    !@command.empty? && (!@exit_status.nil? || !@terminating_signal.nil?) &&
       !@started_at.to_s.strip.empty? && !@ended_at.to_s.strip.empty?
   end
 
   def verdict
     return VERDICT_UNKNOWN_UNVERIFIABLE unless complete?
 
-    @exit_status == 0 ? VERDICT_PASS : VERDICT_FAIL
+    @exit_status == 0 && @terminating_signal.nil? ? VERDICT_PASS : VERDICT_FAIL
   end
 
   def to_h
@@ -1438,6 +1439,7 @@ class DurableCommandCapture
       'stdout' => @stdout,
       'stderr' => @stderr,
       'exit_status' => @exit_status,
+      'terminating_signal' => @terminating_signal,
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
@@ -1576,7 +1578,8 @@ class DurableCommandCapture
           command: command,
           stdout: stdout_str,
           stderr: stderr_str,
-          exit_status: status.signaled? ? "SIGNALED:#{status.termsig}" : status.exitstatus,
+          exit_status: status.signaled? ? nil : status.exitstatus,
+          terminating_signal: status.signaled? ? status.termsig : nil,
           started_at: started_at,
           ended_at: terminal_at
         )
@@ -1640,7 +1643,8 @@ class ExecutionRecord
                                 keyword_init: true)
 
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
-                :durable_capture_path, :started_at, :ended_at, :parent_execution_id
+                :durable_capture_path, :capture_path, :exit_status, :terminating_signal,
+                :started_at, :ended_at, :parent_execution_id
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1649,6 +1653,12 @@ class ExecutionRecord
     @pid = attrs.key?(:pid) ? attrs[:pid] : attrs['pid']
     @status = (attrs[:status] || attrs['status'])&.to_s
     @durable_capture_path = (attrs[:durable_capture_path] || attrs['durable_capture_path'])&.to_s
+    @capture_path = attrs[:capture_path] || attrs['capture_path'] || @durable_capture_path
+    @exit_status = attrs.key?(:exit_status) ? attrs[:exit_status] : attrs['exit_status']
+    @terminating_signal = attrs.key?(:terminating_signal) ? attrs[:terminating_signal] : attrs['terminating_signal']
+    @terminal_metadata_persisted = %i[capture_path exit_status terminating_signal].any? do |key|
+      attrs.key?(key) || attrs.key?(key.to_s)
+    end
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @parent_execution_id = (attrs[:parent_execution_id] || attrs['parent_execution_id'])&.to_s
@@ -1665,6 +1675,11 @@ class ExecutionRecord
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
+    if @terminal_metadata_persisted
+      data['capture_path'] = @capture_path
+      data['exit_status'] = @exit_status
+      data['terminating_signal'] = @terminating_signal
+    end
     # Only nested records carry lineage, so top-level record bytes are unchanged.
     data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
     data
@@ -2091,9 +2106,22 @@ class ExecutionRecord
   end
 
   def complete!(file_path, durable_capture_path:)
+    capture = DurableCommandCapture.load(durable_capture_path)
+    terminal_exit_status = capture.exit_status
+    terminal_signal = capture.terminating_signal
+    legacy_signal = terminal_exit_status.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(terminal_exit_status)
+    if legacy_signal
+      terminal_exit_status = nil
+      terminal_signal ||= legacy_signal[1].to_i
+    end
+
     @status = STATUS_COMPLETED
     @durable_capture_path = durable_capture_path
-    @ended_at = Time.now.utc.iso8601
+    @capture_path = durable_capture_path
+    @exit_status = terminal_exit_status
+    @terminating_signal = terminal_signal
+    @ended_at = capture.ended_at
+    @terminal_metadata_persisted = true
     save(file_path)
     self
   end
@@ -2749,10 +2777,20 @@ if __FILE__ == $PROGRAM_NAME
         end
 
         result = candidate.exit_status
-        signal_match = result.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(result)
-        signal = signal_match[1].to_i if signal_match
-        unless (result.is_a?(Integer) && (0..255).cover?(result)) ||
-               (signal && Signal.list.value?(signal) && !%w[STOP CONT].any? { |name| Signal.list[name] == signal })
+        signal = candidate.terminating_signal
+        legacy_signal = result.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(result)
+        if legacy_signal
+          legacy_signal_number = legacy_signal[1].to_i
+          if signal && signal != legacy_signal_number
+            raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture signal metadata conflicts'
+          end
+          signal ||= legacy_signal_number
+          result = nil
+        end
+        valid_signal = signal.is_a?(Integer) && Signal.list.value?(signal) &&
+                       !%w[STOP CONT].any? { |name| Signal.list[name] == signal }
+        valid_status = result.is_a?(Integer) && (0..255).cover?(result)
+        unless (valid_status && signal.nil?) || (result.nil? && valid_signal)
           raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture exit result is malformed'
         end
         [result, signal]

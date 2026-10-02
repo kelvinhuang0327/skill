@@ -34,17 +34,29 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   end
   method_before = digest.call('fable-method')
   judge_before = digest.call('fable-judge')
+  launcher_source = File.join(tmp, 'fable-method/scripts/task_checkpoint.rb')
+  launcher_destination = File.join(tmp, 'fable-method/platforms/codex/fable-method/scripts/task_checkpoint.rb')
+  launcher_destination_relative = launcher_destination.delete_prefix(tmp)
   implicit = run.call('--check')
   explicit = run.call('--check', '--skill', 'fable-method')
-  check.call(implicit[0] && implicit == explicit, 'legacy implicit and explicit Method CLI are identical')
+  check.call(!File.file?(launcher_destination), 'fixture starts without the managed Codex launcher')
+  check.call(!implicit[0] && implicit == explicit && implicit[1].include?('DRIFT: codex skill=fable-method'),
+             'managed check detects the missing Codex launcher')
   check.call(run.call('--write')[0], 'Method write succeeds')
-  check.call(method_before == digest.call('fable-method'), 'four Method bundles stay byte invariant')
+  method_after = digest.call('fable-method')
+  method_after.delete(launcher_destination_relative)
+  check.call(method_before == method_after, 'Method write changes no other managed bundle bytes')
+  check.call(File.file?(launcher_destination), 'canonical managed Codex bundle contains task_checkpoint.rb')
+  check.call(File.binread(launcher_source) == File.binread(launcher_destination),
+             'installed launcher bytes match the canonical source')
+  check.call(run.call('--check')[0], 'Method second-generation NO_DRIFT')
+  method_materialized = digest.call('fable-method')
   2.times { check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge generation succeeds') }
   check.call(judge_before == digest.call('fable-judge'), 'four Judge bundles deterministic after second write')
   check.call(run.call('--check', '--skill', 'fable-judge')[0], 'Judge second-generation NO_DRIFT')
   File.open(File.join(tmp, 'fable-judge/shared/SKILL.md'), 'a') { |f| f.write("\nJudge fixture change.\n") }
   check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge-only source change generates')
-  check.call(method_before == digest.call('fable-method'), 'Judge-only operation leaves Method unchanged')
+  check.call(method_materialized == digest.call('fable-method'), 'Judge-only operation leaves Method unchanged')
   judge_changed = digest.call('fable-judge')
   method_source = File.join(tmp, 'fable-method/shared/SKILL.md')
   method_source_before = File.binread(method_source)

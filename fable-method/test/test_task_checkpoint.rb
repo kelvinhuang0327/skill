@@ -1751,6 +1751,7 @@ class DurableCommandCaptureTest < Minitest::Test
     assert_equal command, reloaded.command
     assert_includes reloaded.stdout, 'ok'
     assert_equal 0, reloaded.exit_status
+    assert_nil reloaded.terminating_signal
     refute_nil reloaded.started_at
     refute_nil reloaded.ended_at
     assert_equal DurableCommandCapture::VERDICT_PASS, reloaded.verdict
@@ -1764,6 +1765,7 @@ class DurableCommandCaptureTest < Minitest::Test
 
     reloaded = DurableCommandCapture.load(path)
     assert_equal 7, reloaded.exit_status
+    assert_nil reloaded.terminating_signal
     assert_includes reloaded.stderr, 'boom'
     assert_equal DurableCommandCapture::VERDICT_FAIL, reloaded.verdict
     refute_equal DurableCommandCapture::VERDICT_PASS, reloaded.verdict
@@ -2208,8 +2210,12 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
     assert_equal owner[:wait].pid, record.pid
     assert_equal capture_path(identity), record.durable_capture_path
+    assert_equal capture_path(identity), record.capture_path
+    assert_nil record.exit_status
+    assert_equal Signal.list.fetch(signal_name), record.terminating_signal
     capture = DurableCommandCapture.load(capture_path(identity))
-    assert_equal "SIGNALED:#{Signal.list.fetch(signal_name)}", capture.exit_status
+    assert_nil capture.exit_status
+    assert_equal Signal.list.fetch(signal_name), capture.terminating_signal
     assert_equal command, capture.command
     assert_equal [result[0], result[1]], [capture.stdout, capture.stderr]
     assert_operator Time.iso8601(record.ended_at), :>=, Time.iso8601(capture.ended_at)
@@ -2249,6 +2255,8 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
     assert_equal 143, capture.exit_status
     assert_instance_of Integer, capture.exit_status
+    assert_equal 143, record.exit_status
+    assert_nil record.terminating_signal
     assert_equal 1, launch_records.size
   end
 
@@ -2288,7 +2296,10 @@ class TaskCheckpointRunTest < Minitest::Test
     wait_until('managed descendant escaped its owned group') { ExecutionRecord.pid_alive?(descendant_pid) == false }
     record = ExecutionRecord.load(record_path(identity))
     assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
-    assert_equal "SIGNALED:#{Signal.list.fetch('INT')}", DurableCommandCapture.load(record.durable_capture_path).exit_status
+    capture = DurableCommandCapture.load(record.durable_capture_path)
+    assert_nil capture.exit_status
+    assert_equal Signal.list.fetch('INT'), capture.terminating_signal
+    assert_equal capture.terminating_signal, record.terminating_signal
   end
 
   def test_run_repeated_signals_while_draining_do_not_skip_finalization
@@ -2368,6 +2379,41 @@ class TaskCheckpointRunTest < Minitest::Test
     [@caller, @worktree].each { |path| refute File.exist?(File.join(path, '.fable')) }
   end
 
+  def test_run_persists_normal_terminal_metadata
+    identity = 'terminal_success'
+    result = run_cli(cli_args(identity, upstream(result: '0')))
+    assert_output(result, 0)
+
+    record = ExecutionRecord.load(record_path(identity))
+    capture = DurableCommandCapture.load(capture_path(identity))
+    persisted = JSON.parse(File.binread(record_path(identity)))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal capture.ended_at, record.ended_at
+    assert_equal 0, record.exit_status
+    assert_nil record.terminating_signal
+    assert_equal capture_path(identity), record.capture_path
+    assert_equal 0, persisted.fetch('exit_status')
+    assert_nil persisted.fetch('terminating_signal')
+    assert_equal capture_path(identity), persisted.fetch('capture_path')
+  end
+
+  def test_run_persists_nonzero_terminal_metadata
+    identity = 'terminal_nonzero'
+    result = run_cli(cli_args(identity, upstream(result: '7')))
+    assert_output(result, 7)
+
+    record = ExecutionRecord.load(record_path(identity))
+    capture = DurableCommandCapture.load(capture_path(identity))
+    persisted = JSON.parse(File.binread(record_path(identity)))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    assert_equal capture.ended_at, record.ended_at
+    assert_equal 7, record.exit_status
+    assert_nil record.terminating_signal
+    assert_equal capture_path(identity), persisted.fetch('capture_path')
+    assert_equal 7, persisted.fetch('exit_status')
+    assert_nil persisted.fetch('terminating_signal')
+  end
+
   def test_run_rejects_different_execution_id_while_task_writer_is_active
     first = start_cli(cli_args('writer_first', upstream(barrier: true)))
     wait_until('first task writer did not start') { !launch_records.empty? }
@@ -2403,7 +2449,13 @@ class TaskCheckpointRunTest < Minitest::Test
       assert result[2].signaled?
       assert_equal Signal.list.fetch('TERM'), result[2].termsig
     end
-    assert_equal "SIGNALED:#{Signal.list.fetch('TERM')}", DurableCommandCapture.load(capture_path('signaled')).exit_status
+    capture = DurableCommandCapture.load(capture_path('signaled'))
+    record = ExecutionRecord.load(record_path('signaled'))
+    assert_nil capture.exit_status
+    assert_equal Signal.list.fetch('TERM'), capture.terminating_signal
+    assert_nil record.exit_status
+    assert_equal capture.terminating_signal, record.terminating_signal
+    assert_equal capture_path('signaled'), record.capture_path
     assert_equal 1, launch_records.size
   end
 

@@ -20,6 +20,13 @@ module Fable
     DEPTH_SOURCE = 'fable-method/shared/references/judge-handoff.md'
     DEPTH_DESTINATION = 'references/judge-depth-contract.md'
     DEPTH_SECTIONS = ['Depth and evidence reuse', 'Depth reconciliation', 'Remediation limit'].freeze
+    COPY_INSTALL_FILES = {
+      'fable-method' => {
+        'codex' => {
+          'fable-method/scripts/task_checkpoint.rb' => 'scripts/task_checkpoint.rb'
+        }.freeze
+      }.freeze
+    }.freeze
     LIVE = {
       'fable-method' => {
         'codex' => '/Users/kelvin/.codex/skills/fable-method',
@@ -79,6 +86,10 @@ module Fable
 
     def platforms(name)
       skill(name).fetch('platforms')
+    end
+
+    def copy_install_files(name, platform)
+      COPY_INSTALL_FILES.fetch(name, {}).fetch(platform, {})
     end
 
     def pair(name, platform)
@@ -172,6 +183,10 @@ module Fable
           sources << owned!(p['frontmatter_source'], area)
           array!(p['adapter_sources'], 'adapter_sources').each { |a| sources << owned!(a, area) }
           targets = ['SKILL.md'] + refs.map { |r| r.delete_prefix("#{name}/shared/") } + common['projections'].map { |r| r['destination'] }
+          copy_install_files(name, p['name']).each do |source, target|
+            sources << source
+            targets << self.class.relative!(target, 'copy-install destination')
+          end
           array!(p['reference_overrides'], 'reference_overrides').each do |r|
             mapping!(r, %w[source destination], 'reference override')
             sources << owned!(r['source'], area)
@@ -248,7 +263,10 @@ module Fable
     def source_paths(name)
       common = shared(name)
       [common['skill'], *common['references'], *common['projections'].map { |p| p['source'] },
-       *platforms(name).flat_map { |p| [p['frontmatter_source'], *p['adapter_sources'], *p['reference_overrides'].map { |r| r['source'] }] }]
+       *platforms(name).flat_map do |p|
+         [p['frontmatter_source'], *p['adapter_sources'], *p['reference_overrides'].map { |r| r['source'] },
+          *copy_install_files(name, p['name']).keys]
+       end]
     end
 
     def read(root, relative)
@@ -350,6 +368,9 @@ module Fable
       common['references'].each { |ref| files[ref.delete_prefix("#{name}/shared/")] = read(root, ref) }
       common['projections'].each { |p| files[p['destination']] = self.class.project(read(root, p['source']), p['sections']) }
       record['reference_overrides'].each { |r| files[r['destination']] = read(root, r['source']) }
+      copy_install_files(name, platform).each do |source, destination|
+        files[destination] = read(root, source)
+      end
       # Projection bundles must resolve both paths and fragments entirely within
       # their rendered boundary. Existing Method link checks retain their policy.
       self.class.validate_links!(files) if name == 'fable-judge'
