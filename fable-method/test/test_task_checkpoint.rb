@@ -2392,6 +2392,7 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 0, record.exit_status
     assert_nil record.terminating_signal
     assert_equal capture_path(identity), record.capture_path
+    assert_equal capture.ended_at, persisted.fetch('ended_at')
     assert_equal 0, persisted.fetch('exit_status')
     assert_nil persisted.fetch('terminating_signal')
     assert_equal capture_path(identity), persisted.fetch('capture_path')
@@ -2409,6 +2410,7 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal capture.ended_at, record.ended_at
     assert_equal 7, record.exit_status
     assert_nil record.terminating_signal
+    assert_equal capture.ended_at, persisted.fetch('ended_at')
     assert_equal capture_path(identity), persisted.fetch('capture_path')
     assert_equal 7, persisted.fetch('exit_status')
     assert_nil persisted.fetch('terminating_signal')
@@ -2442,7 +2444,10 @@ class TaskCheckpointRunTest < Minitest::Test
 
   def test_run_signaled_result_replays_the_signal_and_output
     args = cli_args('signaled', upstream(result: 'TERM'))
-    results = [run_cli(args), run_cli(args)]
+    original = run_cli(args)
+    terminal_record_bytes = File.binread(record_path('signaled'))
+    replay = run_cli(args)
+    results = [original, replay]
     results.each do |result|
       assert_equal "out\0尾\n", result[0]
       assert_equal "err\0尾\n", result[1]
@@ -2451,11 +2456,17 @@ class TaskCheckpointRunTest < Minitest::Test
     end
     capture = DurableCommandCapture.load(capture_path('signaled'))
     record = ExecutionRecord.load(record_path('signaled'))
+    persisted = JSON.parse(File.binread(record_path('signaled')))
     assert_nil capture.exit_status
     assert_equal Signal.list.fetch('TERM'), capture.terminating_signal
     assert_nil record.exit_status
     assert_equal capture.terminating_signal, record.terminating_signal
     assert_equal capture_path('signaled'), record.capture_path
+    assert_equal capture.ended_at, persisted.fetch('ended_at')
+    assert_nil persisted.fetch('exit_status')
+    assert_equal capture.terminating_signal, persisted.fetch('terminating_signal')
+    assert_equal capture_path('signaled'), persisted.fetch('capture_path')
+    assert_equal terminal_record_bytes, File.binread(record_path('signaled')), 'terminal record stays immutable on replay'
     assert_equal 1, launch_records.size
   end
 

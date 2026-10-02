@@ -32,11 +32,14 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
       [f.delete_prefix(tmp), [Digest::SHA256.file(f).hexdigest, File.stat(f).mode]]
     end
   end
-  method_before = digest.call('fable-method')
-  judge_before = digest.call('fable-judge')
   launcher_source = File.join(tmp, 'fable-method/scripts/task_checkpoint.rb')
   launcher_destination = File.join(tmp, 'fable-method/platforms/codex/fable-method/scripts/task_checkpoint.rb')
   launcher_destination_relative = launcher_destination.delete_prefix(tmp)
+  FileUtils.rm_f(launcher_destination)
+  launcher_directory = File.dirname(launcher_destination)
+  Dir.rmdir(launcher_directory) if Dir.exist?(launcher_directory) && Dir.empty?(launcher_directory)
+  method_before = digest.call('fable-method')
+  judge_before = digest.call('fable-judge')
   implicit = run.call('--check')
   explicit = run.call('--check', '--skill', 'fable-method')
   check.call(!File.file?(launcher_destination), 'fixture starts without the managed Codex launcher')
