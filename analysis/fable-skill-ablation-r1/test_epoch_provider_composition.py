@@ -79,27 +79,40 @@ case "${{FAKE_MODE:-with-cost}}" in
     if [ -n "${{FAKE_INIT:-}}" ]; then
       printf '%s\\n' "$FAKE_INIT"
     else
-      printf '%s\\n' '{{"type":"system","subtype":"init"}}'
+      printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}}'
     fi
-    printf '{{"type":"result","subtype":"success","is_error":false,"total_cost_usd":"%s"}}\\n' "${{FAKE_COST:-0.1250000}}"
+    printf '%s\\n' '{{"type":"assistant","session_id":"provider-session","message":{{"id":"message-1","model":"offline-model"}}}}'
+    printf '{{"type":"result","subtype":"success","is_error":false,"session_id":"provider-session","modelUsage":{{"offline-model":{{"input_tokens":1,"output_tokens":1}}}},"num_turns":1,"total_cost_usd":"%s"}}\\n' "${{FAKE_COST:-0.1250000}}"
     ;;
   no-result-event)
     if [ -n "${{FAKE_INIT:-}}" ]; then
       printf '%s\\n' "$FAKE_INIT"
     else
-      printf '%s\\n' '{{"type":"system","subtype":"init"}}'
+      printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}}'
     fi
+    printf '%s\\n' '{{"type":"assistant","session_id":"provider-session","message":{{"id":"message-1","model":"offline-model"}}}}'
     ;;
   two-result-events)
+    printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}}'
+    printf '%s\\n' '{{"type":"assistant","session_id":"provider-session","message":{{"id":"message-1","model":"offline-model"}}}}'
     printf '%s\\n' '{{"type":"result","total_cost_usd":"0.1000000"}}'
     printf '%s\\n' '{{"type":"result","total_cost_usd":"0.2000000"}}'
     ;;
   process-error)
-    printf '%s\\n' '{{"type":"result","total_cost_usd":"0.1250000"}}'
+    printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}}'
+    printf '%s\\n' '{{"type":"assistant","session_id":"provider-session","message":{{"id":"message-1","model":"offline-model"}}}}'
+    printf '%s\\n' '{{"type":"result","subtype":"success","session_id":"provider-session","modelUsage":{{"offline-model":{{"input_tokens":1,"output_tokens":1}}}},"total_cost_usd":"0.1250000"}}'
     exit 23
     ;;
+  invalid-session-known-cost)
+    printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}}'
+    printf '%s\\n' '{{"type":"assistant","session_id":"wrong-session","message":{{"id":"message-1","model":"offline-model"}}}}'
+    printf '%s\\n' '{{"type":"result","subtype":"success","session_id":"provider-session","modelUsage":{{"offline-model":{{"input_tokens":1,"output_tokens":1}}}},"total_cost_usd":"0.1250000"}}'
+    ;;
   malformed-cost)
-    printf '%s\\n' '{{"type":"result","total_cost_usd":"not-canonical"}}'
+    printf '%s\\n' '{{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}}'
+    printf '%s\\n' '{{"type":"assistant","session_id":"provider-session","message":{{"id":"message-1","model":"offline-model"}}}}'
+    printf '%s\\n' '{{"type":"result","subtype":"success","session_id":"provider-session","modelUsage":{{"offline-model":{{"input_tokens":1,"output_tokens":1}}}},"total_cost_usd":"not-canonical"}}'
     ;;
 esac
 """
@@ -128,7 +141,9 @@ except OSError:
     fd9 = "closed"
 else:
     fd9 = "open"
-sys.stdout.write(json.dumps({{"type": "result", "fd9": fd9}}) + "\\n")
+sys.stdout.write(json.dumps({{"type": "system", "subtype": "init", "session_id": "provider-session", "model": "offline-model", "fd9": fd9}}) + "\\n")
+sys.stdout.write(json.dumps({{"type": "assistant", "session_id": "provider-session", "message": {{"id": "message-1", "model": "offline-model"}}}}) + "\\n")
+sys.stdout.write(json.dumps({{"type": "result", "subtype": "success", "session_id": "provider-session", "modelUsage": {{"offline-model": {{"input_tokens": 1, "output_tokens": 1}}}}, "total_cost_usd": "0.1250000"}}) + "\\n")
 """
     provider.write_text(script, encoding="utf-8")
     provider.chmod(0o700)
@@ -373,13 +388,9 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ledger = self.ledger(root)
-            result, _, _ = self.compose(
-                root, ledger=ledger, environment={"FAKE_MODE": "no-result-event"}
-            )
+            with self.assertRaises(claude.ProviderOutputError):
+                self.compose(root, ledger=ledger, environment={"FAKE_MODE": "no-result-event"})
 
-            self.assertIsNone(result.settlement_record)
-            self.assertFalse(result.settlement_authority.passed)
-            self.assertIn("settlement_unresolved", result.settlement_authority.reasons)
             snapshot = ledger.load()
             self.assertEqual(snapshot.started_unresolved, {"slot-a": Decimal("2.0000000")})
             self.assertEqual(
@@ -391,12 +402,9 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ledger = self.ledger(root)
-            result, _, _ = self.compose(
-                root, ledger=ledger, environment={"FAKE_MODE": "two-result-events"}
-            )
+            with self.assertRaises(claude.ProviderOutputError):
+                self.compose(root, ledger=ledger, environment={"FAKE_MODE": "two-result-events"})
 
-            self.assertIsNone(result.settlement_record)
-            self.assertFalse(result.settlement_authority.passed)
             self.assertEqual(
                 ledger.load().started_unresolved, {"slot-a": Decimal("2.0000000")}
             )
@@ -405,12 +413,9 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             ledger = self.ledger(root)
-            result, _, _ = self.compose(
-                root, ledger=ledger, environment={"FAKE_MODE": "malformed-cost"}
-            )
+            with self.assertRaises(claude.ProviderOutputError):
+                self.compose(root, ledger=ledger, environment={"FAKE_MODE": "malformed-cost"})
 
-            self.assertIsNone(result.settlement_record)
-            self.assertFalse(result.settlement_authority.passed)
             self.assertEqual(
                 ledger.load().started_unresolved, {"slot-a": Decimal("2.0000000")}
             )
@@ -666,7 +671,11 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
             if command[-1] == "--version":
                 return FakeControllerPopen(stdout=(REQUIRED_VERSION + "\n").encode())
             return FakeControllerPopen(
-                stdout=b'{"type":"result","total_cost_usd":"0.1250000"}\n'
+                stdout=(
+                    b'{"type":"system","subtype":"init","session_id":"provider-session","model":"offline-model"}\n'
+                    b'{"type":"assistant","session_id":"provider-session","message":{"id":"message-1","model":"offline-model"}}\n'
+                    b'{"type":"result","subtype":"success","session_id":"provider-session","modelUsage":{"offline-model":{"input_tokens":1,"output_tokens":1}},"total_cost_usd":"0.1250000"}\n'
+                )
             )
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -870,6 +879,7 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
             ledger = self.ledger(root)
             pair = ("s01-A01-r0-OFF", "s02-A01-r0-ON")
             event = fixtures.carrier_init_event(carrier=True) if run_event is None else run_event
+            event = {**event, "session_id": "provider-session", "model": "offline-model"}
             global_events = ({"claude": {
                 "OFF": [fixtures.carrier_init_event(carrier=False)],
                 "ON": [fixtures.carrier_init_event(carrier=True)],
@@ -882,13 +892,17 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
                         return composition.execute_reserved_provider_slot(authority=authority, invocation=request)
                 result = composition.execute_reserved_provider_slot(authority=authority, invocation=request)
                 return result if transform is None else transform(result, ledger)
+            environment = {"FAKE_MODE": mode, "FAKE_INIT": json.dumps(event)}
             evidence = runner.execute_manifest_slot(
                 fixtures.synthetic_manifest(str(stub)), pair[1], workspace_parent=root,
                 reference_events=[fixtures.init_event()],
                 materializer=lambda plan: fixtures.make_git_repository(Path(plan.workspace_path)),
                 executor=execute, provider_instruction_surface_events=global_events,
                 expected_providers=("claude",),
-                environment={"FAKE_MODE": mode, "FAKE_INIT": json.dumps(event)},
+                provider_environments=fixtures.neutral_provider_environments(
+                    ("claude",), environment
+                ),
+                environment=environment,
                 opaque_id_factory=lambda: SESSION_TOKEN_A,
             )
             return evidence, ledger.load()
@@ -937,7 +951,8 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
 
     def test_29_unknown_cost_is_uncountable_and_retains_full_cap(self) -> None:
         evidence, snapshot = self.run_composed(mode="no-result-event")
-        self.assertTrue(evidence.purity.purity_pass)
+        self.assertFalse(evidence.purity.purity_pass)
+        self.assertIn("ProviderOutputError", evidence.executor_error)
         self.assertTrue(evidence.global_instruction_surface.passed)
         self.assertFalse(evidence.settlement_authority.passed)
         self.assertFalse(evidence.run_countable)
@@ -989,6 +1004,15 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
         self.assertEqual(snapshot.started_unresolved, {})
         self.assertEqual(snapshot.outstanding_reservations, {"s01-A01-r0-OFF": SEALED_CAP})
 
+    def test_semantically_invalid_stream_still_settles_known_provider_cost(self) -> None:
+        evidence, snapshot = self.run_composed(mode="invalid-session-known-cost")
+
+        self.assertFalse(evidence.run_countable)
+        self.assertIn("ProviderOutputError", evidence.executor_error)
+        self.assertIn("session_ids_inconsistent", evidence.executor_error)
+        self.assertEqual(snapshot.lifetime_total_spend, Decimal("0.1250000"))
+        self.assertEqual(snapshot.started_unresolved, {})
+
     def test_34_caller_constructed_receipt_cannot_reuse_real_settlement(self) -> None:
         evidence, snapshot = self.run_composed(transform=lambda result, ledger: replace(result))
         self.assertTrue(evidence.purity.purity_pass)
@@ -1007,15 +1031,15 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
         self.assertEqual(source.count(guarded), 1)
         namespace = dict(vars(runner))
         exec(compile(source.replace(guarded, "", 1), "<offline-gate-mutation>", "exec"), namespace)
-        regression = type(self)("test_29_unknown_cost_is_uncountable_and_retains_full_cap")
+        regression = type(self)("test_27_missing_foreign_and_non_durable_settlement_or_start_fail_final_gate")
         observed = unittest.TestResult()
         with mock.patch.object(runner, "execute_manifest_slot", namespace["execute_manifest_slot"]):
             regression.run(observed)
         self.assertEqual(observed.errors, [])
-        self.assertEqual(len(observed.failures), 1)
+        self.assertGreaterEqual(len(observed.failures), 1)
         self.assertIn("self.assertFalse(evidence.run_countable)", observed.failures[0][1])
         restored = unittest.TestResult()
-        type(self)("test_29_unknown_cost_is_uncountable_and_retains_full_cap").run(restored)
+        type(self)("test_27_missing_foreign_and_non_durable_settlement_or_start_fail_final_gate").run(restored)
         self.assertTrue(restored.wasSuccessful(), restored.failures + restored.errors)
 
 
