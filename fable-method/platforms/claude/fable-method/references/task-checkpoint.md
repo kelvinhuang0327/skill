@@ -411,12 +411,6 @@ Ruby scripts. The placeholder above means that selected launcher, which
 defaults to the confirmed deployed checkout; an isolated task worktree is
 never the permanent canonical runtime path.
 
-<<<<<<< HEAD
-### Explicit stale recovery
-
-`--run` never recovers a stale record. A separate, explicitly authorized
-recovery may use:
-=======
 ### Nested protected runs
 
 A protected application may launch another `--run` for the same task ID and
@@ -514,7 +508,6 @@ path.
 changing IDs cannot bypass the stale stop. After an explicit recovery chain
 reaches a completed successor, the successor remains available through normal
 durable-capture replay. A separate, explicitly authorized recovery may use:
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 
 ```text
 ruby task_checkpoint.rb \
@@ -560,10 +553,6 @@ closed. The task-scoped lock serializes this transition and successor claim
 with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
-<<<<<<< HEAD
-
-=======
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
