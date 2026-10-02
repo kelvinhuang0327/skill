@@ -29,6 +29,10 @@ from typing import Any, Callable, Iterable, Mapping, Sequence, Union
 FABLE_SKILL_IDENTITY = "fable-method"
 _OPAQUE_ID_RE = re.compile(r"[0-9a-f]{32,64}")
 _MISSING = object()
+_SECRET_ENVIRONMENT_KEY_RE = re.compile(
+    r"(?:^|_)(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|AUTHORIZATION)(?:$|_)",
+    re.IGNORECASE,
+)
 _INVENTORY_DIMENSIONS = frozenset({"tools", "agents", "mcp_servers"})
 _DIMENSION_ALIASES = {
     "mcp_servers": ("mcp_servers", "mcpServers"),
@@ -79,6 +83,44 @@ class HarnessContractError(ValueError):
     """The manifest or injected input cannot prove the harness contract."""
 
 
+def _redact_text(value: str, secret_values: Sequence[str]) -> str:
+    candidates = sorted(
+        {secret for secret in secret_values if secret}, key=len, reverse=True
+    )
+    if not candidates:
+        return value
+    return re.sub("|".join(re.escape(secret) for secret in candidates), "REDACTED", value)
+
+
+def _environment_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _redact_serialized_payload(
+    payload: Any, secret_values: Sequence[str], *, field_name: str = ""
+) -> Any:
+    if "sha256" in field_name.casefold() or "fingerprint" in field_name.casefold():
+        return payload
+    if isinstance(payload, str):
+        return _redact_text(payload, secret_values)
+    if isinstance(payload, Mapping):
+        return {
+            _redact_text(key, secret_values) if isinstance(key, str) else key:
+            _redact_serialized_payload(
+                value,
+                secret_values,
+                field_name=key if isinstance(key, str) else "",
+            )
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [
+            _redact_serialized_payload(item, secret_values, field_name=field_name)
+            for item in payload
+        ]
+    return payload
+
+
 @dataclass(frozen=True)
 class ManifestSlot:
     """A selected schedule slot retained only on the orchestrator side."""
@@ -116,12 +158,21 @@ class ModelInvocation:
     task_visible_run_id: str
 
     def model_visible_record(self) -> dict[str, Any]:
+        secret_values = tuple(self.environment.values())
         return {
-            "argv": list(self.argv),
-            "cwd": self.cwd,
-            "prompt": self.prompt,
-            "environment": dict(self.environment),
-            "task_visible_run_id": self.task_visible_run_id,
+            "argv": [_redact_text(value, secret_values) for value in self.argv],
+            "cwd": _redact_text(self.cwd, secret_values),
+            "prompt": _redact_text(self.prompt, secret_values),
+            "environment": {
+                _redact_text(key, secret_values): {
+                    "value": "REDACTED",
+                    "sha256_fingerprint": _environment_fingerprint(value),
+                }
+                for key, value in sorted(self.environment.items())
+            },
+            "task_visible_run_id": _redact_text(
+                self.task_visible_run_id, secret_values
+            ),
         }
 
 
@@ -251,7 +302,8 @@ class RunEvidence:
     settlement_authority: "SettlementAuthorityResult"
 
     def as_record(self) -> dict[str, Any]:
-        return {
+        secret_values = tuple(self.model_invocation.environment.values())
+        record = {
             "orchestrator": {
                 "run_id": self.orchestrator_run_id,
                 "condition": self.condition,
@@ -269,6 +321,7 @@ class RunEvidence:
             "settlement_authority": self.settlement_authority.as_record(),
             "run_countable": self.run_countable,
         }
+        return _redact_serialized_payload(record, secret_values)
 
 
 Event = Union[Mapping[str, Any], str, bytes]
@@ -934,6 +987,12 @@ def evaluate_global_instruction_surface(
     provider_events: Mapping[str, Mapping[str, Iterable[Event]]],
     *,
     expected_providers: Sequence[str],
+    provider_environments: Mapping[
+        str, Mapping[str, Mapping[str, str]]
+    ] | None = None,
+    active_provider: str | None = None,
+    active_arm: str | None = None,
+    active_environment: Mapping[str, str] | None = None,
     allowed_fable_carrier: str = FABLE_SKILL_IDENTITY,
 ) -> GlobalInstructionSurfaceResult:
     """Evaluate the unavoidable, provider-neutral instruction-surface floor.
@@ -950,6 +1009,9 @@ def evaluate_global_instruction_surface(
     (INSTRUCTION_SURFACES carries no carrier exception), the treatment
     carrier delta present only and exactly on the ON arm, and the resulting
     non-treatment representation identical across every expected provider.
+    The same gate compares raw environment values across OFF/ON in memory;
+    only comparison booleans are retained in its result.  Secret values are
+    compared by stable fingerprints, while other values are compared directly.
     Existing per-slot inventory checks (tools/agents/mcp_servers) are a
     separate, independently-enforced gate and are not restated here.
     """
@@ -964,7 +1026,105 @@ def evaluate_global_instruction_surface(
         )
 
     per_provider_evidence: dict[str, Mapping[str, InitEvidence]] = {}
+    environment_pairs_resolved = True
+    active_environment_requested = (
+        active_provider is not None
+        or active_arm is not None
+        or active_environment is not None
+    )
+    active_environment_resolved = not active_environment_requested
+    active_environment_matched = False
+
     for provider in expected_providers:
+        environment_arms = (
+            provider_environments.get(provider)
+            if isinstance(provider_environments, Mapping)
+            else None
+        )
+        environment_pair_present = (
+            isinstance(environment_arms, Mapping)
+            and all(
+                arm in environment_arms
+                and isinstance(environment_arms[arm], Mapping)
+                and all(
+                    isinstance(key, str) and isinstance(value, str)
+                    for key, value in environment_arms[arm].items()
+                )
+                for arm in REQUIRED_TREATMENT_ARMS
+            )
+        )
+        checks[f"environment_pair_present:{provider}"] = environment_pair_present
+        if not environment_pair_present:
+            environment_pairs_resolved = False
+            reasons.append(f"missing_or_malformed_environment_pair:{provider}")
+        else:
+            off_environment = environment_arms["OFF"]
+            on_environment = environment_arms["ON"]
+            keys_equal = set(off_environment) == set(on_environment)
+            checks[f"environment_keys_equal:{provider}"] = keys_equal
+            if not keys_equal:
+                reasons.append(f"environment_key_drift:{provider}")
+
+            secret_keys = {
+                key
+                for key in set(off_environment) & set(on_environment)
+                if _SECRET_ENVIRONMENT_KEY_RE.search(key)
+            }
+            secret_fingerprints_equal = all(
+                _environment_fingerprint(off_environment[key])
+                == _environment_fingerprint(on_environment[key])
+                for key in secret_keys
+            )
+            checks[f"secret_environment_fingerprints_equal:{provider}"] = (
+                secret_fingerprints_equal
+            )
+            if not secret_fingerprints_equal:
+                reasons.append(f"secret_environment_fingerprint_drift:{provider}")
+
+            all_fingerprints_equal = (
+                keys_equal
+                and all(
+                    _environment_fingerprint(off_environment[key])
+                    == _environment_fingerprint(on_environment[key])
+                    for key in off_environment
+                )
+            )
+            checks[f"environment_value_fingerprints_equal:{provider}"] = (
+                all_fingerprints_equal
+            )
+            if not all_fingerprints_equal:
+                reasons.append(f"environment_value_fingerprint_drift:{provider}")
+
+            nonsecret_keys = {
+                key
+                for key in set(off_environment) & set(on_environment)
+                if not _SECRET_ENVIRONMENT_KEY_RE.search(key)
+            }
+            nonsecret_values_equal = (
+                keys_equal
+                and all(
+                    off_environment[key] == on_environment[key]
+                    for key in nonsecret_keys
+                )
+            )
+            checks[f"nonsecret_environment_values_equal:{provider}"] = (
+                nonsecret_values_equal
+            )
+            if not nonsecret_values_equal:
+                reasons.append(f"nonsecret_environment_value_drift:{provider}")
+
+            if active_environment_requested and provider == active_provider:
+                active_environment_matched = (
+                    active_arm in REQUIRED_TREATMENT_ARMS
+                    and isinstance(active_environment, Mapping)
+                    and all(
+                        isinstance(key, str) and isinstance(value, str)
+                        for key, value in active_environment.items()
+                    )
+                    and dict(active_environment) == dict(environment_arms[active_arm])
+                )
+                active_environment_resolved = True
+
         arms = provider_events.get(provider)
         provider_present = isinstance(arms, Mapping)
         checks[f"provider_present:{provider}"] = provider_present
@@ -1016,7 +1176,20 @@ def evaluate_global_instruction_surface(
         if not carrier_correct:
             reasons.append(f"carrier_delta_incorrect:{provider}")
 
-    fully_covered = len(per_provider_evidence) == len(expected_providers)
+    if active_environment_requested:
+        checks["active_environment_matches_provider_pair"] = (
+            active_environment_resolved and active_environment_matched
+        )
+        if not active_environment_resolved:
+            reasons.append("active_environment_provider_or_arm_unresolved")
+        elif not active_environment_matched:
+            reasons.append("active_environment_does_not_match_pair_evidence")
+
+    fully_covered = (
+        len(per_provider_evidence) == len(expected_providers)
+        and environment_pairs_resolved
+        and active_environment_resolved
+    )
     checks["expected_provider_arm_set_fully_covered"] = fully_covered
     if not fully_covered:
         return GlobalInstructionSurfaceResult(
@@ -1187,6 +1360,8 @@ def execute_manifest_slot(
     executor: Executor,
     provider_instruction_surface_events: Mapping[str, Mapping[str, Iterable[Event]]],
     expected_providers: Sequence[str],
+    provider_environments: Mapping[str, Mapping[str, Mapping[str, str]]] | None = None,
+    active_provider: str | None = None,
     environment: Mapping[str, str] | None = None,
     opaque_id_factory: Callable[[], str] | None = None,
 ) -> RunEvidence:
@@ -1220,7 +1395,9 @@ def execute_manifest_slot(
     try:
         materializer(plan)
     except Exception as exc:  # injected boundary: convert failure to evidence
-        materializer_error = f"{type(exc).__name__}: {exc}"
+        materializer_error = _redact_text(
+            f"{type(exc).__name__}: {exc}", tuple(invocation.environment.values())
+        )
 
     surface_audit = audit_model_visible_surfaces(
         invocation, workspace, slot.forbidden_model_tokens
@@ -1250,7 +1427,9 @@ def execute_manifest_slot(
             execution_result = executor(invocation)
             run_records = list(execution_result)
         except Exception as exc:  # injected boundary: fail closed, retain evidence
-            executor_error = f"{type(exc).__name__}: {exc}"
+            executor_error = _redact_text(
+                f"{type(exc).__name__}: {exc}", tuple(invocation.environment.values())
+            )
 
     purity = evaluate_purity(
         run_records,
@@ -1266,6 +1445,16 @@ def execute_manifest_slot(
     global_instruction_surface = evaluate_global_instruction_surface(
         provider_instruction_surface_events,
         expected_providers=expected_providers,
+        provider_environments=provider_environments,
+        active_provider=(
+            active_provider
+            if active_provider is not None
+            else expected_providers[0]
+            if len(expected_providers) == 1
+            else None
+        ),
+        active_arm=slot.condition,
+        active_environment=invocation.environment,
     )
     settlement_authority = evaluate_settlement_authority(
         executor_called=executor_called,

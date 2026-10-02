@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -79,6 +81,16 @@ def carrier_init_event(*, carrier: bool, skills: list[Any] | None = None, **surf
     baseline = ["reference-skill"] if skills is None else list(skills)
     resolved_skills = [*baseline, runner.FABLE_SKILL_IDENTITY] if carrier else baseline
     return init_event(skills=resolved_skills, **instruction_surface_block(**surface_overrides))
+
+
+def neutral_provider_environments(
+    providers: tuple[str, ...], environment: dict[str, str] | None = None
+) -> dict[str, dict[str, dict[str, str]]]:
+    shared = dict(environment or {})
+    return {
+        provider: {"OFF": dict(shared), "ON": dict(shared)}
+        for provider in providers
+    }
 
 
 def evaluate(
@@ -403,6 +415,7 @@ class CanonicalHarnessTests(unittest.TestCase):
                 executor=fake_executor,
                 provider_instruction_surface_events=passing_global_evidence,
                 expected_providers=("claude",),
+                provider_environments=neutral_provider_environments(("claude",)),
                 opaque_id_factory=lambda: "00112233445566778899aabbccddeeff",
             )
 
@@ -567,7 +580,11 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
             },
         }
         result = runner.evaluate_global_instruction_surface(
-            provider_events, expected_providers=("provider-a", "provider-b")
+            provider_events,
+            expected_providers=("provider-a", "provider-b"),
+            provider_environments=neutral_provider_environments(
+                ("provider-a", "provider-b")
+            ),
         )
         self.assertTrue(result.resolved)
         self.assertTrue(result.checks["provider_local_surfaces_equal:provider-a"])
@@ -587,7 +604,11 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
             },
         }
         result = runner.evaluate_global_instruction_surface(
-            provider_events, expected_providers=("provider-a", "provider-b")
+            provider_events,
+            expected_providers=("provider-a", "provider-b"),
+            provider_environments=neutral_provider_environments(
+                ("provider-a", "provider-b")
+            ),
         )
         self.assertTrue(result.resolved)
         self.assertTrue(result.passed, result.reasons)
@@ -600,7 +621,9 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
             }
         }
         result = runner.evaluate_global_instruction_surface(
-            provider_events, expected_providers=("provider-a", "provider-b")
+            provider_events,
+            expected_providers=("provider-a", "provider-b"),
+            provider_environments=neutral_provider_environments(("provider-a",)),
         )
         self.assertFalse(result.resolved)
         self.assertFalse(result.passed)
@@ -611,7 +634,9 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
             "provider-a": {"OFF": [carrier_init_event(carrier=False)]},
         }
         result = runner.evaluate_global_instruction_surface(
-            provider_events, expected_providers=("provider-a",)
+            provider_events,
+            expected_providers=("provider-a",),
+            provider_environments=neutral_provider_environments(("provider-a",)),
         )
         self.assertFalse(result.resolved)
         self.assertIn("missing_arm:provider-a:ON", result.reasons)
@@ -644,6 +669,7 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
                 executor=fake_executor,
                 provider_instruction_surface_events=passing_global_evidence,
                 expected_providers=("claude",),
+                provider_environments=neutral_provider_environments(("claude",)),
                 opaque_id_factory=lambda: "aa112233445566778899aabbccddeeff",
             )
 
@@ -677,6 +703,7 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
                 executor=fake_executor,
                 provider_instruction_surface_events=incomplete_global_evidence,
                 expected_providers=("claude",),
+                provider_environments=neutral_provider_environments(("claude",)),
                 opaque_id_factory=lambda: "bb112233445566778899aabbccddeeff",
             )
 
@@ -710,6 +737,7 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
                 executor=fake_executor,
                 provider_instruction_surface_events=failing_global_evidence,
                 expected_providers=("claude",),
+                provider_environments=neutral_provider_environments(("claude",)),
                 opaque_id_factory=lambda: "cc112233445566778899aabbccddeeff",
             )
 
@@ -751,6 +779,7 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
                 executor=fake_executor,
                 provider_instruction_surface_events=donor_shaped_evidence,
                 expected_providers=("claude",),
+                provider_environments=neutral_provider_environments(("claude",)),
                 opaque_id_factory=lambda: "dd112233445566778899aabbccddeeff",
             )
 
@@ -761,6 +790,124 @@ class GlobalInstructionSurfaceGateTests(unittest.TestCase):
         self.assertTrue(evidence.purity.purity_pass, evidence.purity.reasons)
         self.assertFalse(evidence.global_instruction_surface.resolved)
         self.assertFalse(evidence.run_countable)
+
+
+class EnvironmentParityAndRedactionTests(unittest.TestCase):
+    def provider_events(self) -> dict[str, dict[str, list[dict[str, Any]]]]:
+        return {
+            "claude": {
+                "OFF": [carrier_init_event(carrier=False)],
+                "ON": [carrier_init_event(carrier=True)],
+            }
+        }
+
+    def evaluate_environments(
+        self, environments: dict[str, dict[str, dict[str, str]]], **kwargs: Any
+    ) -> Any:
+        return runner.evaluate_global_instruction_surface(
+            self.provider_events(),
+            expected_providers=("claude",),
+            provider_environments=environments,
+            **kwargs,
+        )
+
+    def test_identical_off_on_environment_pair_passes_with_secret_fingerprint(self) -> None:
+        secret = "sk-test-secret-value"
+        pair = neutral_provider_environments(
+            ("claude",), {"ANTHROPIC_API_KEY": secret, "PATH": "/offline/bin"}
+        )
+
+        result = self.evaluate_environments(pair)
+
+        self.assertTrue(result.resolved)
+        self.assertTrue(result.passed, result.reasons)
+        self.assertTrue(result.checks["secret_environment_fingerprints_equal:claude"])
+        self.assertTrue(result.checks["nonsecret_environment_values_equal:claude"])
+
+    def test_environment_key_secret_and_nonsecret_drift_fail(self) -> None:
+        key_drift = {"claude": {"OFF": {"PATH": "/bin"}, "ON": {"HOME": "/tmp"}}}
+        result = self.evaluate_environments(key_drift)
+        self.assertTrue(result.resolved)
+        self.assertFalse(result.checks["environment_keys_equal:claude"])
+        self.assertFalse(result.passed)
+
+        secret_drift = neutral_provider_environments(
+            ("claude",), {"ANTHROPIC_API_KEY": "secret-off", "PATH": "/bin"}
+        )
+        secret_drift["claude"]["ON"]["ANTHROPIC_API_KEY"] = "secret-on"
+        result = self.evaluate_environments(secret_drift)
+        self.assertFalse(result.checks["secret_environment_fingerprints_equal:claude"])
+        self.assertFalse(result.passed)
+
+        nonsecret_drift = neutral_provider_environments(("claude",), {"PATH": "/bin"})
+        nonsecret_drift["claude"]["ON"]["PATH"] = "/usr/bin"
+        result = self.evaluate_environments(nonsecret_drift)
+        self.assertFalse(result.checks["nonsecret_environment_values_equal:claude"])
+        self.assertFalse(result.passed)
+
+    def test_missing_pair_and_active_invocation_mismatch_fail_closed(self) -> None:
+        missing = self.evaluate_environments({})
+        self.assertFalse(missing.resolved)
+        self.assertIn("missing_or_malformed_environment_pair:claude", missing.reasons)
+
+        pair = neutral_provider_environments(("claude",), {"PATH": "/bin"})
+        active_mismatch = self.evaluate_environments(
+            pair,
+            active_provider="claude",
+            active_arm="ON",
+            active_environment={"PATH": "/unexpected"},
+        )
+        self.assertTrue(active_mismatch.resolved)
+        self.assertFalse(active_mismatch.checks["active_environment_matches_provider_pair"])
+        self.assertFalse(active_mismatch.passed)
+
+    def test_model_visible_and_serialized_evidence_never_retain_raw_environment_values(
+        self,
+    ) -> None:
+        secret = "sk-secret-materializer-error"
+        environment = {"ANTHROPIC_API_KEY": secret, "CUSTOM_VALUE": "ordinary"}
+        invocation = runner.ModelInvocation(
+            argv=("/offline/claude", secret),
+            cwd=f"/tmp/{secret}",
+            prompt=f"prompt contains {secret}",
+            environment=environment,
+            task_visible_run_id=f"run-{secret}",
+        )
+        serialized_invocation = json.dumps(invocation.model_visible_record(), sort_keys=True)
+        self.assertNotIn(secret, serialized_invocation)
+        self.assertIn(hashlib.sha256(secret.encode()).hexdigest(), serialized_invocation)
+        self.assertEqual(
+            invocation.model_visible_record()["environment"]["ANTHROPIC_API_KEY"]["value"],
+            "REDACTED",
+        )
+
+        manifest = synthetic_manifest("definitely-not-an-installed-provider")
+        provider_events = self.provider_events()
+
+        def materializer(plan: Any) -> None:
+            raise RuntimeError(f"failed with {secret}")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            evidence = runner.execute_manifest_slot(
+                manifest,
+                "s02-A01-r0-ON",
+                workspace_parent=temporary,
+                reference_events=[init_event()],
+                materializer=materializer,
+                executor=lambda _invocation: [],
+                provider_instruction_surface_events=provider_events,
+                expected_providers=("claude",),
+                provider_environments=neutral_provider_environments(
+                    ("claude",), environment
+                ),
+                environment=environment,
+                opaque_id_factory=lambda: "ee112233445566778899aabbccddeeff",
+            )
+
+        serialized_evidence = json.dumps(evidence.as_record(), sort_keys=True)
+        self.assertNotIn(secret, serialized_evidence)
+        self.assertIn(hashlib.sha256(secret.encode()).hexdigest(), serialized_evidence)
+        self.assertIsNotNone(evidence.materializer_error)
 
 
 class SettlementAuthorityTests(unittest.TestCase):
