@@ -9,6 +9,9 @@
 - [Destructive action provenance](#destructive-action-provenance)
 - [Ownership and quiescence blocker evidence](#ownership-and-quiescence-blocker-evidence)
 - [Lifecycle closure](#lifecycle-closure)
+- [Context and continuity](#context-and-continuity)
+- [Filesystem accounting](#filesystem-accounting)
+- [Final artifact gate](#final-artifact-gate)
 
 Use the compact form for ordinary `FAST`/`STANDARD` work. Use the full
 evidence handoff for Judge-gated work, a blocked result, or a Packet that names
@@ -50,6 +53,18 @@ OVERALL_TASK_CONTRACT_RESULT:
 
 Earlier failures, aborts, timeouts, and terminations remain in the attempt and
 filesystem ledgers.
+
+Label verification provenance as `RUN_THIS_TASK` for checks actually executed
+this task/current phase, or `REUSED_EXACT_TREE_EVIDENCE` when valid evidence is
+reused for an identical command, environment, HEAD, and tree. Never call reused
+evidence a rerun. Reuse does not require rerunning a check solely to obtain a
+fresh label; keep `NOT RUN` distinct from `PASS`.
+
+`VERIFY_WORLD_NOT_SELF_REPORT`: prefer an external observation of changed
+behavior when practical — call the endpoint, exercise the affected UI,
+re-read/diff the mutated file, or run a read-only query when database state is
+load-bearing. A Worker saying it works is not verification, and this rule does
+not add an automatic browser, database, full-suite, or Judge requirement.
 
 ## Platform consumer evidence view
 
@@ -308,3 +323,144 @@ FULL_PR_LIFECYCLE_CLOSED: NO
 
 Do not prewrite a Judge verdict, claim publication, or call local completion a
 closed PR lifecycle.
+
+## Context and continuity
+
+Never infer model identity, context capacity, current usage, or billing policy
+from the product name or maximum window. Resolve each independently and mark
+unavailable values `UNKNOWN`; do not make a cost-multiplier claim unless the
+active model, plan/policy, and threshold are current and authoritative.
+
+When exact usage metadata is unavailable, report
+`CURRENT_CONTEXT_PERCENT: UNKNOWN`,
+`CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC`, and a qualitative pressure level.
+At a stable milestone or before a large phase/handoff, preserve only observed
+state: exact repository/branch/HEAD/tree/status, active processes and pending
+mutations, completed files/commits, verification and `NOT RUN`, failed
+attempts, blocker, next action/milestone, and stop conditions. Do not write a
+checkpoint unless the Packet supplies both
+`HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE` and an exact `HANDOFF_OUTPUT_PATH`;
+default to `TRANSCRIPT_ONLY`.
+
+After compaction or resume, report `CONTEXT_REHYDRATION_STATUS: PASS` only when
+project, task, authority, repository, sandbox, modified-path ledger, observable
+history, milestone, blocker, next action, next milestone, and stop conditions
+are all resolved. Otherwise report `CONTEXT_HANDOFF_INCOMPLETE` and do only
+read-only state resolution. Resume never clears a blocker, extends
+authorization, hides a failed attempt, or reopens a stopped mutation.
+
+## Filesystem accounting
+
+Keep these lifecycle axes distinct:
+
+```text
+IMPLEMENTATION_LIFECYCLE_STATUS: NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED | NOT_APPLICABLE
+PR_PUBLICATION_STATUS: NOT_APPLICABLE | NOT_CREATED | DRAFT_OPEN | READY_OPEN | MERGED | BLOCKED
+POSTMERGE_LIFECYCLE_STATUS: NOT_APPLICABLE | NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED
+BRANCH_CLEANUP_STATUS: NOT_APPLICABLE | RETAINED_WHILE_PR_OPEN | DELETED | ALREADY_ABSENT | BLOCKED
+FULL_PR_LIFECYCLE_CLOSED: YES | NO
+```
+
+Terminal absence proves current state only. `ALREADY_ABSENT` does not by
+itself prove `DELETED_BY_THIS_TASK`. A handoff claim that this task deleted,
+removed, changed, or otherwise caused a destructive mutation must be supported
+by an exact entry in the existing task command or filesystem ledger recording
+the action and its actual observed result or exit status, not by terminal-state
+evidence alone.
+
+`FULL_PR_LIFECYCLE_CLOSED: YES` requires verified merge containment,
+post-merge checks, cleanup, and a clean/restored workspace. Local completion
+without publication is not a publication failure. Keep unauthorized actions
+under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
+
+Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one
+compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, and
+`SMALLEST_NEXT_ACTION:` (or a named-gate prefix, such as
+`A2_BLOCKER_CODE:`) — so a downstream Agent can select the next action without
+local filesystem access to the originating Agent. The inline record is a
+transfer summary, not a second authority: a durable artifact or exact locator
+remains canonical for full evidence, but must never be the sole carrier of the
+fact needed to decide what happens next. It does not replace artifact paths,
+hashes, full evidence, runtime receipts, or exact authority locators.
+
+```text
+BLOCKER_CODE:
+BLOCKER_DETAIL:
+SMALLEST_NEXT_ACTION:
+```
+
+`BLOCKER_DETAIL` states the actual missing or invalid fact when known — for
+example, a missing strategy, draw, config, seed, unsupported capability, or
+unresolved authority — never a vague `see artifact`, `blocked`, or `needs
+investigation` once the exact blocking fact was observed. When genuinely
+unknown, state `UNKNOWN` and name the smallest bounded resolution action.
+`SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap. Each
+independently blocked gate carries its own record rather than one blocker
+duplicated under aliases. A `COMPLETE` handoff needs no blocker record.
+
+For judged, publication-bound, or Tier-2 runtime work, report the complete
+ledger with `NONE` only when a partition is truly empty:
+
+```text
+FILES_WRITTEN_DURING_TASK:
+FILES_RETAINED_AT_END:
+FILES_DELETED_BEFORE_END:
+TASK_CREATED_FILES_RETAINED:
+TASK_CREATED_FILES_DELETED:
+PRE_EXISTING_FILES_RETAINED_UNCHANGED:
+PRE_EXISTING_FILES_MODIFIED_AND_RATIFIED:
+FILES_MODIFIED_DURING_TASK:
+REPOSITORY_FILES_MODIFIED:
+TOOLCHAIN_RUNTIME_OUTPUTS_CREATED:
+TOOLCHAIN_RUNTIME_OUTPUTS_MODIFIED:
+PRE_EXISTING_RUNTIME_OUTPUTS_RETAINED_UNCHANGED:
+WORKTREE_MATERIALIZATION_CREATED:
+WORKTREE_MATERIALIZATION_UPDATED:
+WORKTREE_MATERIALIZATION_REMOVED:
+GIT_NETWORK_METADATA_WRITES:
+GIT_WORKTREE_METADATA_WRITES:
+HARNESS_GIT_METADATA_WRITES:
+```
+
+Keep `TASK_COMMIT`, `TASK_TREE`, `FINAL_HEAD`, `FINAL_TREE`,
+`CANONICAL_FINAL_HEAD`, `CANONICAL_FINAL_TREE`, and `COMMIT_LINK` distinct.
+Local-only commits use `COMMIT_LINK: NOT_APPLICABLE`.
+
+## Final artifact gate
+
+Before a behavior-changing edit, include this exact intent line in the final
+report:
+
+```text
+INTENT: code does <X>; the check/task expects <Y>; the opened spec says <Z>
+```
+
+Hostile-review the final report against the Packet and actual diff/status.
+Every changed path must be authorized; every `PASS` needs an observed command,
+observation, or valid same-tree evidence. Do not return terminal success while
+a mandatory criterion is `NOT RUN`, unresolved, or contradicted. Add the
+required `AUTH:`, `PENDING:`, or `TWINS:` line when its condition applies. Lead
+with what happened; distinguish `NOT RUN`, `BLOCKED`, and `UNKNOWN`. Never
+claim deployment, publication, runtime success, equality, or cleanup without
+observing it. `FULL_PR_LIFECYCLE_CLOSED: YES` also requires a verified merge
+commit, target containment, required post-merge checks, cleanup, and a
+clean/restored workspace.
+
+When a task changes runtime identity, report `RUNTIME_TRANSITION_OCCURRED: YES`
+with before and after HEAD/tree/bindings, action, timestamp, task/run ID, and
+rollback target. Otherwise report `RUNTIME_TRANSITION_OCCURRED: NO`.
+
+For judged or publication-bound work, also include:
+
+```text
+LOCAL_FULL_SUITE_RUNS:
+FOCUSED_TEST_RUNS:
+INITIAL_JUDGE_RUNS:
+DELTA_REJUDGE_RUNS:
+FULL_JUDGE_RUNS:
+EXACT_HEAD_CI_RUNS:
+REUSED_EVIDENCE:
+INVALIDATED_EVIDENCE:
+```
+
+Leave no task-created scratch debris.

@@ -45,7 +45,10 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     )
     assert_fable(
       '- `FAST`: one known low-risk local target, one direct acceptance check, no new',
-      'behavior, and no Judge trigger.'
+      'behavior, and no Judge trigger.',
+      'After a passing FAST gate, proceed directly from named inputs → implement → required',
+      'acceptance → specifically authorized local commit/publication if applicable → handoff.',
+      'Do not process non-applicable references or repeat discovery.'
     )
   end
 
@@ -73,9 +76,11 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '- overlapping dirty ownership；'
     )
     assert_fable(
-      'The only preflight stop conditions are wrong repository, incompatible',
-      'base/ref, overlapping dirty ownership, active concurrent mutation, missing',
-      "Report\nobservable facts, decisions, commands, results"
+      'Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.',
+      'Any unresolved front-door gate blocks direct FAST entry and follows existing',
+      'fail-closed or escalation behavior.',
+      'If write ownership remains unresolved, stop before edit, verification, or',
+      'ownership mutation.'
     )
   end
 

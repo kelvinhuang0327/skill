@@ -49,6 +49,122 @@ that a branch, ruleset, review, resource, or previous mutation is absent. When
 a repository and ref are pinned, retain repository, exact ref, path, symbol,
 and evidence classification for every load-bearing conclusion.
 
+### Exact Packet resolution
+
+The executable Packet is Worker authority after the Planner resolves the
+authority chain. A complete Packet supplies Goal, Owner, scope, acceptance,
+deliverable format, and forbidden actions or stop conditions. Verify at most
+one pinned supporting locator. After routing, authorization, and repository
+identity are confirmed, read a Packet-named input through its exact locator
+first. If it is readable and matches, stop broad discovery for that authority;
+do not scan workspaces, branches, worktrees, or transcripts to reconstruct it.
+This only forbids reconstructing Packet authority; it does not prohibit
+task-scoped source lookup after authority is resolved.
+
+When the locator is unreadable or mismatched, distinguish `ABSENT`, permission
+denied, network/read error, and identity mismatch. Do not guess a substitute or
+bypass a STOP. Only use bounded adjacent resolution already allowed by the
+Packet; a missing cross-lane input is `UPSTREAM_AUTHORITY_NOT_READY`.
+
+For `AUTHORITATIVE_PACKET_PARTIAL`, infer only the smallest machine-checkable
+acceptance supported by repository behavior and mark each item `[Inferred]`;
+otherwise stop with `BLOCKED_MISSING_VERIFIABLE_ACCEPTANCE`. Packet steps marked
+`MUST`, `REQUIRED`, `read completely`, `require`, or `STOP if` are mandatory. If
+one cannot be executed, stop before mutation and report the exact step, reason,
+impact, and required decision as `PACKET_REQUIRED_STEP_NOT_EXECUTED`.
+
+If a Packet conflicts with a domain, schema, terminology, data, safety, or live
+repository invariant, do not silently choose either side. Without an explicit
+Owner-approved override, stop with `PLANNER_PACKET_CONTRACT_CONFLICT` and name
+the Packet claim, repository evidence, impact, override status, and required
+decision. For a complete Packet, limit live checks to repository/branch/HEAD/
+worktree, Owner authorization, allowed and forbidden paths, named inputs and
+outputs, and Packet-versus-live conflicts. Preserve its task class, route,
+acceptance, deliverable, and stop conditions; do not re-plan or create a new
+product brief.
+
+For a target already in exact cleanup scope, `ALREADY_ABSENT` requires both its
+filesystem path and Git registration to be absent; confirm an exact local
+branch ref separately. An exact local branch ref confirmed absent makes only
+that branch `ALREADY_ABSENT`; it does not establish another worktree's
+absence. Read errors or insufficient permissions are not absence. Once
+confirmed absent, stop searching and do not call delete; current absence alone
+does not prove this task deleted the target. For a confirmed-absent target,
+report `ALREADY_ABSENT`, do not execute delete, and do not claim this task
+caused the absence.
+
+### Bounded preflight and write boundary
+
+Before mutation, confirm only facts that can invalidate execution: canonical
+repository, branch, full HEAD/tree, worktree mode and status; staged, tracked,
+untracked, and pre-existing paths by scope; applicable `AGENTS.md` and
+`AGENTS.override.md`; Packet-named paths, direct consumers, runtime/import/
+deploy chain, tools, authorization, and external effects.
+
+The preflight STOP conditions are wrong repository, incompatible base/ref,
+overlapping dirty ownership, active concurrent mutation, missing required
+capability, or an explicit safety restriction. A compatible descendant,
+unrelated out-of-scope dirt, or harmless environment difference is report-only.
+When exact untracked-file count or identity is load-bearing, use a file-complete
+inventory such as `git status --porcelain=v1 --untracked-files=all`; a collapsed
+directory entry does not establish file cardinality. Do not require this
+inventory when exact count or identity is immaterial.
+
+For runtime/worktree cleanup or mutation, `ACTIVE_RUNTIME_OWNERSHIP` includes
+either a running process owning or depending on the target, or a loaded/enabled
+recurring scheduler bound to the target or its runtime source. Task-relevant
+schedulers include launchd, cron, systemd, or an equivalent recurring
+scheduler. When applicable, inspect only task-relevant schedule state,
+WorkingDirectory, executable/interpreter, script path, and
+import/module-root/PYTHONPATH bindings. A loaded/enabled scheduler bound to
+the target worktree/source retains active ownership unless an authorized
+ownership transition removes or repoints the binding. `NO_CURRENT_PROCESS`
+does not establish `NO_ACTIVE_RUNTIME_OWNERSHIP`; do not turn this into a
+workspace-wide audit.
+
+Before deleting or replacing a checkout/worktree that is or was the exact
+deployed runtime source, require `DEPLOYED_HEAD` to remain reachable through an
+explicitly recognized durable Git source authority appropriate to the task.
+Content-equivalent code/tree on main is NOT sufficient evidence that the exact
+deployed source may be discarded. If exact `DEPLOYED_HEAD` has no durable
+source authority, STOP: `DEPLOYED_HEAD_DURABLE_SOURCE_AUTHORITY_MISSING`. The
+Worker MUST NOT automatically create a branch/tag/ref to satisfy this gate.
+Creating or changing a preservation ref remains a separate Git mutation and
+requires applicable task authority / authorization.
+
+Make ownership explicit: `READ_BEFORE_EDIT: REQUIRED`,
+`UNEXPLAINED_CONCURRENT_MUTATION: STOP`, and
+`STALE_ASSUMPTION_AFTER_EXTERNAL_CHANGE: RE-READ BEFORE WRITE`. Re-read the
+exact target before each edit. Preserve unrelated Owner state; never use cwd as
+implicit authority, stage or edit outside declared scope, or reset, restore,
+stash, or clean unrelated work. Adjacent source, tests, or configuration count
+as scope only when acceptance demonstrably requires them. A new outcome,
+unrelated subsystem, or material risk change requires a Planner Delta. Use an
+opaque aggregate for protected paths; do not inspect protected or opaque
+content.
+
+Before inspecting content across committed objects, freeze exact refs/trees,
+inventory metadata, classify paths as safe, protected, Owner-protected,
+unknown, submodule, symlink, or special mode, and search only an exact safe
+path/blob allowlist. Unknown or protected content fails closed. Start the
+in-memory filesystem ledger before the first write; include source edits,
+generated/runtime outputs, scratch, deleted temporaries, worktree materialization,
+and Git/harness metadata. Do not create reports, logs, or scratch files outside
+an explicitly authorized path.
+
+For large structured command/tool output used as authority, capture it
+completely, parse or filter it internally, then project only a bounded summary
+to the conversational or harness surface; never derive an authority, count,
+identity, or completeness claim from display output that may have been
+truncated. If complete capture cannot be established and the missing portion
+could alter the decision, state `UNKNOWN` rather than treat the displayed
+subset as complete. This does not require a new durable evidence store; use
+in-process parsing or an existing safe temporary mechanism.
+
+Non-Git source roots remain supported: do not run `git init`, create a nested
+repository, or turn a non-Git source root into a Git authority. Keep
+`CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence distinct.
+
 ## Authorization evidence and conversation boundary
 
 A standalone Owner authorization is evidence only where the Worker can
@@ -98,6 +214,28 @@ mutation never inherits a prior authorization; treat it as
 standalone authorization may still name several exact high-risk actions in
 one envelope (see Git action tiers below) — the conversation boundary governs
 how that envelope must be delivered, not how many actions it may contain.
+
+An explicit high-risk authorization may combine the exact action and target
+with the executable Worker Packet in one direct Owner message
+(`OWNER_DIRECT_PACKET_AUTHORIZATION`); an authorization-only message is not
+required. Reuse only an applicable direct authorization in the same Worker
+conversation. Every envelope names both exact action and exact target. An
+irreversible or outward-facing action requires the user's own words as
+`AUTH: user said "<exact authorization words>"`; quote the Packet only when it
+directly authorizes that exact action and target, otherwise report
+`PENDING: <action> - awaiting your authorization`.
+
+Fail loudly: `UNSUPPORTED_REQUIRED_CAPABILITY -> STOP`,
+`AMBIGUOUS_HIGH_RISK_AUTHORIZATION -> DENY / STOP`, and
+`MISSING_REQUIRED_SECURITY_ENFORCEMENT -> REPORT, DO NOT PRETEND ENFORCED`.
+Use the front-door `CAPABILITY_STATUS`: `ALLOWED` requires direct evidence;
+`UNKNOWN` is never allowed. `BLOCKED` means direct evidence shows the required
+execution path is unavailable or denied. After `BLOCKED`, do not repeat the
+same preflight, seek repeated authorization as a substitute, or change
+execution path to bypass the block. Retry only on exact
+`CAPABILITY_STATE_CHANGED_EVIDENCE`. Owner authorization and harness capability
+are separate facts; capability status does not change Planner routing
+semantics.
 
 ## Production mutation harness preflight
 
@@ -354,6 +492,24 @@ scope-clean. If canonical-base → candidate-head contains unauthorized
 ancestry paths, stop before push, PR creation, mark-ready, or merge. This
 replaces the prior changed-path interpretation; it is not a second
 publication-scope gate.
+
+Before an authorized lifecycle mutation, read live state. If the desired state
+already holds and exact identity matches, accept `SKIP_ALREADY_COMPLETE` /
+`ALREADY_SATISFIED` without repeating the mutation; if a same-role resource has
+conflicting identity, stop with `STOP_UNRESOLVED`.
+
+Before a long Ready/merge/publication lifecycle, inspect only open PRs in the
+same repository for overlap with already-known load-bearing paths. Path overlap
+alone does not stop work. If an overlapping open PR also claims a competing
+architecture decision, successor, canonical authority, or supersession,
+stop with `OVERLAPPING_AUTHORITY_PUBLICATION_ORDER_REQUIRED` for publication
+order resolution; do not create another governance tracker.
+
+When merge/publication acceptance depends on exact-head verification and
+canonical main advanced, inspect bounded path overlap and direct consumers of
+candidate-modified state. Run only the focused prospective integration check
+when a direct dependency exists; main advancing alone does not require a full
+suite.
 
 ## Worktrees and mutation evidence
 

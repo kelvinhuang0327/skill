@@ -68,3 +68,26 @@ conversation from the start, a still-applicable prior direct authorization
 there would already have been sufficient. In every case, an action outside the authorized envelope — an unlisted remote
 deletion, say — stays `PENDING` regardless of how the original authorization
 arrived.
+
+## Compact flow without a Packet
+
+1. Classify the ask: plan-first beats task; a mixed “why and fix” is a task;
+   a pure question changes nothing. Ask one pointed question only when
+   evidence cannot resolve materially different deliverables.
+2. Define done as an observable result and name its verification. Check
+   assumptions instead of assuming them.
+3. Orient by enumerating safe sources, read primary sources, parallelize
+   independent expensive reads, time-box lookups, surface surprises, and make
+   one evidence-backed recommendation.
+
+The triviality gate requires one file, under about ten changed lines, no new
+behavior, and no searching. Otherwise use the full loop. For implementation,
+continue with intent → smallest coherent change → acceptance → surrounding
+verification → handoff/report.
+
+State checkable assumptions and load the applicable domain adapter before
+Step 2. The Fit gate routes reachable-source questions through the loop,
+researchable unknown techniques through bounded research first, pure inference
+to an explicitly low-confidence answer or one pointed question, and recurring
+specialized procedures to the installed skill-creator Skill. Name each such
+detour; never silently skip the loop.

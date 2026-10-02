@@ -71,3 +71,18 @@ FINAL_REVERIFY: PASS
 
 `NOT_SAFE` and `NOT_APPLICABLE` need only a short reason and are not
 themselves a task failure.
+
+## Legacy-donor characterization probe
+
+Before frozen behavior semantics are finalized for a legacy-donor migration,
+run one small executable characterization probe by default when donor execution
+is cheap, bounded, safe, and dependency-feasible — all four conditions must
+hold. Run the minimum probe sufficient to test the load-bearing observed
+behavior; source-only reading can mistake a dead path for a live operator or a
+degenerate parameter for deterministic behavior. This is characterization, not
+benchmarking: no full donor replay, exhaustive parameter sweep, performance
+benchmark, production mutation, external spend, or broad historical
+reconstruction is required. `SOURCE_ONLY` remains acceptable when the probe is
+`BLOCKED`, `DISPROPORTIONATE`, `UNSAFE`, or `DEPENDENCY_INFEASIBLE`; report the
+limitation. This default changes no Planner-owned authority mode, execution
+status, frozen semantics, or provenance rule.

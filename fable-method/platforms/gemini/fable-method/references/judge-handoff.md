@@ -21,18 +21,26 @@ The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
 category and material consequence together. Do not restate or widen that list
 here. `LOOP_JUDGED` is judged by route definition, not by category.
 
+The routing fields have separate jobs: `JUDGE_TRIGGER` answers whether an
+independent Judge is required at all. `JUDGE_MODE` answers how that handoff
+occurs, or is `NOT_APPLICABLE` when no Judge applies. `JUDGE_DEPTH` is
+`BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies. When no
+named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set
+`JUDGE_DISPATCH: SUPPRESSED`; the Worker terminal state remains the final task
+state. Do not create, schedule, invoke, fall back to, or automatically escalate
+into any Judge. When a named mandatory Judge trigger applies,
+`JUDGE_MODE: NOT_APPLICABLE` is a contract conflict:
+`STOP: JUDGE_MODE_CONTRACT_CONFLICT`. Do not suppress the mandatory Judge or
+silently override the Packet. Check this boundary after `JUDGE_TRIGGER`
+resolution and before any Judge handoff or depth evaluation. `FRESH_CONTEXT`
+and `SELF_CHECK_ONLY` retain their existing routing semantics.
+
 `READ_ONLY_COMPLETION_REVIEW` is a task class, not an unconditional Judge
-trigger. Resolve the Judge trigger and mode before dispatch. When no named
-mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set
-`JUDGE_DISPATCH: SUPPRESSED` and do not dispatch `fable-judge`. When a named
-mandatory Judge trigger applies, `JUDGE_MODE: NOT_APPLICABLE` is
-`JUDGE_MODE_CONTRACT_CONFLICT`; stop instead of suppressing the mandatory
-Judge or silently launching one. A named mandatory Judge trigger with
-`JUDGE_MODE: FRESH_CONTEXT` still requires an independent `fable-judge`
-handoff; this boundary does not alter `FRESH_CONTEXT` or `SELF_CHECK_ONLY`
-semantics. A Worker with no fresh-context capability may self-check only, must
-mark `JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim independent `VERIFIED`
-for a Judge-gated task.
+trigger. Resolve the Judge trigger and mode before dispatch. A named mandatory
+Judge trigger with `JUDGE_MODE: FRESH_CONTEXT` still requires an independent
+`fable-judge` handoff. A Worker with no fresh-context capability may
+self-check only, must mark `JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim
+independent `VERIFIED` for a Judge-gated task.
 
 ## Depth and evidence reuse
 
