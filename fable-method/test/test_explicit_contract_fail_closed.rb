@@ -768,6 +768,93 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_includes Parser.skill, '[post-attempt remote observation](references/task-checkpoint.md#post-attempt-remote-observation)'
   end
 
+  # A-F guard the instruction contract, not model timing or execution behavior.
+  # The existing helper deletes/weakens each clause in memory, requires the
+  # same assertion to fail, then re-reads and verifies the untouched source.
+  def test_fast_orchestration_case_a_resolved_facts_and_direct_implementation
+    clauses = [
+      'Reuse already-authoritative repository/scope facts unless a live contradiction appears; grouping is not a reason to rediscover them.',
+      'Repeat repository, history, worktree, or process discovery only when a live contradiction makes it load-bearing.'
+    ]
+    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
+      'unless a live contradiction appears' => 'after every tool call'
+    })
+    assert_canonical_contract_controls('SKILL.md', 'Route once', [
+      'Once the cause and authorized fix are known on a resolved FAST task, implement directly without a second planning phase.',
+      'Do not process non-applicable references or repeat discovery.'
+    ], { 'without a second planning phase' => 'after a second planning phase' })
+  end
+
+  def test_fast_orchestration_case_b_independent_preflight_group
+    clauses = [
+      'For a resolved FAST task, prefer one bounded grouped read-only action for independent live facts such as repository identity, current HEAD/tree, worktree status, authorized scope, and required local file existence.',
+      'Group only when independence and safety are already established.'
+    ]
+    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
+      'prefer one bounded grouped read-only action' => 'require a separate read-only action per fact',
+      'independence and safety are already established' => 'independence and safety are unknown'
+    })
+  end
+
+  def test_fast_orchestration_case_c_dependent_safety_gate_remains_serial
+    clauses = [
+      'If a next action depends on a prior result to decide whether it is safe, keep those actions serial.',
+      'No particular shell syntax or mandatory batching is required.'
+    ]
+    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
+      'keep those actions serial' => 'batch those actions regardless',
+      'No particular shell syntax or mandatory batching is required.' => 'Mandatory shell batching is required.'
+    })
+    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', [
+      'Keep dependent checks serial under the preflight grouping rule above, and observe every required result; a grouped invocation alone is not PASS.'
+    ], { 'Keep dependent checks serial' => 'Batch dependent checks' })
+  end
+
+  def test_fast_orchestration_case_d_independent_required_acceptance_group
+    clauses = [
+      'For a resolved FAST task, prefer one bounded verification action containing already-required checks when they are independent and safe to group:',
+      'focused tests, formatter/linter checks, `git diff --check`, changed-path verification, and final tracked-status checks when applicable.',
+      'observe every required result; a grouped invocation alone is not PASS.'
+    ]
+    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, {
+      'already-required checks' => 'additional speculative checks',
+      'when they are independent and safe to group' => 'even when they depend on prior results',
+      'observe every required result' => 'observe only the final result'
+    })
+  end
+
+  def test_fast_orchestration_case_e_acceptance_stops_verification
+    clauses = [
+      'Once acceptance is falsifiably covered and every required check passes, stop verification and reuse that evidence for handoff.',
+      'Do not add a broad inspection, full suite, Judge, evidence pass, or separate identity/reporting verification pass unless explicitly required by the task, an applicable existing gate, or a new live contradiction.',
+      'Specifically authorized commit/publication and their required identity/status observations still follow the existing lifecycle gates.'
+    ]
+    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, {
+      'and every required check passes' => 'even when a required check is missing',
+      'stop verification and reuse that evidence' => 'start another verification phase',
+      'an applicable existing gate' => 'no existing gate',
+      'still follow the existing lifecycle gates' => 'bypass the existing lifecycle gates'
+    })
+  end
+
+  def test_fast_orchestration_case_f_unresolved_safety_gates_fail_closed
+    clauses = [
+      'Any unresolved front-door gate blocks direct FAST entry and follows existing fail-closed or escalation behavior.',
+      'Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.',
+      'If write ownership remains unresolved, stop before edit, verification, or ownership mutation.',
+      'Grouping never resolves or bypasses an unresolved authority, active-writer, ownership, capability, or destructive Git gate; existing fail-closed handling still applies.'
+    ]
+    weakenings = {
+      'blocks direct FAST entry' => 'permits direct FAST entry',
+      'stop before edit, verification, or ownership mutation' => 'continue to edit and verify'
+    }
+    %w[authority active-writer ownership capability].each do |gate|
+      weakenings[gate + ','] = ''
+    end
+    weakenings['or destructive Git gate'] = 'or harmless Git gate'
+    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+  end
+
   private
 
   def canonical_contract_section(relative_path, heading)
