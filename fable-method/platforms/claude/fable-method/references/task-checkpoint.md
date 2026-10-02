@@ -369,6 +369,13 @@ and identities across sessions and models; never synthesize them from PID,
 timestamp, session, model, or current directory, including to bypass a stop.
 The original Packet still controls authorization and allowed output paths.
 
+The upstream spawn closes all unlisted descriptors and explicitly allowlists
+the task-lock descriptor at child FD 10. The protected parent may hold that
+same lock at another descriptor number. This keeps FD 9 closed for application
+runners that reserve it, while the child still holds the task lock if the
+wrapper dies. `FABLE_PROTECTED_RUN_LOCK_FD` names the child descriptor and is
+the only extra descriptor passed by this boundary.
+
 The foreground CLI owns the execution record with its own PID while it
 supervises the upstream process. Its only new-execution route is:
 

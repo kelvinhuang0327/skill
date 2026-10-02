@@ -1398,6 +1398,10 @@ end
 # start/end timestamps are persisted.
 class DurableCommandCapture
   SCHEMA_VERSION = 1
+  # FD 9 is reserved by the epoch runner. Keep the task lock explicitly
+  # allowlisted for durability and nested lineage, but give it a separate
+  # child slot so ordinary protected children receive FD 9 closed.
+  INHERITED_TASK_LOCK_CHILD_FD = 10
 
   VERDICT_PASS = 'PASS'
   VERDICT_FAIL = 'FAIL'
@@ -1539,14 +1543,14 @@ class DurableCommandCapture
         installed_signals << name
       end
 
-      spawn_opts = { pgroup: true }
+      spawn_opts = { pgroup: true, close_others: true }
       spawn_opts[:chdir] = chdir if chdir
       if inherited_lock
         unless inherited_lock.respond_to?(:fileno) && !inherited_lock.closed?
           raise ArgumentError, 'inherited_lock must be an open file descriptor'
         end
         lock_fd = inherited_lock.fileno
-        spawn_opts[lock_fd] = lock_fd
+        spawn_opts[INHERITED_TASK_LOCK_CHILD_FD] = lock_fd
       end
       before_spawn.call if before_spawn
       # The executable/argv0 pair also prevents Ruby's single-string shell
@@ -1917,7 +1921,7 @@ class ExecutionRecord
     {
       NESTED_TASK_ID_ENV => task_id.to_s,
       NESTED_RECORD_ROOT_ENV => File.realpath(repo_root),
-      NESTED_LOCK_FD_ENV => lock.fileno.to_s,
+      NESTED_LOCK_FD_ENV => DurableCommandCapture::INHERITED_TASK_LOCK_CHILD_FD.to_s,
       NESTED_LOCK_IDENTITY_ENV => "#{stat.dev}:#{stat.ino}",
       NESTED_PARENT_ENV => parent_execution_id.to_s,
       NESTED_SECRET_ENV => secret.to_s
