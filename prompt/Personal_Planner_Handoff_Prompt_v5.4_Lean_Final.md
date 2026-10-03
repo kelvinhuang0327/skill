@@ -190,7 +190,7 @@ new route、evidence 與 impact；不要因為工作很大、很慢或檔案很�
 ### 4.1 Packet authority
 
 Planner 在 handoff 前解析 authority chain。Executable Packet 必須攜帶 goal、
-exact scope、acceptance、constraints、forbidden actions、required commands 與
+exact scope、acceptance、constraints、forbidden actions、required checks 與
 必要的 lifecycle/Judge decisions；它就是下一個 Worker 的 task authority。
 最多提供一個已解析的 pinned supporting locator。Worker 只做 bounded consistency
 check，不重新執行 generic multi-level authority search。
@@ -206,6 +206,10 @@ HANDOFF_AUTHORITY_UNRESOLVED
 一般 reversible local implementation 可由同一個 executable Packet 的
 Owner Authorization 授權，包含 stated scope 內必要的 edit、test、generation
 與明確允許的 local commit。Packet 必須明寫 commit/push/publication 權限。
+
+COMMIT_AUTHORIZED: YES permits staging only declared in-scope paths and one bounded local commit; it authorizes no remote mutation.
+
+Publication authorization must pin candidate ref and SHA, target ref, expected target-base SHA, and FAST_FORWARD_ONLY. Equivalent valid Git syntax is allowed when it preserves the authorized outcome and safety boundary; exact argv binds only when command syntax itself is required.
 
 Push、Draft/Ready PR、merge、deploy/release、destructive action、secret、
 production write、migration/backfill、external message、payment、registry
@@ -488,6 +492,8 @@ scratch script、tee log、generic /tmp output 或 evidence package；必要的
 repository/toolchain output 必須能在 final handoff 中分類。未授權 runtime write
 要停止並回報 exact path。
 
+For FamilyPlatform inventory-shopping validation, use compatible Node 24.x; a Node 20 failure caused solely by unavailable node is a toolchain mismatch, not a product regression.
+
 ### 5.4 Verification
 
 Packet 指定 repository 中已確認存在的 focused acceptance、relevant regression、
@@ -643,6 +649,8 @@ LIVE_STATE_IDEMPOTENT_RESOLUTION：
 - 若存在同名／同 role resource 但 load-bearing identity 衝突：
   → STOP 並回報 identity conflict。
 - 授權邊界保護：已滿足之 live state 僅能唯讀確認並重用，絕不得據此推論另一項不同 mutation 的授權。
+
+完成任何已授權的 lifecycle action 並觀察到其 required postcondition 後，該 pre-action Packet/gate 即視為已消耗，不得在後續 turn 重用為 authority。後續工作須依 current canonical state 重新解析 fresh authority。
 
 ### 5.6 Legacy code migration bundle（僅限從既有實作移植行為的任務）
 
@@ -985,7 +993,7 @@ WORKTREE_PATH: <ABSOLUTE_PATH>
 Adjacent paths demonstrably required by stated acceptance are allowed and must be reported.
 
 ## Required checks
-<EXACT_COMMANDS_AND_ACCEPTANCE>
+<FALSIFIABLE_ACCEPTANCE_AND_FOCUSED_VERIFICATION; exact argv only when command syntax itself is required>
 
 ## Runtime
 RUNTIME_POLICY_TIER: <0 | 1 | 2>
