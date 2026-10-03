@@ -1951,34 +1951,6 @@ class TaskCheckpointRunTest < Minitest::Test
     STDOUT.write("protected recovery\n")
     exit 0
   RUBY
-<<<<<<< HEAD
-  NESTED_RECOVERY_UPSTREAM = <<~'RUBY'
-    state, observation_path, launches, release, ruby, cli, repo, worktree, task_id, child_task_id, child_id = ARGV
-    keys = %w[FABLE_RECOVERY_TASK_ID FABLE_RECOVERY_OLD_EXECUTION_ID
-              FABLE_RECOVERY_SUCCESSOR_ID FABLE_RECOVERY_CAPABILITY]
-    inherited = keys.to_h { |key| [key, ENV[key]] }
-    observation = { 'state_sha256' => Digest::SHA256.hexdigest(File.binread(state)),
-                    'inherited' => inherited }
-    File.write(observation_path, JSON.generate(observation))
-    File.open(launches, 'a') { |file| file.puts Process.pid }
-    unless release == '-'
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
-      until File.file?(release)
-        abort 'nested recovery barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-        sleep 0.01
-      end
-    end
-    command = [ruby, cli, '--run', '--repo', repo, '--worktree', worktree,
-               '--task-id', child_task_id, '--execution-id', child_id, '--',
-               ruby, '-e', 'abort "capability leaked" if ENV.key?("FABLE_RECOVERY_CAPABILITY"); STDOUT.write("nested child\\n")']
-    out, err, status = Open3.capture3(*command)
-    observation['child_exit'] = status.exitstatus
-    observation['child_stderr'] = err
-    File.write(observation_path, JSON.generate(observation))
-    STDOUT.write(out)
-    STDERR.write(err)
-    exit(status.exitstatus || 1)
-=======
   # A synthetic protected application that launches further protected runs.
   # Like a well-behaved application, it forwards the named inherited task-lock
   # descriptor unless a step models one that closes its descriptors.
@@ -2027,7 +1999,6 @@ class TaskCheckpointRunTest < Minitest::Test
     File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
     STDOUT.write("leaf #{label}\n")
     exit 0
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
   RUBY
 
   def setup
@@ -2127,15 +2098,6 @@ class TaskCheckpointRunTest < Minitest::Test
      @recovery_observation, @launches, @release]
   end
 
-<<<<<<< HEAD
-  def nested_recovery_upstream(child_task: TASK_ID, barrier: false)
-    [RbConfig.ruby, '-rjson', '-rdigest', '-ropen3', '-e', NESTED_RECOVERY_UPSTREAM,
-     @application_state, @recovery_observation, @launches, barrier ? @release : '-',
-     RbConfig.ruby, CLI, @repo, @worktree, TASK_ID, child_task, 'nested_child']
-  end
-
-=======
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
   def recovery_cli_args(identity, command = nil)
     command ||= recovery_upstream(identity)
     ['--recover-run', '--repo', @repo, '--worktree', @worktree,
@@ -2148,19 +2110,11 @@ class TaskCheckpointRunTest < Minitest::Test
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
   end
 
-<<<<<<< HEAD
-  def start_cli(args, cwd: @caller, pgroup: true, env: nil)
-    command = []
-    command << env if env
-    stdin, stdout, stderr, wait = Open3.popen3(*command, RbConfig.ruby, CLI, *args,
-                                                chdir: cwd, pgroup: pgroup)
-=======
   def start_cli(args, cwd: @caller, pgroup: true, env: nil, inherit_fds: [])
     spawn_env = env ? [env] : []
     spawn_opts = { chdir: cwd, pgroup: pgroup }
     inherit_fds.each { |fd| spawn_opts[fd] = fd }
     stdin, stdout, stderr, wait = Open3.popen3(*spawn_env, RbConfig.ruby, CLI, *args, spawn_opts)
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
     stdin.close
     readers = [stdout, stderr].map { |io| Thread.new { begin; io.read; ensure; io.close; end } }
     child = { wait: wait, readers: readers }
@@ -2530,108 +2484,6 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal recovery_upstream(old_id), DurableCommandCapture.load(successor.durable_capture_path).command
   end
 
-<<<<<<< HEAD
-  def test_recovery_successor_launches_same_lineage_nested_protected_child
-    old_id = 'nested_stale_fixture'
-    seed_stale_execution(old_id)
-    old_bytes = File.binread(record_path(old_id))
-    state_bytes = File.binread(@application_state)
-
-    result = run_cli(recovery_cli_args(old_id, nested_recovery_upstream))
-
-    assert_equal 0, result[2].exitstatus, result[1]
-    assert_equal "nested child\n", result[0]
-    assert_equal state_bytes, File.binread(@application_state)
-    assert_equal old_bytes, File.binread(record_path(old_id))
-    observation = JSON.parse(File.read(@recovery_observation))
-    assert_equal Digest::SHA256.hexdigest(state_bytes), observation.fetch('state_sha256')
-    assert_equal 0, observation.fetch('child_exit')
-    successor_id = successor_execution_id(old_id)
-    transition = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
-    assert_equal successor_id, transition.successor_execution_id
-    successor = ExecutionRecord.load(record_path(successor_id))
-    assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
-    assert_equal old_id, successor.recovery_old_execution_id
-    assert_equal ExecutionRecord.nested_capability_digest(TASK_ID, successor_id,
-                                                          observation.fetch('inherited').fetch('FABLE_RECOVERY_CAPABILITY')),
-                 successor.nested_capability_sha256
-    refute_includes File.binread(record_path(successor_id)),
-                    observation.fetch('inherited').fetch('FABLE_RECOVERY_CAPABILITY')
-    refute_includes File.binread(recovery_transition_path(old_id)),
-                    observation.fetch('inherited').fetch('FABLE_RECOVERY_CAPABILITY')
-    child = ExecutionRecord.load(record_path('nested_child'))
-    assert_equal ExecutionRecord::STATUS_COMPLETED, child.status
-    assert_equal successor_id, child.parent_execution_id
-    assert_equal old_id, child.recovery_old_execution_id
-    assert_equal "nested child\n", DurableCommandCapture.load(child.durable_capture_path).stdout
-  end
-
-  def test_independent_writer_is_rejected_during_nested_recovery
-    old_id = 'nested_competitor_fixture'
-    seed_stale_execution(old_id)
-    owner = start_cli(recovery_cli_args(old_id, nested_recovery_upstream(barrier: true)))
-    wait_until('recovered driver did not start') { File.file?(@recovery_observation) }
-
-    competitor = run_cli(cli_args('independent_writer'))
-    assert_equal 1, competitor[2].exitstatus
-    assert_includes competitor[1], ExecutionRecord::CLASSIFICATION_ACTIVE
-    refute File.exist?(record_path('independent_writer'))
-
-    File.write(@release, 'go')
-    assert_equal 0, finish_cli(owner)[2].exitstatus
-  end
-
-  def test_nested_capability_cannot_cross_task_identity
-    old_id = 'nested_wrong_task_fixture'
-    seed_stale_execution(old_id)
-    other_task = 'OTHER_TASK'
-
-    result = run_cli(recovery_cli_args(old_id, nested_recovery_upstream(child_task: other_task)))
-
-    assert_equal 1, result[2].exitstatus
-    assert_includes result[1], 'nested recovery task or execution identity does not match'
-    refute File.exist?(ExecutionRecord.default_path(@repo, other_task, 'nested_child'))
-  end
-
-  def test_copied_environment_cannot_spoof_recovery_ancestry
-    old_id = 'nested_spoof_fixture'
-    seed_stale_execution(old_id)
-    owner = start_cli(recovery_cli_args(old_id, nested_recovery_upstream(barrier: true)))
-    wait_until('recovered driver did not expose test capability') { File.file?(@recovery_observation) }
-    copied_env = JSON.parse(File.read(@recovery_observation)).fetch('inherited')
-
-    spoof = run_cli(cli_args('spoofed_writer'), env: copied_env)
-    assert_equal 1, spoof[2].exitstatus
-    assert_includes spoof[1], 'nested recovery owner capability or ancestry is invalid'
-    refute File.exist?(record_path('spoofed_writer'))
-
-    File.write(@release, 'go')
-    assert_equal 0, finish_cli(owner)[2].exitstatus
-  end
-
-  def test_partial_recovery_environment_fails_closed
-    result = run_cli(cli_args('partial_capability'),
-                     env: { 'FABLE_RECOVERY_TASK_ID' => TASK_ID })
-
-    assert_equal 1, result[2].exitstatus
-    assert_includes result[1], 'nested recovery capability is incomplete or malformed'
-    refute File.exist?(record_path('partial_capability'))
-  end
-
-  def test_nested_child_lease_blocks_new_top_level_writer
-    nested_lock = ExecutionRecord.acquire_nested_lock!(@repo, TASK_ID)
-    begin
-      result = run_cli(cli_args('writer_during_orphaned_child'))
-      assert_equal 1, result[2].exitstatus
-      assert_includes result[1], ExecutionRecord::CLASSIFICATION_ACTIVE
-      refute File.exist?(record_path('writer_during_orphaned_child'))
-    ensure
-      nested_lock.close
-    end
-  end
-
-=======
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
   def test_recover_run_refuses_live_stale_pid
     old_id = 'stale_fixture_live'
     pid = Process.spawn(RbConfig.ruby, '-e', 'sleep 5')
@@ -2848,8 +2700,6 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_empty launch_records
   end
 
-<<<<<<< HEAD
-=======
   def test_normal_run_cannot_bypass_unrecovered_stale_execution_with_new_id
     old_id = 'rotated_id_stale_fixture'
     new_id = 'rotated_id_bypass_fixture'
@@ -2900,7 +2750,6 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, launch_records.size, 'normal replay must reuse the completed explicit recovery successor'
   end
 
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
   def test_duplicate_recovery_replays_one_terminal_successor
     old_id = 'duplicate_recovery_fixture'
     seed_stale_execution(old_id)
@@ -2973,11 +2822,6 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal [record_path(old_id), record_path(successor_id)].sort, records.sort
   end
 
-<<<<<<< HEAD
-  def test_dead_started_successor_resumes_only_under_same_identity_and_checkpoint
-    old_id = 'dead_successor_fixture'
-    seed_stale_execution(old_id)
-=======
   def test_dead_started_recovery_successor_retry_preserves_nested_lineage_and_history
     old_id = 'dead_successor_fixture'
     seed_stale_execution(old_id)
@@ -2988,16 +2832,11 @@ class TaskCheckpointRunTest < Minitest::Test
                    result: nested_attempt)],
       release: @release
     )
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
     transition = ExecutionRecoveryTransition.reserve!(repo_root: @repo, task_id: TASK_ID,
                                                        old_execution_id: old_id,
                                                        application_state_path: @application_state,
                                                        worktree_path: @worktree,
-<<<<<<< HEAD
-                                                       command: recovery_upstream(old_id))
-=======
                                                        command: command)
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
     stale_successor = ExecutionRecord.acquire!(record_path(transition.successor_execution_id),
                                                task_id: TASK_ID,
                                                execution_id: transition.successor_execution_id,
@@ -3005,15 +2844,6 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_nil stale_successor.classification
     stale_successor_bytes = File.binread(record_path(transition.successor_execution_id))
 
-<<<<<<< HEAD
-    result = run_cli(recovery_cli_args(old_id))
-
-    assert_equal 0, result[2].exitstatus, result[1]
-    reread = ExecutionRecoveryTransition.load(recovery_transition_path(old_id))
-    assert_equal transition.successor_execution_id, reread.successor_execution_id
-    assert_equal [stale_successor_bytes], reread.successor_attempt_history.map { |entry| entry.fetch('record_json') }
-    assert_equal 1, launch_records.size
-=======
     recovery = start_cli(recovery_cli_args(old_id, command))
     wait_until('retried recovery application did not start') { launch_records.size == 1 }
     nested = nested_result(nested_attempt)
@@ -3037,7 +2867,6 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path(successor_id)).status
     assert_equal old_bytes, File.binread(record_path(old_id))
     assert_equal 2, launch_records.size
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
   end
 
   def test_run_unresolved_and_malformed_states_fail_closed

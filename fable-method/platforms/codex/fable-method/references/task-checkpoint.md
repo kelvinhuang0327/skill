@@ -369,6 +369,13 @@ and identities across sessions and models; never synthesize them from PID,
 timestamp, session, model, or current directory, including to bypass a stop.
 The original Packet still controls authorization and allowed output paths.
 
+The upstream spawn closes all unlisted descriptors and explicitly allowlists
+the task-lock descriptor at child FD 10. The protected parent may hold that
+same lock at another descriptor number. This keeps FD 9 closed for application
+runners that reserve it, while the child still holds the task lock if the
+wrapper dies. `FABLE_PROTECTED_RUN_LOCK_FD` names the child descriptor and is
+the only extra descriptor passed by this boundary.
+
 The foreground CLI owns the execution record with its own PID while it
 supervises the upstream process. Its only new-execution route is:
 
@@ -411,12 +418,6 @@ Ruby scripts. The placeholder above means that selected launcher, which
 defaults to the confirmed deployed checkout; an isolated task worktree is
 never the permanent canonical runtime path.
 
-<<<<<<< HEAD
-### Explicit stale recovery
-
-`--run` never recovers a stale record. A separate, explicitly authorized
-recovery may use:
-=======
 ### Nested protected runs
 
 A protected application may launch another `--run` for the same task ID and
@@ -514,7 +515,6 @@ path.
 changing IDs cannot bypass the stale stop. After an explicit recovery chain
 reaches a completed successor, the successor remains available through normal
 durable-capture replay. A separate, explicitly authorized recovery may use:
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 
 ```text
 ruby task_checkpoint.rb \
@@ -560,10 +560,6 @@ closed. The task-scoped lock serializes this transition and successor claim
 with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
-<<<<<<< HEAD
-
-=======
->>>>>>> 0fd7c60e46f750f07575fae3a75e271a81b94c3f
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
