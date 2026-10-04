@@ -454,5 +454,45 @@ class CliTests(unittest.TestCase):
             self.assertEqual((code, result["status"]), (2, "BLOCKED"))
 
 
+class PinnedReadTests(unittest.TestCase):
+    def test_hash_and_content_use_one_read_for_pack_and_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            world = World(tmp)
+            world.save()
+            read_bytes = Path.read_bytes
+            counts = {}
+            # the profile stores resolved paths (on macOS the default temp directory sits behind a /var -> /private/var symlink),
+            # so the files are matched by their resolved path; comparing the unresolved test paths only passed under a symlink-free TMPDIR
+            targets = {world.pack.resolve(), world.bank.resolve()}
+            def swap_after_read(path):
+                content = read_bytes(path)
+                if Path(path).resolve() in targets:
+                    key = str(Path(path).resolve())
+                    counts[key] = counts.get(key, 0) + 1
+                    Path(path).write_bytes(b"replacement which is neither pinned nor JSON")
+                return content
+            with mock.patch.object(Path, "read_bytes", swap_after_read):
+                result = ep.check_profile(world.path, env={})
+            self.assertEqual(result["status"], "PASS", result)
+            self.assertEqual(counts, {str(world.pack.resolve()): 1, str(world.bank.resolve()): 1})
+
+    def test_read_pinned_returns_the_same_bytes_it_hashed_and_rejects_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pack.md"
+            original = b"pinned\r\nbytes\n"
+            path.write_bytes(original)
+            pin = ep.pin(path)
+            read_bytes = Path.read_bytes
+            def swap_after_read(current):
+                content = read_bytes(current)
+                current.write_bytes(b"replacement")
+                return content
+            with mock.patch.object(Path, "read_bytes", swap_after_read):
+                result = ep.read_pinned(pin)
+            self.assertEqual(result, original)
+            with self.assertRaisesRegex(ValueError, "pinned content changed"):
+                ep.read_pinned(pin)
+
+
 if __name__ == "__main__":
     unittest.main()

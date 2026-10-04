@@ -13,10 +13,12 @@ import fcntl
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -247,6 +249,7 @@ class ProbeRunTests(ProbeCase):
             received.append(response)
             return response
 
+        tee.is_simulated = True
         self.run_probe(transport=tee)
         records = [r for sid in "ABCD" for r in self.ledger()["steps"][sid]["requests"]]
         self.assertEqual(len(records), len(received))
@@ -582,6 +585,7 @@ class AnalysisGuardTests(ProbeCase):
             response = sim(path, body)
             return modify(copy.deepcopy(response), body) if path == "responses" else response
 
+        transport.is_simulated = True
         return transport
 
     def report(self, modify, name="lie"):
@@ -714,6 +718,21 @@ class ClientStatelessnessTests(ProbeCase):
             self.assertIs(report["candidate_interface"]["stateless_isolation_verified"], False, key)
         clean, _, _ = self.run_probe("clean-again")
         self.assertIs(clean["candidate_interface"]["stateless_isolation_verified"], True)
+
+
+class SimulationBoundaryTests(ProbeCase):
+    def test_unmarked_transport_and_live_post_are_blocked_before_any_probe_write(self):
+        for index, transport in enumerate((lambda path, body: {}, api.ResponsesAdapter(self.instructions)._post)):
+            out = self.work / ("unmarked-" + str(index))
+            probe = pb.Probe(out, self.registration, mode="SIMULATION", instructions=self.instructions,
+                             public=self.public, transport=transport)
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-NOT-A-REAL-KEY"}):
+                self.assertBlocks("SIMULATION_TRANSPORT_NOT_SIMULATED", probe.run)
+            self.assertFalse(out.exists())
+            self.assertEqual(urllib.request.urlopen.call_count, 0)
+            self.assertEqual(socket.socket.connect.call_count, 0)
+            print("REPAIR_OBSERVATION " + json.dumps({"case": "K", "caller": "Probe", "transport": index,
+                  "new_requests": 0, "network_calls": 0, "writes": 0, "outcome": "BLOCKED"}))
 
 
 if __name__ == "__main__":

@@ -52,6 +52,12 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
 8. 收據模式不符、狀態未知、成本或狀態讀不出來、輸出與 adapter 說法不一致，都算「付了錢但不可用」，停止執行。
 9. 帳本在寫入「已停止」之前被中斷，續跑時以 `LEDGER_CONFLICT` 結束，不會留下一個永遠無法關閉的殭屍執行。
 10. 核准檔綁在設定檔（或探針的註冊檔）的雜湊上，而它們都釘住了 runner 的五個程式檔：核准涵蓋的是「會跑的程式碼」，不只是「會讀的資料」。
+11. 所有讀取 run 狀態的入口先經過 `inspect_run`：manifest、state、ledger 與日誌須可解析、形狀有效且相互一致。
+    日誌領先帳本就拒絕；帳本領先日誌可復原，`RESUME.reconciliation.ledger_ahead` 明示缺少的日誌事實。
+    帳本不存在只在持久空日誌且 state 為 RUNNING 的第一次存檔前允許初始化。缺失、損壞或尾端撕裂的日誌一律拒絕。
+12. 被拒絕的 resume/replay/check 不寫任何檔案，包含鎖的 PID。`_lock` 只 flock；通過所有檢查才寫 PID。
+13. SIMULATION transport 必須明確標記 `is_simulated = True`；Runner 與 Probe 在任何檔案寫入前檢查。
+    指令、題庫 manifest 與 fixture 都從同一次讀取的位元組雜湊並消費，送出的指令另核對設定 pin。
 
 ## 指令
 
@@ -62,7 +68,7 @@ python3 execution_profile.py build --protocol P --receipt R --bank-manifest M --
 python3 execution_profile.py check PROFILE.json [--mode SIMULATION|LIVE] [--deep]
 
 # 執行器
-python3 exploration_runner.py check  --profile PROFILE.json [--mode LIVE]
+python3 exploration_runner.py check  --profile PROFILE.json [--mode LIVE] [--out DIR]
 python3 exploration_runner.py run    --profile PROFILE.json --out DIR --mode SIMULATION [--allow-formal-simulation]
 python3 exploration_runner.py resume --profile PROFILE.json --out DIR --mode SIMULATION
 python3 exploration_runner.py replay --out DIR
@@ -87,7 +93,7 @@ LIVE 的守門條件由命令列入口強制執行：Owner 簽署並綁定到這
 ```bash
 python3 -B -m unittest -q test_execution_profile test_exploration_runner test_probe_2b
 python3 -B mutation_runner.py --check-patterns     # 每個變異體恰好命中一處，且指定的測試真的存在
-python3 -B mutation_runner.py                      # 全部變異體
+python3 -B mutation_runner.py --workers 2           # 全部變異體；可用 --results-json 保留每個子程序完整輸出
 ```
 
 - 三個測試模組都不開任何 socket、不呼叫任何模型；崩潰測試用真的子行程與真的 SIGKILL。

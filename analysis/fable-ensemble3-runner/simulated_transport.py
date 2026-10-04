@@ -37,6 +37,8 @@ class SimulatedResponses:
             "fault": name}.  A rule matches when every given key matches; the first matching rule fires.
     """
 
+    is_simulated = True
+
     FAULTS = ("timeout", "socket_timeout", "conn_error", "url_error", "http_400", "http_401", "http_429", "http_500", "http_503",
               "wrong_model", "wrong_tier", "no_usage", "huge_usage", "incomplete_cap", "incomplete_other", "bad_json",
               "two_messages", "tool_call", "count_over", "cap_overshoot", "hang", "crash")

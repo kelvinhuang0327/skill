@@ -5,18 +5,20 @@
 
 Reuses the verified R2 runner (fable-ensemble3-r1/mutation_check.py): a mutant counts only if the mutated source compiles
 and imports and the named test fails an assertion inside the test module; a crash, a timeout or a failure raised by the
-subject itself does not count.  The profile tests pin the sealed files through git, so every mutant lives in a shared clone
-of this repository at the sealed commit, with only the runner directory mutated.  The original tree is never touched.
+subject itself does not count. The profile tests read sealed Git objects through a git-dir pointer in a plain source copy;
+no clone, checkout or index mutation is performed. The original tree is never touched.
 """
 from __future__ import annotations
 
 import argparse
 import ast
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -37,9 +39,13 @@ from mutation_cases import CASES  # noqa: E402
 
 def build_base(tmp: Path) -> Path:
     base = tmp / "base"
-    subprocess.run(["git", "clone", "--shared", "--no-checkout", str(REPO), str(base)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(base), "checkout", SEALED, "--", "analysis/fable-ensemble3-r1", "analysis/fable-ensemble3-lab",
-                    "analysis/fable-ensemble3-bank"], check=True, capture_output=True)
+    # A plain copy plus read-only object lookup: no clone / checkout / index writes.
+    git_dir = subprocess.run(["git", "--no-optional-locks", "-C", str(REPO), "rev-parse", "--absolute-git-dir"],
+                             check=True, capture_output=True, text=True).stdout.strip()
+    base.mkdir()
+    (base / ".git").write_text(f"gitdir: {git_dir}\n")
+    for name in ("fable-ensemble3-r1", "fable-ensemble3-lab", "fable-ensemble3-bank"):
+        shutil.copytree(ANALYSIS / name, base / "analysis" / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copytree(ROOT, base / "analysis" / "fable-ensemble3-runner", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     return base
 
@@ -96,7 +102,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check-patterns", action="store_true", help="only verify that every pattern matches the source exactly once")
     parser.add_argument("--only", default="")
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--results-json", help="retain exact subprocess output and assertion classifications here")
     args = parser.parse_args()
     cases = [case for case in CASES if args.only in case[0]]
     if args.check_patterns:
@@ -110,15 +117,31 @@ def main() -> int:
                 print(f"PATCH_MISMATCH {name}: {problem}")
         print(f"{len(cases) - bad}/{len(cases)} patterns match exactly once and name an existing test")
         return 0 if not bad else 1
+    captures = []
+    run = subprocess.run
+    def capture(*a, **kw):
+        started = time.time()
+        result = run(*a, **kw)
+        if kw.get("capture_output"):
+            captures.append({"argv": a[0], "cwd": str(kw.get("cwd", "")), "start_epoch": started, "end_epoch": time.time(),
+                             "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+        return result
+    if args.results_json:
+        subprocess.run = capture
     with tempfile.TemporaryDirectory(prefix="ensemble3-runner-mutants-") as tmp:
         tmp = Path(tmp)
         base = build_base(tmp)
         baseline = mc._run_tests(base / "analysis" / "fable-ensemble3-runner", MODULES, 900)
+        if args.results_json:
+            Path(args.results_json).write_text(json.dumps({"baseline": baseline.__dict__, "captures": captures}, indent=2) + "\n")
         if baseline.returncode or baseline.failures or baseline.load_error:
             raise SystemExit(f"baseline red: {baseline.failures}")
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             results = list(pool.map(lambda pair: run_case(base, tmp, pair[0], pair[1]), enumerate(cases)))
     killed = sum(r["status"] == "KILLED" for r in results)
+    if args.results_json:
+        subprocess.run = run
+        Path(args.results_json).write_text(json.dumps({"results": results, "captures": captures}, indent=2) + "\n")
     for r in results:
         print(f"{r['status']:<14} {r['name']}" + ("" if r["status"] == "KILLED" else f"   {r.get('detail') or r.get('observed_failures')}"))
     print(f"\n{killed}/{len(results)} killed")

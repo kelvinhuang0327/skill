@@ -8,11 +8,14 @@ Run: python3 -B -m unittest -q test_exploration_runner
 from __future__ import annotations
 
 import contextlib
+import copy
 import fcntl
+import hashlib
 import io
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -101,6 +104,14 @@ class RunnerCase(unittest.TestCase):
             self.fail(f"expected {exception.__name__} matching {regex!r}, got {type(other).__name__}: {other}")
         else:
             self.fail(f"expected {exception.__name__} matching {regex!r}: nothing was raised")
+
+    def completes(self, call):
+        """`call` must return.  A raised error is a failed assertion here, not a crash: the run-state gate turns several defects
+        into a loud RunBlocked at the end of a run, and the mutation rule counts an assertion, never an ERROR."""
+        try:
+            return call()
+        except Exception as exc:
+            self.fail(f"expected the call to return, got {type(exc).__name__}: {exc}")
 
 
 class CleanRunTests(RunnerCase):
@@ -292,6 +303,23 @@ class PlanningTests(RunnerCase):
         statuses = {tuple(r["status"] for r in rows) for rows in json.loads((self.root / "run" / "runs.json").read_text()).values()}
         self.assertEqual(statuses, {("OK", "OK", "NOT_RUN", "NOT_RUN", "NOT_RUN")})
 
+    def test_an_unreservable_round_ends_the_run_with_two_whole_rounds_and_no_gap_in_the_books(self):
+        # the same defect as above seen through the run-state gate: a skipped round leaves a gap, which the gate refuses at the
+        # end of the run, so the old test errors; this one asserts on it
+        runner, sim = self.make("gap")
+        original = bl.Ledger.reserve_round
+
+        def refuse_third(self_, round_index, item_ids):
+            if round_index == 2:
+                raise bl.BudgetStop("whole round including retries cannot be reserved")
+            return original(self_, round_index, item_ids)
+
+        with mock.patch.object(bl.Ledger, "reserve_round", refuse_third):
+            result = self.completes(runner.start)
+        self.assertEqual((result["state"], result["report"]["rounds_reserved"]), ("COMPLETE", 2))
+        self.assertEqual(len(sim.requests), 32)
+        self.assertEqual(sorted(self.ledger("gap")["slots"]), sorted(f"{item}:{n}" for item in runner.order for n in (0, 1)))
+
 
 class PureFunctionTests(unittest.TestCase):
     def test_raw_upper_cost_matches_the_adapters_own_upper_bound(self):
@@ -381,6 +409,15 @@ class FaultTests(RunnerCase):
         self.assertEqual([(r["path"], r["error"]["type"]) for r in errors], [("responses", "TimeoutError")])  # the failure is on record
         rows = [r["phase"] for r in self.attempts() if r.get("slot") == f"{self.ITEM}:0"]
         self.assertNotIn("RESPONSE", rows[rows.index("ERROR"):])  # and nothing pretends a response arrived
+
+    def test_a_failed_request_leaves_its_error_record_and_the_run_still_closes_with_a_valid_log(self):
+        # a record under any other phase name is refused by the run-state gate when the run closes; assert on that, not on a crash
+        result, runner, sim = self.completes(lambda: self.run_it("errrec", faults=[self.rule("timeout")]))
+        self.assertEqual(result["state"], "COMPLETE")
+        errors = [r for r in self.attempts("errrec") if r["phase"] == "ERROR" and r["slot"] == f"{self.ITEM}:0"]
+        self.assertEqual([(r["path"], r["error"]["type"]) for r in errors], [("responses", "TimeoutError")])
+        phases = {r["phase"] for r in self.attempts("errrec")}
+        self.assertEqual(phases - {"ROUND_RESERVED", "START", "REQUEST", "RESPONSE", "ERROR", "SETTLED", "RESUME"}, set())
 
     def test_other_uncertain_failures_after_the_generation_request_end_as_incomplete_without_a_resend(self):
         for fault in ("http_500", "conn_error", "url_error"):
@@ -536,12 +573,14 @@ class FaultTests(RunnerCase):
         with mock.patch.object(xr.AppendLog, "append", failing):
             result = runner.start()
         slot = self.slot(self.ITEM, name="persist-response")
+        self.assertIsNotNone(result["halt"])
         self.assertEqual((result["halt"]["reason"], slot["status"]), ("PERSISTENCE", "INVALID_OUTPUT"))
         self.assertEqual(slot["receipts"][0]["cost"], str(OK_COST))
         # the request could not be written, so it was never sent
         runner, sim = self.make("persist-request")
         with mock.patch.object(xr.AppendLog, "append", lambda log, record: failing(log, record, "REQUEST")):
             result = runner.start()
+        self.assertIsNotNone(result["halt"])
         self.assertEqual(result["halt"]["reason"], "PERSISTENCE")
         self.assertEqual(self.generations(sim, self.ITEM), [])
         self.assertEqual(self.slot(self.ITEM, name="persist-request")["status"], "INCOMPLETE")
@@ -658,6 +697,16 @@ class CrashAndResumeTests(RunnerCase):
             self.assertBlocks("RESUME_IDENTITY_MISMATCH:.*runner_sources", other.resume)
         self.assertEqual(other_sim.requests, [])
         self.assertEqual(self.slot(self.ITEM, name="recoded")["state"], "RUNNING")
+
+    def test_resume_refuses_when_the_runner_code_changed_since_the_run_began(self):
+        # the same guard as the last part of the test above, on its own: a manifest without a usable code pin is refused by the
+        # run-state gate before the identity comparison, so the combined test errors for that mutant; this one asserts on it
+        self.interrupt("recoded-alone")
+        with mock.patch.object(ep, "runner_sources", lambda: {"exploration_runner.py": "0" * 64}):
+            other, other_sim = self.make("recoded-alone", log=False)
+            self.assertBlocks("RESUME_IDENTITY_MISMATCH:.*runner_sources", other.resume)
+        self.assertEqual(other_sim.requests, [])
+        self.assertEqual(self.slot(self.ITEM, name="recoded-alone")["state"], "RUNNING")
 
     def test_start_never_relaunches_an_existing_run(self):
         self.run_it("used")
@@ -822,6 +871,25 @@ class ModeAndGateTests(RunnerCase):
             self.assertEqual((result["halt"]["reason"], slot["status"]), (reason, "INVALID_OUTPUT"), reason)
             self.assertEqual(slot["receipts"], [{"status": "INVALID_OUTPUT", "cost": str(OK_COST), "cost_known": True}], reason)
 
+    def test_a_receipt_from_the_wrong_mode_or_one_the_checker_rejects_is_halted_and_never_booked_as_a_result(self):
+        # accepting either kind of receipt books an OK slot whose verified run is not OK; the run-state gate refuses that when the
+        # run closes, so the old test errors; this one asserts on it
+        original = api.ResponsesAdapter.invoke
+        cases = {"RECEIPT_MODE_MISMATCH": lambda r: {**r, "mode": "LIVE"}, "INCONSISTENT_RECEIPT": lambda r: {**r, "output": {}}}
+        for reason, mutate in cases.items():
+            def lying(adapter, item, mutate=mutate):
+                receipt = original(adapter, item)
+                return mutate(receipt) if item["item_id"] == self.ITEM else receipt
+
+            name = "booked-" + reason.lower()
+            runner, _ = self.make(name)
+            with mock.patch.object(api.ResponsesAdapter, "invoke", lying):
+                result = self.completes(runner.start)
+            slot = self.slot(self.ITEM, name=name)
+            self.assertEqual(result["state"], "HALTED", reason)
+            self.assertEqual((result["halt"]["reason"], slot["status"]), (reason, "INVALID_OUTPUT"), reason)
+            self.assertEqual(slot["verified_run"]["status"], "INVALID_OUTPUT", reason)
+
     def test_a_receipt_without_a_readable_status_or_cost_halts_and_is_charged_the_cap(self):
         original = api.ResponsesAdapter.invoke
         without = lambda key: (lambda r: {k: v for k, v in r.items() if k != key})
@@ -979,6 +1047,406 @@ class RealArtifactRunnerTests(unittest.TestCase):
         self.assertEqual(self.cli(["check", "--profile", str(self.profile)])[0], 0)
         code, result = self.cli(["check", "--profile", str(self.profile), "--mode", "LIVE"])
         self.assertEqual((code, result["status"]), (2, "BLOCKED"))
+
+
+def directory_digest(out):
+    entries = [(str(p.relative_to(out)), hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else "DIRECTORY")
+               for p in sorted(out.rglob("*"))] if out.exists() else []
+    return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+
+
+class RepairIntegrityTests(RunnerCase):
+    """R1 A-M acceptance; observations include the entire directory and server counts."""
+
+    def note(self, case, **result):
+        print("REPAIR_OBSERVATION " + json.dumps({"case": case, "test": self._testMethodName, **result}, sort_keys=True))
+
+    def interrupted(self, name="run"):
+        runner, sim = self.make(name, log=False)
+        victim = runner.order[3]
+        def dies(path, body):
+            response = sim(path, body)
+            if path == "responses" and json.loads(body["input"])["item_id"] == victim:
+                raise KeyboardInterrupt("request already reached the simulated server")
+            return response
+        dies.is_simulated = True
+        runner.transport = dies
+        with self.assertRaises(KeyboardInterrupt):
+            runner.start()
+        return runner, sim
+
+    def cli(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = xr.main(argv)
+        return code, json.loads(output.getvalue())
+
+    def deny_all(self, case, reason, name="run"):
+        out = self.root / name
+        runner, sim = self.make(name, log=False)
+        entrances = {
+            "inspect_run": lambda: xr.inspect_run(out), "Runner.resume": runner.resume,
+            "replay_run": lambda: xr.replay_run(out), "write_ledger": runner._write_accounting,
+            "report_finalize": lambda: runner._finalize(None),
+        }
+        for entrance, call in entrances.items():
+            before = directory_digest(out)
+            self.assertBlocks(reason, call)
+            after = directory_digest(out)
+            self.assertEqual(after, before, entrance)
+            self.assertEqual(sim.requests, [], entrance)
+            self.note(case, entrance=entrance, before_sha256=before, after_sha256=after, new_requests=0, outcome="BLOCKED")
+        for command in ("resume", "replay", "check"):
+            argv = [command, "--out", str(out)]
+            if command != "replay":
+                argv += ["--profile", str(self.root / "unused-profile.json")]
+            if command == "resume":
+                argv += ["--mode", "SIMULATION"]
+            before = directory_digest(out)
+            try:
+                code, result = self.cli(argv)
+            except Exception as exc:  # a raw error instead of a BLOCKED answer is a failed assertion, not a crash
+                self.fail(f"CLI {command}: expected a BLOCKED answer, got {type(exc).__name__}: {exc}")
+            self.assertEqual((code, result["state"], result["generation_calls"]), (2, "BLOCKED", 0))
+            self.assertRegex(";".join(result["reasons"]), reason)
+            self.assertTrue(all("," not in r for r in result["reasons"]))
+            self.assertEqual(directory_digest(out), before)
+            self.note(case, entrance="CLI " + command, before_sha256=before, after_sha256=directory_digest(out),
+                      new_requests=0, outcome="BLOCKED", reasons=result["reasons"])
+
+    def child(self, command, victim="none"):
+        return subprocess.run([sys.executable, "-B", str(HERE / "crash_driver.py"), str(self.root), command, victim],
+                              capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "TMPDIR": str(self.root),
+                              "PYTHONDONTWRITEBYTECODE": "1"}, timeout=180)
+
+    def server(self):
+        return [json.loads(line) for line in (self.root / "server.jsonl").read_text().splitlines()]
+
+    def killed(self, command="start"):
+        runner, _ = self.make(log=False)
+        victim = runner.order[3]
+        child = self.child(command, victim)
+        self.assertEqual(child.returncode, -9, child.stderr)
+        self.assertEqual(len([r for r in self.server() if r["path"] == "responses"]), 4)
+        return victim
+
+    def test_A_sigkill_then_missing_ledger_is_blocked_without_writes_or_resends(self):
+        self.killed()
+        (self.root / "run/ledger.json").unlink()
+        server_before = (self.root / "server.jsonl").read_bytes()
+        before = directory_digest(self.root / "run")
+        child = self.child("resume")
+        self.assertEqual(child.returncode, 2, child.stderr)
+        self.assertRegex(json.loads(child.stdout)["reason"], "LEDGER_MISSING")
+        self.assertEqual(directory_digest(self.root / "run"), before)
+        self.assertEqual((self.root / "server.jsonl").read_bytes(), server_before)
+        self.note("A", kill_returncode=-9, server_generations_before=4, server_generations_after=4, new_requests=0,
+                  before_sha256=before, after_sha256=directory_digest(self.root / "run"), outcome="BLOCKED")
+        self.deny_all("A", "LEDGER_MISSING")
+
+    def test_B_sigkill_then_older_snapshot_is_blocked_for_resume_and_replay(self):
+        self.killed()
+        (self.root / "run/ledger.json").write_bytes((self.root / "ledger-snapshot.json").read_bytes())
+        before = directory_digest(self.root / "run")
+        server_before = (self.root / "server.jsonl").read_bytes()
+        child = self.child("resume")
+        self.assertEqual(child.returncode, 2, child.stderr)
+        self.assertRegex(json.loads(child.stdout)["reason"], "LEDGER_BEHIND_ATTEMPT")
+        self.assertEqual(directory_digest(self.root / "run"), before)
+        self.assertEqual((self.root / "server.jsonl").read_bytes(), server_before)
+        self.note("B", kill_returncode=-9, server_generations_before=4, server_generations_after=4, new_requests=0,
+                  before_sha256=before, after_sha256=directory_digest(self.root / "run"), outcome="BLOCKED")
+        self.deny_all("B", "LEDGER_BEHIND_ATTEMPT")
+
+    def test_C_invalid_ledger_bytes_and_shapes_are_named_and_every_entrance_is_read_only(self):
+        self.interrupted()
+        path = self.root / "run/ledger.json"
+        original = path.read_bytes()
+        state = json.loads(original)
+        variants = [b"", b"garbage", b"{}", b"[]", b'{"slots": []}',
+                    xr.canonical({**state, "slots": []}).encode(), xr.canonical({**state, "spent_upper": "NaN"}).encode(),
+                    xr.canonical({**state, "spent_upper": "0"}).encode(), xr.canonical({**state, "events": {}}).encode(),
+                    xr.canonical({**state, "overrun": True}).encode()]
+        failures = []  # collected, then asserted once: a failure inside subTest is not seen by the mutation engine's classifier
+        for index, content in enumerate(variants):
+            path.write_bytes(content)
+            try:
+                self.deny_all("C", "LEDGER")
+            except AssertionError as exc:
+                failures.append((index, str(exc)[:300]))
+        path.write_bytes(original)
+        self.assertEqual(failures, [])
+
+    def test_D_missing_unparseable_and_malformed_manifest_or_state_are_blocked(self):
+        self.interrupted()
+        failures = []  # collected, then asserted once: a failure inside subTest is not seen by the mutation engine's classifier
+        for filename in ("run_manifest.json", "run_state.json"):
+            path = self.root / "run" / filename
+            original = path.read_bytes()
+            for content in (None, b"garbage", b"{}", b"[]"):
+                if content is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(content)
+                try:
+                    self.deny_all("D", "NO_RUN_TO_RESUME|RUN_MANIFEST|RUN_STATE")
+                except AssertionError as exc:
+                    failures.append((filename, content, str(exc)[:300]))
+                finally:
+                    path.write_bytes(original)
+        self.assertEqual(failures, [])
+
+    def test_E_missing_mid_corruption_torn_tail_and_bad_log_shapes_never_get_certified(self):
+        self.interrupted()
+        path = self.root / "run/attempts.jsonl"
+        original = path.read_bytes()
+        lines = original.splitlines(keepends=True)
+        variants = [None, b"".join(lines[:2] + [b"broken\n"] + lines[3:]), original + b'{"phase":',
+                    original + b"{}\n", original + b"[]\n", original + b"\n"]
+        failures = []  # collected, then asserted once: a failure inside subTest is not seen by the mutation engine's classifier
+        for index, content in enumerate(variants):
+            if content is None:
+                path.unlink()
+            else:
+                path.write_bytes(content)
+            try:
+                self.deny_all("E", "ATTEMPTS|LEDGER_OR_ATTEMPTS")
+            except AssertionError as exc:
+                failures.append((index, str(exc)[:300]))
+            finally:
+                path.write_bytes(original)
+        self.assertEqual(failures, [])
+
+    def test_F_each_ledger_before_log_window_recovers_without_repeating_a_started_call(self):
+        for phase in ("START", "SETTLED", "ROUND_RESERVED"):
+            name = "window-" + phase
+            runner, sim = self.make(name, log=False)
+            append, fired = xr.AppendLog.append, []
+            def crash(log, record):
+                if record["phase"] == phase and not fired:
+                    fired.append(True)
+                    raise KeyboardInterrupt("crash between durable ledger and log")
+                return append(log, record)
+            with mock.patch.object(xr.AppendLog, "append", crash), self.assertRaises(KeyboardInterrupt):
+                runner.start()
+            before = directory_digest(runner.out_dir)
+            inspection = xr.inspect_run(runner.out_dir)
+            self.assertTrue(inspection["reconciliation"]["ledger_ahead"])
+            started = {(key, n) for key, s in inspection["ledger"]["slots"].items() for n in range(1, s["attempts"] + 1)}
+            resumed, server2 = self.make(name, log=False)
+            result = resumed.resume()
+            self.assertEqual(result["state"], "COMPLETE")
+            for key, n in started:
+                self.assertEqual(self.ledger(name)["slots"][key]["attempts"], n)
+                self.assertEqual(len(self.generations(server2, key.rsplit(":", 1)[0])), 4)
+            all_gens = [r for r in sim.requests + server2.requests if r["path"] == "responses"]
+            self.assertEqual(len(all_gens), 39 if phase == "START" else 40)
+            logged = sum((CAP if r["cost_upper_usd"] is None else Decimal(r["cost_upper_usd"]))
+                         for r in self.attempts(name) if r["phase"] == "SETTLED")
+            self.assertGreaterEqual(Decimal(self.ledger(name)["spent_upper"]), logged)
+            resume_record = [r for r in self.attempts(name) if r["phase"] == "RESUME"][-1]
+            self.assertEqual(resume_record["reconciliation"], inspection["reconciliation"])
+            self.note("F", window=phase, before_sha256=before, after_sha256=directory_digest(runner.out_dir),
+                      server_generations=len(all_gens), spent_upper=self.ledger(name)["spent_upper"],
+                      logged_spent=str(logged), outcome="COMPLETE", reconciliation=resume_record["reconciliation"])
+
+    def test_G_sigkill_after_durable_overrun_response_charges_actual_cost_and_halts(self):
+        victim = self.killed("start-overrun")
+        before = directory_digest(self.root / "run")
+        server_before = (self.root / "server.jsonl").read_bytes()
+        result = self.child("resume")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = json.loads(result.stdout)
+        self.assertIsNotNone(result["halt"])
+        self.assertEqual((result["state"], result["halt"]["reason"]), ("HALTED", "ATTEMPT_CAP_OVERRUN"))
+        ledger = self.ledger()
+        self.assertEqual(Decimal(ledger["spent_upper"]), Decimal("1.001368"))
+        self.assertIs(ledger["overrun"], True)
+        self.assertEqual(Decimal(ledger["slots"][f"{victim}:0"]["receipts"][0]["cost"]), Decimal("1.00018"))
+        self.assertEqual((self.root / "server.jsonl").read_bytes(), server_before)
+        self.note("G", kill_returncode=-9, before_sha256=before, after_sha256=directory_digest(self.root / "run"),
+                  server_generations_before=4, server_generations_after=4, new_requests=0,
+                  spent_upper=ledger["spent_upper"], outcome="HALTED ATTEMPT_CAP_OVERRUN")
+
+    def test_H_instruction_swap_after_check_is_blocked_before_send(self):
+        import test_execution_profile as tp
+        directory = self.root / "profile-input"
+        directory.mkdir()
+        world = tp.World(directory)
+        profile = world.save()
+        check = ep.check_profile
+        def replace_after_check(*args, **kwargs):
+            result = check(*args, **kwargs)
+            world.pack.write_text("replacement instructions")
+            return result
+        out = self.root / "race"
+        before = directory_digest(out)
+        with mock.patch.object(ep, "check_profile", replace_after_check):
+            try:
+                code, result = self.cli(["run", "--profile", str(profile), "--out", str(out), "--mode", "SIMULATION",
+                                        "--allow-formal-simulation"])
+            except Exception as exc:
+                self.fail(f"expected a named block before any send: {type(exc).__name__}: {exc}")
+        self.assertEqual((code, result["state"], result["generation_calls"]), (2, "BLOCKED", 0))
+        self.assertIn("INSTRUCTION_HASH_MISMATCH_OR_UNREADABLE", result["reasons"])
+        self.assertFalse(out.exists())
+        self.note("H", new_requests=0, before_sha256=before, after_sha256=directory_digest(out), outcome="BLOCKED")
+
+    def test_H_runner_checks_the_profile_pin_and_actual_outgoing_instructions(self):
+        profile = self.root / "pin-profile.json"
+        profile.write_text(xr.canonical({"instruction": {"sha256": xr.sha256_text("pinned")},
+                                       "bank": {"manifest": ep.pin(self.manifest)}}))
+        runner, sim = self.make("pin", log=False)
+        runner = xr.Runner(runner.out_dir, mode="SIMULATION", bank_manifest=self.manifest, instructions="wrong",
+                           budget="50", attempt_cap=CAP, transport=sim, profile=profile)
+        self.assertBlocks("INSTRUCTIONS_DO_NOT_MATCH_PROFILE", runner.start)
+        self.assertEqual(sim.requests, [])
+        self.assertFalse(runner.out_dir.exists())
+        log = xr.AppendLog(self.root / "unused-log.jsonl")
+        recorder = xr.Recorder(sim, log, xr.sha256_text("pinned"))
+        self.assertBlocks("SENT_INSTRUCTIONS_HASH_MISMATCH", lambda: recorder("responses", {"instructions": "wrong"}))
+        self.assertFalse(log.path.exists())
+        self.assertEqual(sim.requests, [])
+
+    def test_I_complete_or_identity_or_lock_or_wiring_refusals_preserve_every_byte(self):
+        self.run_it()
+        out = self.root / "run"
+        before = directory_digest(out)
+        runner, sim = self.make(log=False)
+        self.assertBlocks("RUN_IS_COMPLETE", runner.resume)
+        self.assertEqual(directory_digest(out), before)
+        self.assertEqual(sim.requests, [])
+        self.note("I", entrance="Runner.resume COMPLETE", new_requests=0, before_sha256=before,
+                  after_sha256=directory_digest(out), outcome="BLOCKED RUN_IS_COMPLETE")
+        self.interrupted("open")
+        out = self.root / "open"
+        before = directory_digest(out)
+        for kwargs, reason in (({"instructions": "different"}, "RESUME_IDENTITY_MISMATCH"), ({}, "SIMULATION_NEEDS")):
+            runner, sim = self.make("open", log=False, **kwargs)
+            if not kwargs:
+                runner.transport = None
+            self.assertBlocks(reason, runner.resume)
+            self.assertEqual(directory_digest(out), before)
+            self.assertEqual(sim.requests, [])
+        descriptor = os.open(out / "run.lock", os.O_RDWR)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            runner, sim = self.make("open", log=False)
+            self.assertBlocks("ANOTHER_RUNNER_HOLDS", runner.resume)
+            self.assertEqual(directory_digest(out), before)
+            self.assertEqual(sim.requests, [])
+        finally:
+            os.close(descriptor)
+        self.note("I", entrance="identity/wiring/lock", new_requests=0, before_sha256=before,
+                  after_sha256=directory_digest(out), outcome="BLOCKED")
+
+    def test_J_both_help_entries_without_B_leave_no_bytecode_in_external_copy(self):
+        clone = self.root / "bytecode-copy"
+        for name in ("fable-ensemble3-runner", "fable-ensemble3-r1", "fable-ensemble3-lab", "fable-ensemble3-bank"):
+            shutil.copytree(HERE.parent / name, clone / "analysis" / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        package = clone / "analysis/fable-ensemble3-runner"
+        for entry in ("exploration_runner.py", "probe_2b.py"):
+            before = directory_digest(package)
+            result = subprocess.run([sys.executable, str(package / entry), "--help"], capture_output=True, text=True,
+                                    env={"PATH": "/usr/bin:/bin", "TMPDIR": str(self.root)}, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(list(package.rglob("*.pyc")), [])
+            self.assertEqual(list(package.rglob("__pycache__")), [])
+            self.assertEqual(list(clone.rglob("*.pyc")), [])
+            self.assertEqual(directory_digest(package), before)
+            self.note("J", entry=entry, no_B=True, bytecode=[], before_sha256=before,
+                      after_sha256=directory_digest(package), outcome="PASS")
+
+    def test_K_simulation_rejects_unmarked_callable_and_live_adapter_before_any_write(self):
+        for index, transport in enumerate((lambda path, body: {}, api.ResponsesAdapter("x")._post)):
+            runner, sim = self.make("unmarked-" + str(index), log=False)
+            runner.transport = transport
+            before = directory_digest(runner.out_dir)
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-NOT-A-REAL-KEY"}):
+                self.assertBlocks("SIMULATION_TRANSPORT_NOT_SIMULATED", runner.start)
+            self.assertFalse(runner.out_dir.exists())
+            self.assertEqual(sim.requests, [])
+            self.assertEqual(urllib_calls(), 0)
+            self.assertEqual(directory_digest(runner.out_dir), before)
+            self.note("K", caller="Runner", transport=index, new_requests=0, network_calls=0, outcome="BLOCKED",
+                      before_sha256=before, after_sha256=directory_digest(runner.out_dir))
+        self.assertIs(SimulatedResponses.is_simulated, True)
+
+    def test_L_judge_appendix_A_now_blocks_with_only_the_four_pre_kill_generations(self):
+        _, server = self.interrupted()
+        self.assertEqual(len([r for r in server.requests if r["path"] == "responses"]), 4)
+        (self.root / "run/ledger.json").unlink()
+        before = directory_digest(self.root / "run")
+        runner, _ = self.make(log=False)
+        runner.transport = server
+        self.assertBlocks("LEDGER_MISSING", runner.resume)
+        self.assertEqual(len([r for r in server.requests if r["path"] == "responses"]), 4)
+        self.assertEqual(directory_digest(self.root / "run"), before)
+        self.note("L", server_generations_before=4, server_generations_after=4, new_requests=0,
+                  before_sha256=before, after_sha256=directory_digest(self.root / "run"), outcome="BLOCKED")
+
+    def test_M_normal_kill_resumes_and_pre_first_save_initialization_remains_legal(self):
+        victim = self.killed()
+        before = directory_digest(self.root / "run")
+        child = self.child("resume")
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(json.loads(child.stdout)["state"], "COMPLETE")
+        self.assertEqual(len([r for r in self.server() if r["path"] == "responses"]), 40)
+        self.assertEqual(len([r for r in self.server() if r["path"] == "responses" and r["item_id"] == victim]), 5)
+        self.assertEqual(Decimal(self.ledger()["spent_upper"]), 39 * OK_COST + CAP)
+        self.note("M", kill_returncode=-9, before_sha256=before, after_sha256=directory_digest(self.root / "run"),
+                  server_generations_before=4, server_generations_after=40, spent_upper=self.ledger()["spent_upper"], outcome="COMPLETE")
+        runner, server = self.make("first-save", log=False)
+        with mock.patch.object(bl.Ledger, "_save", side_effect=KeyboardInterrupt("before first save")), self.assertRaises(KeyboardInterrupt):
+            runner.start()
+        self.assertFalse((runner.out_dir / "ledger.json").exists())
+        inspection = xr.inspect_run(runner.out_dir)
+        self.assertTrue(inspection["reconciliation"]["pre_first_save"])
+        resumed, server = self.make("first-save", log=False)
+        result = resumed.resume()
+        self.assertEqual(result["state"], "COMPLETE")
+        self.assertEqual(len([r for r in server.requests if r["path"] == "responses"]), 40)
+        self.note("M", entrance="pre_first_save", server_generations=40, outcome="COMPLETE")
+
+    def test_bank_manifest_and_fixtures_are_hashed_and_parsed_from_one_read(self):
+        read_bytes = Path.read_bytes
+        counts = {}
+        paths = {self.manifest} | {Path(row[ref]) for row in json.loads(self.manifest.read_bytes())["items"]
+                                  for ref in ("public_ref", "oracle_ref")}
+        def swap_after_read(path):
+            content = read_bytes(path)
+            if path in paths:
+                counts[str(path)] = counts.get(str(path), 0) + 1
+                path.write_bytes(b"replacement non-JSON")
+            return content
+        with mock.patch.object(Path, "read_bytes", swap_after_read):
+            try:
+                bank, public, labels = xr.load_bank(self.manifest)
+            except Exception as exc:
+                self.fail(f"bank must consume the already hashed bytes: {type(exc).__name__}: {exc}")
+        self.assertEqual(public, self.public)
+        self.assertEqual(labels, self.labels)
+        self.assertEqual(counts, {str(path): 1 for path in paths})
+
+    def test_log_settlement_round_and_overrun_cannot_lead_the_ledger(self):
+        self.interrupted()
+        ledger_path, log_path = self.root / "run/ledger.json", self.root / "run/attempts.jsonl"
+        original_ledger, original_log = ledger_path.read_bytes(), log_path.read_bytes()
+        ledger = json.loads(original_ledger)
+        settled = next(r for r in self.attempts() if r["phase"] == "SETTLED")
+        slot = ledger["slots"][settled["slot"]]
+        ledger["spent_upper"] = str(Decimal(ledger["spent_upper"]) - Decimal(slot["receipts"][0]["cost"]))
+        slot.update(state="RUNNING", receipts=[], held=str(2 * CAP))
+        slot.pop("status"); slot.pop("verified_run")
+        ledger_path.write_text(xr.canonical(ledger))
+        self.deny_all("B", "LEDGER_BEHIND_SETTLED")
+        ledger_path.write_bytes(original_ledger)
+        log_path.write_bytes(original_log + json.dumps({"phase": "ROUND_RESERVED", "round": 1, "t": 0}).encode() + b"\n")
+        self.deny_all("B", "LEDGER_BEHIND_ROUND_RESERVED")
+        records = [json.loads(line) for line in original_log.splitlines()]
+        next(r for r in records if r["phase"] == "SETTLED")["kind"] = "ATTEMPT_CAP_OVERRUN"
+        log_path.write_text("".join(json.dumps(r) + "\n" for r in records))
+        self.deny_all("B", "LEDGER_BEHIND_OVERRUN")
 
 
 if __name__ == "__main__":

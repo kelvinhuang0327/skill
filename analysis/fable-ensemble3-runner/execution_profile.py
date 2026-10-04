@@ -61,6 +61,14 @@ def sha256_file(path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def read_pinned(record) -> bytes:
+    """Hash and consume exactly one read. Never validate one version and use a second."""
+    content = Path(record["ref"]).read_bytes()
+    if hashlib.sha256(content).hexdigest() != record["sha256"]:
+        raise ValueError("pinned content changed")
+    return content
+
+
 def pin(path) -> Dict[str, str]:
     path = Path(path).resolve()
     return {"ref": str(path), "sha256": sha256_file(path)}
@@ -86,7 +94,7 @@ def runner_drift(recorded) -> List[str]:
 
 
 def _git(repo, *args) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    result = subprocess.run(["git", "--no-optional-locks", "-C", str(repo), *args], capture_output=True, text=True)
     if result.returncode:
         raise ValueError(f"git {' '.join(args)} failed: {result.stderr.strip()[:200]}")
     return result.stdout.strip()
@@ -101,7 +109,7 @@ def sealed_files(repo, sealed_commit) -> Dict[str, str]:
     if not blobs:
         raise ValueError("the sealed commit holds no analysis/fable-ensemble3-* files")
     names = sorted(blobs)
-    hashed = subprocess.run(["git", "-C", str(repo), "hash-object", "--stdin-paths"], capture_output=True, text=True,
+    hashed = subprocess.run(["git", "--no-optional-locks", "-C", str(repo), "hash-object", "--stdin-paths"], capture_output=True, text=True,
                             input="".join(f"{Path(repo) / name}\n" for name in names))
     if hashed.returncode or len(hashed.stdout.split()) != len(names):
         raise ValueError(f"git hash-object failed: {hashed.stderr.strip()[:200]}")
@@ -205,6 +213,7 @@ def check_profile(profile_path, *, mode: str = "SIMULATION", env: Optional[Mappi
 
 
 def _check_body(profile: dict, mode: str, env: Mapping[str, str], deep: bool, reasons: List[str]) -> None:
+    pinned_bytes = {}
     def pinned(name: str, record) -> Optional[Path]:
         """The pinned artifact's path if it still exists with its recorded sha256."""
         try:
@@ -215,16 +224,22 @@ def _check_body(profile: dict, mode: str, env: Mapping[str, str], deep: bool, re
         if not path.is_file():
             reasons.append(f"ARTIFACT_MISSING:{name}")
             return None
-        if sha256_file(path) != digest:
+        try:
+            content = path.read_bytes()
+        except OSError:
+            reasons.append(f"ARTIFACT_UNREADABLE:{name}")
+            return None
+        if hashlib.sha256(content).hexdigest() != digest:
             reasons.append(f"ARTIFACT_HASH_MISMATCH:{name}")
             return None
+        pinned_bytes[path] = content
         return path
 
     def load(path: Optional[Path]) -> dict:
         if path is None:
             return {}
         try:
-            value = engine.read_json(path)
+            value = json.loads(pinned_bytes[path], object_pairs_hook=engine.no_duplicates)
         except (OSError, ValueError):
             reasons.append(f"ARTIFACT_UNREADABLE:{path.name}")
             return {}
@@ -262,7 +277,7 @@ def _check_body(profile: dict, mode: str, env: Mapping[str, str], deep: bool, re
             reasons.append(reason)
     if pack_manifest.get("source_commit") != instruction["source_commit"]:
         reasons.append("PACK_SOURCE_COMMIT_MISMATCH")
-    if pack_path is not None and CONFLICT_MARKER.search(pack_path.read_text(encoding="utf-8", errors="replace")):
+    if pack_path is not None and CONFLICT_MARKER.search(pinned_bytes[pack_path].decode("utf-8", errors="replace")):
         reasons.append("INSTRUCTION_HAS_CONFLICT_MARKERS")
 
     # --- one bank, one receipt -----------------------------------------------------------------------------------------
@@ -352,7 +367,7 @@ def _check_body(profile: dict, mode: str, env: Mapping[str, str], deep: bool, re
                 reasons.append("BANK_REBUILD_FAILED")
             else:
                 rebuilt = (destination / "manifest.json").read_text().replace(str(destination.resolve()), "<DEST>")
-                expected = manifest_path.read_text().replace(str(manifest_path.parent.resolve()), "<DEST>")
+                expected = pinned_bytes[manifest_path].decode("utf-8").replace(str(manifest_path.parent.resolve()), "<DEST>")
                 if rebuilt != expected:
                     reasons.append("BANK_REBUILD_MISMATCH")
 

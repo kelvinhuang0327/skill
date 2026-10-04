@@ -27,6 +27,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+sys.dont_write_bytecode = True
 import _lab  # noqa: F401
 import build_engineering_bank as eb
 import decision_engine as engine
@@ -35,7 +36,6 @@ import exploration_runner as xr
 import responses_adapter as api
 from simulated_transport import SimulatedResponses
 
-sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 REGISTRATION_ARTIFACT = "FABLE_ENSEMBLE3_STAGE2B_PROBE_REGISTRATION"
 REPORT_ARTIFACT = "FABLE_ENSEMBLE3_STAGE2B_PROBE_REPORT"
@@ -168,6 +168,8 @@ class Probe:
         if self.mode == "SIMULATION":
             if self.transport is None:
                 raise ProbeBlocked("SIMULATION_NEEDS_A_SIMULATED_TRANSPORT")
+            if getattr(self.transport, "is_simulated", False) is not True:
+                raise ProbeBlocked("SIMULATION_TRANSPORT_NOT_SIMULATED")
             self.inner = self.transport
         else:
             if self.transport is not None:
@@ -454,7 +456,7 @@ def main(argv=None) -> int:
             return 0
         registration = probe_gate(args.registration, mode=args.mode, approval_file=args.approval_file)
         _, public, labels = xr.load_bank(registration["engineering_manifest"]["ref"])
-        instructions = Path(registration["instruction"]["ref"]).read_text(encoding="utf-8")
+        instructions = ep.read_pinned(registration["instruction"]).decode("utf-8")
         transport = None
         if args.mode == "SIMULATION":
             transport = SimulatedResponses(public, answer_for=lambda item: labels[item["item_id"]]["acceptable"][0],

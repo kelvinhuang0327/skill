@@ -24,6 +24,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import random
 import socket
@@ -35,6 +36,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+sys.dont_write_bytecode = True
 import _lab  # noqa: F401  (puts the sealed lab on sys.path and checks where each module came from)
 import budget_ledger as bl
 import decision_engine as engine
@@ -43,7 +45,6 @@ import offline_replay as replay
 import responses_adapter as api
 from simulated_transport import SimulatedResponses
 
-sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
 MODES = ("SIMULATION", "LIVE")
 BANK_PURPOSES = ("ENGINEERING_ONLY", "FORMAL_DECISION_EXPLORATION")
@@ -56,7 +57,7 @@ REPORT_METRICS = (
 )
 
 
-class RunBlocked(Exception):
+class RunBlocked(ValueError):
     """The run must not start (or resume); nothing was sent."""
 
 
@@ -130,25 +131,221 @@ class AppendLog:
             _fsync_dir(self.path.parent)
 
     def records(self) -> List[dict]:
-        if not self.path.exists():
-            return []
-        return [json.loads(line) for line in self.path.read_text().splitlines() if line.strip()]
+        try:
+            content = self.path.read_bytes()
+        except OSError as exc:
+            raise RunBlocked("ATTEMPTS_MISSING_OR_UNREADABLE") from exc
+        rows = []
+        for index, line in enumerate(content.splitlines(keepends=True), 1):
+            if not line.endswith(b"\n"):
+                raise RunBlocked(f"ATTEMPTS_TORN_TAIL:line_{index}")
+            try:
+                row = json.loads(line, object_pairs_hook=engine.no_duplicates)
+                if not isinstance(row, dict):
+                    raise ValueError("not an object")
+            except (ValueError, TypeError) as exc:
+                raise RunBlocked(f"ATTEMPTS_INVALID_LINE:line_{index}") from exc
+            rows.append(row)
+        return rows
+
+
+def _require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise RunBlocked(reason)
+
+
+def _read_state(path: Path, reason: str) -> dict:
+    try:
+        value = json.loads(path.read_bytes(), object_pairs_hook=engine.no_duplicates)
+        _require(isinstance(value, dict), reason)
+        return value
+    except (OSError, ValueError, TypeError) as exc:
+        raise RunBlocked(reason) from exc
+
+
+def inspect_run(out_dir) -> dict:
+    """Read-only gate for every run-state consumer. Ledger writes precede log writes.
+
+    A log ahead of the ledger is corruption; a ledger ahead of the log is a
+    supported crash window. Missing ledger + an empty log is pre-first-save.
+    Torn log tails are refused rather than repaired or silently certified.
+    """
+    out = Path(out_dir)
+    if not (out / "run_manifest.json").is_file():
+        raise RunBlocked("NO_RUN_TO_RESUME")
+    manifest = _read_state(out / "run_manifest.json", "RUN_MANIFEST_INVALID_OR_UNREADABLE")
+    state = _read_state(out / "run_state.json", "RUN_STATE_INVALID_OR_UNREADABLE")
+    records = AppendLog(out / "attempts.jsonl").records()
+    try:
+        order, planned, target = manifest["item_order"], manifest["planned_rounds"], manifest["target_rounds"]
+        _require(manifest["artifact"] == MANIFEST_ARTIFACT and manifest["schema_version"] == 1
+                 and manifest["mode"] in MODES and manifest["bank_purpose"] in BANK_PURPOSES,
+                 "RUN_MANIFEST_SHAPE_INVALID")
+        _require(isinstance(order, list) and bool(order) and all(isinstance(i, str) and i and ":" not in i for i in order)
+                 and len(set(order)) == len(order) and type(planned) is int and type(target) is int
+                 and 3 <= planned <= target and type(manifest["seed"]) is int, "RUN_MANIFEST_SHAPE_INVALID")
+        for pin_name in ("bank_manifest", "profile", "protocol"):
+            pin = manifest[pin_name]
+            _require(pin is None and pin_name != "bank_manifest" or isinstance(pin, dict)
+                     and isinstance(pin["ref"], str) and isinstance(pin["sha256"], str) and len(pin["sha256"]) == 64,
+                     "RUN_MANIFEST_PIN_INVALID")
+        _require(isinstance(manifest["instructions_sha256"], str) and len(manifest["instructions_sha256"]) == 64
+                 and isinstance(manifest["runner_sources"], dict), "RUN_MANIFEST_SHAPE_INVALID")
+        budget, cap = bl.money(manifest["budget_usd"]), bl.money(manifest["attempt_cap_usd"])
+        _require(cap > 0, "RUN_MANIFEST_COST_INVALID")
+        _require(state["state"] in ("RUNNING", "COMPLETE", "HALTED")
+                 and type(state["t"]) in (int, float) and math.isfinite(state["t"]), "RUN_STATE_SHAPE_INVALID")
+        if state["state"] == "HALTED":
+            _require(isinstance(state["reason"], str) and isinstance(state["detail"], str), "RUN_STATE_SHAPE_INVALID")
+    except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError) as exc:
+        if isinstance(exc, RunBlocked):
+            raise
+        raise RunBlocked("RUN_MANIFEST_OR_STATE_SHAPE_INVALID") from exc
+    ledger_path = out / "ledger.json"
+    if not ledger_path.exists():
+        _require(not records and state["state"] == "RUNNING", "LEDGER_MISSING:no ledger to replay")
+        return {"manifest": manifest, "state": state, "ledger": None, "records": records,
+                "reconciliation": {"pre_first_save": True, "ledger_ahead": []}}
+    ledger = _read_state(ledger_path, "LEDGER_INVALID_OR_UNREADABLE")
+    try:
+        slots = ledger["slots"]
+        _require(isinstance(slots, dict) and isinstance(ledger["events"], list)
+                 and type(ledger["overrun"]) is bool, "LEDGER_SHAPE_INVALID")
+        _require(bl.money(ledger["budget"]) == budget and bl.money(ledger["attempt_cap"]) == cap,
+                 "LEDGER_MANIFEST_COST_MISMATCH")
+        total, overrun_slots = Decimal(0), []
+        for key, slot in slots.items():
+            item, round_text = key.rsplit(":", 1)
+            _require(item in order and round_text == str(int(round_text)) and 0 <= int(round_text) < planned,
+                     "LEDGER_SLOT_INVALID")
+            status, attempts, receipts = slot["state"], slot["attempts"], slot["receipts"]
+            _require(status in ("RESERVED", "RUNNING", "RETRY_READY", "FINAL", "OVERRUN")
+                     and type(attempts) is int and 0 <= attempts <= 2 and isinstance(receipts, list), "LEDGER_SLOT_SHAPE_INVALID")
+            _require(len(receipts) == attempts - (1 if status == "RUNNING" else 0), "LEDGER_RECEIPT_COUNT_INVALID")
+            if status == "RESERVED":
+                _require(attempts == 0 and bl.money(slot["held"]) == 2 * cap, "LEDGER_RESERVED_INVALID")
+            elif status == "RUNNING":
+                _require(attempts > 0 and bl.money(slot["held"]) == (3 - attempts) * cap, "LEDGER_RUNNING_INVALID")
+            elif status == "RETRY_READY":
+                _require(attempts == 1 and receipts[0]["status"] == "INFRA_ERROR" and bl.money(slot["held"]) == cap,
+                         "LEDGER_RETRY_INVALID")
+            else:
+                _require(attempts > 0 and bl.money(slot["held"]) == 0, "LEDGER_FINAL_INVALID")
+                if status == "FINAL":
+                    _require(isinstance(slot["verified_run"], dict) and slot["verified_run"]["status"] == slot["status"]
+                             and slot["status"] in engine.FAILURES | {"OK"}, "LEDGER_VERIFIED_RUN_INVALID")
+            for receipt in receipts:
+                _require(isinstance(receipt, dict) and isinstance(receipt["status"], str)
+                         and type(receipt["cost_known"]) is bool, "LEDGER_RECEIPT_SHAPE_INVALID")
+                cost = bl.money(receipt["cost"])
+                _require(receipt["cost_known"] or cost == cap, "LEDGER_UNKNOWN_COST_INVALID")
+                total += cost
+            if status == "OVERRUN":
+                _require(bl.money(receipts[-1]["cost"]) > cap, "LEDGER_OVERRUN_SLOT_INVALID")
+                overrun_slots.append(key)
+            else:
+                _require(all(bl.money(r["cost"]) <= cap for r in receipts), "LEDGER_OVERRUN_SLOT_INVALID")
+        _require(bl.money(ledger["spent_upper"]) == total, "LEDGER_SPENT_RECEIPTS_MISMATCH")
+        _require(ledger["overrun"] == bool(overrun_slots), "LEDGER_OVERRUN_MISMATCH")
+        reserved_rounds = []
+        for index in range(planned):
+            present = [f"{item}:{index}" in slots for item in order]
+            _require(all(present) or not any(present), "LEDGER_PARTIAL_ROUND")
+            if all(present):
+                reserved_rounds.append(index)
+        _require(reserved_rounds == list(range(len(reserved_rounds))), "LEDGER_ROUND_GAP")
+        intents, events_rounds = set(), set()
+        for event in ledger["events"]:
+            if event["event"] == "RESERVE_ROUND":
+                index = event["round"]
+                _require(type(index) is int and index in reserved_rounds
+                         and event["slots"] == [f"{item}:{index}" for item in order] and index not in events_rounds,
+                         "LEDGER_RESERVE_EVENT_INVALID")
+                events_rounds.add(index)
+            elif event["event"] == "START_INTENT":
+                pair = (event["slot"], event["attempt"])
+                _require(pair[0] in slots and type(pair[1]) is int and 1 <= pair[1] <= slots[pair[0]]["attempts"]
+                         and pair not in intents, "LEDGER_START_EVENT_INVALID")
+                intents.add(pair)
+            elif event["event"] == "RECOVER_UNCERTAIN_NO_RELAUNCH":
+                _require(event["slot"] in slots, "LEDGER_RECOVERY_EVENT_INVALID")
+            else:
+                raise RunBlocked("LEDGER_EVENT_INVALID")
+        _require(events_rounds == set(reserved_rounds)
+                 and intents == {(key, n) for key, slot in slots.items() for n in range(1, slot["attempts"] + 1)},
+                 "LEDGER_EVENTS_INCONSISTENT")
+        starts, settles, rounds = set(), set(), set()
+        for row in records:
+            phase = row["phase"]
+            _require(type(row["t"]) in (int, float) and math.isfinite(row["t"]), "ATTEMPTS_SHAPE_INVALID")
+            if phase == "ROUND_RESERVED":
+                index = row["round"]
+                _require(type(index) is int and index in reserved_rounds, "LEDGER_BEHIND_ROUND_RESERVED")
+                rounds.add(index)
+            elif phase in ("START", "REQUEST", "RESPONSE", "ERROR", "SETTLED"):
+                key, attempt = row["slot"], row["attempt"]
+                _require(key in slots and type(attempt) is int and 1 <= attempt <= slots[key]["attempts"],
+                         "LEDGER_BEHIND_ATTEMPT")
+                pair = (key, attempt)
+                if phase == "START":
+                    _require(pair not in starts, "ATTEMPTS_DUPLICATE_START")
+                    starts.add(pair)
+                elif phase == "SETTLED":
+                    _require(attempt <= len(slots[key]["receipts"]), "LEDGER_BEHIND_SETTLED")
+                    receipt = slots[key]["receipts"][attempt - 1]
+                    cost = cap if row["cost_upper_usd"] is None else bl.money(row["cost_upper_usd"])
+                    _require(receipt["status"] == row["status"] and bl.money(receipt["cost"]) == cost
+                             and receipt["cost_known"] == (row["cost_upper_usd"] is not None), "LEDGER_SETTLED_MISMATCH")
+                    _require(row["charged_cap_because_unknown"] == (row["cost_upper_usd"] is None), "ATTEMPTS_SHAPE_INVALID")
+                    _require(not (row["kind"] == "ATTEMPT_CAP_OVERRUN" or cost > cap) or ledger["overrun"],
+                             "LEDGER_BEHIND_OVERRUN")
+                    _require(pair not in settles, "ATTEMPTS_DUPLICATE_SETTLED")
+                    settles.add(pair)
+                else:
+                    _require(row["path"] in ("responses", "responses/input_tokens"), "ATTEMPTS_SHAPE_INVALID")
+                    _require(isinstance(row[{"REQUEST": "body", "RESPONSE": "response", "ERROR": "error"}[phase]], dict),
+                             "ATTEMPTS_SHAPE_INVALID")
+            elif phase == "RESUME":
+                _require(isinstance(row["recovered_uncertain"], list)
+                         and all(key in slots and slots[key]["attempts"] > 0 for key in row["recovered_uncertain"]),
+                         "LEDGER_BEHIND_RESUME")
+            else:
+                raise RunBlocked("ATTEMPTS_PHASE_INVALID")
+        if state["state"] == "COMPLETE":
+            _require(not any(slot["state"] == "RUNNING" for slot in slots.values()) and not ledger["overrun"],
+                     "RUN_STATE_LEDGER_MISMATCH")
+        ahead = ([f"ROUND_RESERVED:{n}" for n in sorted(set(reserved_rounds) - rounds)]
+                 + [f"START:{key}:{n}" for key, n in sorted(intents - starts)]
+                 + [f"SETTLED:{key}:{n}" for key, slot in sorted(slots.items()) for n in range(1, len(slot["receipts"]) + 1)
+                    if (key, n) not in settles])
+    except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError) as exc:
+        if isinstance(exc, RunBlocked):
+            raise
+        raise RunBlocked("LEDGER_OR_ATTEMPTS_SHAPE_INVALID") from exc
+    return {"manifest": manifest, "state": state, "ledger": ledger, "records": records,
+            "reconciliation": {"pre_first_save": False, "ledger_ahead": ahead}}
 
 
 # --- inputs ----------------------------------------------------------------------------------------------------------
-def load_bank(manifest_path):
+def load_bank(manifest_path, *, manifest_bytes=None, expected_sha256=None):
     """(manifest, public items, labels).  Every hash is re-checked; the provider only ever gets `public` items."""
-    manifest = engine.read_json(manifest_path)
+    content = Path(manifest_path).read_bytes() if manifest_bytes is None else manifest_bytes
+    if expected_sha256 is not None and hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise RunBlocked("BANK_MANIFEST_HASH_MISMATCH:the bank changed since this run")
+    manifest = json.loads(content, object_pairs_hook=engine.no_duplicates)
     if manifest.get("purpose") not in BANK_PURPOSES:
         raise ValueError("unknown bank purpose")
     public, labels = {}, {}
     for row in manifest["items"]:
+        loaded = {}
         for ref, digest in (("public_ref", "public_sha256"), ("oracle_ref", "oracle_sha256")):
-            if ep.sha256_file(row[ref]) != row[digest]:
+            fixture_bytes = Path(row[ref]).read_bytes()
+            if hashlib.sha256(fixture_bytes).hexdigest() != row[digest]:
                 raise ValueError("fixture or oracle changed after freeze")
-        item = engine.read_json(row["public_ref"])
+            loaded[ref] = json.loads(fixture_bytes, object_pairs_hook=engine.no_duplicates)
+        item = loaded["public_ref"]
         engine.validate_public(item)
-        label = engine.read_json(row["oracle_ref"])
+        label = loaded["oracle_ref"]
         if item["item_id"] != row["item_id"] or label["item_id"] != row["item_id"] or label["public_sha256"] != row["public_sha256"]:
             raise ValueError("oracle does not bind this fixture")
         public[row["item_id"]], labels[row["item_id"]] = item, label
@@ -209,8 +406,9 @@ def build_report(public: Dict[str, dict], labels: Dict[str, dict], runs: Dict[st
 class Recorder:
     """Transport wrapper.  The request is on disk before it is sent; the raw response is on disk before anyone parses it."""
 
-    def __init__(self, inner: Callable, log: AppendLog):
+    def __init__(self, inner: Callable, log: AppendLog, expected_instructions_sha256=None):
         self.inner, self.log = inner, log
+        self.expected_instructions_sha256 = expected_instructions_sha256
         self.slot = self.attempt = None
         self.generation_sent = False
         self.last_generation = None
@@ -226,6 +424,8 @@ class Recorder:
 
     def __call__(self, path: str, body: dict) -> dict:
         instructions = body.get("instructions")
+        if self.expected_instructions_sha256 is not None and sha256_text(instructions or "") != self.expected_instructions_sha256:
+            raise RunBlocked("SENT_INSTRUCTIONS_HASH_MISMATCH")
         self._append({"phase": "REQUEST", "path": path, "body_sha256": sha256_text(json.dumps(body)),
                       "instructions_sha256": None if instructions is None else sha256_text(instructions),
                       "body": {key: value for key, value in body.items() if key != "instructions"}})
@@ -308,6 +508,16 @@ def saved_runs(public: Dict[str, dict], ledger: bl.Ledger, rounds: int) -> Dict[
     return result
 
 
+def _loaded_ledger(out: Path, inspection: dict) -> bl.Ledger:
+    """Use the inspected bytes; don't re-read state or initialize it in read-only consumers."""
+    ledger = bl.Ledger.__new__(bl.Ledger)
+    ledger.path = out / "ledger.json"
+    ledger.budget = bl.money(inspection["manifest"]["budget_usd"])
+    ledger.cap = bl.money(inspection["manifest"]["attempt_cap_usd"])
+    ledger.state = inspection["ledger"]
+    return ledger
+
+
 class Runner:
     def __init__(self, out_dir, *, mode: str, bank_manifest, instructions: str, budget, attempt_cap, target_rounds: int = 5,
                  seed: int = 6302, transport: Optional[Callable] = None, profile=None, protocol=None):
@@ -315,9 +525,14 @@ class Runner:
             raise RunBlocked("MODE_INVALID")
         self.out_dir, self.mode = Path(out_dir), mode
         self.bank_manifest = Path(bank_manifest)
-        self.manifest, self.public, self.labels = load_bank(self.bank_manifest)
+        profile_data = None if profile is None else _read_state(Path(profile), "PROFILE_MISSING_OR_INVALID")
+        bank_bytes = self.bank_manifest.read_bytes()
+        self.bank_pin = {"ref": str(self.bank_manifest.resolve()), "sha256": hashlib.sha256(bank_bytes).hexdigest()}
+        self.manifest, self.public, self.labels = load_bank(self.bank_manifest, manifest_bytes=bank_bytes,
+            expected_sha256=None if profile_data is None else profile_data["bank"]["manifest"]["sha256"])
         self.purpose = self.manifest["purpose"]
         self.instructions = instructions
+        self.instructions_pin = sha256_text(instructions) if profile_data is None else profile_data["instruction"]["sha256"]
         self.budget, self.cap = bl.money(budget), bl.money(attempt_cap)
         self.target_rounds, self.seed = target_rounds, seed
         self.transport, self.profile, self.protocol = transport, profile, protocol
@@ -333,7 +548,7 @@ class Runner:
     def _identity(self) -> dict:
         return {
             "artifact": MANIFEST_ARTIFACT, "schema_version": 1, "mode": self.mode, "bank_purpose": self.purpose,
-            "bank_manifest": ep.pin(self.bank_manifest), "instructions_sha256": sha256_text(self.instructions),
+            "bank_manifest": self.bank_pin, "instructions_sha256": sha256_text(self.instructions),
             "policy_sha256": ep.sha256_file(ep.R1 / "ensemble_scoring.py"), "runner_sources": ep.runner_sources(),
             "profile": None if self.profile is None else ep.pin(self.profile),
             "protocol": None if self.protocol is None else ep.pin(self.protocol),
@@ -344,16 +559,22 @@ class Runner:
     def _set_state(self, state: str, **extra) -> None:
         atomic_write(self.out_dir / "run_state.json", canonical({"state": state, "t": time.time(), **extra}))
 
-    def _lock(self) -> None:
-        descriptor = os.open(self.out_dir / "run.lock", os.O_RDWR | os.O_CREAT, 0o644)
+    def _lock(self, *, create=False) -> None:
+        try:
+            descriptor = os.open(self.out_dir / "run.lock", os.O_RDWR | (os.O_CREAT if create else 0), 0o644)
+        except OSError as exc:
+            raise RunBlocked("RUN_LOCK_MISSING_OR_UNREADABLE") from exc
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(descriptor)
             raise RunBlocked("ANOTHER_RUNNER_HOLDS_THIS_DIRECTORY")
-        os.ftruncate(descriptor, 0)
-        os.write(descriptor, f"{os.getpid()}\n".encode())
         self._lock_fd = descriptor
+
+    def _stamp_lock(self) -> None:
+        os.ftruncate(self._lock_fd, 0)
+        os.write(self._lock_fd, f"{os.getpid()}\n".encode())
+        os.fsync(self._lock_fd)
 
     def _unlock(self) -> None:
         if self._lock_fd is not None:
@@ -370,10 +591,14 @@ class Runner:
 
     def _adapter(self) -> "api.ResponsesAdapter":
         self.recorder = None
+        if sha256_text(self.instructions) != self.instructions_pin:
+            raise RunBlocked("INSTRUCTIONS_DO_NOT_MATCH_PROFILE")
         if self.mode == "SIMULATION":
             if self.transport is None:
                 raise RunBlocked("SIMULATION_NEEDS_A_SIMULATED_TRANSPORT")
-            holder = Recorder(self.transport, self.log)
+            if getattr(self.transport, "is_simulated", False) is not True:
+                raise RunBlocked("SIMULATION_TRANSPORT_NOT_SIMULATED")
+            holder = Recorder(self.transport, self.log, self.instructions_pin)
             adapter = api.ResponsesAdapter(self.instructions, transport=holder)
             if adapter.live:
                 raise RunBlocked("SIMULATION_MUST_NOT_USE_THE_LIVE_ADAPTER")
@@ -387,7 +612,7 @@ class Runner:
                 adapter.preflight()  # key presence, before a single request is built
             except api.CapabilityBlocked as exc:
                 raise RunBlocked(f"LIVE_KEY_MISSING: {exc}") from exc
-            holder = Recorder(adapter._post, self.log)
+            holder = Recorder(adapter._post, self.log, self.instructions_pin)
             adapter.transport = holder
         self.recorder = holder
         return adapter
@@ -399,34 +624,52 @@ class Runner:
         self.planned = self._plan()
         adapter = self._adapter()  # wiring errors (no key, wrong transport) surface before anything is written
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self._lock()
+        self._lock(create=True)
         try:
             exclusive_write(self.out_dir / "run_manifest.json",
                             canonical({**self._identity(), "planned_rounds": self.planned, "started_epoch": time.time()}))
             self._set_state("RUNNING")
+            exclusive_write(self.log.path, "")  # an empty log is durable before the first ledger save
+            self._stamp_lock()
             self.ledger = bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap)
             return self._execute(adapter)
         finally:
             self._unlock()
 
     def resume(self) -> dict:
-        if not (self.out_dir / "run_manifest.json").is_file():
-            raise RunBlocked("NO_RUN_TO_RESUME")
+        inspect_run(self.out_dir)
         self._lock()
         try:
-            manifest = engine.read_json(self.out_dir / "run_manifest.json")
-            state = engine.read_json(self.out_dir / "run_state.json")
+            inspection = inspect_run(self.out_dir)  # repeat under flock; no PID write until all refusal checks pass
+            manifest, state = inspection["manifest"], inspection["state"]
             if state["state"] != "RUNNING":
                 raise RunBlocked(f"RUN_IS_{state['state']}: only an interrupted run can resume")
             mismatched = sorted(key for key, value in self._identity().items() if manifest.get(key) != value)
             if mismatched:
-                raise RunBlocked("RESUME_IDENTITY_MISMATCH:" + ",".join(mismatched))
+                raise RunBlocked("RESUME_IDENTITY_MISMATCH:" + ";".join(mismatched))
             self.planned = manifest["planned_rounds"]
             adapter = self._adapter()  # before the ledger is touched: a wiring error must not recover or change anything
-            self.ledger = bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap)
+            self._stamp_lock()
+            self.ledger = (_loaded_ledger(self.out_dir, inspection) if inspection["ledger"] is not None
+                           else bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap))
             uncertain = sorted(slot for slot, record in self.ledger.state["slots"].items() if record["state"] == "RUNNING")
+            overrun = None
+            for slot in uncertain:
+                attempt = self.ledger.state["slots"][slot]["attempts"]
+                responses = [row["response"] for row in inspection["records"] if row.get("phase") == "RESPONSE"
+                             and row.get("path") == "responses" and row.get("slot") == slot and row.get("attempt") == attempt]
+                cost = raw_upper_cost(responses[-1]) if responses else None
+                if cost is not None and cost > self.cap:
+                    try:
+                        self._finish(slot, "INVALID_OUTPUT", cost, self.public[slot.rsplit(":", 1)[0]])
+                    except RunHalt as halt:
+                        overrun = halt
+                    self._log_settled(slot, attempt, "INVALID_OUTPUT", cost, "ATTEMPT_CAP_OVERRUN", "durable response recovered")
             self.ledger.recover_uncertain()  # started, no receipt: INCOMPLETE and charged the cap; never sent again
-            self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": uncertain})
+            self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": uncertain,
+                             "reconciliation": inspection["reconciliation"]})
+            if overrun is not None:
+                return self._finalize(overrun)
             return self._execute(adapter)
         finally:
             self._unlock()
@@ -536,6 +779,7 @@ class Runner:
 
     # --- the end -----------------------------------------------------------------------------------------------------
     def _finalize(self, halted: Optional[RunHalt]) -> dict:
+        inspect_run(self.out_dir)
         runs = saved_runs(self.public, self.ledger, self.target_rounds)
         atomic_write(self.out_dir / "runs.json", canonical(runs))
         kind = "SIMULATION_NOT_A_RESULT" if self.mode == "SIMULATION" else "EXPLORATION_RESULT_UNREVIEWED"
@@ -559,6 +803,7 @@ class Runner:
 
     def _write_accounting(self) -> None:
         """Every file this run left in its directory, with hashes; the runner writes nowhere else."""
+        inspect_run(self.out_dir)
         files = [{"path": str(path.relative_to(self.out_dir)), "bytes": path.stat().st_size, "sha256": ep.sha256_file(path)}
                  for path in sorted(self.out_dir.rglob("*")) if path.is_file() and path.name != "write_ledger.json"]
         atomic_write(self.out_dir / "write_ledger.json", canonical({
@@ -570,17 +815,20 @@ class Runner:
 def replay_run(out_dir) -> dict:
     """Rebuild a finished run's verified runs (and report) from the ledger alone; never writes anything."""
     out_dir = Path(out_dir)
-    manifest = engine.read_json(out_dir / "run_manifest.json")
+    inspection = inspect_run(out_dir)
+    manifest = inspection["manifest"]
     bank = manifest["bank_manifest"]
-    if ep.sha256_file(bank["ref"]) != bank["sha256"]:
-        raise ValueError("the bank changed since this run")
-    _, public, labels = load_bank(bank["ref"])
-    if not (out_dir / "ledger.json").is_file():
-        raise ValueError("no ledger to replay")
-    ledger = bl.Ledger(out_dir / "ledger.json", budget=manifest["budget_usd"], attempt_cap=manifest["attempt_cap_usd"])
-    runs = saved_runs(public, ledger, manifest["target_rounds"])
-    state = engine.read_json(out_dir / "run_state.json")["state"]
-    saved = engine.read_json(out_dir / "runs.json") if (out_dir / "runs.json").is_file() else None
+    try:
+        _, public, labels = load_bank(bank["ref"], expected_sha256=bank["sha256"])
+        _require(inspection["ledger"] is not None, "LEDGER_MISSING:no ledger to replay")
+        ledger = _loaded_ledger(out_dir, inspection)
+        runs = saved_runs(public, ledger, manifest["target_rounds"])
+        state = inspection["state"]["state"]
+        saved = engine.read_json(out_dir / "runs.json") if (out_dir / "runs.json").is_file() else None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if isinstance(exc, RunBlocked):
+            raise
+        raise RunBlocked("REPLAY_INVALID:" + str(exc).replace(",", ";")) from exc
     report = None
     if state == "COMPLETE":
         report = finished_report(public, labels, runs, mode=manifest["mode"], ledger_state=ledger.state, order=manifest["item_order"],
@@ -617,7 +865,10 @@ def validate_approval(path, bound_path, *, scope: str, total_required: Decimal, 
 
 def _inputs(profile_path, mode: str, budget_override):
     profile = engine.read_json(profile_path)
-    instructions = Path(profile["instruction"]["ref"]).read_text(encoding="utf-8")
+    try:
+        instructions = ep.read_pinned(profile["instruction"]).decode("utf-8")
+    except (OSError, ValueError) as exc:
+        raise RunBlocked("INSTRUCTION_HASH_MISMATCH_OR_UNREADABLE") from exc
     cap = Decimal(profile["cost"]["attempt_reservation_usd"])
     required = cap * profile["cost"]["max_attempts_per_slot"] * profile["bank"]["items"] * profile["policy"]["target_runs"]
     total = profile["cost"].get("total_reservation_usd")
@@ -668,9 +919,12 @@ def main(argv=None) -> int:
     check = commands.add_parser("check")
     check.add_argument("--profile", required=True)
     check.add_argument("--mode", default="SIMULATION", choices=MODES)
+    check.add_argument("--out", help="also check this run directory through the common integrity gate")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
+            if args.out:
+                inspect_run(args.out)
             result = ep.check_profile(args.profile, mode=args.mode)
             print(json.dumps(result, indent=2))
             return 0 if not result["reasons"] else 2
@@ -678,6 +932,8 @@ def main(argv=None) -> int:
             result = replay_run(args.out)
             print(json.dumps({k: v for k, v in result.items() if k != "runs"}, indent=2, sort_keys=True))
             return 0
+        if args.command == "resume":
+            inspect_run(args.out)
         runner = _runner(args, resume=args.command == "resume")
         result = runner.start() if args.command == "run" else runner.resume()
     except RunBlocked as blocked:
