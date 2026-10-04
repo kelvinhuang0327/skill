@@ -223,6 +223,14 @@ class TaskCheckpointTest < Minitest::Test
     end
   end
 
+  def test_checkpoint_requires_absolute_repository_and_worktree_locators
+    %i[repository worktree].each do |field|
+      cp = TaskCheckpoint.new(@valid_attrs.merge(field => "relative/#{field}"))
+      error = assert_raises(TaskCheckpoint::ValidationError) { cp.validate! }
+      assert_match(/#{field} must be an absolute locator/, error.message)
+    end
+  end
+
   def test_checkpoint_rejects_bare_inherited_without_locator
     attrs = @valid_attrs.merge(authoritative_packet_ref: 'ORIGINAL_TASK_RULES_INHERITED: YES')
     cp = TaskCheckpoint.new(attrs)
@@ -917,6 +925,22 @@ class TaskCheckpointTest < Minitest::Test
     result = reconciler.reconcile
     assert_equal 'STOP_UNRESOLVED', result.verdict
     assert_match(/Repository identity mismatch/i, result.reason)
+  end
+
+  def test_requested_worktree_must_match_the_checkpoint_locator
+    cp = TaskCheckpoint.new(@valid_attrs)
+    other_worktree = File.join(@tmpdir, 'other-worktree')
+    reconciler = TaskReconciler.new(cp, {
+      repository: @repo_dir,
+      worktree: other_worktree
+    })
+
+    result = reconciler.reconcile
+
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Exact worktree locator mismatch/, result.reason)
+    assert_includes result.reason, cp.worktree
+    assert_includes result.reason, other_worktree
   end
 
   def test_missing_worktree_fails_closed
@@ -1757,6 +1781,45 @@ class DurableCommandCaptureTest < Minitest::Test
     assert_equal run_result.exit_status, reloaded.exit_status
   end
 
+  def test_protected_capture_binds_exact_execution_repository_worktree_launcher_and_runtime
+    repository = File.join(@tmpdir, 'execution-repository')
+    FileUtils.mkdir_p(repository)
+    run_git = lambda do |*arguments|
+      stdout, stderr, status = Open3.capture3('git', '-C', repository, *arguments)
+      assert status.success?, stderr
+      stdout.strip
+    end
+    run_git.call('init', '--quiet')
+    run_git.call('config', 'user.name', 'Fable capture test')
+    run_git.call('config', 'user.email', 'fable-capture@example.invalid')
+    File.write(File.join(repository, 'bound.txt'), "capture identity\n")
+    run_git.call('add', 'bound.txt')
+    run_git.call('commit', '--quiet', '-m', 'capture identity')
+    expected_head = run_git.call('rev-parse', 'HEAD')
+    expected_tree = run_git.call('rev-parse', 'HEAD^{tree}')
+    identity = DurableCommandCapture.capture_execution_identity(
+      repository_path: repository, worktree_path: repository
+    )
+    path = capture_path('execution_identity')
+
+    DurableCommandCapture.run_and_capture(
+      ['git', 'rev-parse', 'HEAD'], file_path: path, chdir: repository,
+      execution_identity: identity
+    )
+    captured = DurableCommandCapture.load(path)
+
+    assert_equal expected_head, captured.stdout.strip
+    assert_equal expected_head, captured.execution_identity['head']
+    assert_equal expected_tree, captured.execution_identity['tree']
+    assert_equal File.realpath(repository), captured.execution_identity['repository_path']
+    assert_equal File.realpath(repository), captured.execution_identity['worktree_path']
+    launcher = File.realpath(File.expand_path('../scripts/task_checkpoint.rb', __dir__))
+    assert_equal launcher, captured.execution_identity['launcher_path']
+    assert_equal Digest::SHA256.file(launcher).hexdigest, captured.execution_identity['launcher_sha256']
+    assert_equal File.realpath(RbConfig.ruby), captured.execution_identity['runtime_executable']
+    assert_equal RUBY_DESCRIPTION, captured.execution_identity['runtime_version']
+  end
+
   # F. Durable Judge failure: non-zero exit preserved, verdict can never be PASS.
   def test_f_durable_failure_preserves_nonzero_exit_and_cannot_pass
     path = capture_path('failure')
@@ -2359,6 +2422,15 @@ class TaskCheckpointRunTest < Minitest::Test
     assert capture.complete?
     assert_equal command, capture.command
     assert_equal original[0, 2], [capture.stdout, capture.stderr]
+    assert_equal File.realpath(@repo), capture.execution_identity['repository_path']
+    assert_equal File.realpath(@worktree), capture.execution_identity['worktree_path']
+    assert_nil capture.execution_identity['head'], 'non-Git worktrees must remain explicitly unavailable'
+    assert_nil capture.execution_identity['tree'], 'non-Git worktrees must remain explicitly unavailable'
+    launcher = File.realpath(CLI)
+    assert_equal launcher, capture.execution_identity['launcher_path']
+    assert_equal Digest::SHA256.file(launcher).hexdigest, capture.execution_identity['launcher_sha256']
+    assert_equal File.realpath(RbConfig.ruby), capture.execution_identity['runtime_executable']
+    assert_equal RUBY_DESCRIPTION, capture.execution_identity['runtime_version']
     before = [File.binread(record_path(identity)), File.binread(capture_path(identity))]
     replay = run_cli(cli_args(identity, command), cwd: @worktree)
     assert_output(replay, 0)
