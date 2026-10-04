@@ -441,4 +441,16 @@ REPAIR = [
     ("R8 simulated class marker lost", "simulated_transport.py", '    is_simulated = True\n', '    is_simulated = False\n',
      RI + "test_K_simulation_rejects_unmarked_callable_and_live_adapter_before_any_write"),
 ]
-CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR
+
+# --- how far the ledger may be ahead of the attempt log -------------------------------------------------------------------------
+BOUND = [
+    ("R9 ledger-ahead tolerance unbounded", XR,
+     '_require(len([item for item in ahead if item not in acknowledged]) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")',
+     '_require(True, "ATTEMPTS_BEHIND_LEDGER")', RI + "test_N_an_emptied_or_truncated_log_far_behind_the_ledger_is_refused"),
+    ("R9 ledger-ahead tolerance below a crash inside resume", XR, 'MAX_UNACKNOWLEDGED_AHEAD = 3\n', 'MAX_UNACKNOWLEDGED_AHEAD = 1\n',
+     RI + "test_P_a_crash_inside_resume_after_recovery_and_before_its_log_record_resumes_again"),
+    ("R9 earlier resumes' notes are not trusted", XR,
+     '                acknowledged.update(noted["ledger_ahead"] if isinstance(noted, dict) and isinstance(noted.get("ledger_ahead"), list) else [])\n',
+     '                pass\n', RI + "test_O_several_crashes_in_a_row_in_different_windows_still_resume_and_never_resend"),
+]
+CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND

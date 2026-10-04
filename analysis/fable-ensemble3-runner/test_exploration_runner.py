@@ -113,6 +113,16 @@ class RunnerCase(unittest.TestCase):
         except Exception as exc:
             self.fail(f"expected the call to return, got {type(exc).__name__}: {exc}")
 
+    def crashes(self, call):
+        """`call` must end in the injected KeyboardInterrupt.  A refusal or any other error is a failed assertion, not a crash."""
+        try:
+            call()
+        except KeyboardInterrupt:
+            return
+        except Exception as exc:
+            self.fail(f"expected the injected crash, got {type(exc).__name__}: {exc}")
+        self.fail("expected the injected crash: the call returned")
+
 
 class CleanRunTests(RunnerCase):
     def test_a_clean_run_settles_every_slot_and_replays_identically(self):
@@ -1201,16 +1211,19 @@ class RepairIntegrityTests(RunnerCase):
         path = self.root / "run/attempts.jsonl"
         original = path.read_bytes()
         lines = original.splitlines(keepends=True)
-        variants = [None, b"".join(lines[:2] + [b"broken\n"] + lines[3:]), original + b'{"phase":',
-                    original + b"{}\n", original + b"[]\n", original + b"\n"]
+        # the first three are refused for their own named reason (a missing log would otherwise also be caught, later and under another
+        # name, by the bound on how far the ledger may be ahead of the log); the shapes below them only need an ATTEMPTS-style block
+        variants = [(None, "ATTEMPTS_MISSING_OR_UNREADABLE"), (b"".join(lines[:2] + [b"broken\n"] + lines[3:]), "ATTEMPTS_INVALID_LINE"),
+                    (original + b'{"phase":', "ATTEMPTS_TORN_TAIL"), (original + b"{}\n", "ATTEMPTS|LEDGER_OR_ATTEMPTS"),
+                    (original + b"[]\n", "ATTEMPTS|LEDGER_OR_ATTEMPTS"), (original + b"\n", "ATTEMPTS|LEDGER_OR_ATTEMPTS")]
         failures = []  # collected, then asserted once: a failure inside subTest is not seen by the mutation engine's classifier
-        for index, content in enumerate(variants):
+        for index, (content, reason) in enumerate(variants):
             if content is None:
                 path.unlink()
             else:
                 path.write_bytes(content)
             try:
-                self.deny_all("E", "ATTEMPTS|LEDGER_OR_ATTEMPTS")
+                self.deny_all("E", reason)
             except AssertionError as exc:
                 failures.append((index, str(exc)[:300]))
             finally:
@@ -1234,7 +1247,7 @@ class RepairIntegrityTests(RunnerCase):
             self.assertTrue(inspection["reconciliation"]["ledger_ahead"])
             started = {(key, n) for key, s in inspection["ledger"]["slots"].items() for n in range(1, s["attempts"] + 1)}
             resumed, server2 = self.make(name, log=False)
-            result = resumed.resume()
+            result = self.completes(resumed.resume)  # a legitimate crash window must resume; a refusal here is a failed assertion
             self.assertEqual(result["state"], "COMPLETE")
             for key, n in started:
                 self.assertEqual(self.ledger(name)["slots"][key]["attempts"], n)
@@ -1447,6 +1460,90 @@ class RepairIntegrityTests(RunnerCase):
         next(r for r in records if r["phase"] == "SETTLED")["kind"] = "ATTEMPT_CAP_OVERRUN"
         log_path.write_text("".join(json.dumps(r) + "\n" for r in records))
         self.deny_all("B", "LEDGER_BEHIND_OVERRUN")
+
+    def test_N_an_emptied_or_truncated_log_far_behind_the_ledger_is_refused(self):
+        self.interrupted()
+        out = self.root / "run"
+        path = out / "attempts.jsonl"
+        original = path.read_bytes()
+        lines = original.splitlines(keepends=True)
+        self.completes(lambda: xr.inspect_run(out))  # the untouched log is accepted
+        failures = []
+        for index, content in enumerate((b"", b"".join(lines[:1]), b"".join(lines[:3]))):
+            path.write_bytes(content)  # the ledger still shows three settled slots and a started fourth: far more than one crash window
+            try:
+                self.deny_all("N", "ATTEMPTS_BEHIND_LEDGER")
+            except AssertionError as exc:
+                failures.append((index, str(exc)[:300]))
+            finally:
+                path.write_bytes(original)
+        self.assertEqual(failures, [])
+
+    def test_O_several_crashes_in_a_row_in_different_windows_still_resume_and_never_resend(self):
+        name = "chain"
+        out = self.root / name
+        append = xr.AppendLog.append
+        sims = []
+        # four START windows in a row leave three recovered settles by the fifth resume: without the acknowledgement of recovered
+        # slots that already exceeds the tolerance, so the chain is long enough to need it
+        for cycle, window in enumerate(("START", "START", "START", "START", "SETTLED", "START")):
+            runner, sim = self.make(name, log=False)
+            sims.append(sim)
+            fired = []
+
+            def crash(log, record, window=window, fired=fired):
+                if record["phase"] == window and not fired:
+                    fired.append(True)
+                    raise KeyboardInterrupt("crash between a durable ledger write and its log record")
+                return append(log, record)
+
+            with mock.patch.object(xr.AppendLog, "append", crash):
+                self.crashes(runner.start if cycle == 0 else runner.resume)
+            self.completes(lambda: xr.inspect_run(out))  # the state each crash leaves is still a legitimate one
+        final, sim = self.make(name, log=False)
+        sims.append(sim)
+        result = self.completes(final.resume)
+        self.assertEqual(result["state"], "COMPLETE")
+        sent = [r for s in sims for r in s.requests if r["path"] == "responses"]
+        per_item = {}
+        for r in sent:
+            per_item[r["item_id"]] = per_item.get(r["item_id"], 0) + 1
+        self.assertLessEqual(len(sent), 40)
+        self.assertLessEqual(max(per_item.values()), 5)  # one call per item and round: nothing was sent twice
+        logged = sum((CAP if r["cost_upper_usd"] is None else Decimal(r["cost_upper_usd"])) for r in self.attempts(name) if r["phase"] == "SETTLED")
+        self.assertGreaterEqual(Decimal(self.ledger(name)["spent_upper"]), logged)
+
+    def test_P_a_crash_inside_resume_after_recovery_and_before_its_log_record_resumes_again(self):
+        name = "midresume"
+        out = self.root / name
+        append = xr.AppendLog.append
+        runner, sim = self.make(name, log=False)
+        fired = []
+
+        def crash_at_start(log, record):
+            if record["phase"] == "START" and not fired:
+                fired.append(True)
+                raise KeyboardInterrupt("crash after the ledger begin, before the START record")
+            return append(log, record)
+
+        with mock.patch.object(xr.AppendLog, "append", crash_at_start):
+            self.crashes(runner.start)
+        middle, sim2 = self.make(name, log=False)
+
+        def crash_at_resume(log, record):
+            if record["phase"] == "RESUME":
+                raise KeyboardInterrupt("crash after the recovery was saved, before its record")
+            return append(log, record)
+
+        with mock.patch.object(xr.AppendLog, "append", crash_at_resume):
+            self.crashes(middle.resume)
+        self.assertEqual(sim2.requests, [])
+        self.completes(lambda: xr.inspect_run(out))  # two unacknowledged records (the original gap and the recovered settle) are tolerated
+        final, sim3 = self.make(name, log=False)
+        result = self.completes(final.resume)
+        self.assertEqual(result["state"], "COMPLETE")
+        sent = [r for s in (sim, sim2, sim3) for r in s.requests if r["path"] == "responses"]
+        self.assertEqual(len(sent), 39)  # the first call never left, and nothing was sent twice
 
 
 if __name__ == "__main__":

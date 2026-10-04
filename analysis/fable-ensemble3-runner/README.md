@@ -54,6 +54,8 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
 10. 核准檔綁在設定檔（或探針的註冊檔）的雜湊上，而它們都釘住了 runner 的五個程式檔：核准涵蓋的是「會跑的程式碼」，不只是「會讀的資料」。
 11. 所有讀取 run 狀態的入口先經過 `inspect_run`：manifest、state、ledger 與日誌須可解析、形狀有效且相互一致。
     日誌領先帳本就拒絕；帳本領先日誌可復原，`RESUME.reconciliation.ledger_ahead` 明示缺少的日誌事實。
+    領先量有上限：先前 RESUME 記錄已寫下的不計，其餘不得超過 `MAX_UNACKNOWLEDGED_AHEAD`（3 筆：一個崩潰視窗留下 1 筆，
+    resume 自己的復原中途崩潰再多 1 筆，外加 1 筆餘裕），所以被清空或截短的日誌不會被當成崩潰（`ATTEMPTS_BEHIND_LEDGER`）。
     帳本不存在只在持久空日誌且 state 為 RUNNING 的第一次存檔前允許初始化。缺失、損壞或尾端撕裂的日誌一律拒絕。
 12. 被拒絕的 resume/replay/check 不寫任何檔案，包含鎖的 PID。`_lock` 只 flock；通過所有檢查才寫 PID。
 13. SIMULATION transport 必須明確標記 `is_simulated = True`；Runner 與 Probe 在任何檔案寫入前檢查。

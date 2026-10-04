@@ -49,6 +49,9 @@ HERE = Path(__file__).resolve().parent
 MODES = ("SIMULATION", "LIVE")
 BANK_PURPOSES = ("ENGINEERING_ONLY", "FORMAL_DECISION_EXPLORATION")
 MANIFEST_ARTIFACT = "FABLE_ENSEMBLE3_R1_RUN_MANIFEST"
+# How far the ledger may be ahead of the attempt log without a note from an earlier resume: one crash window leaves one pending
+# record, and a crash inside resume's own recovery leaves one more (the recovered settle).  Anything further has lost log history.
+MAX_UNACKNOWLEDGED_AHEAD = 3
 REPORT_METRICS = (
     "single", "single_gated", "maj3", "gated", "cov3", "disagreement", "coverage_gap", "vote_effect", "checker_effect",
     "aggregation_effect", "total_effect", "crit_single", "crit_single_gated", "crit_maj3", "crit_gated", "crit_checker",
@@ -318,6 +321,12 @@ def inspect_run(out_dir) -> dict:
                  + [f"START:{key}:{n}" for key, n in sorted(intents - starts)]
                  + [f"SETTLED:{key}:{n}" for key, slot in sorted(slots.items()) for n in range(1, len(slot["receipts"]) + 1)
                     if (key, n) not in settles])
+        acknowledged = set()  # what earlier resumes already wrote down in their RESUME record
+        for row in records:
+            if row["phase"] == "RESUME":
+                noted = row.get("reconciliation")
+                acknowledged.update(noted["ledger_ahead"] if isinstance(noted, dict) and isinstance(noted.get("ledger_ahead"), list) else [])
+        _require(len([item for item in ahead if item not in acknowledged]) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")
     except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError) as exc:
         if isinstance(exc, RunBlocked):
             raise
