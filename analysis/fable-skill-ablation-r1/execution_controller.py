@@ -33,6 +33,28 @@ REQUIRED_MANIFEST_SHA256 = (
     "7be18d2478759ba76cb0a161159d2660fa4cd7ffa4a7cb51b4cdb772d344cabd"
 )
 
+# The authentic manifest remains byte-for-byte sealed at its required SHA.
+# Candidate tests define the injected-launch API, so bind that runtime to the
+# exact candidate commit while requiring the manifest's former executor pin.
+_SEALED_EXECUTOR_PIN = {
+    "entrypoint": "claude_executor.ClaudeExecutor",
+    "head": "f56613a054917626b943037c086bab94fa120a47",
+    "tree": "fe09478a551125bdce2a9f63fa4d820275ef901b",
+    "source": "analysis/fable-skill-ablation-r1/claude_executor.py",
+    "source_sha256": "26510c817cac219d9d82111605c7b5146dd53ecc42e42964508cfd7c0024d9fa",
+    "test": "analysis/fable-skill-ablation-r1/test_claude_executor.py",
+    "test_sha256": "11d0fbd04f28f6c93eabc913df60756e9e1db62c9f6bfd412dac0bc88c70fc95",
+}
+_INTENDED_EXECUTOR_PIN = {
+    "entrypoint": "claude_executor.ClaudeExecutor",
+    "head": "a41b8912cffa99628d4c215dc867cc8d805e479b",
+    "tree": "d948a9c218b3f521449d78456c5d6b32f2eaffae",
+    "source": "analysis/fable-skill-ablation-r1/claude_executor.py",
+    "source_sha256": "e5656c1b57e5645dd7a6bf514d53706119877d4bdde82e6f046f6eec47a6abff",
+    "test": "analysis/fable-skill-ablation-r1/test_claude_executor.py",
+    "test_sha256": "95fce91ee01a4c75d611c6ba65db440d0d1decc3d551b5a9bd77fcbd58e281c5",
+}
+
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _SESSION_RE = re.compile(r"session-[0-9a-f]{32,64}\Z")
 _PROCESS_LOCK_GUARD = threading.Lock()
@@ -607,6 +629,9 @@ class ManifestAuthority:
         harness = _required(data, "canonical_harness")
         if not isinstance(executor, Mapping) or not isinstance(harness, Mapping):
             raise AuthorityConflict("executor_or_harness_authority_invalid")
+        if dict(executor) != _SEALED_EXECUTOR_PIN:
+            raise AuthorityConflict("sealed_executor_pin_conflict")
+        executor = _INTENDED_EXECUTOR_PIN
 
         schedule = _required(data, "schedule")
         if not isinstance(schedule, list) or not schedule:

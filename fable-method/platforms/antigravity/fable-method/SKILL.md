@@ -84,7 +84,9 @@ fail-closed or escalation behavior.
 If write ownership remains unresolved, stop before edit, verification, or
 ownership mutation.
 
-Use established facts as inputs. Repeat repository, history, worktree, or process discovery only when a live contradiction makes it load-bearing. Once the Goal, boundary, and acceptance are resolved, the Worker owns implementation details. Repair task-caused failures inside scope; do not expand for adjacent unrelated findings. After each acceptance item and required check passes, stop verification.
+Use established facts as inputs. Repeat repository, history, worktree, or process discovery only when a live contradiction makes it load-bearing. Once the Goal, boundary, and acceptance are resolved, the Worker owns implementation details. Repair task-caused failures inside scope; do not expand for adjacent unrelated findings. After all acceptance items and required checks pass, stop verification.
+
+For a resolved FAST task, prefer one bounded grouped read-only action for independent live facts such as repository identity, current HEAD/tree, worktree status, authorized scope, and required local file existence. Reuse already-authoritative repository/scope facts unless a live contradiction appears; grouping is not a reason to rediscover them. Group only when independence and safety are already established. If a next action depends on a prior result to decide whether it is safe, keep those actions serial. Grouping never resolves or bypasses an unresolved authority, active-writer, ownership, capability, or destructive Git gate; existing fail-closed handling still applies. No particular shell syntax or mandatory batching is required.
 
 Required capability uses this tri-state:
 
@@ -111,6 +113,8 @@ A Judge trigger requires both a listed category and a material consequence: the 
 
 After a passing FAST gate, proceed directly from named inputs → implement → required acceptance → specifically authorized local commit/publication if applicable → handoff. Do not process non-applicable references or repeat discovery. FAST reduces unnecessary work, never safety.
 
+Once the cause and authorized fix are known on a resolved FAST task, implement directly without a second planning phase.
+
 Planning and pure QA have no implementation route. Route changes require a new Owner instruction, an observed authority/scope conflict, or verified missing capability; difficulty, file count, risk, or slow checks alone do not justify a change. For route-order ambiguity, use [flowcharts](references/flowcharts.md).
 
 ## Intent, authorization, and surgical execution
@@ -126,6 +130,8 @@ A failed acceptance is attributed and retried only through a falsifiable hypothe
 ## Verification and Judge handoff
 
 Verify by observation; source inspection or command execution alone is not a passing result. `NOT RUN` is never `PASS`. Run the named acceptance and only directly relevant surrounding checks. Stop after acceptance and required checks pass. For Judge triggers, evidence reuse, depth, Fresh Context handoff, and the one-remediation limit, use [Judge handoff](references/judge-handoff.md).
+
+For a resolved FAST task, prefer one bounded verification action containing already-required checks when they are independent and safe to group: for example, focused tests, formatter/linter checks, `git diff --check`, changed-path verification, and final tracked-status checks when applicable. Keep dependent checks serial under the preflight grouping rule above, and observe every required result; a grouped invocation alone is not PASS. Once acceptance is falsifiably covered and every required check passes, stop verification and reuse that evidence for handoff. Do not add a broad inspection, full suite, Judge, evidence pass, or separate identity/reporting verification pass unless explicitly required by the task, an applicable existing gate, or a new live contradiction. Specifically authorized commit/publication and their required identity/status observations still follow the existing lifecycle gates.
 
 ## Lifecycle and filesystem accounting
 
