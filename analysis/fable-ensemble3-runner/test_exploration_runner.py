@@ -12,9 +12,11 @@ import copy
 import fcntl
 import hashlib
 import io
+import itertools
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -1544,6 +1546,777 @@ class RepairIntegrityTests(RunnerCase):
         self.assertEqual(result["state"], "COMPLETE")
         sent = [r for s in (sim, sim2, sim3) for r in s.requests if r["path"] == "responses"]
         self.assertEqual(len(sent), 39)  # the first call never left, and nothing was sent twice
+
+
+# --- R2: an independent oracle for the journal gate ------------------------------------------------------------------------------
+# Written from the R2 Packet, not from the product: it never calls the runner's gate code and never reads its constant.
+ORACLE_BOUND = 3  # the Packet's absolute bound on ledger facts that have no concrete attempt-log record
+ORACLE_SEED = 20261005
+PAYLOAD_PHASES = ("REQUEST", "RESPONSE", "ERROR")
+
+
+def oracle_truth(ledger: dict) -> dict:
+    """Every fact the ledger holds, by identity, with the content a record of it must carry."""
+    truth = {}
+    for key, slot in ledger["slots"].items():
+        truth[("RR", int(key.rsplit(":", 1)[1]))] = None
+        for n in range(1, slot["attempts"] + 1):
+            truth[("START", key, n)] = None
+        for n, receipt in enumerate(slot["receipts"], 1):
+            truth[("SETTLED", key, n)] = (receipt["status"], Decimal(receipt["cost"]), receipt["cost_known"])
+    return truth
+
+
+def oracle_fact(row: dict, cap: Decimal):
+    """(identity, content) of a concrete fact record or of a request/response/error row; None for anything else (RESUME)."""
+    phase = row["phase"]
+    if phase == "ROUND_RESERVED":
+        return ("RR", row["round"]), None
+    if phase == "START":
+        return ("START", row["slot"], row["attempt"]), None
+    if phase == "SETTLED":
+        cost = row["cost_upper_usd"]
+        return ("SETTLED", row["slot"], row["attempt"]), (row["status"], cap if cost is None else Decimal(cost), cost is not None)
+    if phase in PAYLOAD_PHASES:
+        return ("PAYLOAD", row["slot"], row["attempt"]), None
+    return None
+
+
+def oracle_needs(fact) -> list:
+    """Facts that must be on record earlier: the causal order in which the runner writes."""
+    if fact[0] == "RR":
+        return [("RR", fact[1] - 1)] if fact[1] > 0 else []
+    if fact[0] == "START":
+        return [("RR", int(fact[1].rsplit(":", 1)[1]))] + ([("SETTLED", fact[1], fact[2] - 1)] if fact[2] > 1 else [])
+    return [("START", fact[1], fact[2])]  # a settlement, a request, a response or an error needs its start
+
+
+def oracle_verdict(ledger: dict, records: list) -> str:
+    """ACCEPT unless the log is ahead of the ledger, a fact is on record twice or out of order, or more than ORACLE_BOUND
+    ledger facts have no concrete record.  Positions and set differences only; RESUME records are never read."""
+    cap, truth = Decimal(ledger["attempt_cap"]), oracle_truth(ledger)
+    concrete = [(index, found) for index, found in ((i, oracle_fact(row, cap)) for i, row in enumerate(records)) if found]
+    for _, (fact, content) in concrete:
+        identity = ("START",) + fact[1:] if fact[0] == "PAYLOAD" else fact
+        if identity not in truth or (fact[0] != "PAYLOAD" and truth[identity] != content):
+            return "LOG_AHEAD_OF_LEDGER"
+    position = {}
+    for index, (fact, _) in concrete:
+        if fact[0] != "PAYLOAD":
+            if fact in position:
+                return "DUPLICATE_FACT"
+            position[fact] = index
+    for index, (fact, _) in concrete:
+        if any(position.get(need, len(records)) > index for need in oracle_needs(fact)):
+            return "OUT_OF_ORDER"
+    return "ACCEPT" if len(set(truth) - set(position)) <= ORACLE_BOUND else "MISSING_BEYOND_BOUND"
+
+
+def oracle_frontier(ledger: dict, records: list) -> list:
+    """Indexes of fact records that nothing on record depends on: the only records a crash could have lost."""
+    cap = Decimal(ledger["attempt_cap"])
+    found = [(i, oracle_fact(row, cap)) for i, row in enumerate(records)]
+    needed = {need for _, f in found if f for need in oracle_needs(f[0])}
+    return [i for i, f in found if f and f[0][0] != "PAYLOAD" and f[0] not in needed]
+
+
+def fact_name(fact) -> str:
+    return f"ROUND_RESERVED:{fact[1]}" if fact[0] == "RR" else f"{fact[0]}:{fact[1]}:{fact[2]}"
+
+
+def forged_record(ledger: dict, fact) -> dict:
+    """A shape-valid concrete record of `fact`, marked reconciled, carrying the content the ledger gives it."""
+    marks = {"t": 1.0, "reconciled": True, "derived_from": "ledger.json", "original_payload": "LOST"}
+    if fact[0] == "RR":
+        return {"phase": "ROUND_RESERVED", "round": fact[1], **marks}
+    if fact[0] == "START":
+        return {"phase": "START", "slot": fact[1], "attempt": fact[2], **marks}
+    receipt = ledger["slots"][fact[1]]["receipts"][fact[2] - 1]
+    return {"phase": "SETTLED", "slot": fact[1], "attempt": fact[2], "status": receipt["status"], "kind": "RECONCILED_FROM_LEDGER",
+            "detail": "forged", "cost_upper_usd": receipt["cost"] if receipt["cost_known"] else None,
+            "charged_cap_because_unknown": not receipt["cost_known"], "ledger_state": None, **marks}
+
+
+def absent_records(ledger: dict) -> list:
+    """Shape-valid reconciled records of facts the ledger does not hold: an unreserved round, an unstarted attempt, a wrong settlement."""
+    slots = ledger["slots"]
+    fresh = next(key for key, slot in sorted(slots.items()) if slot["attempts"] < 2)
+    settled = next(key for key, slot in sorted(slots.items()) if slot["receipts"])
+    wrong = forged_record(ledger, ("SETTLED", settled, 1))
+    wrong["status"] = "INCOMPLETE" if wrong["status"] == "OK" else "OK"
+    last_round = max(int(key.rsplit(":", 1)[1]) for key in slots)
+    return [forged_record(ledger, ("RR", last_round + 1)), forged_record(ledger, ("START", fresh, slots[fresh]["attempts"] + 1)), wrong]
+
+
+def forged_resume(claims: list, k: int) -> dict:
+    """A shape-valid RESUME record that claims k backfilled facts, in one of several shapes."""
+    record = {"phase": "RESUME", "t": 2.0, "recovered_uncertain": [], "reconciliation": {"pre_first_save": False, "ledger_ahead": claims[:k]}}
+    if k % 3 == 1:
+        record["recovered_uncertain"] = ["no-such-item:9"]
+    elif k % 3 == 2:
+        record.update(backfilled=claims[:k], acknowledged=True)
+    else:
+        record["reconciliation"]["verified_by"] = "the journal itself"
+    return record
+
+
+class ProductGate:
+    """The product's own gate, `xr.inspect_run`, on in-memory records: only the four file reads are replaced, every decision is
+    the product's.  A cross-check in the random test compares it with the unpatched file path."""
+
+    def __init__(self, out: Path):
+        self.out, self.rows = out, None
+        self.parsed = {name: json.loads((out / name).read_bytes()) for name in ("run_manifest.json", "run_state.json", "ledger.json")}
+
+    def __enter__(self):
+        self.patches = [mock.patch.object(xr, "_read_state", lambda path, reason: self.parsed[Path(path).name]),
+                        mock.patch.object(xr.AppendLog, "records", lambda log: self.rows)]
+        for patcher in self.patches:
+            patcher.start()
+        return self
+
+    def __exit__(self, *exc):
+        for patcher in reversed(self.patches):
+            patcher.stop()
+
+    def __call__(self, rows: list) -> str:
+        self.rows = rows
+        return gate_outcome(lambda: xr.inspect_run(self.out))
+
+
+def gate_outcome(call) -> str:
+    try:
+        call()
+    except xr.RunBlocked as blocked:
+        return "REFUSED:" + str(blocked)
+    except Exception as exc:  # a crash is a disagreement with any verdict, never a refusal
+        return f"CRASHED:{type(exc).__name__}:{exc}"
+    return "ACCEPTED"
+
+
+def exhaustive_damage(rows: list):
+    """Every single and double deletion, duplication and reordering of `rows`."""
+    n = len(rows)
+    for i in range(n):
+        yield "delete-1", rows[:i] + rows[i + 1:]
+    for i, j in itertools.combinations(range(n), 2):
+        yield "delete-2", [row for k, row in enumerate(rows) if k not in (i, j)]
+    for i in range(n):
+        for j in range(n + 1):
+            yield "duplicate-1", rows[:j] + [rows[i]] + rows[j:]
+    for i, j in itertools.combinations(range(n), 2):
+        yield "duplicate-2", [x for k, row in enumerate(rows) for x in ([row, row] if k in (i, j) else [row])]
+    for i in range(n):
+        rest = rows[:i] + rows[i + 1:]
+        for j in range(n):
+            if j != i:
+                yield "move-1", rest[:j] + [rows[i]] + rest[j:]
+    for i, j in itertools.combinations(range(n), 2):
+        swapped = list(rows)
+        swapped[i], swapped[j] = rows[j], rows[i]
+        yield "swap-2", swapped
+
+
+def random_damage(rng: random.Random, ledger: dict, rows: list):
+    """One to four random damages; frontier deletions are favoured so that the bound itself is crossed often."""
+    rows, names = list(rows), []
+    for _ in range(rng.randint(1, 4)):
+        op = rng.choice(("frontier", "frontier", "frontier", "delete", "duplicate", "move", "swap", "truncate"))
+        names.append(op)
+        if op == "frontier":
+            for _ in range(rng.randint(1, 5)):
+                frontier = oracle_frontier(ledger, rows)
+                if frontier:
+                    rows.pop(rng.choice(frontier))
+        elif op == "delete":
+            rows.pop(rng.randrange(len(rows)))
+        elif op == "duplicate":
+            rows.insert(rng.randrange(len(rows) + 1), rows[rng.randrange(len(rows))])
+        elif op == "move":
+            row = rows.pop(rng.randrange(len(rows)))
+            rows.insert(rng.randrange(len(rows) + 1), row)
+        elif op == "swap":
+            i, j = rng.randrange(len(rows)), rng.randrange(len(rows))
+            rows[i], rows[j] = rows[j], rows[i]
+        else:
+            del rows[len(rows) - rng.randint(1, 12):]
+    return "+".join(names), rows
+
+
+class JournalHelpers:
+    """Run builders shared by the R2 tests (no tests of its own)."""
+
+    def crash_on(self, phase, slot=None):
+        append, fired = xr.AppendLog.append, []
+
+        def crash(log, record):
+            if record["phase"] == phase and (slot is None or record.get("slot") == slot) and not fired:
+                fired.append(True)
+                raise KeyboardInterrupt(f"crash between the ledger write and its {phase} record")
+            return append(log, record)
+
+        return mock.patch.object(xr.AppendLog, "append", crash)
+
+    def dying(self, sim, item, occurrence):
+        calls = []
+
+        def dies(path, body):
+            response = sim(path, body)
+            if path == "responses" and json.loads(body["input"])["item_id"] == item:
+                calls.append(1)
+                if len(calls) == occurrence:
+                    raise KeyboardInterrupt("the request already reached the simulated server")
+            return response
+
+        dies.is_simulated = True
+        return dies
+
+    def journal_runner(self, name, bank, budget, faults=()):
+        _, public, _ = xr.load_bank(bank)
+        sim = SimulatedResponses(public, answer_for=self.answer, faults=faults)
+        runner = xr.Runner(self.root / name, mode="SIMULATION", bank_manifest=bank, instructions="synthetic instructions",
+                           budget=budget, attempt_cap=CAP, target_rounds=5, seed=6302, transport=sim)
+        return runner, sim
+
+    def small_base(self) -> Path:
+        """Two items, three rounds: an infra retry, a crash in the START window and its resume, then a kill mid-call."""
+        manifest = json.loads(self.manifest.read_text())
+        manifest["items"] = manifest["items"][:2]
+        bank = self.root / "small-bank.json"
+        bank.write_text(json.dumps(manifest))
+        budget = str(2 * 2 * CAP * 3)
+        first, _ = self.journal_runner("small", bank, budget)
+        a, b = first.order
+        first.transport = SimulatedResponses(first.public, answer_for=self.answer, faults=[
+            {"path": "responses/input_tokens", "item_id": a, "occurrence": 1, "fault": "conn_error"}])
+        with self.crash_on("START", f"{b}:0"):
+            self.crashes(first.start)
+        second, sim = self.journal_runner("small", bank, budget)
+        second.transport = self.dying(sim, a, 2)
+        self.crashes(second.resume)
+        return self.root / "small"
+
+    def large_base(self) -> Path:
+        """Eight items, five rounds: a retry, crashes in the SETTLED, ROUND_RESERVED and START windows, then a kill mid-call."""
+        first, _ = self.journal_runner("large", self.manifest, "50")
+        order = first.order
+        first.transport = SimulatedResponses(self.public, answer_for=self.answer, faults=[
+            {"path": "responses/input_tokens", "item_id": order[2], "occurrence": 1, "fault": "conn_error"}])
+        with self.crash_on("SETTLED", f"{order[5]}:1"):
+            self.crashes(first.start)
+        for phase, slot in (("ROUND_RESERVED", None), ("START", f"{order[0]}:3")):
+            again, _ = self.journal_runner("large", self.manifest, "50")
+            with self.crash_on(phase, slot):
+                self.crashes(again.resume)
+        last, sim = self.journal_runner("large", self.manifest, "50")
+        last.transport = self.dying(sim, order[4], 2)
+        self.crashes(last.resume)
+        return self.root / "large"
+
+
+class JournalOracleTests(JournalHelpers, RunnerCase):
+    """R2-3: the product gate and an independent oracle must agree on every damaged log, with and without forged records."""
+
+    def compare(self, gate, ledger, family, rows, ks, case_index, tally) -> None:
+        truth, cap = oracle_truth(ledger), Decimal(ledger["attempt_cap"])
+        present = {found[0] for found in (oracle_fact(row, cap) for row in rows) if found and found[0][0] != "PAYLOAD"}
+        missing = sorted(set(truth) - present)
+        claims = [fact_name(f) for f in missing] + [fact_name(f) for f in sorted(truth) if f not in set(missing)]
+        refill = missing[0] if missing else sorted(present)[case_index % len(present)]
+        for forged_kind, forged in (("none", []), ("reconciled-absent", [absent_records(ledger)[case_index % 3]]),
+                                    ("reconciled-present", [forged_record(ledger, refill)])):
+            plain = gate(rows + forged)
+            for k in [None] + ks:
+                variant = rows + forged + ([] if k is None else [forged_resume(claims, k)])
+                verdict, product = oracle_verdict(ledger, variant), (plain if k is None else gate(variant))
+                tally["comparisons"] += 1
+                tally["oracle"][verdict] = tally["oracle"].get(verdict, 0) + 1
+                outcome = product.split(":")[0] if not product.startswith("REFUSED") else "REFUSED:" + product.split(":")[1]
+                tally["product"][outcome] = tally["product"].get(outcome, 0) + 1
+                where = {"family": family, "case": case_index, "forged": forged_kind, "resume_claims": k, "oracle": verdict,
+                         "product": product[:160], "missing_concrete": len(missing)}
+                if (verdict == "ACCEPT") != (product == "ACCEPTED"):
+                    cause = ("SELF_VOUCHING_RESUME_FLIPPED_A_REFUSAL" if k is not None and plain != "ACCEPTED" and product == "ACCEPTED"
+                             else f"{verdict}->{outcome}")
+                    tally["disagreement_causes"][cause] = tally["disagreement_causes"].get(cause, 0) + 1
+                    tally["disagreements"] += 1
+                    if len(tally["samples"]) < 12:
+                        tally["samples"].append(where)
+                if k is not None and product != plain:  # I4: a RESUME record must change neither the decision nor the reason
+                    tally["resume_changed_outcome"] += 1
+                    if len(tally["i4_samples"]) < 6:
+                        tally["i4_samples"].append({**where, "without_resume": plain[:160]})
+
+    @staticmethod
+    def new_tally(**extra) -> dict:
+        return {"comparisons": 0, "disagreements": 0, "resume_changed_outcome": 0, "oracle": {}, "product": {},
+                "disagreement_causes": {}, "samples": [], "i4_samples": [], "families": {}, **extra}
+
+    def test_R2_oracle_agrees_with_the_gate_on_every_single_and_double_damage_of_a_small_run(self):
+        out = self.small_base()
+        rows = xr.AppendLog(out / "attempts.jsonl").records()
+        frozen = json.dumps(rows, sort_keys=True)
+        ledger = json.loads((out / "ledger.json").read_text())
+        tally = self.new_tally(base_records=len(rows), base_ledger_facts=len(oracle_truth(ledger)), base=oracle_verdict(ledger, rows))
+        with ProductGate(out) as gate:
+            tally["base_product"] = gate(rows)
+            for index, (family, damaged) in enumerate(exhaustive_damage(rows)):
+                tally["families"][family] = tally["families"].get(family, 0) + 1
+                self.compare(gate, ledger, family, damaged, [1 + index % 8], index, tally)
+        tally["cases"] = sum(tally["families"].values())
+        print("R2_ORACLE " + json.dumps({"test": "exhaustive-small", **tally}, sort_keys=True))
+        n = len(rows)
+        self.assertEqual(tally["families"], {"delete-1": n, "delete-2": n * (n - 1) // 2, "duplicate-1": n * (n + 1),
+                                             "duplicate-2": n * (n - 1) // 2, "move-1": n * (n - 1), "swap-2": n * (n - 1) // 2})
+        self.assertEqual((tally["base"], tally["base_product"]), ("ACCEPT", "ACCEPTED"))
+        self.assertEqual(json.dumps(rows, sort_keys=True), frozen)  # nothing the gate read was changed by it
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+        self.assertEqual((tally["resume_changed_outcome"], tally["i4_samples"]), (0, []))
+
+    def test_R2_oracle_agrees_with_the_gate_on_seeded_random_damage_of_a_larger_run(self):
+        out = self.large_base()
+        rows = xr.AppendLog(out / "attempts.jsonl").records()
+        ledger = json.loads((out / "ledger.json").read_text())
+        rng = random.Random(ORACLE_SEED)
+        cases = [random_damage(rng, ledger, rows) for _ in range(520)]
+        tally = self.new_tally(seed=ORACLE_SEED, base_records=len(rows), base_ledger_facts=len(oracle_truth(ledger)),
+                               base=oracle_verdict(ledger, rows))
+        with ProductGate(out) as gate:
+            tally["base_product"] = gate(rows)
+            for index, (family, damaged) in enumerate(cases):
+                tally["families"][family.split("+")[0]] = tally["families"].get(family.split("+")[0], 0) + 1
+                self.compare(gate, ledger, family, damaged, list(range(1, 9)), index, tally)
+            mocked = [gate(damaged) for _, damaged in cases[:60]]
+        copy = self.root / "large-file-path"
+        shutil.copytree(out, copy)
+        unpatched = []
+        for _, damaged in cases[:60]:  # the same decisions through the real file reads, nothing patched
+            (copy / "attempts.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in damaged))
+            unpatched.append(gate_outcome(lambda: xr.inspect_run(copy)).replace(str(copy), str(out)))
+        tally["cases"] = len(cases)
+        tally["file_path_cross_check"] = {"cases": len(unpatched), "equal": mocked == unpatched}
+        print("R2_ORACLE " + json.dumps({"test": "random-large", **tally}, sort_keys=True))
+        self.assertGreaterEqual(tally["cases"], 500)
+        self.assertEqual((tally["base"], tally["base_product"]), ("ACCEPT", "ACCEPTED"))
+        self.assertEqual(mocked, unpatched)
+        self.assertGreater(min(tally["oracle"].get(v, 0) for v in ("ACCEPT", "MISSING_BEYOND_BOUND", "OUT_OF_ORDER", "DUPLICATE_FACT")), 0)
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+        self.assertEqual((tally["resume_changed_outcome"], tally["i4_samples"]), (0, []))
+
+
+def fact_of(row: dict):
+    """The product's identity of a concrete fact record, as it lists missing facts (any other record gets a non-matching one)."""
+    return ("ROUND_RESERVED", row.get("round"), None) if row["phase"] == "ROUND_RESERVED" else (row["phase"], row.get("slot"), row.get("attempt"))
+
+
+def moved_before(rows: list, i: int, j: int) -> list:
+    """rows with rows[i] moved to just before the record that was at index j."""
+    result = list(rows)
+    row = result.pop(i)
+    result.insert(j if j < i else j - 1, row)
+    return result
+
+
+class R2IntegrityTests(JournalHelpers, RunnerCase):
+    """R2-1/R2-4/R2-6: named regressions for I1-I5, the write-back windows, the SIMULATION boundary and the bytecode check."""
+
+    ENTRANCES = ("inspect_run", "Runner.resume", "replay_run", "report", "write_ledger", "CLI resume", "CLI replay", "CLI check")
+
+    def cli(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = xr.main(argv)
+        return code, json.loads(output.getvalue())
+
+    def rows_of(self, name) -> list:
+        return xr.AppendLog(self.root / name / "attempts.jsonl").records()
+
+    def write_rows(self, name, rows) -> None:
+        (self.root / name / "attempts.jsonl").write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+
+    def interrupted_at(self, name, position, faults=()):
+        """A run killed in-process mid-call: the generation of order[position] in round 0 reached the server, nothing settled it."""
+        runner, sim = self.make(name, log=False, faults=faults)
+        runner.transport = self.dying(sim, runner.order[position], 1)
+        self.crashes(runner.start)
+        return runner, sim
+
+    def sigkilled(self) -> str:
+        """A real child process SIGKILLed mid-call (the crash driver): four generations reached the server, the fourth unsettled."""
+        probe, _ = self.make(log=False)
+        victim = probe.order[3]
+        child = subprocess.run([sys.executable, "-B", str(HERE / "crash_driver.py"), str(self.root), "start", victim],
+                               capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "TMPDIR": str(self.root),
+                                                                    "PYTHONDONTWRITEBYTECODE": "1"}, timeout=180)
+        self.assertEqual(child.returncode, -9, child.stderr)
+        return victim
+
+    def kill_at_append(self, n):
+        append, calls = xr.AppendLog.append, []
+
+        def kill(log, record):
+            calls.append(record["phase"])
+            if len(calls) == n:
+                raise KeyboardInterrupt(f"killed at write {n} ({record['phase']})")
+            return append(log, record)
+
+        return mock.patch.object(xr.AppendLog, "append", kill)
+
+    def refused_everywhere(self, case, reason, name="run") -> list:
+        """I5 at all eight entrances: a refusal naming `reason`, no request reaches the server, not one byte of the run directory
+        (the lock included) changes.  Failures are collected and asserted once, so a missing guard is a FAIL, never an ERROR."""
+        out = self.root / name
+        runner, sim = self.make(name, log=False)
+        server_log = out / "simulated_server_log.jsonl"
+        calls = [("inspect_run", lambda: xr.inspect_run(out)), ("Runner.resume", runner.resume), ("replay_run", lambda: xr.replay_run(out)),
+                 ("report", lambda: runner._finalize(None)), ("write_ledger", runner._write_accounting)]
+        for command in ("resume", "replay", "check"):
+            argv = [command, "--out", str(out)] + ([] if command == "replay" else ["--profile", str(self.root / "unused-profile.json")])
+            argv += ["--mode", "SIMULATION"] if command == "resume" else []
+
+            def cli_call(argv=argv):
+                try:
+                    code, printed = self.cli(argv)
+                except Exception as exc:
+                    return f"CRASHED:{type(exc).__name__}:{exc}"
+                if (code, printed.get("state"), printed.get("generation_calls")) == (2, "BLOCKED", 0):
+                    return "REFUSED:" + ";".join(printed.get("reasons", []))
+                return f"NOT_REFUSED:exit_{code}:{json.dumps(printed)[:120]}"
+            calls.append(("CLI " + command, cli_call))
+        observations = []
+        for entrance, call in calls:
+            before, server_before = directory_digest(out), len(sim.requests)
+            cli_server_before = len(server_log.read_text().splitlines()) if server_log.exists() else 0
+            outcome = call() if entrance.startswith("CLI") else gate_outcome(call)
+            cli_server_after = len(server_log.read_text().splitlines()) if server_log.exists() else 0
+            row = {"case": case, "entrance": entrance, "outcome": outcome[:240], "before_sha256": before, "after_sha256": directory_digest(out),
+                   "server_requests": len(sim.requests) - server_before + cli_server_after - cli_server_before}
+            row["ok"] = bool(outcome.startswith("REFUSED:") and re.search(reason, outcome) and row["before_sha256"] == row["after_sha256"]
+                             and row["server_requests"] == 0)
+            observations.append(row)
+            print("R2_OBSERVATION " + json.dumps({"test": self._testMethodName, **row}, sort_keys=True))
+        self.assertEqual([r["entrance"] for r in observations], list(self.ENTRANCES))
+        self.assertEqual([r for r in observations if not r["ok"]], [])
+        return observations
+
+    # --- R2-4: the continuation Judge's counterexample class, fixed as a regression ------------------------------------------
+    def test_R2_forged_resume_claiming_backfilled_facts_is_refused_at_every_entrance(self):
+        """F1-R1-JOURNAL-ACKNOWLEDGEMENT: the ledger holds eight facts the log has no record of and a RESUME record claims they were
+        written back.  Claims of 1..8, the log emptied or only its fact records deleted, after an in-process interrupt and after a
+        real SIGKILL: every entrance refuses, nothing is sent, nothing changes."""
+        failures = []
+        for base in ("interrupt", "sigkill"):
+            if base == "interrupt":
+                self.interrupted_at("run", 3)
+            else:
+                shutil.rmtree(self.root / "run")
+                self.sigkilled()
+            path = self.root / "run" / "attempts.jsonl"
+            original, rows = path.read_bytes(), self.rows_of("run")
+            facts = sorted(oracle_truth(json.loads((self.root / "run" / "ledger.json").read_text())))
+            self.assertEqual(len(facts), 8)  # one reserved round, four starts, three settlements
+            claims = [fact_name(fact) for fact in facts]
+            payload = [row for row in rows if row["phase"] in PAYLOAD_PHASES]
+            variants = [(f"{base}: log emptied, RESUME claims {k}", [forged_resume(claims, k)], "ATTEMPTS_BEHIND_LEDGER") for k in range(1, 9)]
+            variants += [(f"{base}: fact records deleted, RESUME claims {k}", payload + [forged_resume(claims, k)],
+                          "ATTEMPTS_OUT_OF_ORDER:REQUEST_BEFORE_ITS_START") for k in range(1, 9)]
+            variants.append((f"{base}: log emptied, three RESUME shapes each claim all eight", [forged_resume(claims, k) for k in (8, 9, 10)],
+                             "ATTEMPTS_BEHIND_LEDGER"))
+            for label, content, reason in variants:
+                self.write_rows("run", content)
+                try:
+                    self.refused_everywhere("R2-4 " + label, reason)
+                except AssertionError as exc:
+                    failures.append((label, str(exc)[:300]))
+                finally:
+                    path.write_bytes(original)
+            # the intact run with the same forged note appended: the note neither blocks nor helps, the run resumes as before
+            path.write_bytes(original + (json.dumps(forged_resume(claims, 8)) + "\n").encode())
+            if gate_outcome(lambda: xr.inspect_run(self.root / "run")) != "ACCEPTED":
+                failures.append((base, "an intact run with a forged RESUME appended was refused"))
+            resumed, sim = self.make(log=False)
+            outcome = gate_outcome(resumed.resume)
+            generations = len([r for r in sim.requests if r["path"] == "responses"])
+            if (outcome, generations) != ("ACCEPTED", 36):  # the started fourth call is never sent again
+                failures.append((base, outcome, generations))
+        self.assertEqual(failures, [])
+
+    # --- I2: the bound is absolute and counts concrete records only --------------------------------------------------------
+    def test_R2_the_bound_counts_concrete_records_only_three_missing_pass_four_never(self):
+        self.interrupted_at("run", 5)
+        path = self.root / "run" / "attempts.jsonl"
+        original, rows = path.read_bytes(), self.rows_of("run")
+        ledger = json.loads((self.root / "run" / "ledger.json").read_text())
+        claims = [fact_name(fact) for fact in sorted(oracle_truth(ledger))]
+        settled = [i for i, row in enumerate(rows) if row["phase"] == "SETTLED"]  # nothing on record depends on a settlement here
+        self.assertEqual(len(settled), 5)
+        table, failures = [], []
+        for count in range(6):
+            damaged = [row for i, row in enumerate(rows) if i not in settled[:count]]
+            for k in (None, 1, count, 8):
+                self.write_rows("run", damaged + ([] if k is None else [forged_resume(claims, k)]))
+                outcome = gate_outcome(lambda: xr.inspect_run(self.root / "run"))
+                expected = "ACCEPTED" if count <= 3 else "REFUSED:ATTEMPTS_BEHIND_LEDGER"
+                table.append({"missing": count, "resume_claims": k, "outcome": outcome})
+                if not outcome.startswith(expected):
+                    failures.append(table[-1])
+        print("R2_BOUND " + json.dumps(table, sort_keys=True))
+        four_missing = [row for i, row in enumerate(rows) if i not in settled[:4]]
+        self.write_rows("run", four_missing + [forged_resume(claims, 8)])
+        try:
+            self.refused_everywhere("I2 four missing, RESUME claims all", "ATTEMPTS_BEHIND_LEDGER")
+        except AssertionError as exc:
+            failures.append(("entrances", str(exc)[:300]))
+        # the trust boundary, asserted rather than only written down: a forged concrete record that agrees with the ledger cannot
+        # be told from a real one, so four missing plus one such record is three missing
+        lost = fact_of(rows[settled[0]])
+        self.write_rows("run", four_missing + [forged_record(ledger, ("SETTLED", lost[1], lost[2]))])
+        if gate_outcome(lambda: xr.inspect_run(self.root / "run")) != "ACCEPTED":
+            failures.append("a ledger-consistent forged record was told apart")
+        # three missing is a legal state: resume writes the three back, one record each, and finishes without resending anything
+        self.write_rows("run", [row for i, row in enumerate(rows) if i not in settled[:3]])
+        resumed, sim = self.make(log=False)
+        outcome = gate_outcome(resumed.resume)
+        written_back = sorted(fact_of(r) for r in self.rows_of("run") if r.get("reconciled") is True)
+        if (outcome, len([r for r in sim.requests if r["path"] == "responses"]), written_back) != (
+                "ACCEPTED", 34, sorted(fact_of(rows[i]) for i in settled[:3])):
+            failures.append(("resume of three missing", outcome, written_back))
+        path.write_bytes(original)
+        self.assertEqual(failures, [])
+
+    # --- duplicates and causal order ---------------------------------------------------------------------------------------
+    def test_R2_duplicate_and_out_of_order_facts_are_refused_by_name_at_every_entrance(self):
+        order = sorted(self.public)
+        random.Random(6302).shuffle(order)
+        runner, sim = self.make("order", log=False, faults=[{"path": "responses/input_tokens", "item_id": order[0], "occurrence": 1,
+                                                             "fault": "conn_error"}])
+        runner.transport = self.dying(sim, order[2], 2)  # its round-1 call: two reserved rounds and a retried first slot on record
+        self.crashes(runner.start)
+        path = self.root / "order" / "attempts.jsonl"
+        original, rows = path.read_bytes(), self.rows_of("order")
+        ledger = json.loads((self.root / "order" / "ledger.json").read_text())
+
+        def at(phase, slot=None, attempt=1, **match):
+            return next(i for i, r in enumerate(rows) if r["phase"] == phase and (slot is None or (r["slot"], r["attempt"]) == (slot, attempt))
+                        and all(r.get(k) == v for k, v in match.items()))
+        rr0, rr1 = at("ROUND_RESERVED", round=0), at("ROUND_RESERVED", round=1)
+        first, second = f"{order[0]}:0", f"{order[1]}:0"
+        cases = [
+            ("a reserved round recorded twice", rows[:rr0 + 1] + [rows[rr0]] + rows[rr0 + 1:], "ATTEMPTS_DUPLICATE_ROUND_RESERVED"),
+            ("round 1 recorded before round 0", moved_before(rows, rr1, rr0), "ATTEMPTS_OUT_OF_ORDER:ROUND_BEFORE_THE_PREVIOUS_ROUND"),
+            ("a round-1 start before its round", moved_before(rows, at("START", f"{order[0]}:1"), rr1), "ATTEMPTS_OUT_OF_ORDER:START_BEFORE_ITS_ROUND"),
+            ("round 1 deleted while its starts remain", rows[:rr1] + rows[rr1 + 1:], "ATTEMPTS_OUT_OF_ORDER:START_BEFORE_ITS_ROUND"),
+            ("the retry started before the first attempt settled", moved_before(rows, at("START", first, 2), at("SETTLED", first, 1)),
+             "ATTEMPTS_OUT_OF_ORDER:RETRY_BEFORE_THE_FIRST_SETTLEMENT"),
+            ("a settlement before its start", moved_before(rows, at("SETTLED", second), at("START", second)),
+             "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START"),
+            ("a request before its start", moved_before(rows, at("REQUEST", second), at("START", second)),
+             "ATTEMPTS_OUT_OF_ORDER:REQUEST_BEFORE_ITS_START"),
+            ("a start deleted while its requests and settlement remain", [r for i, r in enumerate(rows) if i != at("START", second)],
+             "ATTEMPTS_OUT_OF_ORDER:REQUEST_BEFORE_ITS_START"),
+        ]
+        failures = []
+        for label, damaged, reason in cases:
+            present = {fact_of(r) for r in damaged if r["phase"] in ("ROUND_RESERVED", "START", "SETTLED")}
+            claims = [fact_name(f) for f in sorted(oracle_truth(ledger))]
+            for forged in ([], [forged_resume(claims, 8)]):  # a RESUME claiming everything changes nothing
+                self.write_rows("order", damaged + forged)
+                try:
+                    self.refused_everywhere(label + (" + forged RESUME" if forged else ""), "^REFUSED:" + re.escape(reason) + "$", "order")
+                except AssertionError as exc:
+                    failures.append((label, bool(forged), str(exc)[:300]))
+                finally:
+                    path.write_bytes(original)
+            self.assertLessEqual(len({fact_of(r) for r in rows if r["phase"] in ("ROUND_RESERVED", "START", "SETTLED")} - present), 1)
+        self.assertEqual(failures, [])
+
+    # --- I4: RESUME is an audit note ---------------------------------------------------------------------------------------
+    def test_R2_any_resume_record_anywhere_changes_no_decision_and_no_reason(self):
+        self.interrupted_at("run", 5)
+        out = self.root / "run"
+        rows, ledger = self.rows_of("run"), json.loads((out / "ledger.json").read_text())
+        truth = sorted(oracle_truth(ledger))
+        claims = [fact_name(f) for f in truth] + ["SETTLED:no-such-item:0:1", "ROUND_RESERVED:7"]
+        settled = [i for i, row in enumerate(rows) if row["phase"] == "SETTLED"]
+        start = next(i for i, row in enumerate(rows) if row["phase"] == "START")
+        corpus = [("intact", rows)] + [(f"{n} settlements deleted", [r for i, r in enumerate(rows) if i not in settled[:n]]) for n in range(1, 6)]
+        corpus += [("a start deleted", rows[:start] + rows[start + 1:]), ("a start recorded twice", rows[:start] + [rows[start]] + rows[start:]),
+                   ("log ahead of the ledger", rows + [absent_records(ledger)[1]]), ("log emptied", [])]
+        shapes = [forged_resume(claims, k) for k in range(1, len(claims) + 1)] + [
+            {"phase": "RESUME", "t": 0}, {"phase": "RESUME", "t": 1, "reconciliation": None, "recovered_uncertain": None},
+            {"phase": "RESUME", "t": 2, "reconciliation": "everything was written back", "recovered_uncertain": "all"},
+            {"phase": "RESUME", "t": 3.5, "reconciliation": claims, "recovered_uncertain": sorted(ledger["slots"]) + ["nope:0"]},
+            {"phase": "RESUME", "t": 4, "reconciliation": {"pre_first_save": True, "ledger_ahead": claims * 3}, "trusted": True}]
+        rng, changed, outcomes = random.Random(ORACLE_SEED), [], {}
+        with ProductGate(out) as gate:
+            for label, damaged in corpus:
+                plain = gate(damaged)
+                outcomes[label] = plain[:80]
+                for index, shape in enumerate(shapes):
+                    for position in sorted({0, len(damaged), rng.randrange(len(damaged) + 1)}):
+                        if gate(damaged[:position] + [shape] + damaged[position:]) != plain:
+                            changed.append((label, index, position))
+                if gate(damaged + shapes) != plain:
+                    changed.append((label, "every shape at once"))
+        print("R2_I4 " + json.dumps({"corpus": outcomes, "shapes": len(shapes), "changed": len(changed)}, sort_keys=True))
+        self.assertEqual(outcomes["intact"], "ACCEPTED")
+        self.assertTrue(outcomes["4 settlements deleted"].startswith("REFUSED:ATTEMPTS_BEHIND_LEDGER"))
+        self.assertEqual(changed, [])
+
+    # --- I3: the write-back and its windows ---------------------------------------------------------------------------------
+    def test_R2_resume_writes_each_lost_fact_back_as_its_own_reconciled_record_before_RESUME_and_any_request(self):
+        for window in ("ROUND_RESERVED", "START", "SETTLED"):
+            name = "backfill-" + window
+            runner, sim = self.make(name, log=False)
+            with self.crash_on(window):
+                self.crashes(runner.start)
+            inspection = self.completes(lambda: xr.inspect_run(runner.out_dir))
+            missing, slots, kept = inspection["missing"], inspection["ledger"]["slots"], len(inspection["records"])
+            self.assertEqual(len(missing), 1, window)  # a legitimate crash leaves exactly one ledger fact without its record
+            resumed, sim2 = self.make(name, log=False)
+            self.assertEqual(self.completes(resumed.resume)["state"], "COMPLETE", window)
+            new = self.rows_of(name)[kept:]
+            phases = [row["phase"] for row in new]
+            backfill = new[:len(missing)]
+            self.assertEqual([fact_of(row) for row in backfill], missing, window)
+            for row, fact in zip(backfill, missing):
+                self.assertEqual((row.get("reconciled"), row.get("derived_from"), row.get("original_payload")), (True, "ledger.json", "LOST"))
+                if fact[0] == "SETTLED":
+                    receipt = slots[fact[1]]["receipts"][fact[2] - 1]
+                    self.assertEqual((row["status"], row["cost_upper_usd"], row["charged_cap_because_unknown"]),
+                                     (receipt["status"], receipt["cost"] if receipt["cost_known"] else None, not receipt["cost_known"]))
+            resume_at = phases.index("RESUME")
+            self.assertLess(resume_at, phases.index("REQUEST"), window)  # RESUME, and every write-back, precede every new request
+            recovered = [(r["phase"], r.get("status"), r.get("kind"), r.get("cost_upper_usd")) for r in new[len(missing):resume_at]]
+            self.assertEqual(recovered, [("SETTLED", "INCOMPLETE", "RECOVER_UNCERTAIN_NO_RELAUNCH", None)] if window == "START" else [], window)
+            final = xr.inspect_run(runner.out_dir)
+            self.assertEqual(final["missing"], [], window)  # every ledger fact now has its own record
+            logged = sum((CAP if r["cost_upper_usd"] is None else Decimal(r["cost_upper_usd"])) for r in final["records"] if r["phase"] == "SETTLED")
+            self.assertEqual(Decimal(final["ledger"]["spent_upper"]), logged, window)  # the books and the log agree exactly
+            generations = [r["item_id"] for r in sim.requests + sim2.requests if r["path"] == "responses"]
+            self.assertEqual(len(generations), 39 if window == "START" else 40, window)
+            self.assertLessEqual(max(generations.count(item) for item in set(generations)), 5)
+            print("R2_WINDOW " + json.dumps({"window": window, "missing_before": inspection["reconciliation"]["ledger_ahead"], "resume_at": resume_at,
+                                             "first_request_at": phases.index("REQUEST"), "recovered": recovered}, sort_keys=True))
+
+    def test_R2_a_kill_at_any_write_of_resume_bookkeeping_resumes_and_never_resends(self):
+        """Three lost settlements (the bound) and an uncertain slot: resume writes three records back, then the recovery's record,
+        then RESUME, then the next slot's START.  Kill it at each of those six writes, then twice more at the first write of the
+        next resume; every state in between must pass the gate and the last resume must finish without resending anything."""
+        runner, _ = self.interrupted_at("base", 3)
+        victim, rows = runner.order[3], self.rows_of("base")
+        settled = [i for i, row in enumerate(rows) if row["phase"] == "SETTLED"]
+        self.write_rows("base", [row for i, row in enumerate(rows) if i not in settled])
+        self.assertEqual(len(xr.inspect_run(self.root / "base")["missing"]), 3)
+        expected_missing = {1: 3, 2: 2, 3: 1, 4: 1, 5: 0, 6: 1}
+        trail = []
+        for kill_at in range(1, 7):
+            name = f"kill-{kill_at}"
+            shutil.copytree(self.root / "base", self.root / name)
+            sims = []
+            for round_, at in enumerate((kill_at, 1, 1)):
+                again, sim = self.make(name, log=False)
+                sims.append(sim)
+                with self.kill_at_append(at):
+                    self.crashes(again.resume)
+                state = self.completes(lambda: xr.inspect_run(self.root / name))
+                trail.append({"kill_at": kill_at, "kill": round_, "missing": state["reconciliation"]["ledger_ahead"],
+                              "running": sorted(k for k, s in state["ledger"]["slots"].items() if s["state"] == "RUNNING")})
+                if round_ == 0:
+                    self.assertEqual(len(state["missing"]), expected_missing[kill_at], kill_at)
+            last, sim = self.make(name, log=False)
+            sims.append(sim)
+            self.assertEqual(self.completes(last.resume)["state"], "COMPLETE", kill_at)
+            sent = [r["item_id"] for s in sims for r in s.requests if r["path"] == "responses"]
+            self.assertEqual(sent.count(victim), 4, kill_at)  # its round-0 call reached the server before the first kill: never again
+            self.assertLessEqual(max(sent.count(item) for item in set(sent)), 5, kill_at)
+            final = xr.inspect_run(self.root / name)
+            logged = sum((CAP if r["cost_upper_usd"] is None else Decimal(r["cost_upper_usd"])) for r in final["records"] if r["phase"] == "SETTLED")
+            self.assertEqual((final["missing"], Decimal(final["ledger"]["spent_upper"])), ([], logged), kill_at)
+        print("R2_KILL_TRAIL " + json.dumps(trail, sort_keys=True))
+
+    def test_R2_a_kill_on_either_side_of_the_first_ledger_save_resumes_and_sends_each_call_once(self):
+        for side, target in (("before", "_save"), ("after", "reserve_round")):
+            name = f"first-save-{side}"
+            runner, sim = self.make(name, log=False)
+            with mock.patch.object(bl.Ledger, target, side_effect=KeyboardInterrupt(f"killed {side} the first ledger save")):
+                self.crashes(runner.start)
+            self.assertEqual((runner.out_dir / "ledger.json").exists(), side == "after", side)
+            inspection = self.completes(lambda: xr.inspect_run(runner.out_dir))
+            self.assertEqual((inspection["missing"], inspection["reconciliation"]["pre_first_save"]), ([], side == "before"), side)
+            resumed, sim2 = self.make(name, log=False)
+            self.assertEqual(self.completes(resumed.resume)["state"], "COMPLETE", side)
+            generations = [r["item_id"] for r in sim.requests + sim2.requests if r["path"] == "responses"]
+            self.assertEqual((len(generations), max(generations.count(item) for item in set(generations))), (40, 5), side)
+
+    # --- R2-6(c): the SIMULATION boundary, every kind of transport ------------------------------------------------------------
+    def test_R2_simulation_accepts_only_a_transport_marked_simulated_before_any_write(self):
+        class Unmarked:
+            def __call__(self, path, body):
+                raise AssertionError("a transport that is not marked simulated must never be called")
+
+        class TruthyMarker(Unmarked):
+            is_simulated = "yes"  # truthy, but not True
+
+        class Marked:
+            is_simulated = True
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __call__(self, path, body):
+                return self.inner(path, body)
+
+        refused = [("plain function", lambda path, body: {}), ("real adapter _post", api.ResponsesAdapter("x")._post),
+                   ("unmarked object", Unmarked()), ("object with a truthy non-True marker", TruthyMarker())]
+        self.interrupted_at("open", 3)
+        open_before = directory_digest(self.root / "open")
+        for index, (label, transport) in enumerate(refused):
+            runner, sim = self.make(f"refused-{index}", log=False)
+            runner.transport = transport
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-NOT-A-REAL-KEY"}):  # the network is cut in setUp
+                self.assertBlocks("SIMULATION_TRANSPORT_NOT_SIMULATED", runner.start)
+                again, again_sim = self.make("open", log=False)
+                again.transport = transport
+                self.assertBlocks("SIMULATION_TRANSPORT_NOT_SIMULATED", again.resume)
+            self.assertFalse(runner.out_dir.exists(), label)
+            self.assertEqual((sim.requests, again_sim.requests, urllib_calls()), ([], [], 0), label)
+            self.assertEqual(directory_digest(self.root / "open"), open_before, label)
+            print("R2_OBSERVATION " + json.dumps({"case": "SIMULATION boundary", "caller": "Runner", "transport": label,
+                                                  "outcome": "BLOCKED", "server_requests": 0, "network_calls": 0}))
+        for index, (label, wrap) in enumerate((("SimulatedResponses", lambda inner: inner), ("marked simulated object", Marked))):
+            runner, sim = self.make(f"marked-{index}", log=False)
+            runner.transport = wrap(sim)
+            self.assertEqual(self.completes(runner.start)["state"], "COMPLETE", label)
+            self.assertEqual(len(sim.requests), 80, label)
+            print("R2_OBSERVATION " + json.dumps({"case": "SIMULATION boundary", "caller": "Runner", "transport": label,
+                                                  "outcome": "COMPLETE", "server_requests": 80}))
+
+    # --- R2-6(b): a bytecode check that can fail --------------------------------------------------------------------------------
+    def test_R2_bytecode_writes_are_observable_through_an_explicit_cache_prefix_and_none_happen(self):
+        """Apple's Python sends bytecode to a per-user cache, so an empty package directory alone proves nothing.  With
+        PYTHONPYCACHEPREFIX every write that is not suppressed lands in a directory of ours: first a copy with the suppression
+        removed must write there, then the code as shipped must write nothing there, for both entry points."""
+        copies = {"suppression removed": self.root / "bytecode-control", "as shipped": self.root / "bytecode-shipped"}
+        for root in copies.values():
+            for name in ("fable-ensemble3-runner", "fable-ensemble3-r1", "fable-ensemble3-lab", "fable-ensemble3-bank"):
+                shutil.copytree(HERE.parent / name, root / "analysis" / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for path in (copies["suppression removed"] / "analysis" / "fable-ensemble3-runner").glob("*.py"):
+            path.write_text(path.read_text().replace("sys.dont_write_bytecode = True", "sys.dont_write_bytecode = False"))
+        found = {}
+        for label, root in copies.items():
+            for entry in ("exploration_runner.py", "probe_2b.py"):
+                prefix = self.root / f"prefix-{label.replace(' ', '-')}-{entry}"
+                result = subprocess.run([sys.executable, str(root / "analysis/fable-ensemble3-runner" / entry), "--help"], capture_output=True,
+                                        text=True, env={"PATH": "/usr/bin:/bin", "TMPDIR": str(self.root), "PYTHONPYCACHEPREFIX": str(prefix)},
+                                        timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                found[f"{label} / {entry}"] = sorted(p.name for p in prefix.rglob("*.pyc") if root.name in p.parts)
+        print("R2_BYTECODE " + json.dumps(found, sort_keys=True))
+        for entry in ("exploration_runner.py", "probe_2b.py"):
+            self.assertTrue(any(name.startswith("_lab.") for name in found[f"suppression removed / {entry}"]), entry)  # the check can see a write
+            self.assertEqual(found[f"as shipped / {entry}"], [], entry)
+        self.assertEqual([p for root in copies.values() for p in (root / "analysis").rglob("*.pyc") if root.name == "bytecode-shipped"], [])
 
 
 if __name__ == "__main__":

@@ -443,14 +443,113 @@ REPAIR = [
 ]
 
 # --- how far the ledger may be ahead of the attempt log -------------------------------------------------------------------------
+# R2: the acknowledgement these three once guarded was the defect and is gone.  The first keeps its intent on the rewritten bound
+# line; the second keeps its edit but needs the exact-bound test (resume now writes lost facts back, so test P never exceeds one);
+# the third now removes the write-back that replaced the acknowledgement, under the same test O.
 BOUND = [
     ("R9 ledger-ahead tolerance unbounded", XR,
-     '_require(len([item for item in ahead if item not in acknowledged]) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")',
+     '_require(len(missing) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")',
      '_require(True, "ATTEMPTS_BEHIND_LEDGER")', RI + "test_N_an_emptied_or_truncated_log_far_behind_the_ledger_is_refused"),
     ("R9 ledger-ahead tolerance below a crash inside resume", XR, 'MAX_UNACKNOWLEDGED_AHEAD = 3\n', 'MAX_UNACKNOWLEDGED_AHEAD = 1\n',
-     RI + "test_P_a_crash_inside_resume_after_recovery_and_before_its_log_record_resumes_again"),
-    ("R9 earlier resumes' notes are not trusted", XR,
-     '                acknowledged.update(noted["ledger_ahead"] if isinstance(noted, dict) and isinstance(noted.get("ledger_ahead"), list) else [])\n',
-     '                pass\n', RI + "test_O_several_crashes_in_a_row_in_different_windows_still_resume_and_never_resend"),
+     X + "R2IntegrityTests.test_R2_the_bound_counts_concrete_records_only_three_missing_pass_four_never"),
+    ("R9 earlier resumes' lost facts are not written back (was: earlier resumes' notes are not trusted)", XR,
+     '            for fact in inspection["missing"]:\n                self.log.append(reconciled_record(fact, self.ledger.state["slots"]))\n',
+     '', RI + "test_O_several_crashes_in_a_row_in_different_windows_still_resume_and_never_resend"),
 ]
-CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND
+
+# --- R2: the log never vouches for itself; lost facts come back as concrete records; every entrance uses the gate ---------------
+R2 = X + "R2IntegrityTests."
+R2_FORGED = R2 + "test_R2_forged_resume_claiming_backfilled_facts_is_refused_at_every_entrance"
+R2_BOUNDT = R2 + "test_R2_the_bound_counts_concrete_records_only_three_missing_pass_four_never"
+R2_ORDER = R2 + "test_R2_duplicate_and_out_of_order_facts_are_refused_by_name_at_every_entrance"
+R2_I4 = R2 + "test_R2_any_resume_record_anywhere_changes_no_decision_and_no_reason"
+R2_BACKFILL = R2 + "test_R2_resume_writes_each_lost_fact_back_as_its_own_reconciled_record_before_RESUME_and_any_request"
+R2_SIM = R2 + "test_R2_simulation_accepts_only_a_transport_marked_simulated_before_any_write"
+R2_PYC = R2 + "test_R2_bytecode_writes_are_observable_through_an_explicit_cache_prefix_and_none_happen"
+R2_ORACLE = X + "JournalOracleTests.test_R2_oracle_agrees_with_the_gate_on_seeded_random_damage_of_a_larger_run"
+R2_EXHAUSTIVE = X + "JournalOracleTests.test_R2_oracle_agrees_with_the_gate_on_every_single_and_double_damage_of_a_small_run"
+BOUND_LINE = '        _require(len(missing) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")\n'
+RESUME_NOTE = ('            # an audit note only: no gate reads it, so neither its presence nor anything it claims can change a decision\n'
+               '            self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": uncertain,\n'
+               '                             "reconciliation": inspection["reconciliation"]})\n')
+WRITE_BACK = '            for fact in inspection["missing"]:\n'
+UNGATED = ('{"manifest": _read_state(%s / "run_manifest.json", "X"), "state": _read_state(%s / "run_state.json", "X"), '
+           '"ledger": _read_state(%s / "ledger.json", "X")')
+R2_CASES = [
+    ("R2 I1 a RESUME claim offsets missing facts", XR, BOUND_LINE,
+     '        claimed = {name for row in records if row["phase"] == "RESUME" and isinstance(row.get("reconciliation"), dict)\n'
+     '                   for name in row["reconciliation"].get("ledger_ahead", [])}\n'
+     '        _require(len([f for f in missing if fact_name(f) not in claimed]) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")\n',
+     R2_FORGED),
+    ("R2 I1 a RESUME claim offsets missing facts (seen by the oracle)", XR, BOUND_LINE,
+     '        claimed = {name for row in records if row["phase"] == "RESUME" and isinstance(row.get("reconciliation"), dict)\n'
+     '                   for name in row["reconciliation"].get("ledger_ahead", [])}\n'
+     '        _require(len([f for f in missing if fact_name(f) not in claimed]) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")\n',
+     R2_ORACLE),
+    ("R2 I2 bound enlarged to eight", XR, 'MAX_UNACKNOWLEDGED_AHEAD = 3\n', 'MAX_UNACKNOWLEDGED_AHEAD = 8\n', R2_FORGED),
+    ("R2 I2 bound enlarged by one", XR, BOUND_LINE, BOUND_LINE.replace("<= MAX_UNACKNOWLEDGED_AHEAD", "<= MAX_UNACKNOWLEDGED_AHEAD + 1"), R2_BOUNDT),
+    ("R2 I2 bound enlarged by one (seen by the oracle)", XR, BOUND_LINE,
+     BOUND_LINE.replace("<= MAX_UNACKNOWLEDGED_AHEAD", "<= MAX_UNACKNOWLEDGED_AHEAD + 1"), R2_ORACLE),
+    ("R2 I3 lost facts are not written back", XR, WRITE_BACK + '                self.log.append(reconciled_record(fact, self.ledger.state["slots"]))\n',
+     '', R2_BACKFILL),
+    ("R2 I3 RESUME is written before the write-back", XR, [
+        (RESUME_NOTE, ''),
+        (WRITE_BACK, '            self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": [], '
+                     '"reconciliation": inspection["reconciliation"]})\n' + WRITE_BACK)], None, R2_BACKFILL),
+    ("R2 I3 a recovery leaves no record of its own", XR,
+     '            for slot in recovering:  # a recovery is a ledger fact like any other: its own record follows the ledger write\n'
+     '                self._log_settled(slot, self.ledger.state["slots"][slot]["attempts"], "INCOMPLETE", None,\n'
+     '                                  "RECOVER_UNCERTAIN_NO_RELAUNCH", "started, no receipt: charged the cap, never sent again", "FINAL")\n',
+     '', R2_BACKFILL),
+    ("R2 I3 a written-back settlement is not the ledger's", XR, 'cost_upper_usd=receipt["cost"] if receipt["cost_known"] else None,',
+     'cost_upper_usd=None,', R2_BACKFILL),
+    ("R2 I4 a RESUME record can refuse", XR,
+     '            elif phase != "RESUME":  # a RESUME record is an audit note: none of its fields is read, so it can excuse nothing\n'
+     '                raise RunBlocked("ATTEMPTS_PHASE_INVALID")\n',
+     '            elif phase == "RESUME":\n'
+     '                _require(isinstance(row["recovered_uncertain"], list)\n'
+     '                         and all(key in slots and slots[key]["attempts"] > 0 for key in row["recovered_uncertain"]), "LEDGER_BEHIND_RESUME")\n'
+     '            else:\n                raise RunBlocked("ATTEMPTS_PHASE_INVALID")\n', R2_I4),
+    ("R2 a reserved round may be recorded twice", XR, '_require(index not in rounds, "ATTEMPTS_DUPLICATE_ROUND_RESERVED")',
+     '_require(True, "ATTEMPTS_DUPLICATE_ROUND_RESERVED")', R2_ORDER),
+    ("R2 a reserved round may be recorded twice (seen by the oracle)", XR, '_require(index not in rounds, "ATTEMPTS_DUPLICATE_ROUND_RESERVED")',
+     '_require(True, "ATTEMPTS_DUPLICATE_ROUND_RESERVED")', R2_EXHAUSTIVE),
+    ("R2 a round may be recorded before the previous one", XR,
+     '_require(index == 0 or index - 1 in rounds, "ATTEMPTS_OUT_OF_ORDER:ROUND_BEFORE_THE_PREVIOUS_ROUND")',
+     '_require(True, "ATTEMPTS_OUT_OF_ORDER:ROUND_BEFORE_THE_PREVIOUS_ROUND")', R2_ORDER),
+    ("R2 a start may precede its round", XR, '_require(int(key.rsplit(":", 1)[1]) in rounds, "ATTEMPTS_OUT_OF_ORDER:START_BEFORE_ITS_ROUND")',
+     '_require(True, "ATTEMPTS_OUT_OF_ORDER:START_BEFORE_ITS_ROUND")', R2_ORDER),
+    ("R2 a retry may precede the first settlement", XR,
+     '_require(attempt == 1 or (key, attempt - 1) in settles, "ATTEMPTS_OUT_OF_ORDER:RETRY_BEFORE_THE_FIRST_SETTLEMENT")',
+     '_require(True, "ATTEMPTS_OUT_OF_ORDER:RETRY_BEFORE_THE_FIRST_SETTLEMENT")', R2_ORDER),
+    ("R2 a settlement may precede its start", XR, '_require(pair in starts, "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START")',
+     '_require(True, "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START")', R2_ORDER),
+    ("R2 a settlement may precede its start (seen by the oracle)", XR, '_require(pair in starts, "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START")',
+     '_require(True, "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START")', R2_EXHAUSTIVE),
+    ("R2 a request may precede its start", XR, '_require(pair in starts, f"ATTEMPTS_OUT_OF_ORDER:{phase}_BEFORE_ITS_START")',
+     '_require(True, f"ATTEMPTS_OUT_OF_ORDER:{phase}_BEFORE_ITS_START")', R2_ORDER),
+    ("R2 entrance: resume skips the gate", XR, [
+        ('        inspect_run(self.out_dir)\n        self._lock()\n', '        self._lock()\n'),
+        ('            inspection = inspect_run(self.out_dir)  # repeat under flock; no PID write until all refusal checks pass\n',
+         '            inspection = ' + UNGATED % (("self.out_dir",) * 3) + ', "records": self.log.records(), "missing": [], "reconciliation": {}}\n')],
+     None, R2_FORGED),
+    ("R2 entrance: replay skips the gate", XR, '    inspection = inspect_run(out_dir)\n    manifest = inspection["manifest"]\n',
+     '    inspection = ' + UNGATED % (("out_dir",) * 3) + '}\n    manifest = inspection["manifest"]\n', R2_FORGED),
+    ("R2 entrance: the report skips the gate", XR, '        inspect_run(self.out_dir)\n        runs = saved_runs(', '        runs = saved_runs(', R2_FORGED),
+    ("R2 entrance: the write ledger skips the gate", XR, '        inspect_run(self.out_dir)\n        files = [', '        files = [', R2_FORGED),
+    ("R2 entrance: CLI resume skips the gate", XR, '        if args.command == "resume":\n            inspect_run(args.out)\n', '', R2_FORGED),
+    ("R2 entrance: CLI check skips the gate", XR, '            if args.out:\n                inspect_run(args.out)\n',
+     '            if False:\n                inspect_run(args.out)\n', R2_FORGED),
+    ("R2 runner marker accepts any truthy value", XR, '            if getattr(self.transport, "is_simulated", False) is not True:\n',
+     '            if not getattr(self.transport, "is_simulated", False):\n', R2_SIM),
+    ("R2 probe marker accepts any truthy value", PB, '            if getattr(self.transport, "is_simulated", False) is not True:\n',
+     '            if not getattr(self.transport, "is_simulated", False):\n', B + "SimulationBoundaryTests.test_R2_unmarked_objects_are_blocked_and_marked_simulators_run"),
+    ("R2 probe pack reread without its pin", PB, '        instructions = ep.read_pinned(registration["instruction"]).decode("utf-8")\n',
+     '        instructions = Path(registration["instruction"]["ref"]).read_text(encoding="utf-8")\n',
+     B + "SimulationBoundaryTests.test_R2_a_pack_that_changes_after_the_gate_is_blocked_before_any_send"),
+    ("R2 runner bytecode suppression disabled (cache-prefix check)", XR, 'from simulated_transport import SimulatedResponses\n',
+     'sys.dont_write_bytecode = False\nfrom simulated_transport import SimulatedResponses\n', R2_PYC),
+    ("R2 probe bytecode suppression disabled (cache-prefix check)", PB, 'import build_engineering_bank as eb\n',
+     'sys.dont_write_bytecode = False\nimport build_engineering_bank as eb\n', R2_PYC),
+]
+CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND + R2_CASES

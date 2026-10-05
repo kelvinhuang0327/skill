@@ -734,6 +734,67 @@ class SimulationBoundaryTests(ProbeCase):
             print("REPAIR_OBSERVATION " + json.dumps({"case": "K", "caller": "Probe", "transport": index,
                   "new_requests": 0, "network_calls": 0, "writes": 0, "outcome": "BLOCKED"}))
 
+    def test_R2_unmarked_objects_are_blocked_and_marked_simulators_run(self):
+        class Unmarked:
+            def __call__(self, path, body):
+                raise AssertionError("a transport that is not marked simulated must never be called")
+
+        class TruthyMarker(Unmarked):
+            is_simulated = 1  # truthy, but not True
+
+        class Marked:
+            is_simulated = True
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __call__(self, path, body):
+                return self.inner(path, body)
+
+        for label, transport in (("unmarked object", Unmarked()), ("object with a truthy non-True marker", TruthyMarker())):
+            out = self.work / ("r2-refused-" + label.split()[0])
+            probe = pb.Probe(out, self.registration, mode="SIMULATION", instructions=self.instructions, public=self.public, transport=transport)
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-NOT-A-REAL-KEY"}):  # the network is cut in setUp
+                self.assertBlocks("SIMULATION_TRANSPORT_NOT_SIMULATED", probe.run)
+            self.assertFalse(out.exists(), label)
+            self.assertEqual((urllib.request.urlopen.call_count, socket.socket.connect.call_count), (0, 0), label)
+            print("R2_OBSERVATION " + json.dumps({"case": "SIMULATION boundary", "caller": "Probe", "transport": label, "outcome": "BLOCKED",
+                                                  "server_requests": 0, "network_calls": 0, "writes": 0}))
+        for index, (label, wrap) in enumerate((("SimulatedResponses", lambda inner: inner), ("marked simulated object", Marked))):
+            sim = self.sim()
+            report = pb.Probe(self.work / f"r2-marked-{index}", self.registration, mode="SIMULATION", instructions=self.instructions,
+                              public=self.public, transport=wrap(sim)).run()
+            self.assertEqual((report["ledger_state"], len(sim.requests)), ("COMPLETE", 7), label)
+            print("R2_OBSERVATION " + json.dumps({"case": "SIMULATION boundary", "caller": "Probe", "transport": label, "outcome": "COMPLETE",
+                                                  "server_requests": 7}))
+
+    def test_R2_a_pack_that_changes_after_the_gate_is_blocked_before_any_send(self):
+        """F3 for the probe: the bytes at the pinned instruction location differ from the pin by the time the probe reads them.
+        The pack is hashed and consumed from one read, so the probe refuses before a transport even exists."""
+        out, swapped = self.work / "race", self.work / "swapped-pack.md"
+        real_gate, real_sim, built = pb.probe_gate, pb.SimulatedResponses, []
+
+        def gate_then_swap(*args, **kwargs):
+            registration = real_gate(*args, **kwargs)
+            swapped.write_bytes(self.pack.read_bytes() + b"\n<!-- replaced after the gate passed -->\n")
+            return {**registration, "instruction": {**registration["instruction"], "ref": str(swapped)}}
+
+        def recording(*args, **kwargs):
+            built.append(real_sim(*args, **kwargs))
+            return built[-1]
+
+        buffer = io.StringIO()
+        with mock.patch.object(pb, "probe_gate", gate_then_swap), mock.patch.object(pb, "SimulatedResponses", recording), \
+                contextlib.redirect_stdout(buffer):
+            code = pb.main(["run", "--registration", str(self.registration), "--out", str(out), "--mode", "SIMULATION"])
+        result = json.loads(buffer.getvalue())
+        self.assertEqual((code, result["state"], result["generation_calls"]), (2, "BLOCKED", 0))
+        self.assertIn("pinned content changed", ",".join(result["reasons"]))
+        self.assertEqual(built, [])
+        self.assertFalse(out.exists())
+        print("R2_OBSERVATION " + json.dumps({"case": "F3 instruction race", "caller": "Probe CLI", "outcome": "BLOCKED", "reasons": result["reasons"],
+                                              "server_requests": 0, "writes": 0}))
+
 
 if __name__ == "__main__":
     unittest.main()

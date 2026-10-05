@@ -15,7 +15,10 @@ Accounting rules (the point of this module):
   * unknown cost is charged the cap, never zero; a cost above the cap stops the run;
   * only a request that provably never reached generation, or a definite "not processed" answer, is retried, once;
   * a provider identity or capability violation, a rejected request or an unexpected error halts the run: its slots are
-    kept, nothing is scored, and the run can be neither resumed nor extended.
+    kept, nothing is scored, and the run can be neither resumed nor extended;
+  * the attempt log never vouches for itself: a ledger fact counts as recorded only through its own concrete record, and a
+    RESUME record is an audit note no gate reads; resume first writes every lost fact back, from the ledger, as its own
+    record marked reconciled.
 Never relaunches an existing run; resume continues only an interrupted one, after recovery.
 """
 from __future__ import annotations
@@ -49,8 +52,9 @@ HERE = Path(__file__).resolve().parent
 MODES = ("SIMULATION", "LIVE")
 BANK_PURPOSES = ("ENGINEERING_ONLY", "FORMAL_DECISION_EXPLORATION")
 MANIFEST_ARTIFACT = "FABLE_ENSEMBLE3_R1_RUN_MANIFEST"
-# How far the ledger may be ahead of the attempt log without a note from an earlier resume: one crash window leaves one pending
-# record, and a crash inside resume's own recovery leaves one more (the recovered settle).  Anything further has lost log history.
+# The absolute bound on ledger facts that have no concrete attempt-log record.  Nothing in the log raises it or excuses a fact.
+# Every ledger write is followed by its log record before the next ledger write, and resume writes each missing fact back before
+# it does anything else, so a legitimate crash leaves at most one fact without a record; the rest is the fixed tolerance.
 MAX_UNACKNOWLEDGED_AHEAD = 3
 REPORT_METRICS = (
     "single", "single_gated", "maj3", "gated", "cov3", "disagreement", "coverage_gap", "vote_effect", "checker_effect",
@@ -166,11 +170,37 @@ def _read_state(path: Path, reason: str) -> dict:
         raise RunBlocked(reason) from exc
 
 
-def inspect_run(out_dir) -> dict:
-    """Read-only gate for every run-state consumer. Ledger writes precede log writes.
+def fact_name(fact) -> str:
+    phase, where, attempt = fact
+    return f"{phase}:{where}" if attempt is None else f"{phase}:{where}:{attempt}"
 
-    A log ahead of the ledger is corruption; a ledger ahead of the log is a
-    supported crash window. Missing ledger + an empty log is pre-first-save.
+
+def reconciled_record(fact, slots: dict) -> dict:
+    """The concrete log record of a ledger fact whose own record was lost, derived from the ledger alone.
+
+    It carries exactly what the gate checks against the ledger.  What only the lost record knew (its time, the settlement's
+    kind and detail) is not invented: `original_payload` says it is lost.
+    """
+    phase, where, attempt = fact
+    record = {"phase": phase, "t": time.time(), "reconciled": True, "derived_from": "ledger.json", "original_payload": "LOST"}
+    if phase == "ROUND_RESERVED":
+        return {**record, "round": where}
+    record.update(slot=where, attempt=attempt)
+    if phase == "SETTLED":
+        receipt = slots[where]["receipts"][attempt - 1]
+        record.update(status=receipt["status"], kind="RECONCILED_FROM_LEDGER", detail="the original SETTLED record was lost",
+                      cost_upper_usd=receipt["cost"] if receipt["cost_known"] else None,
+                      charged_cap_because_unknown=not receipt["cost_known"], ledger_state=None)
+    return record
+
+
+def inspect_run(out_dir) -> dict:
+    """Read-only gate for every run-state consumer: a function of the manifest, state, ledger and concrete log records only.
+
+    Ledger writes precede log writes, so the ledger may be ahead of the log, never behind it: a record of a fact the ledger does
+    not hold, a fact recorded twice, or a record before a fact it depends on is refused.  A ledger fact with no concrete record
+    is missing, and more than MAX_UNACKNOWLEDGED_AHEAD missing facts are refused.  Nothing the log says about itself counts: a
+    RESUME record is an audit note and none of its fields is read.  Missing ledger + an empty log is pre-first-save.
     Torn log tails are refused rather than repaired or silently certified.
     """
     out = Path(out_dir)
@@ -207,7 +237,7 @@ def inspect_run(out_dir) -> dict:
     ledger_path = out / "ledger.json"
     if not ledger_path.exists():
         _require(not records and state["state"] == "RUNNING", "LEDGER_MISSING:no ledger to replay")
-        return {"manifest": manifest, "state": state, "ledger": None, "records": records,
+        return {"manifest": manifest, "state": state, "ledger": None, "records": records, "missing": [],
                 "reconciliation": {"pre_first_save": True, "ledger_ahead": []}}
     ledger = _read_state(ledger_path, "LEDGER_INVALID_OR_UNREADABLE")
     try:
@@ -277,13 +307,15 @@ def inspect_run(out_dir) -> dict:
         _require(events_rounds == set(reserved_rounds)
                  and intents == {(key, n) for key, slot in slots.items() for n in range(1, slot["attempts"] + 1)},
                  "LEDGER_EVENTS_INCONSISTENT")
-        starts, settles, rounds = set(), set(), set()
+        starts, settles, rounds = set(), set(), set()  # concrete records so far: each record must follow every fact it depends on
         for row in records:
             phase = row["phase"]
             _require(type(row["t"]) in (int, float) and math.isfinite(row["t"]), "ATTEMPTS_SHAPE_INVALID")
             if phase == "ROUND_RESERVED":
                 index = row["round"]
                 _require(type(index) is int and index in reserved_rounds, "LEDGER_BEHIND_ROUND_RESERVED")
+                _require(index not in rounds, "ATTEMPTS_DUPLICATE_ROUND_RESERVED")
+                _require(index == 0 or index - 1 in rounds, "ATTEMPTS_OUT_OF_ORDER:ROUND_BEFORE_THE_PREVIOUS_ROUND")
                 rounds.add(index)
             elif phase in ("START", "REQUEST", "RESPONSE", "ERROR", "SETTLED"):
                 key, attempt = row["slot"], row["attempt"]
@@ -292,6 +324,8 @@ def inspect_run(out_dir) -> dict:
                 pair = (key, attempt)
                 if phase == "START":
                     _require(pair not in starts, "ATTEMPTS_DUPLICATE_START")
+                    _require(int(key.rsplit(":", 1)[1]) in rounds, "ATTEMPTS_OUT_OF_ORDER:START_BEFORE_ITS_ROUND")
+                    _require(attempt == 1 or (key, attempt - 1) in settles, "ATTEMPTS_OUT_OF_ORDER:RETRY_BEFORE_THE_FIRST_SETTLEMENT")
                     starts.add(pair)
                 elif phase == "SETTLED":
                     _require(attempt <= len(slots[key]["receipts"]), "LEDGER_BEHIND_SETTLED")
@@ -303,36 +337,30 @@ def inspect_run(out_dir) -> dict:
                     _require(not (row["kind"] == "ATTEMPT_CAP_OVERRUN" or cost > cap) or ledger["overrun"],
                              "LEDGER_BEHIND_OVERRUN")
                     _require(pair not in settles, "ATTEMPTS_DUPLICATE_SETTLED")
+                    _require(pair in starts, "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START")
                     settles.add(pair)
                 else:
                     _require(row["path"] in ("responses", "responses/input_tokens"), "ATTEMPTS_SHAPE_INVALID")
                     _require(isinstance(row[{"REQUEST": "body", "RESPONSE": "response", "ERROR": "error"}[phase]], dict),
                              "ATTEMPTS_SHAPE_INVALID")
-            elif phase == "RESUME":
-                _require(isinstance(row["recovered_uncertain"], list)
-                         and all(key in slots and slots[key]["attempts"] > 0 for key in row["recovered_uncertain"]),
-                         "LEDGER_BEHIND_RESUME")
-            else:
+                    _require(pair in starts, f"ATTEMPTS_OUT_OF_ORDER:{phase}_BEFORE_ITS_START")
+            elif phase != "RESUME":  # a RESUME record is an audit note: none of its fields is read, so it can excuse nothing
                 raise RunBlocked("ATTEMPTS_PHASE_INVALID")
         if state["state"] == "COMPLETE":
             _require(not any(slot["state"] == "RUNNING" for slot in slots.values()) and not ledger["overrun"],
                      "RUN_STATE_LEDGER_MISMATCH")
-        ahead = ([f"ROUND_RESERVED:{n}" for n in sorted(set(reserved_rounds) - rounds)]
-                 + [f"START:{key}:{n}" for key, n in sorted(intents - starts)]
-                 + [f"SETTLED:{key}:{n}" for key, slot in sorted(slots.items()) for n in range(1, len(slot["receipts"]) + 1)
-                    if (key, n) not in settles])
-        acknowledged = set()  # what earlier resumes already wrote down in their RESUME record
-        for row in records:
-            if row["phase"] == "RESUME":
-                noted = row.get("reconciliation")
-                acknowledged.update(noted["ledger_ahead"] if isinstance(noted, dict) and isinstance(noted.get("ledger_ahead"), list) else [])
-        _require(len([item for item in ahead if item not in acknowledged]) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")
+        # every ledger fact with no concrete record of its own, in the order resume writes them back (each after what it needs)
+        missing = ([("ROUND_RESERVED", n, None) for n in sorted(set(reserved_rounds) - rounds)]
+                   + [(phase, key, n) for n in (1, 2) for phase, logged in (("START", starts), ("SETTLED", settles))
+                      for key, slot in sorted(slots.items())
+                      if n <= (slot["attempts"] if phase == "START" else len(slot["receipts"])) and (key, n) not in logged])
+        _require(len(missing) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")
     except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError) as exc:
         if isinstance(exc, RunBlocked):
             raise
         raise RunBlocked("LEDGER_OR_ATTEMPTS_SHAPE_INVALID") from exc
-    return {"manifest": manifest, "state": state, "ledger": ledger, "records": records,
-            "reconciliation": {"pre_first_save": False, "ledger_ahead": ahead}}
+    return {"manifest": manifest, "state": state, "ledger": ledger, "records": records, "missing": missing,
+            "reconciliation": {"pre_first_save": False, "ledger_ahead": [fact_name(fact) for fact in missing]}}
 
 
 # --- inputs ----------------------------------------------------------------------------------------------------------
@@ -661,6 +689,10 @@ class Runner:
             self._stamp_lock()
             self.ledger = (_loaded_ledger(self.out_dir, inspection) if inspection["ledger"] is not None
                            else bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap))
+            # Each lost fact is written back first, as its own reconciled record derived from the ledger, in an order where every
+            # record follows what it needs: a kill part-way leaves a shorter list for the next resume and nothing out of order.
+            for fact in inspection["missing"]:
+                self.log.append(reconciled_record(fact, self.ledger.state["slots"]))
             uncertain = sorted(slot for slot, record in self.ledger.state["slots"].items() if record["state"] == "RUNNING")
             overrun = None
             for slot in uncertain:
@@ -674,7 +706,12 @@ class Runner:
                     except RunHalt as halt:
                         overrun = halt
                     self._log_settled(slot, attempt, "INVALID_OUTPUT", cost, "ATTEMPT_CAP_OVERRUN", "durable response recovered")
+            recovering = [slot for slot in uncertain if self.ledger.state["slots"][slot]["state"] == "RUNNING"]
             self.ledger.recover_uncertain()  # started, no receipt: INCOMPLETE and charged the cap; never sent again
+            for slot in recovering:  # a recovery is a ledger fact like any other: its own record follows the ledger write
+                self._log_settled(slot, self.ledger.state["slots"][slot]["attempts"], "INCOMPLETE", None,
+                                  "RECOVER_UNCERTAIN_NO_RELAUNCH", "started, no receipt: charged the cap, never sent again", "FINAL")
+            # an audit note only: no gate reads it, so neither its presence nor anything it claims can change a decision
             self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": uncertain,
                              "reconciliation": inspection["reconciliation"]})
             if overrun is not None:
