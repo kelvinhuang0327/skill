@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import subprocess
+import select
 import sys
 import json
 import os
@@ -631,6 +632,7 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
             parent_terminated = root / "parent-term"
             child_pid_file = root / "child.pid"
             provider = root / "hanging-fake-provider"
+            exit_read, exit_write = os.pipe()
             child_code = "; ".join(
                 [
                     "import pathlib,signal,time",
@@ -647,7 +649,7 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
                     f"    print({REQUIRED_VERSION!r})",
                     "    raise SystemExit(0)",
                     f"signal.signal(signal.SIGTERM, lambda *_: pathlib.Path({str(parent_terminated)!r}).write_text('term'))",
-                    f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}], stdout=sys.stdout, stderr=sys.stderr)",
+                    f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}], stdout=sys.stdout, stderr=sys.stderr, pass_fds=({exit_write},))",
                     f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid))",
                     f"while not pathlib.Path({str(ready)!r}).exists(): time.sleep(0.01)",
                     "print('partial provider stdout', flush=True)",
@@ -660,7 +662,9 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
             launched: list[subprocess.Popen[bytes]] = []
 
             def launch(argv: tuple[str, ...], **kwargs: Any) -> subprocess.Popen[bytes]:
+                kwargs["pass_fds"] = (*kwargs.get("pass_fds", ()), exit_write)
                 process = subprocess.Popen(argv, **kwargs)
+                os.close(exit_write)
                 launched.append(process)
                 return process
 
@@ -700,24 +704,18 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
                 self.assertIn(b"partial provider stderr", error.stderr)
                 self.assertTrue(terminated.is_file())
                 self.assertTrue(parent_terminated.is_file())
-                child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-                child_running = True
-                deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline:
-                    status = subprocess.run(
-                        ["ps", "-o", "stat=", "-p", str(child_pid)],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        text=True,
-                    )
-                    process_state = status.stdout.strip()
-                    child_running = bool(process_state) and not process_state.startswith("Z")
-                    if not child_running:
-                        break
-                    time.sleep(0.02)
-                self.assertFalse(child_running, f"provider child {child_pid} remained alive")
+                self.assertTrue(
+                    select.select([exit_read], [], [], 2.0)[0],
+                    "fake provider child retained its exit pipe after group cleanup",
+                )
+                self.assertEqual(os.read(exit_read, 1), b"")
+
             finally:
+                for descriptor in (exit_read, exit_write):
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
                 if launched:
                     try:
                         os.killpg(launched[-1].pid, signal.SIGKILL)
@@ -732,6 +730,7 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
             ready = root / "child-ready"
             child_pid_file = root / "child.pid"
             provider = root / "closing-pipes-fake-provider"
+            exit_read, exit_write = os.pipe()
             child_code = "; ".join(
                 [
                     "import os,pathlib,signal,time",
@@ -748,7 +747,7 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
                     "if sys.argv[1:] == ['--version']:",
                     f"    print({REQUIRED_VERSION!r})",
                     "    raise SystemExit(0)",
-                    f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}], stdout=sys.stdout, stderr=sys.stderr)",
+                    f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}], stdout=sys.stdout, stderr=sys.stderr, pass_fds=({exit_write},))",
                     f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid))",
                     f"while not pathlib.Path({str(ready)!r}).exists(): time.sleep(0.005)",
                     "print('partial provider stdout', flush=True)",
@@ -761,7 +760,9 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
             launched: list[subprocess.Popen[bytes]] = []
 
             def launch(argv: tuple[str, ...], **kwargs: Any) -> subprocess.Popen[bytes]:
+                kwargs["pass_fds"] = (*kwargs.get("pass_fds", ()), exit_write)
                 process = subprocess.Popen(argv, **kwargs)
+                os.close(exit_write)
                 launched.append(process)
                 return process
 
@@ -786,24 +787,18 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
                 self.assertTrue(ready.is_file())
                 self.assertTrue(child_pid_file.is_file())
 
-                child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-                deadline = time.monotonic() + 2.0
-                child_running = True
-                while time.monotonic() < deadline:
-                    status = subprocess.run(
-                        ["ps", "-o", "stat=", "-p", str(child_pid)],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        text=True,
-                    )
-                    process_state = status.stdout.strip()
-                    child_running = bool(process_state) and not process_state.startswith("Z")
-                    if not child_running:
-                        break
-                    time.sleep(0.02)
-                self.assertFalse(child_running, f"provider child {child_pid} remained alive")
+                self.assertTrue(
+                    select.select([exit_read], [], [], 2.0)[0],
+                    "fake provider child retained its exit pipe after group cleanup",
+                )
+                self.assertEqual(os.read(exit_read, 1), b"")
+
             finally:
+                for descriptor in (exit_read, exit_write):
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
                 if launched:
                     try:
                         os.killpg(launched[-1].pid, signal.SIGKILL)
