@@ -1,0 +1,994 @@
+#!/usr/bin/env python3
+"""Formal exploration runner: provider -> checker -> ledger -> scorer, in SIMULATION or LIVE mode (stdlib only).
+
+    python3 exploration_runner.py run    --profile P --out DIR --mode SIMULATION [--allow-formal-simulation]
+    python3 exploration_runner.py run    --profile P --out DIR --mode LIVE --approval-file F      (blocked until every gate holds)
+    python3 exploration_runner.py resume --profile P --out DIR --mode SIMULATION|LIVE [...]
+    python3 exploration_runner.py replay --out DIR
+    python3 exploration_runner.py check  --profile P [--mode LIVE]
+
+Accounting rules (the point of this module):
+  * a durable START_INTENT is written (fsync) before every request; a slot left RUNNING by a crash is never re-sent:
+    it is recovered as INCOMPLETE and charged the attempt cap;
+  * the raw response, with its usage, is on disk before the adapter parses or validates it; a response the adapter
+    rejects is charged from its own usage (or the cap when the usage cannot be trusted), never as free;
+  * unknown cost is charged the cap, never zero; a cost above the cap stops the run;
+  * only a request that provably never reached generation, or a definite "not processed" answer, is retried, once;
+  * a provider identity or capability violation, a rejected request or an unexpected error halts the run: its slots are
+    kept, nothing is scored, and the run can be neither resumed nor extended;
+  * the attempt log never vouches for itself: a ledger fact counts as recorded only through its own concrete record, and a
+    RESUME record is an audit note no gate reads; resume first writes every lost fact back, from the ledger, as its own
+    record marked reconciled.
+Never relaunches an existing run; resume continues only an interrupted one, after recovery.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import math
+import os
+import random
+import socket
+import sys
+import time
+import urllib.error
+import uuid
+from decimal import Decimal
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+sys.dont_write_bytecode = True
+import _lab  # noqa: F401  (puts the sealed lab on sys.path and checks where each module came from)
+import budget_ledger as bl
+import decision_engine as engine
+import execution_profile as ep
+import offline_replay as replay
+import responses_adapter as api
+from simulated_transport import SimulatedResponses
+
+HERE = Path(__file__).resolve().parent
+MODES = ("SIMULATION", "LIVE")
+BANK_PURPOSES = ("ENGINEERING_ONLY", "FORMAL_DECISION_EXPLORATION")
+MANIFEST_ARTIFACT = "FABLE_ENSEMBLE3_R1_RUN_MANIFEST"
+# The absolute bound on ledger facts that have no concrete attempt-log record.  Nothing in the log raises it or excuses a fact.
+# Every ledger write is followed by its log record before the next ledger write, and resume writes each missing fact back before
+# it does anything else, so a legitimate crash leaves at most one fact without a record; the rest is the fixed tolerance.
+MAX_UNACKNOWLEDGED_AHEAD = 3
+REPORT_METRICS = (
+    "single", "single_gated", "maj3", "gated", "cov3", "disagreement", "coverage_gap", "vote_effect", "checker_effect",
+    "aggregation_effect", "total_effect", "crit_single", "crit_single_gated", "crit_maj3", "crit_gated", "crit_checker",
+    "crit_reduction", "vote_waste", "policy_loss", "agent_failure_rate", "infra_fail_rate", "unknown_rate", "esc_single_gated",
+    "esc_gated", "wrong_selected", "correct_exists_but_escalated", "escalate_created",
+)
+
+
+class RunBlocked(ValueError):
+    """The run must not start (or resume); nothing was sent."""
+
+
+class RunHalt(Exception):
+    """The run stops now; the slot in `slot` was already settled in the ledger."""
+
+    def __init__(self, reason: str, slot: Optional[str] = None, detail: str = ""):
+        super().__init__(f"{reason}: {detail}")
+        self.reason, self.slot, self.detail = reason, slot, detail
+
+
+class RunnerIOError(Exception):
+    """The runner could not persist what it must persist; continuing would lose evidence."""
+
+
+# --- durable files ---------------------------------------------------------------------------------------------------
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical(value) -> str:
+    return json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n"
+
+
+def _fsync_dir(path: Path) -> None:
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_write(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_dir(path.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def exclusive_write(path: Path, text: str) -> None:
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_dir(path.parent)
+
+
+class AppendLog:
+    """JSON-lines file; every record is fsynced before append() returns."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def append(self, record: dict) -> None:
+        line = json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        created = not self.path.exists()
+        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(descriptor, line.encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        if created:
+            _fsync_dir(self.path.parent)
+
+    def records(self) -> List[dict]:
+        try:
+            content = self.path.read_bytes()
+        except OSError as exc:
+            raise RunBlocked("ATTEMPTS_MISSING_OR_UNREADABLE") from exc
+        rows = []
+        for index, line in enumerate(content.splitlines(keepends=True), 1):
+            if not line.endswith(b"\n"):
+                raise RunBlocked(f"ATTEMPTS_TORN_TAIL:line_{index}")
+            try:
+                row = json.loads(line, object_pairs_hook=engine.no_duplicates)
+                if not isinstance(row, dict):
+                    raise ValueError("not an object")
+            except (ValueError, TypeError) as exc:
+                raise RunBlocked(f"ATTEMPTS_INVALID_LINE:line_{index}") from exc
+            rows.append(row)
+        return rows
+
+
+def _require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise RunBlocked(reason)
+
+
+def _read_state(path: Path, reason: str) -> dict:
+    try:
+        value = json.loads(path.read_bytes(), object_pairs_hook=engine.no_duplicates)
+        _require(isinstance(value, dict), reason)
+        return value
+    except (OSError, ValueError, TypeError) as exc:
+        raise RunBlocked(reason) from exc
+
+
+def fact_name(fact) -> str:
+    phase, where, attempt = fact
+    return f"{phase}:{where}" if attempt is None else f"{phase}:{where}:{attempt}"
+
+
+def reconciled_record(fact, slots: dict) -> dict:
+    """The concrete log record of a ledger fact whose own record was lost, derived from the ledger alone.
+
+    It carries exactly what the gate checks against the ledger.  What only the lost record knew (its time, the settlement's
+    kind and detail) is not invented: `original_payload` says it is lost.
+    """
+    phase, where, attempt = fact
+    record = {"phase": phase, "t": time.time(), "reconciled": True, "derived_from": "ledger.json", "original_payload": "LOST"}
+    if phase == "ROUND_RESERVED":
+        return {**record, "round": where}
+    record.update(slot=where, attempt=attempt)
+    if phase == "SETTLED":
+        receipt = slots[where]["receipts"][attempt - 1]
+        record.update(status=receipt["status"], kind="RECONCILED_FROM_LEDGER", detail="the original SETTLED record was lost",
+                      cost_upper_usd=receipt["cost"] if receipt["cost_known"] else None,
+                      charged_cap_because_unknown=not receipt["cost_known"], ledger_state=None)
+    return record
+
+
+def inspect_run(out_dir) -> dict:
+    """Read-only gate for every run-state consumer: a function of the manifest, state, ledger and concrete log records only.
+
+    Ledger writes precede log writes, so the ledger may be ahead of the log, never behind it: a record of a fact the ledger does
+    not hold, a fact recorded twice, or a record before a fact it depends on is refused.  A ledger fact with no concrete record
+    is missing, and more than MAX_UNACKNOWLEDGED_AHEAD missing facts are refused.  Nothing the log says about itself counts: a
+    RESUME record is an audit note and none of its fields is read.  Missing ledger + an empty log is pre-first-save.
+    Torn log tails are refused rather than repaired or silently certified.
+    """
+    out = Path(out_dir)
+    if not (out / "run_manifest.json").is_file():
+        raise RunBlocked("NO_RUN_TO_RESUME")
+    manifest = _read_state(out / "run_manifest.json", "RUN_MANIFEST_INVALID_OR_UNREADABLE")
+    state = _read_state(out / "run_state.json", "RUN_STATE_INVALID_OR_UNREADABLE")
+    records = AppendLog(out / "attempts.jsonl").records()
+    try:
+        order, planned, target = manifest["item_order"], manifest["planned_rounds"], manifest["target_rounds"]
+        _require(manifest["artifact"] == MANIFEST_ARTIFACT and manifest["schema_version"] == 1
+                 and manifest["mode"] in MODES and manifest["bank_purpose"] in BANK_PURPOSES,
+                 "RUN_MANIFEST_SHAPE_INVALID")
+        _require(isinstance(order, list) and bool(order) and all(isinstance(i, str) and i and ":" not in i for i in order)
+                 and len(set(order)) == len(order) and type(planned) is int and type(target) is int
+                 and 3 <= planned <= target and type(manifest["seed"]) is int, "RUN_MANIFEST_SHAPE_INVALID")
+        for pin_name in ("bank_manifest", "profile", "protocol"):
+            pin = manifest[pin_name]
+            _require(pin is None and pin_name != "bank_manifest" or isinstance(pin, dict)
+                     and isinstance(pin["ref"], str) and isinstance(pin["sha256"], str) and len(pin["sha256"]) == 64,
+                     "RUN_MANIFEST_PIN_INVALID")
+        _require(isinstance(manifest["instructions_sha256"], str) and len(manifest["instructions_sha256"]) == 64
+                 and isinstance(manifest["runner_sources"], dict), "RUN_MANIFEST_SHAPE_INVALID")
+        budget, cap = bl.money(manifest["budget_usd"]), bl.money(manifest["attempt_cap_usd"])
+        _require(cap > 0, "RUN_MANIFEST_COST_INVALID")
+        _require(state["state"] in ("RUNNING", "COMPLETE", "HALTED")
+                 and type(state["t"]) in (int, float) and math.isfinite(state["t"]), "RUN_STATE_SHAPE_INVALID")
+        if state["state"] == "HALTED":
+            _require(isinstance(state["reason"], str) and isinstance(state["detail"], str), "RUN_STATE_SHAPE_INVALID")
+    except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError) as exc:
+        if isinstance(exc, RunBlocked):
+            raise
+        raise RunBlocked("RUN_MANIFEST_OR_STATE_SHAPE_INVALID") from exc
+    ledger_path = out / "ledger.json"
+    if not ledger_path.exists():
+        _require(not records and state["state"] == "RUNNING", "LEDGER_MISSING:no ledger to replay")
+        return {"manifest": manifest, "state": state, "ledger": None, "records": records, "missing": [],
+                "reconciliation": {"pre_first_save": True, "ledger_ahead": []}}
+    ledger = _read_state(ledger_path, "LEDGER_INVALID_OR_UNREADABLE")
+    try:
+        slots = ledger["slots"]
+        _require(isinstance(slots, dict) and isinstance(ledger["events"], list)
+                 and type(ledger["overrun"]) is bool, "LEDGER_SHAPE_INVALID")
+        _require(bl.money(ledger["budget"]) == budget and bl.money(ledger["attempt_cap"]) == cap,
+                 "LEDGER_MANIFEST_COST_MISMATCH")
+        total, overrun_slots = Decimal(0), []
+        for key, slot in slots.items():
+            item, round_text = key.rsplit(":", 1)
+            _require(item in order and round_text == str(int(round_text)) and 0 <= int(round_text) < planned,
+                     "LEDGER_SLOT_INVALID")
+            status, attempts, receipts = slot["state"], slot["attempts"], slot["receipts"]
+            _require(status in ("RESERVED", "RUNNING", "RETRY_READY", "FINAL", "OVERRUN")
+                     and type(attempts) is int and 0 <= attempts <= 2 and isinstance(receipts, list), "LEDGER_SLOT_SHAPE_INVALID")
+            _require(len(receipts) == attempts - (1 if status == "RUNNING" else 0), "LEDGER_RECEIPT_COUNT_INVALID")
+            if status == "RESERVED":
+                _require(attempts == 0 and bl.money(slot["held"]) == 2 * cap, "LEDGER_RESERVED_INVALID")
+            elif status == "RUNNING":
+                _require(attempts > 0 and bl.money(slot["held"]) == (3 - attempts) * cap, "LEDGER_RUNNING_INVALID")
+            elif status == "RETRY_READY":
+                _require(attempts == 1 and receipts[0]["status"] == "INFRA_ERROR" and bl.money(slot["held"]) == cap,
+                         "LEDGER_RETRY_INVALID")
+            else:
+                _require(attempts > 0 and bl.money(slot["held"]) == 0, "LEDGER_FINAL_INVALID")
+                if status == "FINAL":
+                    _require(isinstance(slot["verified_run"], dict) and slot["verified_run"]["status"] == slot["status"]
+                             and slot["status"] in engine.FAILURES | {"OK"}, "LEDGER_VERIFIED_RUN_INVALID")
+            for receipt in receipts:
+                _require(isinstance(receipt, dict) and isinstance(receipt["status"], str)
+                         and type(receipt["cost_known"]) is bool, "LEDGER_RECEIPT_SHAPE_INVALID")
+                cost = bl.money(receipt["cost"])
+                _require(receipt["cost_known"] or cost == cap, "LEDGER_UNKNOWN_COST_INVALID")
+                total += cost
+            if status == "OVERRUN":
+                _require(bl.money(receipts[-1]["cost"]) > cap, "LEDGER_OVERRUN_SLOT_INVALID")
+                overrun_slots.append(key)
+            else:
+                _require(all(bl.money(r["cost"]) <= cap for r in receipts), "LEDGER_OVERRUN_SLOT_INVALID")
+        _require(bl.money(ledger["spent_upper"]) == total, "LEDGER_SPENT_RECEIPTS_MISMATCH")
+        _require(ledger["overrun"] == bool(overrun_slots), "LEDGER_OVERRUN_MISMATCH")
+        reserved_rounds = []
+        for index in range(planned):
+            present = [f"{item}:{index}" in slots for item in order]
+            _require(all(present) or not any(present), "LEDGER_PARTIAL_ROUND")
+            if all(present):
+                reserved_rounds.append(index)
+        _require(reserved_rounds == list(range(len(reserved_rounds))), "LEDGER_ROUND_GAP")
+        intents, events_rounds = set(), set()
+        for event in ledger["events"]:
+            if event["event"] == "RESERVE_ROUND":
+                index = event["round"]
+                _require(type(index) is int and index in reserved_rounds
+                         and event["slots"] == [f"{item}:{index}" for item in order] and index not in events_rounds,
+                         "LEDGER_RESERVE_EVENT_INVALID")
+                events_rounds.add(index)
+            elif event["event"] == "START_INTENT":
+                pair = (event["slot"], event["attempt"])
+                _require(pair[0] in slots and type(pair[1]) is int and 1 <= pair[1] <= slots[pair[0]]["attempts"]
+                         and pair not in intents, "LEDGER_START_EVENT_INVALID")
+                intents.add(pair)
+            elif event["event"] == "RECOVER_UNCERTAIN_NO_RELAUNCH":
+                _require(event["slot"] in slots, "LEDGER_RECOVERY_EVENT_INVALID")
+            else:
+                raise RunBlocked("LEDGER_EVENT_INVALID")
+        _require(events_rounds == set(reserved_rounds)
+                 and intents == {(key, n) for key, slot in slots.items() for n in range(1, slot["attempts"] + 1)},
+                 "LEDGER_EVENTS_INCONSISTENT")
+        starts, settles, rounds = set(), set(), set()  # concrete records so far: each record must follow every fact it depends on
+        for row in records:
+            phase = row["phase"]
+            _require(type(row["t"]) in (int, float) and math.isfinite(row["t"]), "ATTEMPTS_SHAPE_INVALID")
+            if phase == "ROUND_RESERVED":
+                index = row["round"]
+                _require(type(index) is int and index in reserved_rounds, "LEDGER_BEHIND_ROUND_RESERVED")
+                _require(index not in rounds, "ATTEMPTS_DUPLICATE_ROUND_RESERVED")
+                _require(index == 0 or index - 1 in rounds, "ATTEMPTS_OUT_OF_ORDER:ROUND_BEFORE_THE_PREVIOUS_ROUND")
+                rounds.add(index)
+            elif phase in ("START", "REQUEST", "RESPONSE", "ERROR", "SETTLED"):
+                key, attempt = row["slot"], row["attempt"]
+                _require(key in slots and type(attempt) is int and 1 <= attempt <= slots[key]["attempts"],
+                         "LEDGER_BEHIND_ATTEMPT")
+                pair = (key, attempt)
+                if phase == "START":
+                    _require(pair not in starts, "ATTEMPTS_DUPLICATE_START")
+                    _require(int(key.rsplit(":", 1)[1]) in rounds, "ATTEMPTS_OUT_OF_ORDER:START_BEFORE_ITS_ROUND")
+                    _require(attempt == 1 or (key, attempt - 1) in settles, "ATTEMPTS_OUT_OF_ORDER:RETRY_BEFORE_THE_FIRST_SETTLEMENT")
+                    starts.add(pair)
+                elif phase == "SETTLED":
+                    _require(attempt <= len(slots[key]["receipts"]), "LEDGER_BEHIND_SETTLED")
+                    receipt = slots[key]["receipts"][attempt - 1]
+                    cost = cap if row["cost_upper_usd"] is None else bl.money(row["cost_upper_usd"])
+                    _require(receipt["status"] == row["status"] and bl.money(receipt["cost"]) == cost
+                             and receipt["cost_known"] == (row["cost_upper_usd"] is not None), "LEDGER_SETTLED_MISMATCH")
+                    _require(row["charged_cap_because_unknown"] == (row["cost_upper_usd"] is None), "ATTEMPTS_SHAPE_INVALID")
+                    _require(not (row["kind"] == "ATTEMPT_CAP_OVERRUN" or cost > cap) or ledger["overrun"],
+                             "LEDGER_BEHIND_OVERRUN")
+                    _require(pair not in settles, "ATTEMPTS_DUPLICATE_SETTLED")
+                    _require(pair in starts, "ATTEMPTS_OUT_OF_ORDER:SETTLED_BEFORE_ITS_START")
+                    settles.add(pair)
+                else:
+                    _require(row["path"] in ("responses", "responses/input_tokens"), "ATTEMPTS_SHAPE_INVALID")
+                    _require(isinstance(row[{"REQUEST": "body", "RESPONSE": "response", "ERROR": "error"}[phase]], dict),
+                             "ATTEMPTS_SHAPE_INVALID")
+                    _require(pair in starts, f"ATTEMPTS_OUT_OF_ORDER:{phase}_BEFORE_ITS_START")
+            elif phase != "RESUME":  # a RESUME record is an audit note: none of its fields is read, so it can excuse nothing
+                raise RunBlocked("ATTEMPTS_PHASE_INVALID")
+        if state["state"] == "COMPLETE":
+            _require(not any(slot["state"] == "RUNNING" for slot in slots.values()) and not ledger["overrun"],
+                     "RUN_STATE_LEDGER_MISMATCH")
+        # every ledger fact with no concrete record of its own, in the order resume writes them back (each after what it needs)
+        missing = ([("ROUND_RESERVED", n, None) for n in sorted(set(reserved_rounds) - rounds)]
+                   + [(phase, key, n) for n in (1, 2) for phase, logged in (("START", starts), ("SETTLED", settles))
+                      for key, slot in sorted(slots.items())
+                      if n <= (slot["attempts"] if phase == "START" else len(slot["receipts"])) and (key, n) not in logged])
+        _require(len(missing) <= MAX_UNACKNOWLEDGED_AHEAD, "ATTEMPTS_BEHIND_LEDGER")
+    except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError) as exc:
+        if isinstance(exc, RunBlocked):
+            raise
+        raise RunBlocked("LEDGER_OR_ATTEMPTS_SHAPE_INVALID") from exc
+    return {"manifest": manifest, "state": state, "ledger": ledger, "records": records, "missing": missing,
+            "reconciliation": {"pre_first_save": False, "ledger_ahead": [fact_name(fact) for fact in missing]}}
+
+
+# --- inputs ----------------------------------------------------------------------------------------------------------
+def load_bank(manifest_path, *, manifest_bytes=None, expected_sha256=None):
+    """(manifest, public items, labels).  Every hash is re-checked; the provider only ever gets `public` items."""
+    content = Path(manifest_path).read_bytes() if manifest_bytes is None else manifest_bytes
+    if expected_sha256 is not None and hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise RunBlocked("BANK_MANIFEST_HASH_MISMATCH:the bank changed since this run")
+    manifest = json.loads(content, object_pairs_hook=engine.no_duplicates)
+    if manifest.get("purpose") not in BANK_PURPOSES:
+        raise ValueError("unknown bank purpose")
+    public, labels = {}, {}
+    for row in manifest["items"]:
+        loaded = {}
+        for ref, digest in (("public_ref", "public_sha256"), ("oracle_ref", "oracle_sha256")):
+            fixture_bytes = Path(row[ref]).read_bytes()
+            if hashlib.sha256(fixture_bytes).hexdigest() != row[digest]:
+                raise ValueError("fixture or oracle changed after freeze")
+            loaded[ref] = json.loads(fixture_bytes, object_pairs_hook=engine.no_duplicates)
+        item = loaded["public_ref"]
+        engine.validate_public(item)
+        label = loaded["oracle_ref"]
+        if item["item_id"] != row["item_id"] or label["item_id"] != row["item_id"] or label["public_sha256"] != row["public_sha256"]:
+            raise ValueError("oracle does not bind this fixture")
+        public[row["item_id"]], labels[row["item_id"]] = item, label
+    return manifest, public, labels
+
+
+def raw_upper_cost(response) -> Optional[Decimal]:
+    """Upper bound of what a received response cost, from its own usage; None when the usage is not usable numbers.
+
+    The same formula the adapter uses for its conservative upper bound, but without its bounds checks: a response the
+    adapter refuses still cost what its usage says, and that must reach the ledger.
+    """
+    try:
+        usage = response["usage"]
+        inputs, outputs = usage["input_tokens"], usage["output_tokens"]
+        cached = usage.get("input_tokens_details", {}).get("cached_tokens", 0)
+    except (KeyError, TypeError, AttributeError):
+        return None
+    if any(type(n) is not int or n < 0 for n in (inputs, outputs, cached)):
+        return None
+    long_context = inputs > 272000
+    return (Decimal(inputs) * Decimal("0.25") * (2 if long_context else 1)
+            + Decimal(outputs) * Decimal("1.20") * (Decimal("1.5") if long_context else 1)) / Decimal(1000000)
+
+
+def build_report(public: Dict[str, dict], labels: Dict[str, dict], runs: Dict[str, List[dict]], *, kind: str, ledger_state: dict) -> dict:
+    """Score the fixed pool with the reviewed R2 policy; every metric R2 defines, with its family-cluster interval."""
+    es = replay.scorer()
+    items = [es.Item(i, p["family"], "DECISION", frozenset(p["disposition_enum"]), frozenset(labels[i]["acceptable"]),
+                     frozenset(labels[i]["unsafe"])) for i, p in public.items()]
+    verified = {i: [es.Run(status=r["status"], disposition=r.get("disposition"), eligible=r.get("eligible"),
+                           contradicts=frozenset(r.get("contradicts", []))) for r in rows] for i, rows in runs.items()}
+    pool = es.evaluate_pool(items, verified)
+    intervals = es.pool_intervals(pool, list(REPORT_METRICS))
+    try:
+        classification = list(es.classify(intervals))
+    except ValueError as exc:
+        classification = ["UNCLASSIFIED", str(exc)[:200]]
+    statuses: Dict[str, int] = {}
+    for rows in runs.values():
+        for row in rows:
+            statuses[row["status"]] = statuses.get(row["status"], 0) + 1
+    return {
+        "kind": kind,
+        "statistical_claims_allowed": False,
+        "items": pool.n_items, "families": pool.n_families, "unresolved": pool.unresolved,
+        "run_statuses": dict(sorted(statuses.items())),
+        "always_escalate_success": sum("ESCALATE" in labels[i]["acceptable"] for i in public) / len(public),
+        "metrics": {name: None if iv is None else {"estimate": iv.est, "lo": iv.lo, "hi": iv.hi, "families": iv.families}
+                    for name, iv in intervals.items()},
+        "classification": classification,
+        "ledger": {"spent_upper_usd": ledger_state["spent_upper"], "attempt_cap_usd": ledger_state["attempt_cap"],
+                   "budget_usd": ledger_state["budget"], "overrun": ledger_state["overrun"]},
+    }
+
+
+# --- the provider side -----------------------------------------------------------------------------------------------
+class Recorder:
+    """Transport wrapper.  The request is on disk before it is sent; the raw response is on disk before anyone parses it."""
+
+    def __init__(self, inner: Callable, log: AppendLog, expected_instructions_sha256=None):
+        self.inner, self.log = inner, log
+        self.expected_instructions_sha256 = expected_instructions_sha256
+        self.slot = self.attempt = None
+        self.generation_sent = False
+        self.last_generation = None
+
+    def begin_attempt(self, slot: str, attempt: int) -> None:
+        self.slot, self.attempt, self.generation_sent, self.last_generation = slot, attempt, False, None
+
+    def _append(self, record: dict) -> None:
+        try:
+            self.log.append({"slot": self.slot, "attempt": self.attempt, "t": time.time(), **record})
+        except OSError as exc:
+            raise RunnerIOError(f"cannot persist {record.get('phase')}: {exc}") from exc
+
+    def __call__(self, path: str, body: dict) -> dict:
+        instructions = body.get("instructions")
+        if self.expected_instructions_sha256 is not None and sha256_text(instructions or "") != self.expected_instructions_sha256:
+            raise RunBlocked("SENT_INSTRUCTIONS_HASH_MISMATCH")
+        self._append({"phase": "REQUEST", "path": path, "body_sha256": sha256_text(json.dumps(body)),
+                      "instructions_sha256": None if instructions is None else sha256_text(instructions),
+                      "body": {key: value for key, value in body.items() if key != "instructions"}})
+        if path == "responses":
+            self.generation_sent = True
+        try:
+            response = self.inner(path, body)
+        except BaseException as exc:
+            self._append({"phase": "ERROR", "path": path, "error": {"type": type(exc).__name__, "text": str(exc)[:300],
+                                                                      "http_status": getattr(exc, "code", None)}})
+            raise
+        if path == "responses":
+            self.last_generation = response  # kept in memory first, so its cost is known even if the append below fails
+        self._append({"phase": "RESPONSE", "path": path, "response": response})
+        return response
+
+
+def classify(exc: BaseException, *, generation_sent: bool, response_received: bool) -> str:
+    """What a failed attempt means.  INFRA: provably not processed, retry once.  TIMEOUT / UNCERTAIN: the generation
+    request left and the outcome is unknown, never resend.  REJECTED / CAPABILITY / PERSISTENCE / OTHER: stop the run."""
+    if isinstance(exc, RunnerIOError):
+        return "PERSISTENCE"
+    if isinstance(exc, api.CapabilityBlocked):
+        return "CAPABILITY"
+    if response_received:
+        return "OTHER"  # a response arrived and then something broke: it is paid for and unusable
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 429 or exc.code == 503 or (500 <= exc.code <= 599 and not generation_sent):
+            return "INFRA"
+        return "UNCERTAIN" if 500 <= exc.code <= 599 else "REJECTED"
+    timed_out = isinstance(exc, (TimeoutError, socket.timeout)) or (
+        isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout)))
+    if timed_out:
+        return "TIMEOUT" if generation_sent else "INFRA"
+    if isinstance(exc, (urllib.error.URLError, ConnectionError, OSError)):
+        return "UNCERTAIN" if generation_sent else "INFRA"
+    return "OTHER"
+
+
+def rounds_reserved(ledger_state: dict, order: List[str], planned: int) -> int:
+    return sum(1 for index in range(planned) if f"{order[0]}:{index}" in ledger_state["slots"])
+
+
+def finished_report(public, labels, runs, *, mode: str, ledger_state: dict, order: List[str], planned: int, target: int) -> dict:
+    kind = "SIMULATION_NOT_A_RESULT" if mode == "SIMULATION" else "EXPLORATION_RESULT_UNREVIEWED"
+    report = build_report(public, labels, runs, kind=kind, ledger_state=ledger_state)
+    report.update(halted=False, planned_rounds=planned, rounds_reserved=rounds_reserved(ledger_state, order, planned), target_rounds=target)
+    return report
+
+
+_SCORER = None
+
+
+def scorer():
+    global _SCORER
+    if _SCORER is None:
+        _SCORER = replay.scorer()
+    return _SCORER
+
+
+def saved_runs(public: Dict[str, dict], ledger: bl.Ledger, rounds: int) -> Dict[str, List[dict]]:
+    """Verified runs per item from the ledger alone: the fixed denominator, NOT_RUN where nothing started."""
+    result = {}
+    for item_id in public:
+        rows = []
+        for index in range(rounds):
+            slot = ledger.state["slots"].get(f"{item_id}:{index}")
+            if slot is None or slot["state"] == "RESERVED":
+                rows.append({"status": "NOT_RUN"})
+            elif slot["state"] == "FINAL":
+                rows.append(slot["verified_run"])
+            elif slot["state"] == "RETRY_READY":  # the first attempt ended in an infra error and no retry was made
+                rows.append({"status": "INFRA_FAIL", "disposition": None, "eligible": None, "contradicts": []})
+            elif slot["state"] == "OVERRUN":
+                last = slot["receipts"][-1]["status"]
+                rows.append({"status": last if last in engine.FAILURES else "INCOMPLETE", "disposition": None, "eligible": None, "contradicts": []})
+            else:
+                raise ValueError(f"unsettled slot {item_id}:{index}: recover uncertain starts before replay")
+        result[item_id] = rows
+    return result
+
+
+def _loaded_ledger(out: Path, inspection: dict) -> bl.Ledger:
+    """Use the inspected bytes; don't re-read state or initialize it in read-only consumers."""
+    ledger = bl.Ledger.__new__(bl.Ledger)
+    ledger.path = out / "ledger.json"
+    ledger.budget = bl.money(inspection["manifest"]["budget_usd"])
+    ledger.cap = bl.money(inspection["manifest"]["attempt_cap_usd"])
+    ledger.state = inspection["ledger"]
+    return ledger
+
+
+class Runner:
+    def __init__(self, out_dir, *, mode: str, bank_manifest, instructions: str, budget, attempt_cap, target_rounds: int = 5,
+                 seed: int = 6302, transport: Optional[Callable] = None, profile=None, protocol=None):
+        if mode not in MODES:
+            raise RunBlocked("MODE_INVALID")
+        self.out_dir, self.mode = Path(out_dir), mode
+        self.bank_manifest = Path(bank_manifest)
+        profile_data = None if profile is None else _read_state(Path(profile), "PROFILE_MISSING_OR_INVALID")
+        bank_bytes = self.bank_manifest.read_bytes()
+        self.bank_pin = {"ref": str(self.bank_manifest.resolve()), "sha256": hashlib.sha256(bank_bytes).hexdigest()}
+        self.manifest, self.public, self.labels = load_bank(self.bank_manifest, manifest_bytes=bank_bytes,
+            expected_sha256=None if profile_data is None else profile_data["bank"]["manifest"]["sha256"])
+        self.purpose = self.manifest["purpose"]
+        self.instructions = instructions
+        self.instructions_pin = sha256_text(instructions) if profile_data is None else profile_data["instruction"]["sha256"]
+        self.budget, self.cap = bl.money(budget), bl.money(attempt_cap)
+        self.target_rounds, self.seed = target_rounds, seed
+        self.transport, self.profile, self.protocol = transport, profile, protocol
+        self.log = AppendLog(self.out_dir / "attempts.jsonl")
+        self.order = sorted(self.public)
+        random.Random(seed).shuffle(self.order)
+        self.ledger: Optional[bl.Ledger] = None
+        self.recorder: Optional[Recorder] = None
+        self.planned = 0
+        self._lock_fd: Optional[int] = None
+
+    # --- identity, state, lock ---------------------------------------------------------------------------------------
+    def _identity(self) -> dict:
+        return {
+            "artifact": MANIFEST_ARTIFACT, "schema_version": 1, "mode": self.mode, "bank_purpose": self.purpose,
+            "bank_manifest": self.bank_pin, "instructions_sha256": sha256_text(self.instructions),
+            "policy_sha256": ep.sha256_file(ep.R1 / "ensemble_scoring.py"), "runner_sources": ep.runner_sources(),
+            "profile": None if self.profile is None else ep.pin(self.profile),
+            "protocol": None if self.protocol is None else ep.pin(self.protocol),
+            "seed": self.seed, "target_rounds": self.target_rounds, "item_order": self.order,
+            "budget_usd": str(self.budget), "attempt_cap_usd": str(self.cap),
+        }
+
+    def _set_state(self, state: str, **extra) -> None:
+        atomic_write(self.out_dir / "run_state.json", canonical({"state": state, "t": time.time(), **extra}))
+
+    def _lock(self, *, create=False) -> None:
+        try:
+            descriptor = os.open(self.out_dir / "run.lock", os.O_RDWR | (os.O_CREAT if create else 0), 0o644)
+        except OSError as exc:
+            raise RunBlocked("RUN_LOCK_MISSING_OR_UNREADABLE") from exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            raise RunBlocked("ANOTHER_RUNNER_HOLDS_THIS_DIRECTORY")
+        self._lock_fd = descriptor
+
+    def _stamp_lock(self) -> None:
+        os.ftruncate(self._lock_fd, 0)
+        os.write(self._lock_fd, f"{os.getpid()}\n".encode())
+        os.fsync(self._lock_fd)
+
+    def _unlock(self) -> None:
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)
+            self._lock_fd = None
+
+    def _plan(self) -> int:
+        planned = scorer().plan_rounds(len(self.public), 2 * self.cap, self.budget, self.target_rounds)
+        if planned == 0:
+            raise RunBlocked("BUDGET_BELOW_THREE_ROUNDS")
+        if self.mode == "LIVE" and self.purpose == "FORMAL_DECISION_EXPLORATION" and planned != self.target_rounds:
+            raise RunBlocked("WHOLE_ROUNDS_NOT_RESERVED")
+        return planned
+
+    def _adapter(self) -> "api.ResponsesAdapter":
+        self.recorder = None
+        if sha256_text(self.instructions) != self.instructions_pin:
+            raise RunBlocked("INSTRUCTIONS_DO_NOT_MATCH_PROFILE")
+        if self.mode == "SIMULATION":
+            if self.transport is None:
+                raise RunBlocked("SIMULATION_NEEDS_A_SIMULATED_TRANSPORT")
+            if getattr(self.transport, "is_simulated", False) is not True:
+                raise RunBlocked("SIMULATION_TRANSPORT_NOT_SIMULATED")
+            holder = Recorder(self.transport, self.log, self.instructions_pin)
+            adapter = api.ResponsesAdapter(self.instructions, transport=holder)
+            if adapter.live:
+                raise RunBlocked("SIMULATION_MUST_NOT_USE_THE_LIVE_ADAPTER")
+        else:
+            if self.transport is not None:
+                raise RunBlocked("LIVE_FORBIDS_AN_INJECTED_TRANSPORT")
+            adapter = api.ResponsesAdapter(self.instructions)
+            if not adapter.live:
+                raise RunBlocked("LIVE_NEEDS_THE_LIVE_ADAPTER")
+            try:
+                adapter.preflight()  # key presence, before a single request is built
+            except api.CapabilityBlocked as exc:
+                raise RunBlocked(f"LIVE_KEY_MISSING: {exc}") from exc
+            holder = Recorder(adapter._post, self.log, self.instructions_pin)
+            adapter.transport = holder
+        self.recorder = holder
+        return adapter
+
+    # --- lifecycle -----------------------------------------------------------------------------------------------
+    def start(self) -> dict:
+        if self.out_dir.exists() and any(self.out_dir.iterdir()):
+            raise RunBlocked("OUT_DIR_NOT_EMPTY: never relaunch an existing run; resume or replay it")
+        self.planned = self._plan()
+        adapter = self._adapter()  # wiring errors (no key, wrong transport) surface before anything is written
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._lock(create=True)
+        try:
+            exclusive_write(self.out_dir / "run_manifest.json",
+                            canonical({**self._identity(), "planned_rounds": self.planned, "started_epoch": time.time()}))
+            self._set_state("RUNNING")
+            exclusive_write(self.log.path, "")  # an empty log is durable before the first ledger save
+            self._stamp_lock()
+            self.ledger = bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap)
+            return self._execute(adapter)
+        finally:
+            self._unlock()
+
+    def resume(self) -> dict:
+        inspect_run(self.out_dir)
+        self._lock()
+        try:
+            inspection = inspect_run(self.out_dir)  # repeat under flock; no PID write until all refusal checks pass
+            manifest, state = inspection["manifest"], inspection["state"]
+            if state["state"] != "RUNNING":
+                raise RunBlocked(f"RUN_IS_{state['state']}: only an interrupted run can resume")
+            mismatched = sorted(key for key, value in self._identity().items() if manifest.get(key) != value)
+            if mismatched:
+                raise RunBlocked("RESUME_IDENTITY_MISMATCH:" + ";".join(mismatched))
+            self.planned = manifest["planned_rounds"]
+            adapter = self._adapter()  # before the ledger is touched: a wiring error must not recover or change anything
+            self._stamp_lock()
+            self.ledger = (_loaded_ledger(self.out_dir, inspection) if inspection["ledger"] is not None
+                           else bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap))
+            # Each lost fact is written back first, as its own reconciled record derived from the ledger, in an order where every
+            # record follows what it needs: a kill part-way leaves a shorter list for the next resume and nothing out of order.
+            for fact in inspection["missing"]:
+                self.log.append(reconciled_record(fact, self.ledger.state["slots"]))
+            uncertain = sorted(slot for slot, record in self.ledger.state["slots"].items() if record["state"] == "RUNNING")
+            overrun = None
+            for slot in uncertain:
+                attempt = self.ledger.state["slots"][slot]["attempts"]
+                responses = [row["response"] for row in inspection["records"] if row.get("phase") == "RESPONSE"
+                             and row.get("path") == "responses" and row.get("slot") == slot and row.get("attempt") == attempt]
+                cost = raw_upper_cost(responses[-1]) if responses else None
+                if cost is not None and cost > self.cap:
+                    try:
+                        self._finish(slot, "INVALID_OUTPUT", cost, self.public[slot.rsplit(":", 1)[0]])
+                    except RunHalt as halt:
+                        overrun = halt
+                    self._log_settled(slot, attempt, "INVALID_OUTPUT", cost, "ATTEMPT_CAP_OVERRUN", "durable response recovered")
+            recovering = [slot for slot in uncertain if self.ledger.state["slots"][slot]["state"] == "RUNNING"]
+            self.ledger.recover_uncertain()  # started, no receipt: INCOMPLETE and charged the cap; never sent again
+            for slot in recovering:  # a recovery is a ledger fact like any other: its own record follows the ledger write
+                self._log_settled(slot, self.ledger.state["slots"][slot]["attempts"], "INCOMPLETE", None,
+                                  "RECOVER_UNCERTAIN_NO_RELAUNCH", "started, no receipt: charged the cap, never sent again", "FINAL")
+            # an audit note only: no gate reads it, so neither its presence nor anything it claims can change a decision
+            self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": uncertain,
+                             "reconciliation": inspection["reconciliation"]})
+            if overrun is not None:
+                return self._finalize(overrun)
+            return self._execute(adapter)
+        finally:
+            self._unlock()
+
+    def _execute(self, adapter) -> dict:
+        halted = None
+        try:
+            self._rounds(adapter)
+        except RunHalt as halt:
+            halted = halt
+        return self._finalize(halted)
+
+    def _rounds(self, adapter) -> None:
+        for round_index in range(self.planned):
+            if f"{self.order[0]}:{round_index}" not in self.ledger.state["slots"]:
+                try:
+                    self.ledger.reserve_round(round_index, self.order)  # the whole round, retries included, or nothing
+                except bl.BudgetStop:
+                    return  # the next whole round cannot be reserved: stop cleanly, the rest stays NOT_RUN
+                except bl.StateConflict as exc:  # e.g. a kill left an overrun on record: end as a halt, not as a crash that repeats
+                    raise RunHalt("LEDGER_CONFLICT", None, str(exc)) from exc
+                self.log.append({"phase": "ROUND_RESERVED", "round": round_index, "t": time.time()})
+            for item_id in self.order:
+                slot = f"{item_id}:{round_index}"
+                if self.ledger.state["slots"][slot]["state"] in ("RESERVED", "RETRY_READY"):
+                    self._execute_slot(adapter, slot, self.public[item_id])
+
+    # --- one slot ----------------------------------------------------------------------------------------------------
+    def _execute_slot(self, adapter, slot: str, item: dict) -> None:
+        while True:
+            try:
+                self.ledger.begin(slot)  # durable START_INTENT (fsync) before any request leaves this process
+            except bl.StateConflict as exc:
+                raise RunHalt("LEDGER_CONFLICT", slot, str(exc)) from exc
+            attempt = self.ledger.state["slots"][slot]["attempts"]
+            self.recorder.begin_attempt(slot, attempt)
+            self.log.append({"phase": "START", "slot": slot, "attempt": attempt, "t": time.time()})
+            try:
+                receipt = adapter.invoke(item)
+            except Exception as exc:  # KeyboardInterrupt/SystemExit leave the slot RUNNING on purpose: resume recovers it
+                if self._settle_exception(slot, item, attempt, exc) == "RETRY":
+                    continue
+                return
+            self._settle_receipt(slot, item, attempt, receipt)
+            return
+
+    def _log_settled(self, slot, attempt, status, cost, kind, detail, state=None) -> None:
+        self.log.append({"phase": "SETTLED", "slot": slot, "attempt": attempt, "status": status, "kind": kind, "detail": detail,
+                         "cost_upper_usd": None if cost is None else str(cost), "charged_cap_because_unknown": cost is None,
+                         "ledger_state": state, "t": time.time()})
+
+    def _finish(self, slot: str, status: str, cost: Optional[Decimal], item: dict, verified: Optional[dict] = None) -> str:
+        if verified is None and status != "INFRA_ERROR":
+            verified = engine.verify_run(item, {"status": status})
+        try:
+            return self.ledger.finish(slot, status, cost, verified)  # cost None is charged the cap, never zero
+        except bl.BudgetStop as stop:
+            raise RunHalt("ATTEMPT_CAP_OVERRUN", slot, str(stop)) from stop
+
+    def _settle_exception(self, slot: str, item: dict, attempt: int, exc: Exception) -> str:
+        recorder = self.recorder
+        received = recorder.last_generation is not None
+        kind = classify(exc, generation_sent=recorder.generation_sent, response_received=received)
+        cost = raw_upper_cost(recorder.last_generation) if received else None
+        stops = kind in ("REJECTED", "CAPABILITY", "PERSISTENCE", "OTHER")
+        status = {"INFRA": "INFRA_ERROR", "TIMEOUT": "TIMEOUT", "UNCERTAIN": "INCOMPLETE"}.get(kind) or ("INVALID_OUTPUT" if received else "INCOMPLETE")
+        detail = f"{type(exc).__name__}: {str(exc)[:200]}"
+        try:
+            state = self._finish(slot, status, cost, item)
+        except RunHalt:
+            self._log_settled(slot, attempt, status, cost, "ATTEMPT_CAP_OVERRUN", detail)
+            raise
+        self._log_settled(slot, attempt, status, cost, kind, detail, state)
+        if stops:
+            raise RunHalt(kind, slot, detail) from exc
+        return "RETRY" if state == "RETRY_READY" else "DONE"
+
+    def _settle_receipt(self, slot: str, item: dict, attempt: int, receipt: dict) -> None:
+        status = cost = verified = None
+        try:
+            status, cost = receipt["status"], bl.money(receipt["cost_upper_usd"])
+            if not isinstance(status, str):
+                raise ValueError("status is not text")
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            problem, cost = "MALFORMED_RECEIPT", None  # a receipt that cannot be read is unusable and is charged the cap, never zero
+        else:
+            problem = None
+            if receipt.get("mode") != ("SIMULATED_TRANSPORT" if self.mode == "SIMULATION" else "LIVE"):
+                problem = "RECEIPT_MODE_MISMATCH"
+            elif status == "OK":
+                try:
+                    verified = engine.verify_run(item, receipt["output"])
+                    if verified["status"] != "OK":
+                        problem = "INCONSISTENT_RECEIPT"
+                except (KeyError, TypeError, ValueError):
+                    problem = "INCONSISTENT_RECEIPT"
+            elif status in engine.FAILURES:
+                verified = engine.verify_run(item, {"status": status})
+            else:
+                problem = "UNKNOWN_RECEIPT_STATUS"
+        if problem:
+            self._finish(slot, "INVALID_OUTPUT", cost, item)  # paid for, unusable
+            self._log_settled(slot, attempt, "INVALID_OUTPUT", cost, problem, f"receipt status {status!r}")
+            raise RunHalt(problem, slot, f"receipt status {status!r}")
+        state = self._finish(slot, status, cost, item, verified)
+        self._log_settled(slot, attempt, status, cost, "RECEIPT", f"provider_response_id={receipt.get('provider_response_id')}", state)
+
+    # --- the end -----------------------------------------------------------------------------------------------------
+    def _finalize(self, halted: Optional[RunHalt]) -> dict:
+        inspect_run(self.out_dir)
+        runs = saved_runs(self.public, self.ledger, self.target_rounds)
+        atomic_write(self.out_dir / "runs.json", canonical(runs))
+        kind = "SIMULATION_NOT_A_RESULT" if self.mode == "SIMULATION" else "EXPLORATION_RESULT_UNREVIEWED"
+        reserved = rounds_reserved(self.ledger.state, self.order, self.planned)
+        if halted is None:
+            report = finished_report(self.public, self.labels, runs, mode=self.mode, ledger_state=self.ledger.state, order=self.order,
+                                     planned=self.planned, target=self.target_rounds)
+            state, halt = "COMPLETE", None
+            self._set_state("COMPLETE")
+        else:
+            halt = {"reason": halted.reason, "slot": halted.slot, "detail": halted.detail}
+            report = {"kind": kind, "halted": True, "halt": halt, "scoring": None, "planned_rounds": self.planned,
+                      "rounds_reserved": reserved, "target_rounds": self.target_rounds,
+                      "ledger": {"spent_upper_usd": self.ledger.state["spent_upper"], "attempt_cap_usd": self.ledger.state["attempt_cap"],
+                                 "budget_usd": self.ledger.state["budget"], "overrun": self.ledger.state["overrun"]}}
+            state = "HALTED"
+            self._set_state("HALTED", **halt)
+        atomic_write(self.out_dir / "report.json", canonical(report))
+        self._write_accounting()
+        return {"state": state, "halt": halt, "report": report, "out_dir": str(self.out_dir)}
+
+    def _write_accounting(self) -> None:
+        """Every file this run left in its directory, with hashes; the runner writes nowhere else."""
+        inspect_run(self.out_dir)
+        files = [{"path": str(path.relative_to(self.out_dir)), "bytes": path.stat().st_size, "sha256": ep.sha256_file(path)}
+                 for path in sorted(self.out_dir.rglob("*")) if path.is_file() and path.name != "write_ledger.json"]
+        atomic_write(self.out_dir / "write_ledger.json", canonical({
+            "out_dir": str(self.out_dir.resolve()), "files": files, "writes_outside_out_dir": [],
+            "note": "no temporary file survives; the runner opens no path outside out_dir"}))
+
+
+# --- replay ----------------------------------------------------------------------------------------------------------
+def replay_run(out_dir) -> dict:
+    """Rebuild a finished run's verified runs (and report) from the ledger alone; never writes anything."""
+    out_dir = Path(out_dir)
+    inspection = inspect_run(out_dir)
+    manifest = inspection["manifest"]
+    bank = manifest["bank_manifest"]
+    try:
+        _, public, labels = load_bank(bank["ref"], expected_sha256=bank["sha256"])
+        _require(inspection["ledger"] is not None, "LEDGER_MISSING:no ledger to replay")
+        ledger = _loaded_ledger(out_dir, inspection)
+        runs = saved_runs(public, ledger, manifest["target_rounds"])
+        state = inspection["state"]["state"]
+        saved = engine.read_json(out_dir / "runs.json") if (out_dir / "runs.json").is_file() else None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if isinstance(exc, RunBlocked):
+            raise
+        raise RunBlocked("REPLAY_INVALID:" + str(exc).replace(",", ";")) from exc
+    report = None
+    if state == "COMPLETE":
+        report = finished_report(public, labels, runs, mode=manifest["mode"], ledger_state=ledger.state, order=manifest["item_order"],
+                                 planned=manifest["planned_rounds"], target=manifest["target_rounds"])
+    return {"state": state, "runs": runs, "matches_saved_runs": None if saved is None else saved == runs, "report": report}
+
+
+# --- gates and command line ------------------------------------------------------------------------------------------
+def validate_approval(path, bound_path, *, scope: str, total_required: Decimal, bound_key: str = "profile_sha256") -> List[str]:
+    """The Owner's written approval for a LIVE action, bound to the exact artifact `bound_path` hashes to.  Nothing here writes one."""
+    try:
+        approval = engine.read_json(path)
+    except (OSError, ValueError, TypeError):
+        return ["APPROVAL_MISSING_OR_INVALID"]
+    if not isinstance(approval, dict):
+        return ["APPROVAL_MISSING_OR_INVALID"]
+    reasons = []
+    if approval.get("approved") is not True:
+        reasons.append("APPROVAL_NOT_GRANTED")
+    for key in ("approved_by", "approved_on", "data_egress"):
+        if not isinstance(approval.get(key), str) or not approval[key].strip():
+            reasons.append(f"APPROVAL_FIELD_MISSING:{key}")
+    if approval.get("scope") != scope:
+        reasons.append("APPROVAL_SCOPE_MISMATCH")
+    if approval.get(bound_key) != ep.sha256_file(bound_path):
+        reasons.append("APPROVAL_NOT_FOR_THIS_PROFILE" if bound_key == "profile_sha256" else "APPROVAL_NOT_FOR_THIS_REGISTRATION")
+    try:
+        if bl.money(approval.get("max_total_reservation_usd")) < total_required:
+            reasons.append("APPROVAL_CAP_BELOW_REQUIRED")
+    except (ValueError, ArithmeticError):
+        reasons.append("APPROVAL_CAP_INVALID")
+    return reasons
+
+
+def _inputs(profile_path, mode: str, budget_override):
+    profile = engine.read_json(profile_path)
+    try:
+        instructions = ep.read_pinned(profile["instruction"]).decode("utf-8")
+    except (OSError, ValueError) as exc:
+        raise RunBlocked("INSTRUCTION_HASH_MISMATCH_OR_UNREADABLE") from exc
+    cap = Decimal(profile["cost"]["attempt_reservation_usd"])
+    required = cap * profile["cost"]["max_attempts_per_slot"] * profile["bank"]["items"] * profile["policy"]["target_runs"]
+    total = profile["cost"].get("total_reservation_usd")
+    if mode == "LIVE":
+        budget = None if total is None else Decimal(str(total))  # an unfrozen total is a gate reason, not a crash
+    else:
+        budget = Decimal(str(budget_override if budget_override is not None else (total or required)))
+    return profile, instructions, cap, required, budget
+
+
+def _runner(args, *, resume: bool) -> Runner:
+    profile_path = Path(args.profile)
+    reasons = ep.check_profile(profile_path, mode=args.mode)["reasons"]
+    if any(reason.startswith(("PROFILE_", "MODE_")) for reason in reasons):
+        raise RunBlocked(",".join(sorted(set(reasons))))  # a profile that cannot even be read has no inputs to look at
+    profile, instructions, cap, required, budget = _inputs(profile_path, args.mode, args.budget)
+    if budget is None:
+        reasons.append("TOTAL_COST_CAP_UNFROZEN")
+    if args.mode == "LIVE":
+        reasons += validate_approval(args.approval_file, profile_path, scope="FORMAL_EXPLORATION_R1", total_required=required) \
+            if args.approval_file else ["APPROVAL_MISSING_OR_INVALID"]
+    elif profile["bank"]["purpose"] == "FORMAL_DECISION_EXPLORATION" and not args.allow_formal_simulation:
+        reasons.append("FORMAL_BANK_SIMULATION_NEEDS_--allow-formal-simulation")
+    if reasons:
+        raise RunBlocked(",".join(sorted(set(reasons))))
+    runner = Runner(args.out, mode=args.mode, bank_manifest=profile["bank"]["manifest"]["ref"], instructions=instructions, budget=budget,
+                    attempt_cap=cap, target_rounds=profile["policy"]["target_runs"], seed=profile["policy"]["schedule_seed"],
+                    profile=profile_path, protocol=profile["protocol"]["ref"])
+    if args.mode == "SIMULATION":  # answers come from the labels: a pipeline exercise, never a model result
+        runner.transport = SimulatedResponses(runner.public, answer_for=lambda item: runner.labels[item["item_id"]]["acceptable"][0],
+                                              log_path=Path(args.out) / "simulated_server_log.jsonl")
+    return runner
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("run", "resume"):
+        sub = commands.add_parser(name)
+        sub.add_argument("--profile", required=True)
+        sub.add_argument("--out", required=True)
+        sub.add_argument("--mode", required=True, choices=MODES)
+        sub.add_argument("--approval-file")
+        sub.add_argument("--allow-formal-simulation", action="store_true")
+        sub.add_argument("--budget")
+    replay_cmd = commands.add_parser("replay")
+    replay_cmd.add_argument("--out", required=True)
+    check = commands.add_parser("check")
+    check.add_argument("--profile", required=True)
+    check.add_argument("--mode", default="SIMULATION", choices=MODES)
+    check.add_argument("--out", help="also check this run directory through the common integrity gate")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "check":
+            if args.out:
+                inspect_run(args.out)
+            result = ep.check_profile(args.profile, mode=args.mode)
+            print(json.dumps(result, indent=2))
+            return 0 if not result["reasons"] else 2
+        if args.command == "replay":
+            result = replay_run(args.out)
+            print(json.dumps({k: v for k, v in result.items() if k != "runs"}, indent=2, sort_keys=True))
+            return 0
+        if args.command == "resume":
+            inspect_run(args.out)
+        runner = _runner(args, resume=args.command == "resume")
+        result = runner.start() if args.command == "run" else runner.resume()
+    except RunBlocked as blocked:
+        print(json.dumps({"state": "BLOCKED", "reasons": str(blocked).split(","), "generation_calls": 0}, indent=2))
+        return 2
+    print(json.dumps({"state": result["state"], "halt": result["halt"], "out_dir": result["out_dir"],
+                      "kind": result["report"]["kind"], "generation_calls_are_simulated": args.mode == "SIMULATION"}, indent=2))
+    return 3 if result["state"] == "HALTED" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
