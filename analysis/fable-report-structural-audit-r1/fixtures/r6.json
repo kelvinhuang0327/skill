@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "R6-001",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["identical_line_run", "english"],
+      "rationale": "Eight consecutive identical non-structural output lines are obvious degeneration.",
+      "text": "Processing request without progress\nProcessing request without progress\nProcessing request without progress\nProcessing request without progress\nProcessing request without progress\nProcessing request without progress\nProcessing request without progress\nProcessing request without progress\n"
+    },
+    {
+      "id": "R6-002",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["identical_line_run", "chinese"],
+      "rationale": "Eight consecutive identical Chinese output lines are an obvious loop.",
+      "text": "仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n仍在等待相同的工具輸出\n"
+    },
+    {
+      "id": "R6-003",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["two_line_cycle"],
+      "rationale": "A two-line output cycle repeated five consecutive times is obvious degeneration.",
+      "text": "Loading shard alpha\nRetrying shard alpha\nLoading shard alpha\nRetrying shard alpha\nLoading shard alpha\nRetrying shard alpha\nLoading shard alpha\nRetrying shard alpha\nLoading shard alpha\nRetrying shard alpha\n"
+    },
+    {
+      "id": "R6-004",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["three_line_cycle"],
+      "rationale": "A three-line output cycle repeated five times is mechanically obvious.",
+      "text": "Tool output begins again\nNo state transition observed\nTool output ends unchanged\nTool output begins again\nNo state transition observed\nTool output ends unchanged\nTool output begins again\nNo state transition observed\nTool output ends unchanged\nTool output begins again\nNo state transition observed\nTool output ends unchanged\nTool output begins again\nNo state transition observed\nTool output ends unchanged\n"
+    },
+    {
+      "id": "R6-005",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["long_identical_line_run"],
+      "rationale": "Twelve consecutive identical error outputs are obvious degeneration.",
+      "text": "ERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\nERROR waiting for unchanged response\n"
+    },
+    {
+      "id": "R6-006",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["identical_line_run", "whitespace_normalization"],
+      "rationale": "Only mechanically insignificant whitespace differs across the repeated output.",
+      "text": "still waiting for tool result\nstill  waiting for tool result\n still waiting for tool result\nstill waiting  for tool result\nstill waiting for  tool result\nstill   waiting for tool result\n  still waiting for tool result\nstill waiting for tool result  \n"
+    },
+    {
+      "id": "R6-007",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["repeated_headings"],
+      "rationale": "Ordinary repeated Markdown headings are explicitly excluded from degeneration.",
+      "text": "## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n## Result\n"
+    },
+    {
+      "id": "R6-008",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["repeated_table_rows"],
+      "rationale": "Ordinary repeated table rows are explicitly excluded from degeneration.",
+      "text": "| Check | Status |\n|---|---|\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n| shard | PASS |\n"
+    },
+    {
+      "id": "R6-009",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["code_fence", "example"],
+      "rationale": "Repeated lines in a fenced example are excluded.",
+      "text": "Example of a bad loop:\n```text\nwaiting forever again\nwaiting forever again\nwaiting forever again\nwaiting forever again\nwaiting forever again\nwaiting forever again\nwaiting forever again\nwaiting forever again\n```\n"
+    },
+    {
+      "id": "R6-010",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["repeated_examples", "markdown_list"],
+      "rationale": "Repeated list examples are structural content, not output degeneration.",
+      "text": "- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n- Example output stays unchanged\n"
+    },
+    {
+      "id": "R6-011",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["below_threshold"],
+      "rationale": "Seven identical lines stay below the deliberately conservative threshold of eight.",
+      "text": "Waiting for a bounded retry\nWaiting for a bounded retry\nWaiting for a bounded retry\nWaiting for a bounded retry\nWaiting for a bounded retry\nWaiting for a bounded retry\nWaiting for a bounded retry\n"
+    },
+    {
+      "id": "R6-012",
+      "rule": "R6_REPETITION_LOOP",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["non_consecutive_repetition", "real_progress"],
+      "rationale": "Repeated progress labels are separated by distinct state transitions and form no repeating block.",
+      "text": "Waiting for next stage\nCompleted unique stage 01\nWaiting for next stage\nCompleted unique stage 02\nWaiting for next stage\nCompleted unique stage 03\nWaiting for next stage\nCompleted unique stage 04\nWaiting for next stage\nCompleted unique stage 05\nWaiting for next stage\nCompleted unique stage 06\nWaiting for next stage\nCompleted unique stage 07\nWaiting for next stage\nCompleted unique stage 08\n"
+    }
+  ]
+}

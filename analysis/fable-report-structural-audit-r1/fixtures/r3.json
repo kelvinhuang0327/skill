@@ -1,0 +1,365 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "R3-001",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "english"],
+      "rationale": "The exact explicit label unit_tests has both terminal statuses.",
+      "text": "unit_tests: PASS\nunit_tests: NOT RUN\n"
+    },
+    {
+      "id": "R3-002",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "markdown_list"],
+      "rationale": "List decoration does not change the exact explicit surface identity.",
+      "text": "- integration suite: PASS\n- integration suite: NOT RUN\n"
+    },
+    {
+      "id": "R3-003",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["table", "english"],
+      "rationale": "Two table rows assign PASS and NOT RUN to the same Check cell.",
+      "text": "| Check | Status |\n|---|---|\n| package build | PASS |\n| package build | NOT RUN |\n"
+    },
+    {
+      "id": "R3-004",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["table", "scope"],
+      "rationale": "Both rows explicitly name the same scope and same check.",
+      "text": "| Scope | Check | Status |\n|---|---|---|\n| api | contract test | PASS |\n| api | contract test | NOT RUN |\n"
+    },
+    {
+      "id": "R3-005",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["status_block", "english"],
+      "rationale": "Two explicit status blocks identify the same check.",
+      "text": "CHECK: dependency audit\nSTATUS: PASS\n\nCHECK: dependency audit\nSTATUS: NOT RUN\n"
+    },
+    {
+      "id": "R3-006",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["status_block", "chinese"],
+      "rationale": "Chinese field labels and explicit Chinese status tokens identify a direct conflict.",
+      "text": "檢查：部署煙霧測試\n狀態：通過\n\n檢查：部署煙霧測試\n狀態：未執行\n"
+    },
+    {
+      "id": "R3-007",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["explicit_prose", "english"],
+      "rationale": "The constrained prose grammar quotes the same explicit check twice.",
+      "text": "Check \"release verification\" status: PASS.\nCheck \"release verification\" status: NOT RUN.\n"
+    },
+    {
+      "id": "R3-008",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["explicit_prose", "scope"],
+      "rationale": "The same quoted surface under the same quoted scope has both statuses.",
+      "text": "Surface `schema check` in scope `payments` has status: PASS.\nSurface `schema check` in scope `payments` has status: NOT RUN.\n"
+    },
+    {
+      "id": "R3-009",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["explicit_prose", "chinese"],
+      "rationale": "The same Chinese-quoted explicit name is marked with incompatible statuses.",
+      "text": "檢查「權限矩陣」狀態：通過。\n檢查「權限矩陣」狀態：未執行。\n"
+    },
+    {
+      "id": "R3-010",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["explicit_prose", "chinese", "scope"],
+      "rationale": "Name and parenthesized scope are exact in both Chinese prose records.",
+      "text": "檢查「資料庫遷移」（範圍：測試環境）狀態：PASS。\n檢查「資料庫遷移」（範圍：測試環境）狀態：NOT RUN。\n"
+    },
+    {
+      "id": "R3-011",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["table", "chinese"],
+      "rationale": "Chinese table headers explicitly bind both values to the same check.",
+      "text": "| 檢查項目 | 狀態 |\n|---|---|\n| 設定檔驗證 | 通過 |\n| 設定檔驗證 | 未執行 |\n"
+    },
+    {
+      "id": "R3-012",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["table", "markdown_markup"],
+      "rationale": "Paired Markdown emphasis around an exact status is mechanically removable.",
+      "text": "| Surface | Result |\n|---|---|\n| CLI smoke | **PASS** |\n| CLI smoke | **NOT RUN** |\n"
+    },
+    {
+      "id": "R3-013",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "inline_code"],
+      "rationale": "Backticks wrap, but do not alter, the exact explicit surface name.",
+      "text": "`lint:strict`: PASS\n`lint:strict`: NOT RUN\n"
+    },
+    {
+      "id": "R3-014",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "unicode_nfkc"],
+      "rationale": "Unicode NFKC mechanically normalizes the full-width and ASCII labels.",
+      "text": "ＡＰＩ smoke: PASS\nAPI smoke: NOT RUN\n"
+    },
+    {
+      "id": "R3-015",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "casefold"],
+      "rationale": "Case folding mechanically matches the otherwise identical labels.",
+      "text": "Release Check: PASS\nrelease check: NOT RUN\n"
+    },
+    {
+      "id": "R3-016",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "whitespace"],
+      "rationale": "Collapsed internal whitespace leaves the same explicit label.",
+      "text": "artifact   scan: PASS\nartifact scan: NOT RUN\n"
+    },
+    {
+      "id": "R3-017",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "bracket_scope"],
+      "rationale": "The bracketed scope and check name are identical in both observations.",
+      "text": "[service-a] contract test: PASS\n[service-a] contract test: NOT RUN\n"
+    },
+    {
+      "id": "R3-018",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["label_value", "delimiter_scope"],
+      "rationale": "The explicit scope delimiter yields one exact scoped identity.",
+      "text": "service-a::health probe: PASS\nservice-a::health probe: NOT RUN\n"
+    },
+    {
+      "id": "R3-019",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["file_name", "pass_like_text"],
+      "rationale": "PASS inside the file name is identity text; the terminal values still conflict.",
+      "text": "reports/PASS-summary.md: PASS\nreports/PASS-summary.md: NOT RUN\n"
+    },
+    {
+      "id": "R3-020",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["table", "scope", "reversed_order"],
+      "rationale": "Status order is irrelevant when scope and surface cells are exact.",
+      "text": "| Surface | Scope | Result |\n|---|---|---|\n| startup probe | desktop | NOT RUN |\n| startup probe | desktop | PASS |\n"
+    },
+    {
+      "id": "R3-021",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["single_status"],
+      "rationale": "Only PASS is reported.",
+      "text": "unit_tests: PASS\n"
+    },
+    {
+      "id": "R3-022",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["single_status"],
+      "rationale": "Only NOT RUN is reported.",
+      "text": "unit_tests: NOT RUN\n"
+    },
+    {
+      "id": "R3-023",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["duplicate_same_status"],
+      "rationale": "Repeating the same status is not an incompatible pair.",
+      "text": "unit_tests: PASS\nunit_tests: PASS\n"
+    },
+    {
+      "id": "R3-024",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["similar_but_different"],
+      "rationale": "unit-test and unit-tests are different explicit labels; no fuzzy identity is inferred.",
+      "text": "unit-test: PASS\nunit-tests: NOT RUN\n"
+    },
+    {
+      "id": "R3-025",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["different_scopes", "repeated_name"],
+      "rationale": "The repeated check name is explicitly under two different scopes.",
+      "text": "[service-a] contract test: PASS\n[service-b] contract test: NOT RUN\n"
+    },
+    {
+      "id": "R3-026",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["code_fence"],
+      "rationale": "Contradictory sample text inside a fenced example is excluded.",
+      "text": "Example only:\n```text\nunit_tests: PASS\nunit_tests: NOT RUN\n```\n"
+    },
+    {
+      "id": "R3-027",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["pass_like_file_name"],
+      "rationale": "PASS-like words embedded in a file name are not terminal status values.",
+      "text": "Artifact: benchmark-PASS-NOT-RUN.csv\nSHA256: 0123456789abcdef\n"
+    },
+    {
+      "id": "R3-028",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["vague_prose"],
+      "rationale": "Vague prose supplies no mechanically bound explicit name/status records.",
+      "text": "The smoke test passed yesterday.\nElsewhere it was described as not run.\n"
+    },
+    {
+      "id": "R3-029",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["table", "different_checks"],
+      "rationale": "Each status belongs to a different explicit Check cell.",
+      "text": "| Check | Status |\n|---|---|\n| package build | PASS |\n| package publish | NOT RUN |\n"
+    },
+    {
+      "id": "R3-030",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["status_block", "different_checks"],
+      "rationale": "The two status blocks explicitly identify different checks.",
+      "text": "CHECK: dependency audit\nSTATUS: PASS\n\nCHECK: license audit\nSTATUS: NOT RUN\n"
+    },
+    {
+      "id": "R3-031",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["scoped_vs_unscoped"],
+      "rationale": "A scoped observation is not merged with an unscoped one.",
+      "text": "[api] ping: PASS\nping: NOT RUN\n"
+    },
+    {
+      "id": "R3-032",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["substring_names"],
+      "rationale": "Substring overlap does not establish exact identity.",
+      "text": "db migration: PASS\ndb migration rollback: NOT RUN\n"
+    },
+    {
+      "id": "R3-033",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["table_without_check_header"],
+      "rationale": "The Item header is outside the intentionally small explicit table grammar.",
+      "text": "| Item | Status |\n|---|---|\n| package build | PASS |\n| package build | NOT RUN |\n"
+    },
+    {
+      "id": "R3-034",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["code_fence", "one_live_status"],
+      "rationale": "The fenced PASS example is ignored, leaving only one live NOT RUN observation.",
+      "text": "```\nstartup probe: PASS\n```\nstartup probe: NOT RUN\n"
+    },
+    {
+      "id": "R3-035",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["chinese", "similar_but_different"],
+      "rationale": "The Chinese labels differ by an explicit suffix.",
+      "text": "登入檢查：通過\n登入檢查-行動版：未執行\n"
+    },
+    {
+      "id": "R3-036",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["chinese", "table", "different_scopes"],
+      "rationale": "The same Chinese check name is explicitly separated by scope.",
+      "text": "| 範圍 | 檢查 | 狀態 |\n|---|---|---|\n| 前端 | 啟動測試 | 通過 |\n| 後端 | 啟動測試 | 未執行 |\n"
+    },
+    {
+      "id": "R3-037",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["chinese", "duplicate_same_status"],
+      "rationale": "Two Chinese PASS equivalents do not conflict.",
+      "text": "檢查：設定驗證\n狀態：通過\n\n檢查：設定驗證\n狀態：通過\n"
+    },
+    {
+      "id": "R3-038",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["pass_like_file_name", "duplicate_same_status"],
+      "rationale": "The identity contains both status-like words, but both actual terminal values are PASS.",
+      "text": "benchmark/PASS_NOT_RUN.txt: PASS\nbenchmark/PASS_NOT_RUN.txt: PASS\n"
+    },
+    {
+      "id": "R3-039",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["explicit_prose", "different_checks"],
+      "rationale": "The constrained prose grammar binds statuses to different quoted names.",
+      "text": "Check \"desktop smoke\" status: PASS.\nCheck \"mobile smoke\" status: NOT RUN.\n"
+    },
+    {
+      "id": "R3-040",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["lifecycle_fields", "no_r3_status_pair"],
+      "rationale": "This is an R4-shaped field conflict, not a PASS/NOT RUN surface conflict.",
+      "text": "IMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\nIMPLEMENTATION_LIFECYCLE_STATUS: BLOCKED\n"
+    }
+  ]
+}
