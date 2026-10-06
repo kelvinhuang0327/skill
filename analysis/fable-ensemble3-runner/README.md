@@ -69,9 +69,39 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
       回補途中被殺：已寫的那幾筆就是具體紀錄，剩下的由下一次 resume 補完（順序保證每一筆都在它依賴的事實之後）；
       回補完成但 `RESUME` 未寫：沒有影響；復原已寫入帳本但紀錄未寫：下一次 resume 以回補補上；連續多次崩潰同理，缺失數只會減少。
     帳本不存在只在持久空日誌且 state 為 RUNNING 的第一次存檔前允許初始化。缺失、損壞或尾端撕裂的日誌一律拒絕。
-12. 被拒絕的入口（上列 8 個）不寫任何檔案，包含鎖的 PID，也不送出任何請求。`_lock` 只 flock；通過所有檢查才寫 PID。
+12. 守門階段被拒絕的入口（上列 8 個）不寫任何檔案，包含鎖的 PID，也不送出任何請求。`_lock` 只 flock；通過所有檢查才寫 PID。
+    已送出請求的呼叫仍可能在最後收尾被拒絕；BLOCKED 的 `generation_calls` 回報本次呼叫實際嘗試送出的生成請求數，不抹成 0。
 13. SIMULATION transport 必須明確標記 `is_simulated = True`；Runner 與 Probe 在任何檔案寫入前檢查。
     指令、題庫 manifest 與 fixture 都從同一次讀取的位元組雜湊並消費，送出的指令另核對設定 pin。
+14. **終局不缺事實，判定只在共用 gate 裡做一次。** 合法執行在狀態轉為 COMPLETE／HALTED 之前就寫完所有日誌紀錄，所以
+    `inspect_run` 對已結束的執行：缺任何帳本事實就拒絕（`TERMINAL_RUN_JOURNAL_INCOMPLETE:<狀態>:<n>_MISSING`），所有入口同一個原因、
+    零請求、目錄不變。唯一例外是 `PERSISTENCE` 停止（日誌寫不進去的終局）：放行但帶旗標 `INCOMPLETE_JOURNAL_BY_PERSISTENCE_HALT`
+    與缺失清單，永遠不是乾淨的結果。RUNNING 的 1～3 筆缺失照舊可續跑，帶旗標 `RESUMABLE_JOURNAL_GAP`；回補過的紀錄帶旗標
+    `RECONCILED_FROM_LEDGER`。`_finalize` 以「即將寫入的終局狀態」呼叫同一個 gate（`closing`），所以會被拒絕的收尾一個位元組都
+    不寫，執行停在 RUNNING，由 resume 先回補；PERSISTENCE 停止則帶旗標寫成 HALTED（D0-3 選擇 (a)）。
+15. **每個出口逐字帶出 gate 的判定**（`integrity`：`status` CLEAN／FLAGGED、`state`、`halt_reason`、`missing`、`missing_count`、
+    `reconciled`、`flags`）。gate 通過之後才做的拒絕（已結束、已認證、身分不符）也帶著它（`RunBlocked.integrity`，命令列印成
+    `integrity`）。命令列：`check --out` 與 `replay` 對帶旗標的執行回 `FLAGGED`／結束碼 `4`，不會印出無旗標的 PASS。
+16. **write ledger 只寫一次。** 只為已結束的執行寫（RUNNING 時 `WRITE_LEDGER_RUN_NOT_TERMINAL`），已存在就拒絕
+    （`WRITE_LEDGER_ALREADY_CERTIFIED`，目錄不變；以 hard link 發布，存在即失敗），內容含同一份 `integrity`。已結束的執行每次經過 gate
+    都重新核對 write ledger：列出的檔案位元組、沒有多出的檔案、判定相同，否則拒絕（`WRITE_LEDGER_MISMATCH:<檔案>`、
+    `WRITE_LEDGER_UNLISTED:<檔案>`、`WRITE_LEDGER_INTEGRITY_MISMATCH`、`WRITE_LEDGER_INVALID_OR_UNREADABLE`）。
+    發布後、清除暫存名之前被殺留下的第二個連結，只有在同目錄、名稱為 `write_ledger.json.<32 位小寫十六進位>.tmp`、
+    是一般檔案且與 write ledger 的裝置及 inode 相同時才豁免。這只辨認 write ledger 本身的第二個連結，不證明由發布流程建立。
+    同內容的複本、符號連結、子目錄裡的 hard link、錯誤長度或大寫的檔名都不豁免。
+    把已認證的執行的狀態改回 RUNNING：唯讀 gate 帶旗標 `WRITE_LEDGER_EXISTS_NOT_RECERTIFIED`；`resume` 以 `RUN_IS_CERTIFIED`
+    拒絕，帶同一判定、零新請求、目錄不變。收尾仍不重寫既有 write ledger，作為第二道防線。
+
+| 入口 | 類別 | 帶出的完整性欄位 |
+|---|---|---|
+| `inspect_run` | 唯讀 | `integrity`、`certificate`（ABSENT／VERIFIED／PRESENT_WHILE_RUNNING） |
+| `replay_run` | 唯讀（含重建 report） | `integrity`、`certificate`；COMPLETE 時重建的 `report.integrity` |
+| `exploration_runner.py check --out` | 唯讀 | `run_integrity`、`run_certificate`；`status` PASS／FLAGGED／BLOCKED，結束碼 0／4／2 |
+| `exploration_runner.py replay` | 唯讀 | `integrity`、`certificate`；結束碼 0（CLEAN）／4（FLAGGED）／2 |
+| `Runner.start`／`run` | 寫入（建立執行） | 回傳與命令列的 `integrity`；`report.json`、`write_ledger.json` 的 `integrity` |
+| `Runner.resume`／`resume` | 寫入；已認證執行一律拒絕 | 回傳與命令列的 `integrity`（收尾後）；拒絕時 `RunBlocked.integrity`／命令列 `integrity` |
+| `Runner._finalize`（report 與 write ledger，run／resume 的最後一步） | 寫入（只對 RUNNING 收尾一次） | `report.json` 與回傳的 `integrity`；對已結束的執行拒絕（`RUN_IS_<狀態>`，帶判定）且不寫 |
+| `Runner._write_accounting`（write ledger） | 寫入（一次） | `write_ledger.json` 的 `integrity`；拒絕時帶判定 |
 
 ## 日誌與帳本的信任邊界（照實列出）
 
@@ -86,6 +116,10 @@ gate 只比對執行目錄裡的檔案，沒有外部錨點。它防的是崩潰
 - 刪掉一筆仍有後續紀錄依賴的事實（例如刪掉 `START` 而保留其請求與結算），把紀錄移到它所依賴的事實之前，或同一事實記兩次。
 - 偽造的自述：任何 `RESUME`（或任何欄位）宣稱已回補、已確認、已驗證，一律不讀：不能讓應拒絕的變成可執行，也不能反過來。
 - 帳本本身損壞、形狀錯誤或內部不一致；manifest／state 遺失或損壞；第一次存檔後帳本不見。
+- 已結束（COMPLETE，或 PERSISTENCE 以外原因的 HALTED）的執行缺任何帳本事實：每個入口都拒絕；PERSISTENCE 停止缺事實：每個入口都帶旗標。
+- write ledger 寫好之後，執行目錄裡任何列出的檔案多改一個位元組、多一個未豁免檔案（包括 `.DS_Store`）、少一個檔案，
+  或 write ledger 本身被改：已結束的執行每個入口都拒絕；沒有自動修復，人工處置須另行核定。
+  write ledger 本身的、符合規則 16 的第二個連結是唯一豁免。已認證的執行即使狀態被改成 RUNNING，也不能 resume。
 
 **不能辨認**：
 
@@ -97,6 +131,16 @@ gate 只比對執行目錄裡的檔案，沒有外部錨點。它防的是崩潰
   而不是按那個回應實際（可能超過上限）的用量。
 - 彼此沒有因果關係的紀錄互換順序（例如兩個不同格子的紀錄對調）：接受，對帳務沒有影響。
 - `RESUME` 被刪掉或偽造：不影響任何決定，也不會被發現（它本來就只是註記）。
+- write ledger 不是外部錨點：帳本、日誌與 write ledger 被協同改寫成互相一致（或整個目錄被換成另一個自洽的目錄），無法辨認。
+  單獨刪除 write ledger 也會讓終局回到未認證：若其餘檔案通過 gate，唯讀出口為 CLEAN，之後可為目前位元組重新寫入。
+  這可掩蓋不涉及帳本事實的改動，不能掩蓋共用 gate 已偵測到的終局事實缺失。
+  寫 write ledger 之前（例如終局狀態已寫、write ledger 未寫的崩潰窗口）對日誌做的、不缺帳本事實的改動（刪掉
+  `REQUEST`／`RESPONSE`／`ERROR`、無因果關係的重排、與帳本一致的偽造紀錄），之後寫出的 write ledger 會照實列入，無法辨認。
+- PERSISTENCE 停止「真的沒寫進去」的事實，與 PERSISTENCE 停止後、寫 write ledger 前被刪掉的事實，無法區分：兩者都帶旗標、列出缺失，
+  都不是乾淨的結果。
+- 收尾被拒絕（終局缺事實）時執行留在 RUNNING，停止原因從未落地；之後的 resume 會先回補再續跑。這與「停止的結算已寫、狀態尚未寫」
+  時崩潰的既有行為相同（停止原因只在記憶體裡），本套件沒有改變它。
+  主 session 的 19 種自然模擬故障未觸發拒絕收尾的形式；這只證明那 19 個案例未觸發，不能排除其他崩潰窗口，也不是驗收豁免。
 
 ## 指令
 
@@ -121,7 +165,8 @@ python3 probe_2b.py recover  --out DIR
 python3 probe_2b.py report   --out DIR
 ```
 
-結束碼：`0` 完成、`2` 被擋（沒有送出任何請求）、`3` 執行或探針停止。
+結束碼：`0` 完成、`2` 被擋、`3` 執行或探針停止、`4`（`check --out`、`replay`）通過但帶完整性旗標，不是乾淨的結果。
+執行器的 BLOCKED 輸出以 `generation_calls` 記本次呼叫已嘗試送出的生成請求數（不含 input-token 計數請求）；守門前拒絕為 0，收尾拒絕可以大於 0。
 
 LIVE 的守門條件由命令列入口強制執行：Owner 簽署並綁定到這份設定檔（或註冊檔）的核准、環境裡已有 `OPENAI_API_KEY`、
 設定檔已凍結、介面已被 Judge 判為 `BENCHMARK_READY`、總保留額已凍結且涵蓋整輪。直接 import 類別會繞過這些條件
@@ -139,7 +184,13 @@ python3 -B mutation_runner.py --workers 2           # 全部變異體；可用 -
 - `JournalOracleTests` 用一個與產品碼無關的極簡 oracle（集合差與位置）比對 gate 的決定：小型執行窮舉所有單筆／雙筆刪除、重複、
   重排，較大執行以固定種子 `20261005` 隨機產生 520 個損壞；每例都附加／不附加偽造的 `RESUME`（宣稱 1…8 筆）與偽造的
   reconciled 紀錄（帳本沒有的事實、帳本有的事實）。任何不一致，或 `RESUME` 改變了決定或原因，都是失敗。
-- bytecode 檢查以 `PYTHONPYCACHEPREFIX` 把任何未被抑制的寫入導到測試自己的目錄，並先證明拿掉抑制就會有檔案。
+- `TerminalOracleTests` 把同一個 oracle 擴充到終局：COMPLETE 與五種 HALTED（REJECTED、CAPABILITY、ATTEMPT_CAP_OVERRUN、OTHER、
+  PERSISTENCE）各自窮舉小型執行的單筆／雙筆刪除、重複、重排（另加 R2 的 RUNNING 小型執行），較大執行以種子 `20261005:<狀態>`
+  各隨機 520 例，認證與未認證兩種；規則是「終局缺事實且非 PERSISTENCE ⇒ 拒絕；PERSISTENCE ⇒ 帶旗標；認證後日誌改動 ⇒ 拒絕；
+  其餘放行」。gate 的每一例都比對；八個入口在固定的子集上全部比對（判定類別、逐字帶出的判定、請求數、目錄雜湊）。
+  `TerminalMatrixTests` 是 狀態 × 缺失 0～4 × 八個入口 × 兩種來源（乾淨結束後才改日誌但未認證／認證後才改日誌）的 480 格矩陣。
+- bytecode 檢查以 `PYTHONPYCACHEPREFIX` 把任何未被抑制的寫入導到測試自己的目錄，並先證明拿掉抑制就會有檔案；
+  原本的 `test_J` 另外以 `-X pycache_prefix`（優先於環境變數與 Apple 的使用者快取）再跑一次兩個入口。
 - 變異驗證沿用已驗證的 R2 判準：變異後的來源要能編譯、能匯入，指定測試要在測試模組內以**斷言**失敗；
   崩潰、逾時或由被測程式自己丟出的錯誤不算殺死。
 - 確切的測試數、變異體數與封存樹上的執行紀錄見證據根目錄的 `runner-impl/`。
@@ -150,4 +201,4 @@ python3 -B mutation_runner.py --workers 2           # 全部變異體；可用 -
 - 探針的輸入計數保留額 US$0.05 是保守的保留值，不是計價事實。
 - `raw_upper_cost` 是 adapter 上界公式的複本（測試保證兩者一致）；adapter 若改版必須同步。
 - 題庫本身的已知限制（L1、N1、N2、位置線索）不在這個套件的範圍內，沿用收據的原樣記錄。
-- 這裡沒有任何東西能證明模型的行為；它只保證：若之後真的跑了，錢花得有據、崩潰不會重複花、證據完整可重播。
+- 離線測試只驗證已列出的工程性質，適用範圍受上述信任邊界限制；不代表模型能力、LIVE 介面或正式實驗已通過驗收。
