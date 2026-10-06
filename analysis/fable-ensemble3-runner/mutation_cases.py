@@ -535,11 +535,16 @@ R2_CASES = [
      None, R2_FORGED),
     ("R2 entrance: replay skips the gate", XR, '    inspection = inspect_run(out_dir)\n    manifest = inspection["manifest"]\n',
      '    inspection = ' + UNGATED % (("out_dir",) * 3) + '}\n    manifest = inspection["manifest"]\n', R2_FORGED),
-    ("R2 entrance: the report skips the gate", XR, '        inspect_run(self.out_dir)\n        runs = saved_runs(', '        runs = saved_runs(', R2_FORGED),
-    ("R2 entrance: the write ledger skips the gate", XR, '        inspect_run(self.out_dir)\n        files = [', '        files = [', R2_FORGED),
+    # R3 re-anchored (same name, intent and expected test): these three exits now consume the gate's result instead of discarding
+    # it, so the line each mutant removes is the one that takes that result; the mutant puts an ungated, clean stand-in there.
+    ("R2 entrance: the report skips the gate", XR, '        integrity = inspect_run(self.out_dir, closing=closing)["integrity"]\n',
+     '        integrity = {"status": "CLEAN", "state": closing["state"], "halt_reason": closing.get("reason"), "missing": [], '
+     '"missing_count": 0, "reconciled": 0, "flags": []}\n', R2_FORGED),
+    ("R2 entrance: the write ledger skips the gate", XR, '        inspection = inspect_run(self.out_dir)\n        integrity = inspection["integrity"]\n',
+     '        inspection = {"state": {"state": "COMPLETE"}}\n        integrity = {"status": "CLEAN", "flags": []}\n', R2_FORGED),
     ("R2 entrance: CLI resume skips the gate", XR, '        if args.command == "resume":\n            inspect_run(args.out)\n', '', R2_FORGED),
-    ("R2 entrance: CLI check skips the gate", XR, '            if args.out:\n                inspect_run(args.out)\n',
-     '            if False:\n                inspect_run(args.out)\n', R2_FORGED),
+    ("R2 entrance: CLI check skips the gate", XR, '            inspection = inspect_run(args.out) if args.out else None\n',
+     '            inspection = None\n', R2_FORGED),
     ("R2 runner marker accepts any truthy value", XR, '            if getattr(self.transport, "is_simulated", False) is not True:\n',
      '            if not getattr(self.transport, "is_simulated", False):\n', R2_SIM),
     ("R2 probe marker accepts any truthy value", PB, '            if getattr(self.transport, "is_simulated", False) is not True:\n',
@@ -552,4 +557,125 @@ R2_CASES = [
     ("R2 probe bytecode suppression disabled (cache-prefix check)", PB, 'import build_engineering_bank as eb\n',
      'sys.dont_write_bytecode = False\nimport build_engineering_bank as eb\n', R2_PYC),
 ]
-CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND + R2_CASES
+
+# --- R3: one terminal verdict in the one gate, carried verbatim by every exit; the write ledger is written once ---------------------
+R3T = X + "R3IntegrityTests."
+R3_GATE = R3T + "test_R3_a_finished_run_lacking_a_fact_is_refused_unless_a_persistence_halt_left_it_which_is_flagged"
+R3_CARRY = R3T + "test_R3_every_exit_carries_the_one_gate_verdict_verbatim"
+R3_CHECK = R3T + "test_R3_check_out_prints_the_run_verdict_and_is_never_a_plain_pass_for_a_run_the_gate_flags"
+R3_ONCE = R3T + "test_R3_a_write_ledger_is_written_once_and_a_reopened_certified_run_is_never_certified_again"
+R3_CERT = R3T + "test_R3_any_byte_changed_after_certification_is_refused_by_every_read_only_exit"
+R3_CLOSE = R3T + "test_R3_a_run_that_lost_a_fact_closes_flagged_only_after_a_persistence_halt_and_is_otherwise_refused_before_it_closes"
+R3_MATRIX = X + "TerminalMatrixTests.test_R3_terminal_matrix_every_finished_state_every_missing_count_every_exit_both_sources"
+R3_EXHAUSTIVE = X + "TerminalOracleTests.test_R3_oracle_agrees_with_the_gate_on_every_single_and_double_damage_of_each_finished_state"
+R3_RANDOM = X + "TerminalOracleTests.test_R3_oracle_agrees_with_the_gate_on_seeded_random_damage_of_each_large_finished_state_certified_or_not"
+R3_EXITS = X + "TerminalOracleTests.test_R3_oracle_agrees_with_every_exit_on_single_and_double_damage_of_each_finished_state"
+R3_CLI = RA + "test_R3_the_command_line_carries_the_verdict_of_a_run_and_of_a_refused_resume"
+STRICT = '            raise RunBlocked(f"TERMINAL_RUN_JOURNAL_INCOMPLETE:{label}:{len(missing)}_MISSING")\n'
+EXCEPTION = '        elif state["state"] == "HALTED" and state.get("reason") == "PERSISTENCE":\n'
+CLOSE = '        integrity = inspect_run(self.out_dir, closing=closing)["integrity"]\n'
+VERIFY = '            _verify_certificate(out, integrity)\n'
+R3_CASES = [
+    # D0-2: the strict condition lives in the gate itself
+    ("R3 D0-2 the gate passes a finished run that lacks a fact", XR, STRICT, '            pass\n', R3_GATE),
+    ("R3 D0-2 the gate passes a finished run that lacks a fact (seen by the oracle)", XR, STRICT, '            pass\n', R3_EXHAUSTIVE),
+    ("R3 D0-2 the gate passes a finished run that lacks a fact (seen by the matrix)", XR, STRICT, '            pass\n', R3_MATRIX),
+    ("R3 D0-2 the close is judged on the state it leaves, not the one it writes", XR, CLOSE,
+     '        integrity = inspect_run(self.out_dir)["integrity"]\n', R3_CLOSE),
+    ("R3 D0-2 a finished run can be closed again", XR,
+     '        if state["state"] != "RUNNING":\n            raise _refusal(f"RUN_IS_{state[\'state\']}: only a running run is closed and only once", integrity)\n',
+     '', R3_ONCE),
+    # D0-3: the PERSISTENCE exception is flagged, and only for PERSISTENCE
+    ("R3 D0-3 the PERSISTENCE exception is widened to every halt", XR, EXCEPTION, '        elif state["state"] == "HALTED":\n', R3_GATE),
+    ("R3 D0-3 the PERSISTENCE exception is widened to every halt (seen by the random oracle)", XR, EXCEPTION,
+     '        elif state["state"] == "HALTED":\n', R3_RANDOM),
+    ("R3 D0-3 the PERSISTENCE exception is widened to every finished run", XR, EXCEPTION, '        elif state["state"] in ("HALTED", "COMPLETE"):\n',
+     R3_GATE),
+    ("R3 D0-3 a PERSISTENCE halt that lacks facts passes unflagged", XR, '            flags.append("INCOMPLETE_JOURNAL_BY_PERSISTENCE_HALT")\n',
+     '            pass\n', R3_GATE),
+    # D0-4: a running run's gap is flagged as resumable; written-back facts stay flagged
+    ("R3 D0-4 a running run's gap passes unflagged", XR, '            flags.append("RESUMABLE_JOURNAL_GAP")\n', '            pass\n', R3_CHECK),
+    ("R3 a fact written back from the ledger passes unflagged", XR, '    if reconciled:\n        flags.append("RECONCILED_FROM_LEDGER")\n',
+     '    if False:\n        flags.append("RECONCILED_FROM_LEDGER")\n', R3_CARRY),
+    # D0-1: every exit carries the verdict, verbatim; one mutant per exit
+    ("R3 D0-1 replay_run drops the verdict", XR, '            "integrity": integrity, "certificate": inspection["certificate"]}\n',
+     '            "certificate": inspection["certificate"]}\n', R3_CARRY),
+    ("R3 D0-1 replay_run drops the verdict (seen by the every-exit oracle)", XR,
+     '            "integrity": integrity, "certificate": inspection["certificate"]}\n', '            "certificate": inspection["certificate"]}\n', R3_EXITS),
+    ("R3 D0-1 a finished report drops the verdict", XR, 'target_rounds=target,\n                  integrity=integrity)\n', 'target_rounds=target)\n', R3_CARRY),
+    ("R3 D0-1 a halted report drops the verdict", XR, '"overrun": self.ledger.state["overrun"]},\n                      "integrity": integrity}\n',
+     '"overrun": self.ledger.state["overrun"]}}\n', R3_CLOSE),
+    ("R3 D0-1 the write ledger drops the verdict", XR, '"writes_outside_out_dir": [], "integrity": integrity,', '"writes_outside_out_dir": [],', R3_CARRY),
+    ("R3 D0-1 check --out discards the gate's verdict again", XR,
+     "            if inspection is not None:  # the run's verdict, verbatim: a run the gate flags is never a plain PASS\n",
+     "            if False:  # the run's verdict, verbatim: a run the gate flags is never a plain PASS\n", R3_CHECK),
+    ("R3 D0-1 a flagged check exits like a clean pass", XR, '            if result["status"] == "FLAGGED":\n                return 4\n',
+     '            if result["status"] == "FLAGGED":\n                return 0\n', R3_CHECK),
+    ("R3 D0-1 CLI replay drops the verdict", XR, 'if k != "runs"}', 'if k not in ("runs", "integrity")}', R3_CARRY),
+    ("R3 D0-1 a flagged replay exits like a clean one", XR, '            return 0 if result["integrity"]["status"] == "CLEAN" else 4\n',
+     '            return 0\n', R3_CARRY),
+    ("R3 D0-1 Runner.resume refuses a finished run without its verdict", XR,
+     '                raise _refusal(f"RUN_IS_{state[\'state\']}: only an interrupted run can resume", inspection["integrity"])\n',
+     '                raise RunBlocked(f"RUN_IS_{state[\'state\']}: only an interrupted run can resume")\n', R3_CARRY),
+    ("R3 D0-1 the report refuses a finished run without its verdict", XR,
+     '            raise _refusal(f"RUN_IS_{state[\'state\']}: only a running run is closed and only once", integrity)\n',
+     '            raise RunBlocked(f"RUN_IS_{state[\'state\']}: only a running run is closed and only once")\n', R3_CARRY),
+    ("R3 D0-1 the write ledger refuses without its verdict", XR,
+     '            raise _refusal("WRITE_LEDGER_ALREADY_CERTIFIED: a write ledger is written once and never recomputed", integrity)\n',
+     '            raise RunBlocked("WRITE_LEDGER_ALREADY_CERTIFIED: a write ledger is written once and never recomputed")\n', R3_CARRY),
+    ("R3 D0-1 a closed run's result drops the verdict", XR, '"report": report, "integrity": integrity, "out_dir": str(self.out_dir)}',
+     '"report": report, "out_dir": str(self.out_dir)}', R3_CARRY),
+    ("R3 D0-1 the flags reach only the gate (the close clears them)", XR, CLOSE,
+     '        integrity = {**inspect_run(self.out_dir, closing=closing)["integrity"], "status": "CLEAN", "flags": []}\n', R3_CLOSE),
+    ("R3 D0-1 the command line drops a run's verdict", XR, ',\n                      "integrity": result["integrity"]}, indent=2))', '}, indent=2))', R3_CLI),
+    ("R3 D0-1 a refused command drops the verdict it carries", XR,
+     ',\n                          **({} if blocked.integrity is None else {"integrity": blocked.integrity})}, indent=2))', '}, indent=2))', R3_CLI),
+    # D0-5: the write ledger is written once and never for a running run
+    ("R3 D0-5 the write ledger is rewritten", XR, [
+        ('        if (self.out_dir / "write_ledger.json").exists():\n', '        if False:\n'),
+        ('        publish_once(self.out_dir / "write_ledger.json", canonical({', '        atomic_write(self.out_dir / "write_ledger.json", canonical({')],
+     None, R3_ONCE),
+    ("R3 D0-5 a reopened certified run is certified again", XR,
+     '        if "WRITE_LEDGER_EXISTS_NOT_RECERTIFIED" not in integrity["flags"]:  # write-once: an existing write ledger is never redone\n',
+     '        if True:  # write-once: an existing write ledger is never redone\n', R3_ONCE),
+    ("R3 D0-5 a running run is written up", XR, '        if inspection["state"]["state"] == "RUNNING":\n            raise _refusal("WRITE_LEDGER_RUN_NOT_TERMINAL',
+     '        if False:\n            raise _refusal("WRITE_LEDGER_RUN_NOT_TERMINAL', R3_ONCE),
+    # R3-3: a finished run's write ledger must still hold
+    ("R3 R3-3 a finished run's write ledger is not checked", XR, VERIFY, '            pass\n', R3_CERT),
+    ("R3 R3-3 a finished run's write ledger is not checked (seen by the random oracle)", XR, VERIFY, '            pass\n', R3_RANDOM),
+    ("R3 R3-3 a file added after the write ledger is tolerated", XR, '        _require(name in listed, f"WRITE_LEDGER_UNLISTED:{name}")\n',
+     '        if name not in listed:\n            continue\n', R3_CERT),
+    ("R3 R3-3 a listed file's bytes are not compared", XR, '_require(name in present and ep.sha256_file(out / name) == listed[name],',
+     '_require(name in present,', R3_CERT),
+    ("R3 R3-3 the write ledger's own verdict is not compared", XR,
+     '    _require(listing.get("integrity") == integrity, "WRITE_LEDGER_INTEGRITY_MISMATCH")\n', '', R3_CERT),
+]
+R3B_PUBLICATION = X + "R3IntegrityTests.test_R3B_only_a_second_regular_link_of_the_write_ledger_is_exempt"
+R3B_COUNT = RA + "test_R3B_the_command_line_reports_generations_sent_before_a_refused_close"
+R3B_CASES = [
+    ("R3B the publication leftover exemption is removed", XR,
+     ' and not _publication_leftover(path, out / "write_ledger.json")', '', R3B_PUBLICATION),
+    ("R3B equal bytes substitute for publication file identity", XR,
+     '    return stat.S_ISREG(leftover.st_mode) and (leftover.st_dev, leftover.st_ino) == (written.st_dev, written.st_ino)\n',
+     '    return stat.S_ISREG(leftover.st_mode) and path.read_bytes() == certificate.read_bytes()\n', R3B_PUBLICATION),
+    ("R3B publication leftovers follow symbolic links", XR, [
+        ('    if path.is_symlink() or path.parent != certificate.parent or not PUBLICATION_TEMP.fullmatch(path.name):\n',
+         '    if path.parent != certificate.parent or not PUBLICATION_TEMP.fullmatch(path.name):\n'),
+        ('    leftover, written = path.lstat(), certificate.lstat()\n',
+         '    leftover, written = path.stat(), certificate.lstat()\n')], None, R3B_PUBLICATION),
+    ("R3B a publication hard link in any directory is exempt", XR,
+     ' or path.parent != certificate.parent', '', R3B_PUBLICATION),
+    ("R3B a publication name accepts any hex length", XR,
+     'r"write_ledger\\.json\\.[0-9a-f]{32}\\.tmp"', 'r"write_ledger\\.json\\.[0-9a-f]+\\.tmp"', R3B_PUBLICATION),
+    ("R3B a publication name accepts uppercase hex", XR,
+     'r"write_ledger\\.json\\.[0-9a-f]{32}\\.tmp"', 'r"write_ledger\\.json\\.[0-9a-fA-F]{32}\\.tmp"', R3B_PUBLICATION),
+    ("R3B a certified run resumes", XR,
+     '            if inspection["certificate"] != "ABSENT":\n'
+     '                raise _refusal("RUN_IS_CERTIFIED: a write ledger exists so the run was closed and a certified run is never resumed", inspection["integrity"])\n',
+     '', R3_ONCE),
+    ("R3B the blocked command reports zero generations", XR,
+     '"generation_calls": 0 if runner is None else runner.generation_calls', '"generation_calls": 0', R3B_COUNT),
+    ("R3B the generation counter is never incremented", XR,
+     '            self.generation_requests += 1\n', '            pass\n', R3B_COUNT),
+]
+CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND + R2_CASES + R3_CASES + R3B_CASES
