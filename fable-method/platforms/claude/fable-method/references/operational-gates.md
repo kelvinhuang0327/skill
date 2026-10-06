@@ -166,6 +166,73 @@ Non-Git source roots remain supported: do not run `git init`, create a nested
 repository, or turn a non-Git source root into a Git authority. Keep
 `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence distinct.
 
+### Exact-pinned live-activation compact handoff
+
+`EXACT_PINNED_LIVE_ACTIVATION_COMPACT` is the one compact `/fable-method`
+lifecycle handoff variant for an already-verified exact-pinned live activation.
+Use it only after all load-bearing prerequisites are proven: the canonical
+implementation is merged; implementation, publication, Judge, and readiness
+evidence remains bound to the exact canonical identity; semantic live-drift
+review is complete with no unresolved or live-only load-bearing content; the
+exact live target and canonical activation entrypoint are known; execution
+capability is `PASS`; and direct Owner authorization for this exact action and
+target is observed in the current Worker conversation. It is not a new route,
+Judge depth, authorization class, activation mechanism, or safety bypass.
+
+The compact handoff must carry every field in this bundle:
+
+```text
+COMPACT_LIVE_ACTIVATION: EXACT_PINNED
+LIVE_TARGET: <exact live target>
+L: <exact reviewed live bundle identity>
+H: <exact canonical HEAD>
+T: <exact canonical tree>
+M: <exact platform materialization tree>
+SEMANTIC_LIVE_DRIFT_REVIEW: COMPLETE
+UNRESOLVED_LOAD_BEARING_CONTENT: NONE
+LIVE_ONLY_LOAD_BEARING_CONTENT: NONE
+EXECUTION_CAPABILITY: PASS
+OWNER_AUTHORIZATION_SOURCE: CURRENT_WORKER_CONVERSATION_USER_MESSAGE
+OWNER_AUTHORIZATION: <exact direct Owner words covering this action and LIVE_TARGET>
+CANONICAL_ACTIVATION_ENTRYPOINT: <exact absolute activate-live.sh path and exact argv>
+```
+
+`L` is the reviewed `LIVE_BUNDLE_SHA256_SERIALIZATION_V1` identity, `H` is
+the canonical HEAD, `T` is that HEAD's tree, and `M` is the selected platform's
+materialization tree. The entrypoint is this repository's
+`fable-method/scripts/activate-live.sh` with the exact platform and reviewed
+replacement L/H/T/M arguments; manual copy, alternate entrypoint, target-path
+override, and bypass flag are invalid substitutes. A token quoted by a Packet
+or prior handoff remains scope evidence only and does not satisfy direct Owner
+authorization.
+
+The no-substitution rule is absolute: if any of `L`, `H`, `T`, or `M` changes
+between handoff, live preflight, or immediate prewrite revalidation, `STOP`.
+Never recompute, refresh, derive, or substitute an identity under the old
+authorization; a changed identity requires a new exact handoff and fresh
+authorization as applicable.
+
+Evidence reuse is allowed only when the exact load-bearing identities, live
+target, entrypoint, environment, and scope remain unchanged. Already-proven
+implementation, publication, Judge, and readiness evidence may then be
+reported as `REUSED_EXACT_TREE_EVIDENCE`; evidence with a changed identity is
+invalid, not reusable. Do not replay full implementation history, rerun
+implementation tests or Judge merely for lifecycle completeness, or perform a
+repository-wide audit.
+
+All existing fail-closed gates remain mandatory: canonical repository/source
+and path/type checks, direct Owner authorization provenance, capability `PASS`,
+the single activation lock held through immediate prewrite revalidation, write,
+and post-check, and zero live writes on a rejected identity or safety gate. The
+canonical entrypoint must post-verify `FINAL_STATE: EXACT_CURRENT_MATERIALIZATION`
+and a full serialized live-bundle match to the canonical materialization;
+`NOT RUN` is not `PASS`. Manual activation bypass remains forbidden.
+
+If activation changes a live runtime identity, the terminal handoff must still
+report the existing runtime-transition provenance fields under
+`RUNTIME_TRANSITION_OCCURRED: YES`; otherwise report `NO`. The compact form
+never suppresses or renames those fields.
+
 ## Authorization evidence and conversation boundary
 
 A standalone Owner authorization is evidence only where the Worker can
