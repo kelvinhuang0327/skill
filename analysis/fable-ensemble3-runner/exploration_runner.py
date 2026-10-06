@@ -3,7 +3,8 @@
 
     python3 exploration_runner.py run    --profile P --out DIR --mode SIMULATION [--allow-formal-simulation]
     python3 exploration_runner.py run    --profile P --out DIR --mode LIVE --approval-file F      (blocked until every gate holds)
-    python3 exploration_runner.py resume --profile P --out DIR --mode SIMULATION|LIVE [...]
+    python3 exploration_runner.py resume --profile P --out DIR --mode SIMULATION [...]               (a LIVE run is never resumed)
+    python3 exploration_runner.py close  --profile P --out DIR [--budget B]          (ends an interrupted run as HALTED; sends nothing)
     python3 exploration_runner.py replay --out DIR
     python3 exploration_runner.py check  --profile P [--mode LIVE]
 
@@ -20,8 +21,11 @@ Accounting rules (the point of this module):
     RESUME record is an audit note no gate reads; resume first writes every lost fact back, from the ledger, as its own
     record marked reconciled;
   * a finished run lacks no ledger fact: the one gate refuses one that does, at every exit, except a PERSISTENCE halt, which
-    is flagged; every exit carries the gate's integrity verdict verbatim, and the write ledger is written once, never redone.
-Never relaunches an existing run; resume continues only an interrupted one, after recovery.
+    is flagged; every exit carries the gate's integrity verdict verbatim, and the write ledger is written once, never redone;
+  * a run bound to LIVE is never continued: the binding is held by two files (the manifest and the RUN_OPENED record the journal
+    is created with), an interrupted LIVE run is ended by close, which sends nothing, and a new attempt needs a new directory;
+  * a write ledger lists every entry of the run directory, found without following a link; anything else refuses.
+Never relaunches an existing run; resume continues only an interrupted SIMULATION run, after recovery; close ends either kind.
 """
 from __future__ import annotations
 
@@ -61,6 +65,8 @@ MANIFEST_ARTIFACT = "FABLE_ENSEMBLE3_R1_RUN_MANIFEST"
 # it does anything else, so a legitimate crash leaves at most one fact without a record; the rest is the fixed tolerance.
 MAX_UNACKNOWLEDGED_AHEAD = 3
 FACT_PHASES = ("ROUND_RESERVED", "START", "SETTLED")  # the concrete records of ledger facts
+AUDIT_NOTES = ("RESUME", "CLOSE")  # records no gate reads: they excuse nothing and refuse nothing, wherever they stand
+STOP_KINDS = ("REJECTED", "CAPABILITY", "PERSISTENCE", "OTHER")  # the settlements that stop a run (classify)
 PUBLICATION_TEMP = re.compile(r"write_ledger\.json\.[0-9a-f]{32}\.tmp")
 REPORT_METRICS = (
     "single", "single_gated", "maj3", "gated", "cov3", "disagreement", "coverage_gap", "vote_effect", "checker_effect",
@@ -149,6 +155,11 @@ def exclusive_write(path: Path, text: str) -> None:
     _fsync_dir(path.parent)
 
 
+def journal_line(record: dict) -> str:
+    """One attempt-log line, exactly as every record of the log is written."""
+    return json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+
+
 class AppendLog:
     """JSON-lines file; every record is fsynced before append() returns."""
 
@@ -156,7 +167,7 @@ class AppendLog:
         self.path = Path(path)
 
     def append(self, record: dict) -> None:
-        line = json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        line = journal_line(record)
         created = not self.path.exists()
         descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
@@ -248,20 +259,73 @@ def _publication_leftover(path: Path, certificate: Path) -> bool:
     return stat.S_ISREG(leftover.st_mode) and (leftover.st_dev, leftover.st_ino) == (written.st_dev, written.st_ino)
 
 
+def _entries(out: Path) -> Dict[str, os.stat_result]:
+    """D4-5: every directory entry below `out`, by its path relative to `out`, with its own lstat.  A link is never followed."""
+    found: Dict[str, os.stat_result] = {}
+    pending = [""]
+    while pending:
+        relative = pending.pop()
+        try:
+            with os.scandir(out / relative if relative else out) as listing:
+                for entry in listing:
+                    name = f"{relative}/{entry.name}" if relative else entry.name
+                    found[name] = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(found[name].st_mode):
+                        pending.append(name)
+        except OSError as exc:
+            raise RunBlocked(f"WRITE_LEDGER_INVENTORY_UNREADABLE:{relative or '.'}") from exc
+    return found
+
+
+def _listable(out: Path, integrity: dict) -> Dict[str, os.stat_result]:
+    """D4-5: every entry below `out`, when every one is a regular file a write ledger can list (the runner makes no directory, no
+    link and no special file); otherwise the first that is not is refused, with the gate's verdict, before anything is written."""
+    entries = _entries(out)
+    for name in sorted(entries):
+        if not stat.S_ISREG(entries[name].st_mode):
+            raise _refusal(f"WRITE_LEDGER_UNLISTABLE:{name}", integrity)
+    return entries
+
+
 def _verify_certificate(out: Path, integrity: dict) -> None:
-    """A finished run's write ledger still holds: every file it lists has those bytes, nothing else is there, same verdict."""
+    """A finished run's write ledger still holds (D4-5): every entry below the run directory, found without following a link, is a
+    file it lists, a regular file with the listed bytes.  Only the write ledger itself, at the top, and a second link of it left by
+    its publication are not listed; a directory, a link or a special file never is.  Same verdict."""
+    entries = _entries(out)
+    written = entries.get("write_ledger.json")  # read only when it is a regular file: a FIFO would block the read
+    _require(written is not None and stat.S_ISREG(written.st_mode), "WRITE_LEDGER_INVALID_OR_UNREADABLE")
     listing = _read_state(out / "write_ledger.json", "WRITE_LEDGER_INVALID_OR_UNREADABLE")
     files = listing.get("files")
     _require(isinstance(files, list) and all(isinstance(entry, dict) and isinstance(entry.get("path"), str)
                                              and isinstance(entry.get("sha256"), str) for entry in files)
              and len({entry["path"] for entry in files}) == len(files), "WRITE_LEDGER_INVALID_OR_UNREADABLE")
     listed = {entry["path"]: entry["sha256"] for entry in files}
-    present = {str(path.relative_to(out)) for path in out.rglob("*")
-               if path.is_file() and path.name != "write_ledger.json" and not _publication_leftover(path, out / "write_ledger.json")}
+    present = {name for name, path in ((name, out / name) for name in entries)
+               if not stat.S_ISDIR(entries[name].st_mode) and name != "write_ledger.json"
+               and not _publication_leftover(path, out / "write_ledger.json")}
     for name in sorted(set(listed) | present):
         _require(name in listed, f"WRITE_LEDGER_UNLISTED:{name}")
+        _require(name not in present or stat.S_ISREG(entries[name].st_mode), f"WRITE_LEDGER_NOT_A_REGULAR_FILE:{name}")
         _require(name in present and ep.sha256_file(out / name) == listed[name], f"WRITE_LEDGER_MISMATCH:{name}")
+    for name in sorted(entries):  # the runner makes no directory, so none is listed (named after any entry inside it, above)
+        _require(not stat.S_ISDIR(entries[name].st_mode), f"WRITE_LEDGER_UNLISTED:{name}")
     _require(listing.get("integrity") == integrity, "WRITE_LEDGER_INTEGRITY_MISMATCH")
+
+
+def _bound(out: Path, manifest: dict, opened: Optional[dict]) -> str:
+    """D4-2: the mode a run is bound to, held by two files: the RUN_OPENED record its journal was created with, naming the sha256
+    of the manifest's bytes and the mode, and the manifest.  No single file changes it: an edited manifest no longer has that hash;
+    a deleted, moved, repeated or rewritten binding record no longer opens the journal or no longer agrees."""
+    _require(opened is not None, "RUN_BINDING_MISSING:the journal does not open with its RUN_OPENED record")
+    _require(isinstance(opened.get("manifest_sha256"), str) and opened.get("mode") in MODES, "RUN_BINDING_INVALID")
+    try:
+        content = (out / "run_manifest.json").read_bytes()
+    except OSError as exc:
+        raise RunBlocked("RUN_MANIFEST_INVALID_OR_UNREADABLE") from exc
+    _require(hashlib.sha256(content).hexdigest() == opened["manifest_sha256"],
+             "RUN_BINDING_MANIFEST_MISMATCH:the manifest is not the one the run was opened with")
+    _require(opened["mode"] == manifest["mode"], "RUN_BINDING_MODE_MISMATCH:the manifest and the RUN_OPENED record disagree")
+    return opened["mode"]
 
 
 def _judged(out: Path, inspection: dict, closing: Optional[dict]) -> dict:
@@ -314,13 +378,20 @@ def inspect_run(out_dir, *, closing: Optional[dict] = None) -> dict:
     The result carries `integrity` (journal_integrity: a finished run lacking a fact is refused here, for every exit at once)
     and `certificate`; a finished run's write ledger must still hold.  `closing` is the state `_finalize` is about to write:
     the run must be RUNNING, and the verdict is for that state, so a close that would be refused writes nothing at all.
+    R4: the journal must open with the RUN_OPENED record that binds the manifest's bytes and the mode (D4-2), and RUNNING beside a
+    report with no write ledger is a rolled-back state (D4-4); both are refused here, so at every entrance.
     """
     out = Path(out_dir)
     if not (out / "run_manifest.json").is_file():
         raise RunBlocked("NO_RUN_TO_RESUME")
     manifest = _read_state(out / "run_manifest.json", "RUN_MANIFEST_INVALID_OR_UNREADABLE")
     state = _read_state(out / "run_state.json", "RUN_STATE_INVALID_OR_UNREADABLE")
-    records = AppendLog(out / "attempts.jsonl").records()
+    journal = AppendLog(out / "attempts.jsonl").records()
+    # D4-2: the record the journal was created with binds the run's mode; it is read for that alone, after every rule below, and
+    # every other record is judged as before.  An audit note ahead of it is transparent, as audit notes are everywhere.
+    head = next((index for index, row in enumerate(journal) if row.get("phase") not in AUDIT_NOTES), None)
+    opened = journal[head] if head is not None and journal[head].get("phase") == "RUN_OPENED" else None
+    records = journal if opened is None else journal[:head] + journal[head + 1:]
     try:
         order, planned, target = manifest["item_order"], manifest["planned_rounds"], manifest["target_rounds"]
         _require(manifest["artifact"] == MANIFEST_ARTIFACT and manifest["schema_version"] == 1
@@ -346,10 +417,15 @@ def inspect_run(out_dir, *, closing: Optional[dict] = None) -> dict:
         if isinstance(exc, RunBlocked):
             raise
         raise RunBlocked("RUN_MANIFEST_OR_STATE_SHAPE_INVALID") from exc
+    # D4-4: a report is written only after the state is final, so RUNNING beside a report is a rolled-back state.  With a write
+    # ledger present R3's rules stand: the gate flags the run and nothing resumes, closes or certifies it again.
+    if state["state"] == "RUNNING" and os.path.lexists(out / "report.json") and not (out / "write_ledger.json").exists():
+        raise RunBlocked("STATE_ROLLBACK_DETECTED:a report exists so the run had finished and its state was rolled back")
     ledger_path = out / "ledger.json"
     if not ledger_path.exists():
         _require(not records and state["state"] == "RUNNING", "LEDGER_MISSING:no ledger to replay")
-        return _judged(out, {"manifest": manifest, "state": state, "ledger": None, "records": records, "missing": [],
+        _bound(out, manifest, opened)
+        return _judged(out, {"manifest": manifest, "state": state, "ledger": None, "records": journal, "missing": [],
                              "reconciliation": {"pre_first_save": True, "ledger_ahead": []}}, closing)
     ledger = _read_state(ledger_path, "LEDGER_INVALID_OR_UNREADABLE")
     try:
@@ -456,6 +532,10 @@ def inspect_run(out_dir, *, closing: Optional[dict] = None) -> dict:
                     _require(isinstance(row[{"REQUEST": "body", "RESPONSE": "response", "ERROR": "error"}[phase]], dict),
                              "ATTEMPTS_SHAPE_INVALID")
                     _require(pair in starts, f"ATTEMPTS_OUT_OF_ORDER:{phase}_BEFORE_ITS_START")
+            elif phase == "RUN_OPENED":  # D4-2: the binding record opens the journal once, before every record the gate reads
+                raise RunBlocked("RUN_BINDING_NOT_FIRST:a second or a late RUN_OPENED record")
+            elif phase == "CLOSE":  # like RESUME, an audit note: none of its fields is read
+                pass
             elif phase != "RESUME":  # a RESUME record is an audit note: none of its fields is read, so it can excuse nothing
                 raise RunBlocked("ATTEMPTS_PHASE_INVALID")
         if state["state"] == "COMPLETE":
@@ -471,7 +551,8 @@ def inspect_run(out_dir, *, closing: Optional[dict] = None) -> dict:
         if isinstance(exc, RunBlocked):
             raise
         raise RunBlocked("LEDGER_OR_ATTEMPTS_SHAPE_INVALID") from exc
-    return _judged(out, {"manifest": manifest, "state": state, "ledger": ledger, "records": records, "missing": missing,
+    _bound(out, manifest, opened)
+    return _judged(out, {"manifest": manifest, "state": state, "ledger": ledger, "records": journal, "missing": missing,
                          "reconciliation": {"pre_first_save": False, "ledger_ahead": [fact_name(fact) for fact in missing]}}, closing)
 
 
@@ -783,10 +864,13 @@ class Runner:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self._lock(create=True)
         try:
-            exclusive_write(self.out_dir / "run_manifest.json",
-                            canonical({**self._identity(), "planned_rounds": self.planned, "started_epoch": time.time()}))
+            manifest = canonical({**self._identity(), "planned_rounds": self.planned, "started_epoch": time.time()})
+            exclusive_write(self.out_dir / "run_manifest.json", manifest)
             self._set_state("RUNNING")
-            exclusive_write(self.log.path, "")  # an empty log is durable before the first ledger save
+            # D4-2: the journal is created holding its binding record (the manifest's exact bytes and the mode), atomically, before
+            # the first ledger save: it is there complete or not at all, and no later entrance ever writes one.
+            atomic_write(self.log.path, journal_line({"phase": "RUN_OPENED", "t": time.time(), "mode": self.mode,
+                                                      "manifest_sha256": sha256_text(manifest)}))
             self._stamp_lock()
             self.ledger = bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap)
             return self._execute(adapter)
@@ -794,20 +878,37 @@ class Runner:
             self._unlock()
 
     def resume(self) -> dict:
+        """Continue an interrupted SIMULATION run, after recovery.  A run bound to LIVE is never continued (D4-1): it is closed."""
+        return self._reopen(closing=False)
+
+    def close(self) -> dict:
+        """End an interrupted run of either mode as HALTED, after the same recovery as resume, sending nothing (D4-3).
+
+        There is no path from here to an adapter, a transport, a key or an approval file: the recovery books only what the ledger
+        and the journal already hold, and the run ends through `_finalize` with nothing executed."""
+        return self._reopen(closing=True)
+
+    def _reopen(self, *, closing: bool) -> dict:
+        """resume and close: one gate, one set of refusals before any byte is written, one recovery; then resume goes on and close
+        ends the run."""
         inspect_run(self.out_dir)
         self._lock()
         try:
             inspection = inspect_run(self.out_dir)  # repeat under flock; no PID write until all refusal checks pass
             manifest, state = inspection["manifest"], inspection["state"]
+            if not closing and (manifest["mode"] == "LIVE" or self.mode == "LIVE"):  # D4-1: there is no LIVE resume, only close
+                raise _refusal("RESUME_FORBIDDEN_FOR_LIVE:use close", inspection["integrity"])
             if state["state"] != "RUNNING":
                 raise _refusal(f"RUN_IS_{state['state']}: only an interrupted run can resume", inspection["integrity"])
             if inspection["certificate"] != "ABSENT":
                 raise _refusal("RUN_IS_CERTIFIED: a write ledger exists so the run was closed and a certified run is never resumed", inspection["integrity"])
             mismatched = sorted(key for key, value in self._identity().items() if manifest.get(key) != value)
             if mismatched:
-                raise _refusal("RESUME_IDENTITY_MISMATCH:" + ";".join(mismatched), inspection["integrity"])
+                raise _refusal(("CLOSE" if closing else "RESUME") + "_IDENTITY_MISMATCH:" + ";".join(mismatched), inspection["integrity"])
             self.planned = manifest["planned_rounds"]
-            adapter = self._adapter()  # before the ledger is touched: a wiring error must not recover or change anything
+            if closing:  # D4-5: a close always ends written up, so an entry no write ledger can list refuses it before any write
+                _listable(self.out_dir, inspection["integrity"])
+            adapter = None if closing else self._adapter()  # D4-3: never for a close; resume: before the ledger is touched
             self._stamp_lock()
             self.ledger = (_loaded_ledger(self.out_dir, inspection) if inspection["ledger"] is not None
                            else bl.Ledger(self.out_dir / "ledger.json", budget=self.budget, attempt_cap=self.cap))
@@ -833,6 +934,8 @@ class Runner:
             for slot in recovering:  # a recovery is a ledger fact like any other: its own record follows the ledger write
                 self._log_settled(slot, self.ledger.state["slots"][slot]["attempts"], "INCOMPLETE", None,
                                   "RECOVER_UNCERTAIN_NO_RELAUNCH", "started, no receipt: charged the cap, never sent again", "FINAL")
+            if closing:  # D4-3: one CLOSE audit record, then the run ends HALTED; nothing is executed, nothing is sent
+                return self._closed(inspection, uncertain, overrun)
             # an audit note only: no gate reads it, so neither its presence nor anything it claims can change a decision
             self.log.append({"phase": "RESUME", "t": time.time(), "recovered_uncertain": uncertain,
                              "reconciliation": inspection["reconciliation"]})
@@ -841,6 +944,20 @@ class Runner:
             return self._execute(adapter)
         finally:
             self._unlock()
+
+    def _closed(self, inspection: dict, recovered: List[str], overrun: Optional[RunHalt]) -> dict:
+        """The end of a close: HALTED for ATTEMPT_CAP_OVERRUN when the ledger holds an overrun (found by this recovery, or by an
+        earlier interrupted close or run) and INTERRUPTED otherwise; never scored.  It lists the stop-class settlements the journal
+        holds: a stop the run had reached and never wrote as its state is shown, not hidden."""
+        stops = [{key: row.get(key) for key in ("slot", "attempt", "kind", "status", "detail")} for row in inspection["records"]
+                 if row.get("phase") == "SETTLED" and row.get("kind") in STOP_KINDS]
+        if overrun is None and self.ledger.state["overrun"]:
+            slot = next((key for key, record in sorted(self.ledger.state["slots"].items()) if record["state"] == "OVERRUN"), None)
+            overrun = RunHalt("ATTEMPT_CAP_OVERRUN", slot, "an overrun already on the ledger")
+        halted = overrun or RunHalt("INTERRUPTED", None, "closed after an interruption; the close sent nothing")
+        note = {"stop_settlements": stops, "recovered_uncertain": recovered, "written_back": inspection["reconciliation"]["ledger_ahead"]}
+        self.log.append({"phase": "CLOSE", "t": time.time(), "halt_reason": halted.reason, **note})  # an audit note, like RESUME
+        return self._finalize(halted, close_note=note)
 
     def _execute(self, adapter) -> dict:
         halted = None
@@ -946,7 +1063,7 @@ class Runner:
         self._log_settled(slot, attempt, status, cost, "RECEIPT", f"provider_response_id={receipt.get('provider_response_id')}", state)
 
     # --- the end -----------------------------------------------------------------------------------------------------
-    def _finalize(self, halted: Optional[RunHalt]) -> dict:
+    def _finalize(self, halted: Optional[RunHalt], *, close_note: Optional[dict] = None) -> dict:
         closing = {"state": "COMPLETE"} if halted is None else {"state": "HALTED", "reason": halted.reason}
         # The one gate judges the journal against the state about to be written, before a byte of it is written.  A run that
         # lacks a ledger fact is refused here and stays RUNNING, for resume to write the fact back first; a PERSISTENCE halt is
@@ -968,6 +1085,8 @@ class Runner:
                       "ledger": {"spent_upper_usd": self.ledger.state["spent_upper"], "attempt_cap_usd": self.ledger.state["attempt_cap"],
                                  "budget_usd": self.ledger.state["budget"], "overrun": self.ledger.state["overrun"]},
                       "integrity": integrity}
+            if close_note is not None:  # D4-3: a closed run is never scored; it shows what its journal says had stopped it
+                report["closed"] = {"by": "close", **close_note}
             state = "HALTED"
             self._set_state("HALTED", **halt)
         atomic_write(self.out_dir / "report.json", canonical(report))
@@ -987,8 +1106,9 @@ class Runner:
             raise _refusal("WRITE_LEDGER_RUN_NOT_TERMINAL: only a finished run is written up", integrity)
         if (self.out_dir / "write_ledger.json").exists():
             raise _refusal("WRITE_LEDGER_ALREADY_CERTIFIED: a write ledger is written once and never recomputed", integrity)
-        files = [{"path": str(path.relative_to(self.out_dir)), "bytes": path.stat().st_size, "sha256": ep.sha256_file(path)}
-                 for path in sorted(self.out_dir.rglob("*")) if path.is_file() and path.name != "write_ledger.json"]
+        entries = _listable(self.out_dir, integrity)  # D4-5: every entry, no link followed; anything but a regular file refuses
+        files = [{"path": name, "bytes": entries[name].st_size, "sha256": ep.sha256_file(self.out_dir / name)}
+                 for name in sorted(entries) if name != "write_ledger.json"]
         publish_once(self.out_dir / "write_ledger.json", canonical({
             "out_dir": str(self.out_dir.resolve()), "files": files, "writes_outside_out_dir": [], "integrity": integrity,
             "note": "no temporary file survives; the runner opens no path outside out_dir; written once, never recomputed"}))
@@ -1089,6 +1209,21 @@ def _runner(args, *, resume: bool) -> Runner:
     return runner
 
 
+def _closer(args, mode: str) -> Runner:
+    """close's Runner (D4-3): the run's identity rebuilt from the profile, in the mode the run is bound to.  A close sends nothing,
+    so the profile is checked for identity only (its SIMULATION check), and no key, approval file or transport is ever asked for."""
+    profile_path = Path(args.profile)
+    reasons = ep.check_profile(profile_path, mode="SIMULATION")["reasons"]
+    if reasons:
+        raise RunBlocked(",".join(sorted(set(reasons))))
+    profile, instructions, cap, _, budget = _inputs(profile_path, mode, args.budget)
+    if budget is None:
+        raise RunBlocked("TOTAL_COST_CAP_UNFROZEN")
+    return Runner(args.out, mode=mode, bank_manifest=profile["bank"]["manifest"]["ref"], instructions=instructions, budget=budget,
+                  attempt_cap=cap, target_rounds=profile["policy"]["target_runs"], seed=profile["policy"]["schedule_seed"],
+                  profile=profile_path, protocol=profile["protocol"]["ref"])
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1100,6 +1235,10 @@ def main(argv=None) -> int:
         sub.add_argument("--approval-file")
         sub.add_argument("--allow-formal-simulation", action="store_true")
         sub.add_argument("--budget")
+    close_cmd = commands.add_parser("close", help="end an interrupted run (either mode) as HALTED, sending nothing")
+    close_cmd.add_argument("--profile", required=True)
+    close_cmd.add_argument("--out", required=True)
+    close_cmd.add_argument("--budget", help="SIMULATION only: the --budget the run was started with, if one was given")
     replay_cmd = commands.add_parser("replay")
     replay_cmd.add_argument("--out", required=True)
     check = commands.add_parser("check")
@@ -1126,14 +1265,20 @@ def main(argv=None) -> int:
             return 0 if result["integrity"]["status"] == "CLEAN" else 4
         if args.command == "resume":
             inspect_run(args.out)
-        runner = _runner(args, resume=args.command == "resume")
-        result = runner.start() if args.command == "run" else runner.resume()
+        if args.command == "resume" and args.mode == "LIVE":  # D4-1: there is no LIVE resume; an interrupted LIVE run is closed
+            raise _refusal("RESUME_FORBIDDEN_FOR_LIVE:use close", inspect_run(args.out)["integrity"])
+        if args.command == "close":  # D4-3: in the mode the run is bound to, read through the gate (D4-2)
+            runner = _closer(args, inspect_run(args.out)["manifest"]["mode"])
+            result = runner.close()
+        else:
+            runner = _runner(args, resume=args.command == "resume")
+            result = runner.start() if args.command == "run" else runner.resume()
     except RunBlocked as blocked:
         print(json.dumps({"state": "BLOCKED", "reasons": str(blocked).split(","), "generation_calls": 0 if runner is None else runner.generation_calls,
                           **({} if blocked.integrity is None else {"integrity": blocked.integrity})}, indent=2))
         return 2
     print(json.dumps({"state": result["state"], "halt": result["halt"], "out_dir": result["out_dir"],
-                      "kind": result["report"]["kind"], "generation_calls_are_simulated": args.mode == "SIMULATION",
+                      "kind": result["report"]["kind"], "generation_calls_are_simulated": runner.mode == "SIMULATION",
                       "integrity": result["integrity"]}, indent=2))
     return 3 if result["state"] == "HALTED" else 0
 

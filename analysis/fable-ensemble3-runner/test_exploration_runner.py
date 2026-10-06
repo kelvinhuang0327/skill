@@ -18,6 +18,8 @@ import os
 import random
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -429,6 +431,8 @@ class FaultTests(RunnerCase):
         errors = [r for r in self.attempts("errrec") if r["phase"] == "ERROR" and r["slot"] == f"{self.ITEM}:0"]
         self.assertEqual([(r["path"], r["error"]["type"]) for r in errors], [("responses", "TimeoutError")])
         phases = {r["phase"] for r in self.attempts("errrec")}
+        self.assertEqual(self.attempts("errrec")[0]["phase"], "RUN_OPENED")  # R4 (added): the journal opens with its binding record
+        phases.discard("RUN_OPENED")  # R4 (added): that record, and only that one, is not an attempt record (D4-2)
         self.assertEqual(phases - {"ROUND_RESERVED", "START", "REQUEST", "RESPONSE", "ERROR", "SETTLED", "RESUME"}, set())
 
     def test_other_uncertain_failures_after_the_generation_request_end_as_incomplete_without_a_resend(self):
@@ -1681,7 +1685,18 @@ def oracle_verdict(ledger: dict, records: list) -> str:
     for index, (fact, _) in concrete:
         if any(position.get(need, len(records)) > index for need in oracle_needs(fact)):
             return "OUT_OF_ORDER"
+    if len(set(truth) - set(position)) <= ORACLE_BOUND and not oracle_bound(records):  # R4 (added): D4-2, the binding record
+        return "BINDING_BROKEN"
     return "ACCEPT" if len(set(truth) - set(position)) <= ORACLE_BOUND else "MISSING_BEYOND_BOUND"
+
+
+def oracle_bound(records: list) -> bool:
+    """R4 (added), D4-2 structurally: the first record that is not an audit note (RESUME, CLOSE) opens the run (RUN_OPENED), and no
+    other record does.  Damage here only deletes, repeats and moves whole records; what the opening record says is judged by the R4
+    oracle below, which knows the manifest."""
+    phases = [row.get("phase") for row in records]
+    heads = [phase for phase in phases if phase not in ("RESUME", "CLOSE")]
+    return bool(heads) and heads[0] == "RUN_OPENED" and phases.count("RUN_OPENED") == 1
 
 
 def oracle_frontier(ledger: dict, records: list) -> list:
@@ -3261,6 +3276,1309 @@ class R3IntegrityTests(TerminalHelpers, RunnerCase):
                                        "resume": written_back}})
         self.assertNotIn("report.json", observed["complete"]["files"])  # the refused close wrote nothing: no report, no write ledger
         self.assertNotIn("write_ledger.json", observed["rejected-halt"]["files"])
+
+
+# --- R4: a run bound to LIVE is never continued; close; state rollback; a certified run lists every entry -------------------------
+# Written from the R4 Packet (D4-1 .. D4-5), not from the product: the oracle decides from how a base run was made (its mode, where
+# it stopped, whether it was certified) and from the one change made to one file; it never calls the runner's gate or reads its
+# constants.  Bases are made by the runner itself.  LIVE ones run with the network cut, a placeholder key and the adapter's `_post`
+# replaced by the simulator: a LIVE-mode directory, never a real LIVE run.
+R4_SEED = 20261006
+R4_FAKE_KEY = "sk-test-NOT-A-REAL-KEY"
+R4_WHERE = ("RUNNING_MID_CALL", "RUNNING_STOP_SETTLED", "HALTED_NO_REPORT", "REPORT_NO_CERTIFICATE", "CERTIFIED_HALTED",
+            "CERTIFIED_COMPLETE")
+R4_READ_ONLY = ("inspect_run", "replay_run", "CLI check --out", "CLI replay")
+R4_SIM_RESUMES = ("Runner.resume SIMULATION", "CLI resume --mode SIMULATION")
+R4_LIVE_RESUMES = ("Runner.resume LIVE", "CLI resume --mode LIVE")
+R4_CLOSES = ("Runner.close", "CLI close")
+R4_ENTRANCES = R4_READ_ONLY + R4_SIM_RESUMES + R4_LIVE_RESUMES + R4_CLOSES + ("write accounting", "run on the directory")
+R4_NOTES = ("RESUME", "CLOSE")
+R4_LEFTOVER = "write_ledger.json.{}.tmp"
+
+
+def r4_expected(base: dict, flags: dict) -> dict:
+    """{entrance: expected}, from the Packet alone.  base: how the runner left the run (mode, state, report, certified, unsettled).
+    flags, for the one change: binding (the manifest's bytes or the binding record), inventory (what a write ledger certifies no
+    longer holds: an entry outside its list, a listed entry changed or gone, its own verdict changed), uncertifies (the write ledger
+    is gone), state / report (what the directory now says), unlistable (an entry no write ledger can list), unconstrained (no R4 rule
+    decides).  Expected: REFUSE, ACCEPT, PROCEED (a SIMULATION run goes on), CLOSE (ends HALTED, sends nothing), CERTIFY, or None:
+    only the invariants of r4_problems hold."""
+    everywhere = dict.fromkeys(R4_ENTRANCES, "REFUSE")
+    if flags.get("binding"):                                                  # D4-2
+        return everywhere
+    certified = base["certified"] and not flags.get("uncertifies")
+    state, report = flags.get("state", base["state"]), flags.get("report", base["report"])
+    if certified and state != "RUNNING" and flags.get("inventory"):          # D4-5, and R3's write ledger
+        return everywhere
+    if state == "RUNNING" and report and not certified:                      # D4-4
+        return everywhere
+    expected = dict.fromkeys(R4_ENTRANCES)
+    for entrance in R4_LIVE_RESUMES + ("run on the directory",):            # D4-1 (a LIVE Runner never resumes); D4-3b
+        expected[entrance] = "REFUSE"
+    if base["mode"] == "LIVE":                                               # D4-1: a run bound to LIVE, whatever the Runner
+        for entrance in R4_SIM_RESUMES:
+            expected[entrance] = "REFUSE"
+    if flags.get("unconstrained"):
+        return expected
+    open_run = state == "RUNNING" and not certified
+    for entrance in R4_READ_ONLY:  # replay needs every slot settled (R1); nothing else here refuses an intact run
+        expected[entrance] = "REFUSE" if "replay" in entrance and base["unsettled"] and state == "RUNNING" else "ACCEPT"
+    if base["mode"] == "SIMULATION":  # a SIMULATION run that goes on but cannot be written up at its end is R3's late refusal
+        for entrance in R4_SIM_RESUMES:
+            expected[entrance] = ("PROCEED" if not flags.get("unlistable") else None) if open_run else "REFUSE"
+    for entrance in R4_CLOSES:                                               # D4-3; D4-5: a close always ends written up
+        expected[entrance] = "CLOSE" if open_run and not flags.get("unlistable") else "REFUSE"
+    expected["write accounting"] = "CERTIFY" if state != "RUNNING" and not certified and not flags.get("unlistable") else "REFUSE"
+    return expected
+
+
+def r4_problems(base: dict, entrance: str, expected, observed: dict) -> list:
+    """What is wrong with one observation: its decision against the oracle's, then the invariants every cell keeps - a run bound
+    to LIVE sends nothing, nothing but a SIMULATION resume sends anything, a refusal that sent nothing changed no byte, a read-only
+    entrance writes nothing, and a crash or a missing entrance is never a decision."""
+    outcome, problems = observed["outcome"], []
+    may_send = base["mode"] == "SIMULATION" and entrance in R4_SIM_RESUMES and expected in ("PROCEED", None)
+    if outcome == "CRASH" and may_send and expected is None and observed["requests"]:
+        pass  # a SIMULATION run that went on after an edit no R4 rule decides, then failed at its own end: see r4_outside_r4
+    elif outcome in ("CRASH", "ABSENT"):
+        problems.append(outcome)
+    elif expected is not None and outcome != expected:
+        problems.append(f"{expected}->{outcome}")
+    if observed["requests"] and not may_send:
+        problems.append("A_LIVE_RUN_SENT_REQUESTS" if base["mode"] == "LIVE" else "SENT_REQUESTS")
+    if outcome == "REFUSE" and not observed["requests"] and observed["before"] != observed["after"]:
+        problems.append("A_REFUSAL_CHANGED_THE_DIRECTORY")
+    if entrance in R4_READ_ONLY and observed["before"] != observed["after"]:
+        problems.append("A_READ_ONLY_ENTRANCE_WROTE")
+    return problems
+
+
+def r4_digest(out: Path) -> str:
+    """Every entry below `out`, by lstat: a regular file by its bytes, a link by its target, anything else by its type.  Opens
+    nothing but regular files: a read of a FIFO would block."""
+    found, pending = [], ([out] if out.is_dir() else [])
+    while pending:
+        with os.scandir(pending.pop()) as listing:
+            for entry in listing:
+                info, relative = entry.stat(follow_symlinks=False), os.path.relpath(entry.path, out)
+                if stat.S_ISREG(info.st_mode):
+                    found.append((relative, "file", hashlib.sha256(Path(entry.path).read_bytes()).hexdigest()))
+                elif stat.S_ISLNK(info.st_mode):
+                    found.append((relative, "link", os.readlink(entry.path)))
+                elif stat.S_ISDIR(info.st_mode):
+                    found.append((relative, "dir", ""))
+                    pending.append(Path(entry.path))
+                else:
+                    found.append((relative, "special", str(stat.S_IFMT(info.st_mode))))
+    return hashlib.sha256(json.dumps(sorted(found)).encode()).hexdigest()
+
+
+def r4_changed(value):
+    """Another value of the same kind."""
+    if value in ("LIVE", "SIMULATION"):
+        return "SIMULATION" if value == "LIVE" else "LIVE"
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value + 1
+    if isinstance(value, str):
+        return value + "x"
+    if isinstance(value, list):
+        return list(reversed(value)) if len({json.dumps(item, sort_keys=True) for item in value}) > 1 else value + ["x"]
+    if isinstance(value, dict):
+        return {**value, "r4": 1}
+    return "x"
+
+
+def r4_leaves(value, path=()) -> list:
+    if isinstance(value, dict) and value:
+        return [leaf for key in sorted(value) for leaf in r4_leaves(value[key], path + (key,))]
+    if isinstance(value, list) and value:
+        return [leaf for index, item in enumerate(value) for leaf in r4_leaves(item, path + (index,))]
+    return [path]
+
+
+def r4_replaced(value, path, new):
+    if not path:
+        return new
+    copied = copy.deepcopy(value)
+    target = copied
+    for step in path[:-1]:
+        target = target[step]
+    target[path[-1]] = new
+    return copied
+
+
+def r4_binding_of(rows: list):
+    """The binding as the oracle sees it: the opening record's phase, mode and manifest hash, and how many records open a run."""
+    head = next((row for row in rows if row.get("phase") not in R4_NOTES), {})
+    return head.get("phase"), head.get("mode"), head.get("manifest_sha256"), sum(row.get("phase") == "RUN_OPENED" for row in rows)
+
+
+def r4_change_flags(base: dict, name: str, new) -> dict:
+    """The oracle's flags for replacing one existing file of `base` by the bytes `new` (removing it when `new` is None)."""
+    if name == "run_manifest.json":
+        return {"binding": True}                       # D4-2: the binding pins the manifest's exact bytes
+    if name == "write_ledger.json":
+        return {"unconstrained": True}                 # what an edited list means is R3's question, not R4's
+    flags = {"inventory": True}                        # a listed file changed: it decides only for a certified finished run
+    if name == "attempts.jsonl" and new is not None:
+        try:
+            rows = [json.loads(line) for line in new.decode("utf-8").splitlines()]
+        except ValueError:
+            rows = None
+        if rows is None or not all(isinstance(row, dict) for row in rows):
+            return {**flags, "unconstrained": True}    # a line that is not a record: R1's rules decide
+        if base["binding"] is not None and r4_binding_of(rows) != base["binding"]:
+            return {"binding": True}
+        head = next((i for i, row in enumerate(base["rows"]) if row.get("phase") not in R4_NOTES), None)
+        changed = [i for i in range(max(len(rows), len(base["rows"])))
+                   if i >= len(rows) or i >= len(base["rows"]) or rows[i] != base["rows"][i]]
+        if base["binding"] is not None and changed == [head]:
+            return flags                               # the opening record, its binding intact: nothing R4 reads changed
+        return {**flags, "unconstrained": True}        # a fact or payload record: R2 / R3 decide
+    if name in ("report.json", "run.lock") and new is not None:
+        return flags                                   # no gate reads these bytes; only a write ledger does
+    if name == "report.json":
+        return {**flags, "report": False}
+    if name == "runs.json" and new is None:
+        return flags                                   # replay rebuilds the runs from the ledger and only compares
+    return {**flags, "unconstrained": True}            # state, ledger, runs bytes, a missing lock: R1 - R3 decide
+
+
+def r4_exhaustive_tampers(base: dict, outside: Path) -> list:
+    """Every exhaustive single-file change that applies to `base`, as {name, flags, apply(work)}; apply changes a fresh copy."""
+    out, tampers = base["dir"], []
+    present = {path.name for path in out.iterdir()}
+    certified_terminal = base["certified"] and base["state"] != "RUNNING"
+
+    def add(name, flags, apply):
+        tampers.append({"name": name, "flags": flags, "apply": apply})
+
+    def put(filename, text):
+        return lambda work: (work / filename).write_text(text)
+
+    def gone(filename):
+        return lambda work: (work / filename).unlink()
+
+    # the manifest (D4-2): every field, its formatting, its absence
+    manifest = json.loads((out / "run_manifest.json").read_text())
+    for key in sorted(manifest):
+        add(f"manifest:{key}", {"binding": True}, put("run_manifest.json", xr.canonical({**manifest, key: r4_changed(manifest[key])})))
+    add("manifest:reformatted", {"binding": True}, put("run_manifest.json", json.dumps(manifest) + "\n"))
+    add("manifest:deleted", {"binding": True}, gone("run_manifest.json"))
+    # the binding record (D4-2), when the journal has one; a note in front of it, or a new time on it, changes no binding
+    rows = base["rows"]
+    if base["binding"] is not None:
+        head = next(i for i, row in enumerate(rows) if row.get("phase") not in R4_NOTES)
+        opened, rest = rows[head], rows[:head] + rows[head + 1:]
+
+        def journal(new_rows):
+            return put("attempts.jsonl", journal_text(new_rows))
+
+        def rewritten(**fields):
+            return journal(rows[:head] + [{**opened, **fields}] + rows[head + 1:])
+
+        add("binding:deleted", {"binding": True}, journal(rest))
+        add("binding:mode", {"binding": True}, rewritten(mode=r4_changed(opened.get("mode"))))
+        add("binding:manifest_sha256", {"binding": True}, rewritten(manifest_sha256="0" * 64))
+        add("binding:phase", {"binding": True}, rewritten(phase="RESUME"))
+        for k in sorted({1, 2, len(rest)}):
+            add(f"binding:moved_after_{k}", {"binding": True}, journal(rest[:k] + [opened] + rest[k:]))
+        add("binding:twice_in_front", {"binding": True}, journal([opened] + rows))
+        add("binding:twice_at_end", {"binding": True}, journal(rows + [opened]))
+        add("binding:time_edited", {"inventory": True}, rewritten(t=1.0))
+    add("journal:RESUME_note_in_front", {"inventory": True}, put("attempts.jsonl", journal_text(
+        [{"phase": "RESUME", "t": 0.5, "recovered_uncertain": [], "reconciliation": {}}] + rows)))
+    # the state (D4-4 when a report exists and no write ledger does), the ledger, the report, the runs, the lock
+    state = json.loads((out / "run_state.json").read_text())
+    if state["state"] == "RUNNING":
+        add("state:HALTED", {"inventory": True, "unconstrained": True}, put("run_state.json", xr.canonical(
+            {"state": "HALTED", "t": 0, "reason": "OTHER", "slot": None, "detail": "edited"})))
+        add("state:COMPLETE", {"inventory": True, "unconstrained": True}, put("run_state.json", xr.canonical({"state": "COMPLETE", "t": 0})))
+    else:
+        add("state:RUNNING", {"inventory": True, "state": "RUNNING"}, put("run_state.json", xr.canonical({"state": "RUNNING", "t": 0})))
+        add("state:time_edited", {"inventory": True}, put("run_state.json", xr.canonical({**state, "t": state["t"] + 1})))
+    ledger_bytes = (out / "ledger.json").read_bytes()
+    add("ledger:reformatted", {"inventory": True}, put("ledger.json", json.dumps(json.loads(ledger_bytes)) + "\n"))
+    earlier = [snapshot for snapshot in base["snapshots"] if snapshot != ledger_bytes]
+    if earlier:
+        add("ledger:rolled_back", {"inventory": True, "unconstrained": True},
+            lambda work, snapshot=earlier[len(earlier) // 2]: (work / "ledger.json").write_bytes(snapshot))
+    if "report.json" in present:
+        report = json.loads((out / "report.json").read_text())
+        add("report:edited", {"inventory": True}, put("report.json", xr.canonical({**report, "kind": "EDITED"})))
+        add("report:deleted", {"inventory": True, "report": False}, gone("report.json"))
+    if "runs.json" in present:
+        add("runs:edited", {"inventory": True}, put("runs.json", xr.canonical({})))
+        add("runs:deleted", {"inventory": True}, gone("runs.json"))
+    add("lock:edited", {"inventory": True}, put("run.lock", "99999\n"))
+    add("lock:deleted", {"inventory": True, "unconstrained": True}, gone("run.lock"))
+    # the write ledger itself
+    if "write_ledger.json" in present:
+        listing = json.loads((out / "write_ledger.json").read_text())
+        add("certificate:deleted", {"uncertifies": True}, gone("write_ledger.json"))
+        add("certificate:verdict_edited", {"inventory": True}, put("write_ledger.json", xr.canonical(
+            {**listing, "integrity": {**listing["integrity"], "status": "EDITED"}})))
+        add("certificate:entry_dropped", {"inventory": True}, put("write_ledger.json", xr.canonical(
+            {**listing, "files": [entry for entry in listing["files"] if entry["path"] != "runs.json"]})))
+        add("certificate:reformatted", {}, put("write_ledger.json", json.dumps(listing) + "\n"))
+
+        def linked_certificate(work):
+            copy_path = outside / f"certificate-{work.name}.json"
+            copy_path.write_bytes((work / "write_ledger.json").read_bytes())
+            (work / "write_ledger.json").unlink()
+            (work / "write_ledger.json").symlink_to(copy_path)
+        add("certificate:symlink", {"unconstrained": True}, linked_certificate)
+    # new entries (D4-5): every kind, at the top and below it, and the publication leftover in its legal and illegal shapes
+    source = "runs.json" if "runs.json" in present else "ledger.json"
+    certificate = "write_ledger.json" if "write_ledger.json" in present else "ledger.json"
+
+    def added(relative, kind):
+        def apply(work):
+            path = work / relative
+            path.parent.mkdir(exist_ok=True)
+            if kind == "file":
+                path.write_text("added after the run\n")
+            elif kind == "copy":
+                path.write_bytes((work / certificate).read_bytes())
+            elif kind == "hardlink":
+                os.link(work / source, path)
+            elif kind == "hardlink-certificate":
+                os.link(work / certificate, path)
+            elif kind == "symlink-internal":
+                path.symlink_to(source)
+            elif kind == "symlink-certificate":
+                path.symlink_to(certificate)
+            elif kind == "symlink-external":
+                path.symlink_to(outside / "external.txt")
+            elif kind == "symlink-dangling":
+                path.symlink_to(work / "nowhere")
+            elif kind == "symlink-dir":
+                path.symlink_to(outside / "a-directory")
+            elif kind == "dir":
+                path.mkdir()
+            else:
+                os.mkfifo(path)
+        return apply
+
+    additions = [("extra.txt", "file", False), (".DS_Store", "file", False), ("sub/x.txt", "file", True),
+                 ("sub/write_ledger.json", "copy", True), ("link-internal", "symlink-internal", True),
+                 ("link-external", "symlink-external", True), ("link-dangling", "symlink-dangling", True), ("link-dir", "symlink-dir", True),
+                 ("emptydir", "dir", True), ("pipe", "fifo", True), ("another-name", "hardlink", False),
+                 (R4_LEFTOVER.format("b" * 32), "copy", False), (R4_LEFTOVER.format("c" * 32), "symlink-certificate", True),
+                 ("sub/" + R4_LEFTOVER.format("d" * 32), "hardlink-certificate", True), (R4_LEFTOVER.format("e" * 31), "hardlink-certificate", False)]
+    for relative, kind, unlistable in additions:
+        add(f"added:{relative}:{kind}", {"inventory": True, **({"unlistable": True} if unlistable else {})}, added(relative, kind))
+    if "write_ledger.json" in present:  # the one exemption: a second link of the write ledger itself, beside it, correctly named
+        add(f"added:{R4_LEFTOVER.format('a' * 32)}:publication-leftover", {}, added(R4_LEFTOVER.format("a" * 32), "hardlink-certificate"))
+    # a listed entry replaced by something that is not a regular file
+    if certified_terminal:
+        def replaced(name, kind):
+            def apply(work):
+                content = (work / name).read_bytes()
+                (work / name).unlink()
+                if kind == "symlink":
+                    target = outside / f"{name}-{work.name}"
+                    target.write_bytes(content)
+                    (work / name).symlink_to(target)
+                elif kind == "dir":
+                    (work / name).mkdir()
+                else:
+                    os.mkfifo(work / name)
+            return apply
+        for name, kind in (("runs.json", "symlink"), ("report.json", "fifo"), ("runs.json", "dir")):
+            add(f"replaced:{name}:{kind}", {"inventory": True}, replaced(name, kind))
+    return tampers
+
+
+def r4_random_tampers(base: dict, rng: random.Random, count: int) -> list:
+    """`count` seeded random single-file changes of `base`: a flipped bit anywhere, or a JSON field of any file given another value."""
+    out, tampers = base["dir"], []
+    files = sorted(path.name for path in out.iterdir() if path.is_file() and path.stat().st_size)
+    for _ in range(count):
+        name = rng.choice(files)
+        data = (out / name).read_bytes()
+        if name.endswith((".json", ".jsonl")) and rng.random() < 0.5:
+            if name == "attempts.jsonl":
+                rows = [json.loads(line) for line in data.decode("utf-8").splitlines()]
+                index = rng.randrange(len(rows))
+                key = rng.choice(sorted(rows[index]))
+                rows[index] = {**rows[index], key: r4_changed(rows[index][key])}
+                new, label = journal_text(rows).encode(), f"field:{index}:{key}"
+            else:
+                value = json.loads(data)
+                path = rng.choice(r4_leaves(value))
+                leaf = value
+                for step in path:
+                    leaf = leaf[step]
+                new = (json.dumps(r4_replaced(value, path, r4_changed(leaf)), sort_keys=True, indent=2) + "\n").encode()
+                label = "field:" + "/".join(map(str, path))
+        else:
+            offset, bit = rng.randrange(len(data)), 1 << rng.randrange(8)
+            new, label = data[:offset] + bytes([data[offset] ^ bit]) + data[offset + 1:], f"flip:{offset}:{bit}"
+        tampers.append({"name": f"random:{name}:{label}", "flags": r4_change_flags(base, name, new),
+                        "apply": lambda work, name=name, new=new: (work / name).write_bytes(new)})
+    return tampers
+
+
+def r4_new_tally(**extra) -> dict:
+    return {"cells": 0, "copies": 0, "tampers": 0, "bases": {}, "expected": {}, "observed": {}, "disagreements": 0, "causes": {},
+            "first_by_cause": {}, "samples": [], "outside_r4": [], **extra}
+
+
+R4_OUTSIDE = """r4_outside_r4: a SIMULATION resume after a single edit that no R4 rule decides (a ledger or journal value the R1-R3 gate does
+not validate, e.g. a settled slot's verified_run disposition) may send its simulated requests and then fail in the scorer at its own
+end.  This predates R4 (found by this oracle on the unmodified 43f6cc3), concerns SIMULATION only and is listed, not counted."""
+
+
+class R4Poison:
+    """A transport that fails the moment anything touches it: any attribute read, any call."""
+
+    def __getattribute__(self, name):
+        raise AssertionError(f"the transport was touched ({name})")
+
+    def __call__(self, path, body):
+        raise AssertionError("the transport was called")
+
+
+class R4Helpers(TerminalHelpers):
+    """The R4 world (a small bank and a profile the command line rebuilds a run's identity from), runner-made bases in both modes,
+    and one observation per entrance (no tests of its own)."""
+
+    def r4_world(self) -> dict:
+        root = self.root / "r4-world"
+        if not (root / "profile.json").exists():
+            root.mkdir(exist_ok=True)
+            (root / "pack.md").write_text("synthetic instructions")
+            (root / "protocol.json").write_text("{}\n")
+            profile = {"instruction": ep.pin(root / "pack.md"), "protocol": ep.pin(root / "protocol.json"),
+                       "bank": {"manifest": ep.pin(self.small_bank()), "items": 2, "purpose": "ENGINEERING_ONLY"},
+                       "cost": {"attempt_reservation_usd": "0.55", "max_attempts_per_slot": 2, "total_reservation_usd": "6.6"},
+                       "policy": {"target_runs": 5, "schedule_seed": 6302}}
+            (root / "profile.json").write_text(xr.canonical(profile))
+        return {"profile": root / "profile.json", "bank": self.small_bank(), "protocol": root / "protocol.json"}
+
+    def r4_runner(self, out, mode, transport=None) -> xr.Runner:
+        """The Runner the command line would build from the R4 profile, in `mode`."""
+        world = self.r4_world()
+        return xr.Runner(out, mode=mode, bank_manifest=world["bank"], instructions="synthetic instructions", budget="6.6", attempt_cap=CAP,
+                         target_rounds=5, seed=6302, transport=transport, profile=world["profile"], protocol=world["protocol"])
+
+    @contextlib.contextmanager
+    def r4_live(self):
+        """A placeholder key in this process's environment, the adapter's `_post` sent to the simulator in self.r4_post, and the
+        profile's own check (its artifact pins, tested in test_execution_profile) passed, so the command line reaches the run."""
+        _, self.r4_public, _ = xr.load_bank(self.small_bank())
+        self.r4_server = SimulatedResponses(self.r4_public, answer_for=self.answer)
+        self.r4_post = self.r4_server
+        passing = lambda path, mode="SIMULATION", **kwargs: {"status": "PASS", "mode": mode, "reasons": [], "generation_calls": 0}  # noqa: E731
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": R4_FAKE_KEY}), \
+                mock.patch.object(api.ResponsesAdapter, "_post", lambda adapter, path, body: self.r4_post(path, body)), \
+                mock.patch.object(ep, "check_profile", passing):
+            yield
+
+    def r4_outside(self) -> Path:
+        outside = self.root / "r4-outside"
+        (outside / "a-directory").mkdir(parents=True, exist_ok=True)
+        (outside / "external.txt").write_text("outside the run directory\n")
+        return outside
+
+    def r4_base(self, name, mode, where) -> dict:
+        """A run the runner itself leaves `where` (R4_WHERE), in `mode`, through in-process interruptions."""
+        out = self.root / name
+        runner = self.r4_runner(out, mode)
+        order = runner.order
+        faults = [] if where in ("RUNNING_MID_CALL", "CERTIFIED_COMPLETE", "REPORT_NO_CERTIFICATE_COMPLETE") else [
+            {"path": "responses", "item_id": order[1], "occurrence": 2, "fault": "http_400"}]
+        sim = SimulatedResponses(runner.public, answer_for=self.answer, faults=faults)
+        send = self.dying(sim, order[1], 2) if where == "RUNNING_MID_CALL" else sim
+        snapshots, save, write, publish, finalize = [], bl.Ledger._save, xr.atomic_write, xr.publish_once, xr.Runner._finalize
+        stop = KeyboardInterrupt(f"R4 base {where}: the run stops here")
+
+        def saved(ledger):
+            save(ledger)
+            snapshots.append(ledger.path.read_bytes())
+
+        def atomic(path, text):
+            if where == "HALTED_NO_REPORT" and Path(path).name == "report.json":
+                raise stop
+            return write(path, text)
+
+        def published(path, text):
+            if where.startswith("REPORT_NO_CERTIFICATE"):
+                raise stop
+            return publish(path, text)
+
+        def finalized(runner_, halted, **kwargs):
+            if where == "RUNNING_STOP_SETTLED":
+                raise stop
+            return finalize(runner_, halted, **kwargs)
+
+        if mode == "SIMULATION":
+            runner.transport = send
+        self.r4_post = send
+        try:
+            with mock.patch.object(bl.Ledger, "_save", saved), mock.patch.object(xr, "atomic_write", atomic), \
+                    mock.patch.object(xr, "publish_once", published), mock.patch.object(xr.Runner, "_finalize", finalized):
+                (self.completes if where.startswith("CERTIFIED") else self.crashes)(runner.start)
+        finally:
+            self.r4_post = self.r4_server
+        rows = [json.loads(line) for line in (out / "attempts.jsonl").read_text().splitlines()]
+        ledger = json.loads((out / "ledger.json").read_text())
+        base = {"name": name, "mode": mode, "where": where, "dir": out, "state": json.loads((out / "run_state.json").read_text())["state"],
+                "report": (out / "report.json").exists(), "certified": (out / "write_ledger.json").exists(),
+                "unsettled": any(slot["state"] == "RUNNING" for slot in ledger["slots"].values()), "rows": rows, "snapshots": snapshots,
+                "binding": r4_binding_of(rows) if any(row.get("phase") == "RUN_OPENED" for row in rows) else None}
+        shape = {"RUNNING_MID_CALL": ("RUNNING", False, False, True), "RUNNING_STOP_SETTLED": ("RUNNING", False, False, False),
+                 "HALTED_NO_REPORT": ("HALTED", False, False, False), "REPORT_NO_CERTIFICATE": ("HALTED", True, False, False),
+                 "CERTIFIED_HALTED": ("HALTED", True, True, False), "CERTIFIED_COMPLETE": ("COMPLETE", True, True, False),
+                 "REPORT_NO_CERTIFICATE_COMPLETE": ("COMPLETE", True, False, False)}[where]
+        self.assertEqual((base["state"], base["report"], base["certified"], base["unsettled"]), shape, (mode, where))
+        return base
+
+    def r4_bases(self, modes=("LIVE", "SIMULATION"), wheres=R4_WHERE) -> list:
+        return [self.r4_base(f"r4-{mode.lower()}-{where.lower()}", mode, where) for mode in modes for where in wheres]
+
+    def r4_cli(self, argv):
+        """(outcome, text, verdict) of one command line call, judged by what it prints and its exit code."""
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+                code = xr.main(argv)
+            printed = json.loads(output.getvalue())
+        except SystemExit as exc:  # argparse: a runner that has no such command
+            return "ABSENT", f"no such command (exit {exc.code})", None
+        except Exception as exc:  # a crash is never a decision
+            return "CRASH", f"{type(exc).__name__}:{exc}", None
+        if code == 2 and printed.get("state") == "BLOCKED":
+            return "REFUSE", ",".join(printed.get("reasons", [])), printed.get("integrity")
+        verdict = printed.get("run_integrity") if argv[0] == "check" else printed.get("integrity")
+        if argv[0] in ("check", "replay") and code in (0, 4):
+            return "ACCEPT", f"exit {code}", verdict
+        if argv[0] == "resume" and code in (0, 3):
+            return "PROCEED", f"exit {code} {printed.get('state')}", verdict
+        if argv[0] == "close" and (code, printed.get("state")) == (3, "HALTED"):
+            return "CLOSE", f"exit {code} {(printed.get('halt') or {}).get('reason')}", verdict
+        return f"EXIT_{code}", json.dumps(printed, sort_keys=True)[:160], verdict
+
+    def r4_call(self, entrance, mode, work, sim):
+        """(outcome, text, verdict) of one entrance on the run directory `work`, whose run is bound to `mode`."""
+        profile = str(self.r4_world()["profile"])
+        commands = {"CLI check --out": ["check", "--profile", profile, "--out", str(work)], "CLI replay": ["replay", "--out", str(work)],
+                    "CLI resume --mode SIMULATION": ["resume", "--profile", profile, "--out", str(work), "--mode", "SIMULATION"],
+                    "CLI resume --mode LIVE": ["resume", "--profile", profile, "--out", str(work), "--mode", "LIVE"],
+                    "CLI close": ["close", "--profile", profile, "--out", str(work)]}
+        if entrance in commands:
+            return self.r4_cli(commands[entrance])
+        try:
+            if entrance == "inspect_run":
+                return "ACCEPT", "returned", xr.inspect_run(work).get("integrity")
+            if entrance == "replay_run":
+                return "ACCEPT", "returned", xr.replay_run(work).get("integrity")
+            runner_mode = {"Runner.resume SIMULATION": "SIMULATION", "Runner.resume LIVE": "LIVE"}.get(entrance, mode)
+            simulated = runner_mode == "SIMULATION" and entrance in ("Runner.resume SIMULATION", "run on the directory")
+            runner = self.r4_runner(work, runner_mode, transport=sim if simulated else None)
+            if entrance.startswith("Runner.resume"):
+                result = runner.resume()
+                return "PROCEED", f"state {result['state']}", result.get("integrity")
+            if entrance == "Runner.close":
+                if not hasattr(runner, "close"):
+                    return "ABSENT", "the Runner has no close", None
+                result = runner.close()
+                return ("CLOSE" if result["state"] == "HALTED" else f"CLOSED_AS_{result['state']}",
+                        f"halt {(result.get('halt') or {}).get('reason')}", result.get("integrity"))
+            if entrance == "write accounting":
+                runner._write_accounting()
+                return "CERTIFY", "written", None
+            runner.start()
+            return "STARTED", "a new run began in an existing directory", None
+        except xr.RunBlocked as blocked:
+            return "REFUSE", str(blocked), getattr(blocked, "integrity", None)
+        except Exception as exc:  # a crash is never a decision
+            return "CRASH", f"{type(exc).__name__}:{exc}", None
+
+    def r4_enter(self, entrance, base, work) -> dict:
+        """One entrance on `work`: its outcome, the requests every simulated server saw, and the directory before and after."""
+        sim = SimulatedResponses(self.r4_public, answer_for=self.answer)
+        server_log = work / "simulated_server_log.jsonl"
+
+        def sent():
+            return (len(sim.requests) + len(self.r4_server.requests)
+                    + (len(server_log.read_text().splitlines()) if server_log.is_file() and not server_log.is_symlink() else 0))
+
+        before, requests = r4_digest(work), sent()
+        outcome, text, verdict = self.r4_call(entrance, base["mode"], work, sim)
+        return {"entrance": entrance, "outcome": outcome, "text": text[:240], "integrity": verdict, "requests": sent() - requests,
+                "before": before, "after": r4_digest(work)}
+
+    def r4_compare(self, base, tampers, tally, entrances=R4_ENTRANCES, observe=None) -> None:
+        """Every entrance on a fresh copy of `base` with one change applied; a copy is replaced after any entrance changed it."""
+        cells = self.root / "r4-cells"
+        cells.mkdir(exist_ok=True)
+        tally["bases"][base["name"]] = tally["bases"].get(base["name"], 0) + len(tampers)
+        tally["tampers"] += len(tampers)
+        for tamper in tampers:
+            expected_all, work = r4_expected(base, tamper["flags"]), None
+            for entrance in entrances:
+                if work is None:
+                    tally["copies"] += 1
+                    work = cells / f"c{tally['copies']}"
+                    shutil.copytree(base["dir"], work)
+                    tamper["apply"](work)
+                observed = self.r4_enter(entrance, base, work)
+                expected = expected_all[entrance]
+                problems = r4_problems(base, entrance, expected, observed)
+                tally["cells"] += 1
+                tally["expected"][str(expected)] = tally["expected"].get(str(expected), 0) + 1
+                tally["observed"][observed["outcome"]] = tally["observed"].get(observed["outcome"], 0) + 1
+                if observed["outcome"] == "CRASH" and not problems:  # never hidden: counted and shown, outside R4's rules
+                    tally["outside_r4"].append({"base": base["name"], "tamper": tamper["name"], "entrance": entrance,
+                                                "requests": observed["requests"], "text": observed["text"][:160]})
+                if observe is not None:
+                    observe(base, tamper, entrance, expected, observed, problems)
+                if problems:
+                    tally["disagreements"] += 1
+                    sample = {"base": base["name"], "tamper": tamper["name"], "entrance": entrance, "expected": expected,
+                              "outcome": observed["outcome"], "text": observed["text"][:160], "requests": observed["requests"],
+                              "problems": problems}
+                    for cause in problems:
+                        key = f"{entrance}:{cause}"
+                        tally["causes"][key] = tally["causes"].get(key, 0) + 1
+                        tally["first_by_cause"].setdefault(key, sample)
+                    if len(tally["samples"]) < 24:
+                        tally["samples"].append(sample)
+                if observed["after"] != observed["before"]:
+                    shutil.rmtree(work)
+                    work = None
+            if work is not None:
+                shutil.rmtree(work)
+
+
+class R4OracleTests(R4Helpers, RunnerCase):
+    """R4 required test 5: the R2/R3 property tests extended with the bound mode and the write ledger's inventory, over exhaustive
+    and seeded random single-file changes of runner-made LIVE and SIMULATION runs, at every entrance."""
+
+    def test_R4_oracle_agrees_with_every_entrance_on_every_exhaustive_single_file_change(self):
+        tally = r4_new_tally(test="exhaustive")
+        with self.r4_live():
+            outside = self.r4_outside()
+            for base in self.r4_bases():
+                self.r4_compare(base, r4_exhaustive_tampers(base, outside), tally)
+        print("R4_ORACLE " + json.dumps(tally, sort_keys=True))
+        self.assertGreater(min(tally["expected"].get(v, 0) for v in ("REFUSE", "ACCEPT", "PROCEED", "CLOSE", "CERTIFY")), 0)
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+
+    def test_R4_oracle_agrees_with_every_entrance_on_seeded_random_single_file_changes(self):
+        tally = r4_new_tally(test="random", seed=f"{R4_SEED}:<base>", per_base=16)
+        with self.r4_live():
+            for base in self.r4_bases():
+                self.r4_compare(base, r4_random_tampers(base, random.Random(f"{R4_SEED}:{base['name']}"), 16), tally)
+        print("R4_ORACLE " + json.dumps(tally, sort_keys=True))
+        self.assertGreater(min(tally["expected"].get(v, 0) for v in ("REFUSE", "ACCEPT")), 0)
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+
+
+# --- R4 [K]: real child processes of the runner, SIGKILLed where a test says ------------------------------------------------------
+# The child cuts its own network, builds the Runner the R4 profile describes and, in LIVE mode, sends the adapter's `_post` to the
+# simulated server; its placeholder key exists only in its own environment.  `kill` names the point where it SIGKILLs itself; an
+# integer kills a close before its n-th write of any kind (journal append, ledger save, atomic write, write-ledger publication,
+# lock stamp).  A close child holds a transport that fails when touched and has no key at all.
+R4_CHILD = r'''
+import json, os, signal, sys
+sys.dont_write_bytecode = True
+spec = json.loads(sys.argv[1])
+import socket
+import urllib.request
+def no_network(*args, **kwargs):
+    raise AssertionError("the network must never be touched")
+urllib.request.urlopen = no_network
+socket.socket.connect = no_network
+import _lab  # noqa: F401
+import budget_ledger as bl
+import exploration_runner as xr
+import responses_adapter as api
+from simulated_transport import SimulatedResponses
+def die():
+    os.kill(os.getpid(), signal.SIGKILL)
+class Poison:
+    def __getattribute__(self, name):
+        raise AssertionError("the transport was touched (%s)" % name)
+    def __call__(self, path, body):
+        raise AssertionError("the transport was called")
+_, public, labels = xr.load_bank(spec["bank"])
+sim = SimulatedResponses(public, answer_for=lambda item: labels[item["item_id"]]["acceptable"][0], faults=spec.get("faults", []),
+                         log_path=spec["server_log"])
+command, kill = spec["command"], spec.get("kill")
+transport = Poison() if command == "close" else (sim if spec["mode"] == "SIMULATION" else None)
+runner = xr.Runner(spec["out"], mode=spec["mode"], bank_manifest=spec["bank"], instructions="synthetic instructions", budget="6.6",
+                   attempt_cap="0.55", target_rounds=5, seed=6302, transport=transport, profile=spec["profile"], protocol=spec["protocol"])
+if spec["mode"] == "LIVE" and command != "close":
+    api.ResponsesAdapter._post = lambda adapter, path, body: sim(path, body)
+save = bl.Ledger._save
+def saved(ledger):
+    save(ledger)
+    if spec.get("snapshots"):
+        with open(os.path.join(spec["snapshots"], "%04d.json" % len(os.listdir(spec["snapshots"]))), "wb") as stream:
+            stream.write(open(ledger.path, "rb").read())
+bl.Ledger._save = saved
+def at_finalize():
+    finalize = xr.Runner._finalize
+    def finalized(self, halted, **kwargs):
+        if halted is not None:
+            die()
+        return finalize(self, halted, **kwargs)
+    xr.Runner._finalize = finalized
+def at_atomic_write(name):
+    write = xr.atomic_write
+    def atomic(path, text):
+        if os.path.basename(str(path)) == name:
+            die()
+        return write(path, text)
+    xr.atomic_write = atomic
+if kill == "stop_settled":
+    at_finalize()
+elif kill == "halted_no_report":
+    at_atomic_write("report.json")
+elif kill == "report_no_certificate":
+    xr.publish_once = lambda path, text: die()
+elif kill == "after_certificate":
+    account = xr.Runner._write_accounting
+    def accounted(self):
+        account(self)
+        die()
+    xr.Runner._write_accounting = accounted
+elif kill == "overrun_before_finish":
+    finish = runner._finish
+    def finishing(slot, *args, **kwargs):
+        if slot == spec["victim"]:
+            die()
+        return finish(slot, *args, **kwargs)
+    runner._finish = finishing
+elif kill == "persistence_then_stop":
+    append, fired = xr.AppendLog.append, []
+    def lossy(log, record):
+        if (record.get("phase"), record.get("path"), record.get("slot")) == ("RESPONSE", "responses", spec["victim"]) and not fired:
+            fired.append(1)
+            raise OSError(28, "No space left on device (injected)")
+        return append(log, record)
+    xr.AppendLog.append = lossy
+    at_finalize()
+elif kill == "first_ledger_save":
+    bl.Ledger._save = lambda ledger: die()
+elif kill == "journal_creation":
+    at_atomic_write("attempts.jsonl")
+elif kill == "journal_rename":
+    replace = os.replace
+    def replacing(source, destination):
+        if os.path.basename(str(destination)) == "attempts.jsonl":
+            die()
+        return replace(source, destination)
+    os.replace = replacing
+elif isinstance(kill, int):
+    count = [0]
+    def counted(function):
+        def wrapper(*args, **kwargs):
+            count[0] += 1
+            if count[0] == kill:
+                die()
+            return function(*args, **kwargs)
+        return wrapper
+    xr.AppendLog.append = counted(xr.AppendLog.append)
+    bl.Ledger._save = counted(bl.Ledger._save)
+    xr.atomic_write = counted(xr.atomic_write)
+    xr.publish_once = counted(xr.publish_once)
+    xr.Runner._stamp_lock = counted(xr.Runner._stamp_lock)
+try:
+    result = runner.start() if command == "start" else runner.close() if command == "close" else runner.resume()
+except xr.RunBlocked as blocked:
+    print(json.dumps({"state": "BLOCKED", "reason": str(blocked)}))
+    raise SystemExit(2)
+print(json.dumps({"state": result["state"], "halt": result["halt"], "integrity": result["integrity"]}))
+'''
+R4_SHAPES = {"RUNNING_MID_CALL": ("RUNNING", False, False, True), "RUNNING_STOP_SETTLED": ("RUNNING", False, False, False),
+             "HALTED_NO_REPORT": ("HALTED", False, False, False), "REPORT_NO_CERTIFICATE": ("HALTED", True, False, False),
+             "CERTIFIED_HALTED": ("HALTED", True, True, False)}
+
+
+def r4_passing(path, mode="SIMULATION", **kwargs) -> dict:
+    """The profile's own check, passed: its artifact pins are test_execution_profile's subject; here it only lets a command reach
+    the run directory, where every R4 decision is made."""
+    return {"status": "PASS", "mode": mode, "reasons": [], "generation_calls": 0}
+
+
+class R4KillHelpers(R4Helpers):
+    """Runs made, and closes interrupted, by real child processes SIGKILLed at a chosen point; the closes R4 allows (no tests)."""
+
+    def r4_child(self, spec: dict, *, key: bool = False) -> subprocess.CompletedProcess:
+        env = {"PATH": "/usr/bin:/bin", "TMPDIR": str(self.root), "PYTHONDONTWRITEBYTECODE": "1"}
+        if key:  # a placeholder, in the child's environment only; its network is cut and its `_post` goes to the simulator
+            env["OPENAI_API_KEY"] = R4_FAKE_KEY
+        return subprocess.run([sys.executable, "-B", "-c", R4_CHILD, json.dumps(spec)], capture_output=True, text=True, cwd=str(HERE),
+                              env=env, timeout=120)
+
+    def r4_spec(self, out, mode, command, **extra) -> dict:
+        world = self.r4_world()
+        return {"command": command, "mode": mode, "out": str(out), "bank": str(world["bank"]), "profile": str(world["profile"]),
+                "protocol": str(world["protocol"]), "faults": [], "server_log": str(self.root / f"{Path(out).name}-unused-server.jsonl"),
+                **extra}
+
+    def r4_killed(self, name, mode, kill=None, fault=None) -> dict:
+        """A run the runner made in a child process that was SIGKILLed at `kill`, or by the simulated server's `crash` fault, at the
+        second item's round-1 call (the victim)."""
+        out = self.root / name
+        victim = self.r4_runner(out, mode).order[1]
+        snapshots, server = self.root / f"{name}-ledgers", self.root / f"{name}-server.jsonl"
+        snapshots.mkdir()
+        faults = [] if fault is None else [{"path": "responses", "item_id": victim, "occurrence": 2, "fault": fault}]
+        child = self.r4_child(self.r4_spec(out, mode, "start", faults=faults, server_log=str(server), kill=kill, victim=f"{victim}:1",
+                                           snapshots=str(snapshots)), key=mode == "LIVE")
+        self.assertEqual(child.returncode, -signal.SIGKILL, (name, child.stdout[-300:], child.stderr[-600:]))
+        rows = ([json.loads(line) for line in (out / "attempts.jsonl").read_text().splitlines()]
+                if (out / "attempts.jsonl").is_file() else [])
+        slots = json.loads((out / "ledger.json").read_text())["slots"] if (out / "ledger.json").is_file() else {}
+        return {"name": name, "mode": mode, "dir": out, "server": server, "server_bytes": server.read_bytes() if server.exists() else b"",
+                "victim": f"{victim}:1", "snapshots": [path.read_bytes() for path in sorted(snapshots.iterdir())],
+                "state": json.loads((out / "run_state.json").read_text())["state"] if (out / "run_state.json").is_file() else None,
+                "report": (out / "report.json").exists(), "certified": (out / "write_ledger.json").exists(), "rows": rows,
+                "unsettled": any(slot["state"] == "RUNNING" for slot in slots.values()),
+                "binding": r4_binding_of(rows) if any(row.get("phase") == "RUN_OPENED" for row in rows) else None}
+
+    @contextlib.contextmanager
+    def r4_no_key(self):
+        """What a close may never need: no key at all, an adapter that cannot be built, a `_post` and a transport class that fail."""
+        def refuse(*args, **kwargs):
+            raise AssertionError("an adapter or a transport was reached")
+        with mock.patch.dict(os.environ), mock.patch.object(api.ResponsesAdapter, "__init__", refuse), \
+                mock.patch.object(api.ResponsesAdapter, "_post", refuse), mock.patch.object(xr, "SimulatedResponses", refuse), \
+                mock.patch.object(ep, "check_profile", r4_passing):
+            os.environ.pop("OPENAI_API_KEY", None)
+            yield
+
+    def r4_close(self, out, mode, *, cli=False):
+        """(outcome, text, verdict) of one close in this process, under r4_no_key, the Runner holding a poisoned transport."""
+        with self.r4_no_key():
+            if cli:
+                return self.r4_cli(["close", "--profile", str(self.r4_world()["profile"]), "--out", str(out)])
+            try:
+                result = self.r4_runner(out, mode, transport=R4Poison()).close()
+            except xr.RunBlocked as blocked:
+                return "REFUSE", str(blocked), blocked.integrity
+            except Exception as exc:  # a crash is never a decision
+                return "CRASH", f"{type(exc).__name__}:{exc}", None
+            return ("CLOSE" if result["state"] == "HALTED" else f"CLOSED_AS_{result['state']}",
+                    f"halt {(result.get('halt') or {}).get('reason')}", result.get("integrity"))
+
+    def r4_closed_problems(self, out, reason, stops) -> list:
+        """What is wrong with a closed run: HALTED for `reason`, nothing missing, no flag but RECONCILED_FROM_LEDGER, a write ledger
+        that verifies, no unsettled slot, books at least the journal's settled spend, and the stop settlements `stops` shown."""
+        problems = []
+        state = json.loads((out / "run_state.json").read_text())
+        if (state.get("state"), state.get("reason")) != ("HALTED", reason):
+            problems.append(f"STATE:{state.get('state')}:{state.get('reason')}")
+        try:
+            inspection = xr.inspect_run(out)
+        except xr.RunBlocked as blocked:
+            return problems + [f"REFUSED:{blocked}"]
+        verdict = inspection["integrity"]
+        if (verdict["state"], verdict["missing_count"], inspection["certificate"]) != ("HALTED", 0, "VERIFIED"):
+            problems.append(f"VERDICT:{verdict['state']}:{verdict['missing_count']}:{inspection['certificate']}")
+        if set(verdict["flags"]) - {"RECONCILED_FROM_LEDGER"} or (verdict["status"] == "FLAGGED") != bool(verdict["flags"]) \
+                or ("RECONCILED_FROM_LEDGER" in verdict["flags"]) != (verdict["reconciled"] > 0):
+            problems.append(f"FLAGS:{verdict['status']}:{verdict['flags']}:{verdict['reconciled']}")
+        if any(slot["state"] == "RUNNING" for slot in inspection["ledger"]["slots"].values()):
+            problems.append("UNSETTLED_SLOT")
+        logged = sum((CAP if row["cost_upper_usd"] is None else Decimal(row["cost_upper_usd"]))
+                     for row in inspection["records"] if row["phase"] == "SETTLED")
+        if Decimal(inspection["ledger"]["spent_upper"]) < logged:
+            problems.append("BOOKS_BELOW_THE_JOURNAL")
+        notes = [row for row in inspection["records"] if row["phase"] == "CLOSE"]
+        if not notes or sorted(stop["kind"] for stop in notes[-1].get("stop_settlements", [])) != stops:
+            problems.append("CLOSE_NOTE")
+        if (out / "report.json").exists():
+            report = json.loads((out / "report.json").read_text())
+            shown = sorted(stop["kind"] for stop in (report.get("closed") or {}).get("stop_settlements", []))
+            if (report.get("halted"), report.get("scoring"), (report.get("halt") or {}).get("reason"), shown) != (True, None, reason, stops):
+                problems.append("REPORT")
+        return problems
+
+
+class R4LiveMatrixTests(R4KillHelpers, RunnerCase):
+    """R4 required test 1 [K]: a run bound to LIVE, made by the runner in a real child process (network cut, placeholder key,
+    `_post` sent to the simulator) and SIGKILLed at five points, is never continued: every entrance, on the run as it is and after
+    each single-file change, refuses every resume, sends nothing, and changes nothing when it refuses."""
+
+    KILLS = (("RUNNING_MID_CALL", None, "crash"), ("RUNNING_STOP_SETTLED", "stop_settled", "http_400"),
+             ("HALTED_NO_REPORT", "halted_no_report", "http_400"), ("REPORT_NO_CERTIFICATE", "report_no_certificate", "http_400"),
+             ("CERTIFIED_HALTED", "after_certificate", "http_400"))
+    TAMPERS = ("state:RUNNING", "manifest:mode", "manifest:seed", "ledger:rolled_back", "binding:deleted", "binding:mode",
+               "binding:manifest_sha256")
+
+    def test_R4_K_a_run_bound_to_LIVE_is_never_continued_at_any_kill_point_or_after_any_single_file_change(self):
+        tally, cells, shapes = r4_new_tally(test="live-matrix"), [], {}
+        with self.r4_live():
+            outside = self.r4_outside()
+            for where, kill, fault in self.KILLS:
+                base = self.r4_killed(f"k-live-{where.lower()}", "LIVE", kill, fault)
+                shapes[where] = (base["state"], base["report"], base["certified"], base["unsettled"])
+                tampers = [{"name": "unchanged", "flags": {}, "apply": lambda work: None}]
+                tampers += [tamper for tamper in r4_exhaustive_tampers(base, outside) if tamper["name"] in self.TAMPERS]
+
+                def observe(base_, tamper, entrance, expected, observed, problems, where=where):
+                    cells.append({"state": where, "tamper": tamper["name"], "entrance": entrance, "expected": expected,
+                                  "outcome": observed["outcome"], "reason": observed["text"][:160], "requests": observed["requests"],
+                                  "before_sha256": observed["before"], "after_sha256": observed["after"],
+                                  "integrity": observed["integrity"], "problems": problems})
+                self.r4_compare(base, tampers, tally, observe=observe)
+        for cell in cells:
+            print("R4_LIVE_MATRIX " + json.dumps(cell, sort_keys=True))
+        print("R4_LIVE_MATRIX_TALLY " + json.dumps(tally, sort_keys=True))
+        resumes = [cell for cell in cells if cell["entrance"] in R4_SIM_RESUMES + R4_LIVE_RESUMES]
+        unnamed = sorted({(cell["state"], cell["tamper"]) for cell in resumes if cell["tamper"] in ("unchanged", "state:RUNNING")
+                          and (cell["state"], cell["tamper"]) != ("REPORT_NO_CERTIFICATE", "state:RUNNING")  # D4-4 refuses that one first
+                          and not cell["reason"].startswith("RESUME_FORBIDDEN_FOR_LIVE")})
+        self.assertEqual(shapes, R4_SHAPES)
+        self.assertEqual((tally["tampers"], len(cells), {cell["outcome"] for cell in resumes}, sum(cell["requests"] for cell in cells), unnamed),
+                         (38, 38 * len(R4_ENTRANCES), {"REFUSE"}, 0, []))
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+
+
+class R4CloseMatrixTests(R4KillHelpers, RunnerCase):
+    """R4 required test 2 [K]: close, on interrupted runs of both modes made by real child processes - zero to three lost facts, an
+    uncertain started call, a durable over-cap response, a stop-class settlement, a PERSISTENCE failure, before the first ledger
+    save - then a close SIGKILLed before each of its writes and closed again; and every run a close must refuse."""
+
+    BASES = (("uncertain", None, "crash", "INTERRUPTED", []), ("overrun", "overrun_before_finish", "huge_usage", "ATTEMPT_CAP_OVERRUN", []),
+             ("rejected", "stop_settled", "http_400", "INTERRUPTED", ["REJECTED"]),
+             ("capability", "stop_settled", "wrong_model", "INTERRUPTED", ["CAPABILITY"]),
+             ("other", "stop_settled", "no_usage", "INTERRUPTED", ["OTHER"]),
+             ("persistence", "persistence_then_stop", None, "INTERRUPTED", ["PERSISTENCE"]),
+             ("pre-first-save", "first_ledger_save", None, "INTERRUPTED", []))
+    KILLED_EVERYWHERE = ("uncertain-3-lost", "overrun", "persistence")
+
+    def r4_lost(self, base, count) -> dict:
+        """A copy of `base` whose journal lost its last `count` settlements, the facts nothing on record depends on (0..3)."""
+        out = self.root / f"{base['name']}-{count}-lost"
+        shutil.copytree(base["dir"], out)
+        rows, ledger = base["rows"], json.loads((out / "ledger.json").read_text())
+        dropped = set(self.final_settlements(rows, ledger)[len(self.final_settlements(rows, ledger)) - count:]) if count else set()
+        (out / "attempts.jsonl").write_text(journal_text([row for index, row in enumerate(rows) if index not in dropped]))
+        self.assertEqual(len(xr.inspect_run(out)["missing"]), count)
+        return {**base, "name": f"{base['name']}-{count}-lost", "dir": out}
+
+    def test_R4_K_close_ends_every_interrupted_run_HALTED_and_finishes_after_a_kill_at_any_of_its_writes(self):
+        cells, failures = [], []
+        for mode in ("LIVE", "SIMULATION"):
+            bases = {}
+            for label, kill, fault, reason, stops in self.BASES:
+                base = self.r4_killed(f"c-{mode.lower()}-{label}", mode, kill, fault)
+                bases[label] = (base, reason, stops)
+            uncertain = bases["uncertain"][0]
+            for count in (1, 2, 3):
+                bases[f"uncertain-{count}-lost"] = (self.r4_lost(uncertain, count), "INTERRUPTED", [])
+            for label, (base, reason, stops) in sorted(bases.items()):
+                for entrance in ("Runner.close", "CLI close"):
+                    work = self.root / f"{base['name']}-{entrance.split()[0]}"
+                    shutil.copytree(base["dir"], work)
+                    outcome, text, _ = self.r4_close(work, mode, cli=entrance == "CLI close")
+                    problems = ([] if outcome == "CLOSE" else [f"OUTCOME:{outcome}:{text[:120]}"]) + self.r4_closed_problems(work, reason, stops)
+                    server = base["server"].read_bytes() if base["server"].exists() else b""
+                    if server != base["server_bytes"]:
+                        problems.append("THE_SERVER_GOT_A_REQUEST")
+                    cells.append({"mode": mode, "base": label, "entrance": entrance, "kill_at_write": None, "outcome": outcome,
+                                  "reason": text[:120], "problems": problems})
+                if label not in self.KILLED_EVERYWHERE:
+                    continue
+                for n in range(1, 40):  # a close SIGKILLed before its n-th write, then closed again (or written up, once HALTED)
+                    work = self.root / f"{base['name']}-kill-{n}"
+                    shutil.copytree(base["dir"], work)
+                    spec = self.r4_spec(work, mode, "close", kill=n)
+                    child = self.r4_child(spec)
+                    if child.returncode == 0:
+                        cells.append({"mode": mode, "base": label, "entrance": "child close", "kill_at_write": n, "outcome": "CLOSE",
+                                      "reason": child.stdout.strip()[-120:], "problems": self.r4_closed_problems(work, reason, stops)})
+                        break
+                    problems = [] if child.returncode == -signal.SIGKILL else [f"CHILD_EXIT_{child.returncode}:{child.stderr[-200:]}"]
+                    halted = json.loads((work / "run_state.json").read_text())["state"] == "HALTED"
+                    before = r4_digest(work)
+                    outcome, text, _ = self.r4_close(work, mode)
+                    if halted:  # the close's decision was durable: a second close refuses it, the write-accounting entrance finishes it
+                        if (outcome, r4_digest(work)) != ("REFUSE", before) or not text.startswith("RUN_IS_HALTED"):
+                            problems.append(f"SECOND_CLOSE_OF_A_HALTED_RUN:{outcome}:{text[:80]}")
+                        self.r4_runner(work, mode)._write_accounting()
+                    elif outcome != "CLOSE":
+                        problems.append(f"SECOND_CLOSE:{outcome}:{text[:120]}")
+                    problems += self.r4_closed_problems(work, reason, stops)
+                    if Path(spec["server_log"]).exists() or (base["server"].read_bytes() if base["server"].exists() else b"") != base["server_bytes"]:
+                        problems.append("THE_SERVER_GOT_A_REQUEST")
+                    cells.append({"mode": mode, "base": label, "entrance": "child close, then close", "kill_at_write": n,
+                                  "halted_before_the_second": halted, "outcome": outcome, "reason": text[:120], "problems": problems})
+                else:
+                    failures.append((mode, label, "the close never completed unkilled"))
+        for cell in cells:
+            print("R4_CLOSE_MATRIX " + json.dumps(cell, sort_keys=True))
+        failures += [(cell["mode"], cell["base"], cell["entrance"], cell["kill_at_write"], cell["problems"]) for cell in cells if cell["problems"]]
+        kills = {(cell["mode"], cell["base"]): cell["kill_at_write"] for cell in cells if cell["entrance"] == "child close"}
+        self.assertEqual(sorted(kills), sorted((mode, label) for mode in ("LIVE", "SIMULATION") for label in self.KILLED_EVERYWHERE))
+        self.assertGreaterEqual(min(kills.values()), 8)  # every write point of the shortest close was killed once
+        self.assertEqual(failures, [])
+
+    def test_R4_K_close_refuses_finished_certified_held_gate_refused_and_never_opened_runs_and_changes_nothing(self):
+        cells = []
+        with self.r4_live():
+            refused = [(self.r4_killed("r-live-halted", "LIVE", "halted_no_report", "http_400")["dir"], "LIVE", "RUN_IS_HALTED"),
+                       (self.r4_killed("r-live-certified", "LIVE", "after_certificate", "http_400")["dir"], "LIVE", "RUN_IS_HALTED"),
+                       (self.r4_base("r-sim-complete", "SIMULATION", "CERTIFIED_COMPLETE")["dir"], "SIMULATION", "RUN_IS_COMPLETE"),
+                       (self.r4_killed("r-live-window", "LIVE", "journal_creation")["dir"], "LIVE", "ATTEMPTS_MISSING_OR_UNREADABLE"),
+                       (self.r4_killed("r-sim-rename", "SIMULATION", "journal_rename")["dir"], "SIMULATION", "ATTEMPTS_MISSING_OR_UNREADABLE")]
+            reopened = self.r4_base("r-sim-reopened", "SIMULATION", "CERTIFIED_HALTED")["dir"]
+            (reopened / "run_state.json").write_text(xr.canonical({"state": "RUNNING", "t": 0}))
+            refused.append((reopened, "SIMULATION", "RUN_IS_CERTIFIED"))
+            unbound = self.r4_killed("r-live-unbound", "LIVE", "stop_settled", "http_400")["dir"]
+            rows = xr.AppendLog(unbound / "attempts.jsonl").records()
+            (unbound / "attempts.jsonl").write_text(journal_text(rows[1:]))
+            refused.append((unbound, "LIVE", "RUN_BINDING_MISSING"))
+            held = self.r4_killed("r-live-held", "LIVE", None, "crash")["dir"]
+        descriptor = os.open(held / "run.lock", os.O_RDWR)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for entrance in ("Runner.close", "CLI close"):
+                before = r4_digest(held)
+                outcome, text, _ = self.r4_close(held, "LIVE", cli=entrance == "CLI close")
+                cells.append({"run": "lock held", "entrance": entrance, "outcome": outcome, "reason": text[:120],
+                              "unchanged": r4_digest(held) == before, "expected": "ANOTHER_RUNNER_HOLDS_THIS_DIRECTORY"})
+        finally:
+            os.close(descriptor)
+        for out, mode, reason in refused:
+            for entrance in ("Runner.close", "CLI close"):
+                before = r4_digest(out)
+                outcome, text, _ = self.r4_close(out, mode, cli=entrance == "CLI close")
+                cells.append({"run": out.name, "entrance": entrance, "outcome": outcome, "reason": text[:120],
+                              "unchanged": r4_digest(out) == before, "expected": reason})
+        for cell in cells:
+            print("R4_CLOSE_REFUSAL " + json.dumps(cell, sort_keys=True))
+        self.assertEqual([cell for cell in cells if (cell["outcome"], cell["unchanged"], cell["reason"].startswith(cell["expected"]))
+                          != ("REFUSE", True, True)], [])
+        self.assertEqual(len(cells), 16)
+
+
+class R4RollbackTests(R4Helpers, RunnerCase):
+    """R4 required test 3: a finished run (HALTED or COMPLETE) whose report exists and whose write ledger does not, its state set
+    back to RUNNING, is refused by every entrance (resume, close, replay, check and the rest), in both modes, sending nothing."""
+
+    def test_R4_a_state_rolled_back_beside_a_report_is_refused_by_every_entrance_in_both_modes(self):
+        tally, cells = r4_new_tally(test="rollback"), []
+        with self.r4_live():
+            for mode in ("LIVE", "SIMULATION"):
+                for where in ("REPORT_NO_CERTIFICATE", "REPORT_NO_CERTIFICATE_COMPLETE"):
+                    base = self.r4_base(f"rb-{mode.lower()}-{where.lower()}", mode, where)
+                    rollback = [tamper for tamper in r4_exhaustive_tampers(base, self.r4_outside()) if tamper["name"] == "state:RUNNING"]
+
+                    def observe(base_, tamper, entrance, expected, observed, problems, label=f"{mode}:{where}"):
+                        cells.append({"run": label, "entrance": entrance, "outcome": observed["outcome"], "reason": observed["text"][:120],
+                                      "requests": observed["requests"], "unchanged": observed["before"] == observed["after"]})
+                    self.r4_compare(base, rollback, tally, observe=observe)
+        for cell in cells:
+            print("R4_ROLLBACK " + json.dumps(cell, sort_keys=True))
+        expected_reason = lambda cell: "OUT_DIR_NOT_EMPTY" if cell["entrance"] == "run on the directory" else "STATE_ROLLBACK_DETECTED"  # noqa: E731
+        self.assertEqual([cell for cell in cells if (cell["outcome"], cell["requests"], cell["unchanged"],
+                                                      cell["reason"].startswith(expected_reason(cell))) != ("REFUSE", 0, True, True)], [])
+        self.assertEqual((len(cells), tally["disagreements"]), (4 * len(R4_ENTRANCES), 0))
+
+
+class R4InventoryTests(R4Helpers, RunnerCase):
+    """R4 required test 4: every entry below a certified run is a regular file its write ledger lists, at every entrance that
+    verifies the write ledger; only the write ledger itself and its correctly named second link are exempt."""
+
+    ENTRANCES = R4_READ_ONLY + R4_SIM_RESUMES + R4_LIVE_RESUMES + R4_CLOSES + ("write accounting", "report")
+
+    def variants(self, base, outside) -> list:
+        """(label, apply(work), the refusal every entrance must name, or None for the one exemption)."""
+        def added(relative, make):
+            def apply(work):
+                (work / relative).parent.mkdir(exist_ok=True)
+                make(work, work / relative)
+            return apply
+
+        def replaced(name, make):
+            def apply(work):
+                content = (work / name).read_bytes()
+                (work / name).unlink()
+                make(work, work / name, content)
+            return apply
+
+        def outside_copy(work, name, content):
+            target = outside / f"{work.name}-{name}"
+            target.write_bytes(content)
+            return target
+
+        link = lambda target: (lambda work, path: path.symlink_to(target(work)))  # noqa: E731
+        hard = lambda source: (lambda work, path: os.link(work / source, path))  # noqa: E731
+        leftover = R4_LEFTOVER.format
+        return [
+            ("an extra regular file", added("extra.txt", lambda work, path: path.write_text("x")), "WRITE_LEDGER_UNLISTED:extra.txt"),
+            ("a file in a subdirectory", added("sub/x.txt", lambda work, path: path.write_text("x")), "WRITE_LEDGER_UNLISTED:sub/x.txt"),
+            ("a nested write_ledger.json", added("sub/write_ledger.json", lambda work, path: path.write_bytes((work / "write_ledger.json").read_bytes())),
+             "WRITE_LEDGER_UNLISTED:sub/write_ledger.json"),
+            ("a link to a listed file", added("link", link(lambda work: work / "runs.json")), "WRITE_LEDGER_UNLISTED:link"),
+            ("a link outside", added("link", link(lambda work: outside / "external.txt")), "WRITE_LEDGER_UNLISTED:link"),
+            ("a dangling link", added("link", link(lambda work: work / "nowhere")), "WRITE_LEDGER_UNLISTED:link"),
+            ("a link to a directory", added("link", link(lambda work: outside / "a-directory")), "WRITE_LEDGER_UNLISTED:link"),
+            ("an empty directory", added("emptydir", lambda work, path: path.mkdir()), "WRITE_LEDGER_UNLISTED:emptydir"),
+            ("a FIFO", added("pipe", lambda work, path: os.mkfifo(path)), "WRITE_LEDGER_UNLISTED:pipe"),
+            ("another name for a listed file", added("other-name", hard("runs.json")), "WRITE_LEDGER_UNLISTED:other-name"),
+            ("the publication leftover", added(leftover("a" * 32), hard("write_ledger.json")), None),
+            ("a leftover that is a copy", added(leftover("b" * 32), lambda work, path: path.write_bytes((work / "write_ledger.json").read_bytes())),
+             "WRITE_LEDGER_UNLISTED:" + leftover("b" * 32)),
+            ("a leftover that is a link", added(leftover("c" * 32), link(lambda work: work / "write_ledger.json")),
+             "WRITE_LEDGER_UNLISTED:" + leftover("c" * 32)),
+            ("a leftover in a subdirectory", added("sub/" + leftover("d" * 32), hard("write_ledger.json")),
+             "WRITE_LEDGER_UNLISTED:sub/" + leftover("d" * 32)),
+            ("a leftover with 31 hex digits", added(leftover("e" * 31), hard("write_ledger.json")), "WRITE_LEDGER_UNLISTED:" + leftover("e" * 31)),
+            ("a leftover with 33 hex digits", added(leftover("e" * 33), hard("write_ledger.json")), "WRITE_LEDGER_UNLISTED:" + leftover("e" * 33)),
+            ("a leftover in capitals", added(leftover("A" * 32), hard("write_ledger.json")), "WRITE_LEDGER_UNLISTED:" + leftover("A" * 32)),
+            ("a listed file made a link to its own bytes", replaced("runs.json", lambda work, path, content: path.symlink_to(outside_copy(work, "runs.json", content))),
+             "WRITE_LEDGER_NOT_A_REGULAR_FILE:runs.json"),
+            ("a listed file made a FIFO", replaced("report.json", lambda work, path, content: os.mkfifo(path)), "WRITE_LEDGER_NOT_A_REGULAR_FILE:report.json"),
+            ("a listed file made a directory", replaced("runs.json", lambda work, path, content: path.mkdir()), "WRITE_LEDGER_MISMATCH:runs.json"),
+            ("the write ledger made a link to its own bytes",
+             replaced("write_ledger.json", lambda work, path, content: path.symlink_to(outside_copy(work, "write_ledger.json", content))),
+             "WRITE_LEDGER_INVALID_OR_UNREADABLE"),
+        ]
+
+    def enter(self, entrance, base, work) -> dict:
+        if entrance != "report":
+            return self.r4_enter(entrance, base, work)
+        before = r4_digest(work)
+        try:
+            self.r4_runner(work, base["mode"])._finalize(None)
+            outcome, text = "CLOSED_A_FINISHED_RUN", "returned"
+        except xr.RunBlocked as blocked:
+            outcome, text = "REFUSE", str(blocked)
+        except Exception as exc:
+            outcome, text = "CRASH", f"{type(exc).__name__}:{exc}"
+        return {"outcome": outcome, "text": text, "requests": 0, "before": before, "after": r4_digest(work)}
+
+    def test_R4_a_certified_run_lists_every_entry_at_every_entrance_that_verifies_its_write_ledger(self):
+        cells = []
+        with self.r4_live():
+            outside = self.r4_outside()
+            for base in self.r4_bases(wheres=("CERTIFIED_HALTED", "CERTIFIED_COMPLETE")):
+                for label, apply, reason in self.variants(base, outside):
+                    for entrance in self.ENTRANCES:
+                        work = self.root / f"inv-{len(cells)}"
+                        shutil.copytree(base["dir"], work)
+                        apply(work)
+                        observed = self.enter(entrance, base, work)
+                        if reason is not None:
+                            ok = (observed["outcome"], observed["text"].split(",")[0] if entrance.startswith("CLI") else observed["text"],
+                                  observed["requests"], observed["before"] == observed["after"])
+                            ok = ok[0] == "REFUSE" and ok[1].startswith(reason) and not ok[2] and ok[3]
+                        else:  # the exemption: read-only exits verify; the writers refuse for their own reasons, never the list
+                            ok = (observed["requests"] == 0 and observed["before"] == observed["after"]
+                                  and (observed["outcome"] == "ACCEPT" if entrance in R4_READ_ONLY
+                                       else observed["outcome"] == "REFUSE" and "WRITE_LEDGER_UNLISTED" not in observed["text"]))
+                        cells.append({"base": base["name"], "variant": label, "entrance": entrance, "expected": reason or "EXEMPT",
+                                      "outcome": observed["outcome"], "reason": observed["text"][:120], "requests": observed["requests"],
+                                      "unchanged": observed["before"] == observed["after"], "ok": ok})
+                        shutil.rmtree(work)
+        for cell in cells:
+            print("R4_INVENTORY " + json.dumps(cell, sort_keys=True))
+        self.assertEqual([cell for cell in cells if not cell["ok"]], [])
+        self.assertEqual(len(cells), 4 * 21 * len(self.ENTRANCES))
+
+
+class R4GuardTests(R4KillHelpers, RunnerCase):
+    """One fast test per R4 guard, each named by its mutants (mutation_cases.R4_CASES); in-process runs of the small bank."""
+
+    def outcome_of(self, call) -> str:
+        try:
+            call()
+        except xr.RunBlocked as blocked:
+            return "REFUSED:" + str(blocked)
+        except Exception as exc:  # a crash is never a refusal
+            return f"CRASHED:{type(exc).__name__}"
+        return "RETURNED"
+
+    def test_R4_G1_resume_with_mode_LIVE_is_refused_by_name_on_the_command_line(self):
+        observed = {}
+        with self.r4_live():
+            for mode in ("LIVE", "SIMULATION"):
+                base = self.r4_base(f"g1-{mode.lower()}", mode, "RUNNING_STOP_SETTLED")
+                before, sent = r4_digest(base["dir"]), len(self.r4_server.requests)
+                outcome, text, _ = self.r4_cli(["resume", "--profile", str(self.r4_world()["profile"]), "--out", str(base["dir"]), "--mode", "LIVE"])
+                observed[mode] = (outcome, text, len(self.r4_server.requests) - sent, r4_digest(base["dir"]) == before)
+        self.assertEqual(observed, {mode: ("REFUSE", "RESUME_FORBIDDEN_FOR_LIVE:use close", 0, True) for mode in ("LIVE", "SIMULATION")})
+
+    def test_R4_G2_a_run_bound_to_LIVE_is_never_resumed_whatever_the_Runner_or_the_command(self):
+        observed = {}
+        with self.r4_live():
+            base = self.r4_base("g2", "LIVE", "RUNNING_MID_CALL")
+            before = r4_digest(base["dir"])
+            for entrance in ("Runner.resume SIMULATION", "Runner.resume LIVE", "CLI resume --mode SIMULATION"):
+                observed[entrance] = self.r4_enter(entrance, base, base["dir"])
+        self.assertEqual({entrance: (seen["outcome"], seen["text"].split(":")[0], seen["requests"], seen["after"]) for entrance, seen in observed.items()},
+                         {entrance: ("REFUSE", "RESUME_FORBIDDEN_FOR_LIVE", 0, before) for entrance in observed})
+
+    def test_R4_G3_a_LIVE_Runner_never_resumes_a_SIMULATION_run_either(self):
+        with self.r4_live():
+            base = self.r4_base("g3", "SIMULATION", "RUNNING_MID_CALL")
+            seen = self.r4_enter("Runner.resume LIVE", base, base["dir"])
+        self.assertEqual((seen["outcome"], seen["text"].split(":")[0], seen["requests"], seen["after"] == seen["before"]),
+                         ("REFUSE", "RESUME_FORBIDDEN_FOR_LIVE", 0, True))
+
+    def test_R4_G4_one_changed_file_never_unbinds_a_run(self):
+        observed, expected = {}, {}
+        with self.r4_live():
+            base = self.r4_base("g4", "LIVE", "RUNNING_STOP_SETTLED")
+            by_name = {tamper["name"]: tamper for tamper in r4_exhaustive_tampers(base, self.r4_outside())}
+            cases = {"manifest:mode": "RUN_BINDING_MANIFEST_MISMATCH", "manifest:seed": "RUN_BINDING_MANIFEST_MISMATCH",
+                     "manifest:reformatted": "RUN_BINDING_MANIFEST_MISMATCH", "binding:deleted": "RUN_BINDING_MISSING",
+                     "binding:mode": "RUN_BINDING_MODE_MISMATCH", "binding:manifest_sha256": "RUN_BINDING_MANIFEST_MISMATCH",
+                     "binding:phase": "RUN_BINDING_MISSING", "binding:moved_after_1": "RUN_BINDING_NOT_FIRST",
+                     "binding:twice_in_front": "RUN_BINDING_NOT_FIRST", "binding:twice_at_end": "RUN_BINDING_NOT_FIRST"}
+            for name, reason in cases.items():
+                work = self.root / f"g4-{name.replace(':', '-')}"
+                shutil.copytree(base["dir"], work)
+                by_name[name]["apply"](work)
+                resumed = self.r4_enter("Runner.resume SIMULATION", base, work)
+                observed[name] = (self.outcome_of(lambda: xr.inspect_run(work)).split(":")[:2], resumed["outcome"], resumed["requests"])
+                expected[name] = (["REFUSED", reason], "REFUSE", 0)
+            intact = self.outcome_of(lambda: xr.inspect_run(base["dir"]))
+        self.assertEqual((intact, observed), ("RETURNED", expected))
+
+    def test_R4_G5_the_journal_is_created_holding_the_binding_of_the_manifest_bytes(self):
+        observed = {}
+        with self.r4_live():
+            for mode in ("LIVE", "SIMULATION"):
+                base = self.r4_base(f"g5-{mode.lower()}", mode, "CERTIFIED_COMPLETE")
+                first = base["rows"][0]
+                observed[mode] = (first.get("phase"), first.get("mode"), first.get("manifest_sha256"), type(first.get("t")).__name__)
+                observed[mode + " sha"] = hashlib.sha256((base["dir"] / "run_manifest.json").read_bytes()).hexdigest()
+        self.assertEqual(observed, {"LIVE": ("RUN_OPENED", "LIVE", observed["LIVE sha"], "float"), "LIVE sha": observed["LIVE sha"],
+                                    "SIMULATION": ("RUN_OPENED", "SIMULATION", observed["SIMULATION sha"], "float"),
+                                    "SIMULATION sha": observed["SIMULATION sha"]})
+
+    def test_R4_G6_close_builds_no_adapter_and_no_transport_and_needs_no_key(self):
+        observed = {}
+        with self.r4_live():
+            bases = [self.r4_base(f"g6-{mode.lower()}", mode, "RUNNING_MID_CALL") for mode in ("LIVE", "SIMULATION")]
+        for base in bases:
+            for entrance in ("Runner.close", "CLI close"):
+                work = self.root / f"{base['name']}-{entrance.split()[0]}"
+                shutil.copytree(base["dir"], work)
+                outcome, text, _ = self.r4_close(work, base["mode"], cli=entrance == "CLI close")
+                observed[(base["mode"], entrance)] = (outcome, json.loads((work / "run_state.json").read_text()).get("reason"),
+                                                      self.r4_closed_problems(work, "INTERRUPTED", []))
+        self.assertEqual(observed, {key: ("CLOSE", "INTERRUPTED", []) for key in observed})
+        self.assertEqual(len(observed), 4)
+
+    def test_R4_G7_close_refuses_finished_certified_held_or_refused_runs_and_changes_nothing(self):
+        cases = []
+        with self.r4_live():
+            cases.append((self.r4_base("g7-halted", "LIVE", "HALTED_NO_REPORT"), "RUN_IS_HALTED"))
+            cases.append((self.r4_base("g7-complete", "SIMULATION", "CERTIFIED_COMPLETE"), "RUN_IS_COMPLETE"))
+            reopened = self.r4_base("g7-reopened", "LIVE", "CERTIFIED_HALTED")
+            (reopened["dir"] / "run_state.json").write_text(xr.canonical({"state": "RUNNING", "t": 0}))
+            cases.append((reopened, "RUN_IS_CERTIFIED"))
+            unbound = self.r4_base("g7-unbound", "SIMULATION", "RUNNING_STOP_SETTLED")
+            (unbound["dir"] / "attempts.jsonl").write_text(journal_text(unbound["rows"][1:]))
+            cases.append((unbound, "RUN_BINDING_MISSING"))
+            held = self.r4_base("g7-held", "LIVE", "RUNNING_MID_CALL")
+        observed, expected = {}, {}
+        descriptor = os.open(held["dir"] / "run.lock", os.O_RDWR)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for base, reason in cases + [(held, "ANOTHER_RUNNER_HOLDS_THIS_DIRECTORY")]:
+                for cli in (False, True):
+                    before = r4_digest(base["dir"])
+                    outcome, text, _ = self.r4_close(base["dir"], base["mode"], cli=cli)
+                    observed[(base["name"], cli)] = (outcome, text.split(":")[0], r4_digest(base["dir"]) == before)
+                    expected[(base["name"], cli)] = ("REFUSE", reason, True)
+        finally:
+            os.close(descriptor)
+        # the identity check is resume's: a Runner of another mode (or any other identity) closes nothing
+        before = r4_digest(held["dir"])
+        outcome, text, _ = self.r4_close(held["dir"], "SIMULATION")
+        observed[("g7-held", "a SIMULATION Runner")] = (outcome, text.split(":")[0], r4_digest(held["dir"]) == before)
+        expected[("g7-held", "a SIMULATION Runner")] = ("REFUSE", "CLOSE_IDENTITY_MISMATCH", True)
+        self.assertEqual(observed, expected)
+
+    def test_R4_G8_close_ends_HALTED_and_shows_the_stop_its_journal_holds(self):
+        observed = {}
+        with self.r4_live():
+            stopped = {mode: self.r4_base(f"g8-{mode.lower()}", mode, "RUNNING_STOP_SETTLED") for mode in ("LIVE", "SIMULATION")}
+            runner = self.r4_runner(self.root / "g8-overrun", "SIMULATION")
+            victim = f"{runner.order[1]}:1"
+            runner.transport = SimulatedResponses(runner.public, answer_for=self.answer, faults=[
+                {"path": "responses", "item_id": runner.order[1], "occurrence": 2, "fault": "huge_usage"}])
+            finish = runner._finish
+
+            def killed_before_finish(slot, *args, **kwargs):
+                if slot == victim:
+                    raise KeyboardInterrupt("killed with the over-cap response durable and nothing settled")
+                return finish(slot, *args, **kwargs)
+            runner._finish = killed_before_finish
+            self.crashes(runner.start)
+        for mode, base in stopped.items():
+            outcome, _, _ = self.r4_close(base["dir"], mode)
+            observed[mode] = (outcome, self.r4_closed_problems(base["dir"], "INTERRUPTED", ["REJECTED"]))
+        overrun = self.root / "g8-overrun"
+        copy_path = self.root / "g8-overrun-again"
+        shutil.copytree(overrun, copy_path)
+        outcome, _, _ = self.r4_close(overrun, "SIMULATION")
+        observed["overrun"] = (outcome, self.r4_closed_problems(overrun, "ATTEMPT_CAP_OVERRUN", []))
+        # the over-cap charge saved by a close killed before its own record: closed again, the run still ends ATTEMPT_CAP_OVERRUN
+        log_settled = xr.Runner._log_settled
+
+        def killed_before_the_record(runner_, slot, attempt, status, cost, kind, *args, **kwargs):
+            if kind == "ATTEMPT_CAP_OVERRUN":
+                raise KeyboardInterrupt("killed between the over-cap charge and its record")
+            return log_settled(runner_, slot, attempt, status, cost, kind, *args, **kwargs)
+        with mock.patch.object(xr.Runner, "_log_settled", killed_before_the_record), self.r4_no_key():
+            self.crashes(lambda: self.r4_runner(copy_path, "SIMULATION", transport=R4Poison()).close())
+        outcome, _, _ = self.r4_close(copy_path, "SIMULATION")
+        observed["overrun closed again"] = (outcome, self.r4_closed_problems(copy_path, "ATTEMPT_CAP_OVERRUN", []))
+        self.assertEqual(observed, {key: ("CLOSE", []) for key in ("LIVE", "SIMULATION", "overrun", "overrun closed again")})
+
+    def test_R4_G10_a_certified_run_refuses_an_entry_outside_its_list(self):
+        observed, expected = {}, {}
+        with self.r4_live():
+            outside = self.r4_outside()
+            base = self.r4_base("g10", "SIMULATION", "CERTIFIED_HALTED")
+            variants = {label: (apply, reason) for label, apply, reason in R4InventoryTests.variants(self, base, outside)}
+        for label in ("a nested write_ledger.json", "a link to a listed file", "a dangling link", "an empty directory", "a FIFO",
+                      "a listed file made a link to its own bytes", "the write ledger made a link to its own bytes", "the publication leftover"):
+            apply, reason = variants[label]
+            work = self.root / f"g10-{len(observed)}"
+            shutil.copytree(base["dir"], work)
+            apply(work)
+            observed[label] = [self.outcome_of(lambda: xr.inspect_run(work)), self.outcome_of(lambda: xr.replay_run(work))]
+            expected[label] = ["RETURNED"] * 2 if reason is None else [o if o.startswith("REFUSED:" + reason) else "REFUSED:" + reason
+                                                                         for o in observed[label]]
+        self.assertEqual(observed, expected)
+
+    def test_R4_G11_a_write_ledger_is_never_written_over_a_link_or_a_directory_and_a_close_refuses_first(self):
+        observed, expected = {}, {}
+        with self.r4_live():
+            finished = self.r4_base("g11-finished", "SIMULATION", "HALTED_NO_REPORT")
+            running = self.r4_base("g11-running", "LIVE", "RUNNING_MID_CALL")
+        for label, relative, make in (("a link", "link", lambda work, path: path.symlink_to(work / "ledger.json")),
+                                      ("a subdirectory", "sub/x.txt", lambda work, path: path.write_text("x"))):
+            for base in (finished, running):
+                work = self.root / f"{base['name']}-{relative.split('/')[0]}"
+                shutil.copytree(base["dir"], work)
+                (work / relative).parent.mkdir(exist_ok=True)
+                make(work, work / relative)
+                before = r4_digest(work)
+                if base is finished:
+                    outcome = self.outcome_of(lambda: self.r4_runner(work, "SIMULATION")._write_accounting())
+                else:
+                    closed, text, _ = self.r4_close(work, "LIVE")
+                    outcome = "REFUSED:" + text if closed == "REFUSE" else "CLOSED"
+                observed[(label, base["name"])] = (outcome.split(":")[:2], r4_digest(work) == before)
+                expected[(label, base["name"])] = (["REFUSED", "WRITE_LEDGER_UNLISTABLE"], True)
+        self.assertEqual(observed, expected)
 
 
 if __name__ == "__main__":

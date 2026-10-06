@@ -678,4 +678,115 @@ R3B_CASES = [
     ("R3B the generation counter is never incremented", XR,
      '            self.generation_requests += 1\n', '            pass\n', R3B_COUNT),
 ]
-CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND + R2_CASES + R3_CASES + R3B_CASES
+
+# --- R4: a run bound to LIVE is never continued; close; state rollback; a write ledger lists every entry ---------------------------
+R4G = X + "R4GuardTests."
+R4_RESUME_CLI, R4_RESUME_RUN, R4_RESUME_LIVE = (R4G + "test_R4_G1_resume_with_mode_LIVE_is_refused_by_name_on_the_command_line",
+                                                R4G + "test_R4_G2_a_run_bound_to_LIVE_is_never_resumed_whatever_the_Runner_or_the_command",
+                                                R4G + "test_R4_G3_a_LIVE_Runner_never_resumes_a_SIMULATION_run_either")
+R4_BINDING, R4_OPENED = (R4G + "test_R4_G4_one_changed_file_never_unbinds_a_run",
+                         R4G + "test_R4_G5_the_journal_is_created_holding_the_binding_of_the_manifest_bytes")
+R4_NO_ADAPTER, R4_CLOSE_REFUSES, R4_CLOSE_ENDS = (R4G + "test_R4_G6_close_builds_no_adapter_and_no_transport_and_needs_no_key",
+                                                  R4G + "test_R4_G7_close_refuses_finished_certified_held_or_refused_runs_and_changes_nothing",
+                                                  R4G + "test_R4_G8_close_ends_HALTED_and_shows_the_stop_its_journal_holds")
+R4_LIST_VERIFY, R4_LIST_WRITE = (R4G + "test_R4_G10_a_certified_run_refuses_an_entry_outside_its_list",
+                                 R4G + "test_R4_G11_a_write_ledger_is_never_written_over_a_link_or_a_directory_and_a_close_refuses_first")
+R4_ROLLBACK = X + "R4RollbackTests.test_R4_a_state_rolled_back_beside_a_report_is_refused_by_every_entrance_in_both_modes"
+R4_INVENTORY = X + "R4InventoryTests.test_R4_a_certified_run_lists_every_entry_at_every_entrance_that_verifies_its_write_ledger"
+R4_LIVE_MATRIX = X + "R4LiveMatrixTests.test_R4_K_a_run_bound_to_LIVE_is_never_continued_at_any_kill_point_or_after_any_single_file_change"
+R4_CLOSE_REFUSALS = X + "R4CloseMatrixTests.test_R4_K_close_refuses_finished_certified_held_gate_refused_and_never_opened_runs_and_changes_nothing"
+R4_LIVE_CHECK = '            if not closing and (manifest["mode"] == "LIVE" or self.mode == "LIVE"):  # D4-1: there is no LIVE resume, only close\n'
+R4_BOUND_FIRST = '    _require(opened is not None, "RUN_BINDING_MISSING:the journal does not open with its RUN_OPENED record")\n'
+R4_ROLLBACK_LINE = '    if state["state"] == "RUNNING" and os.path.lexists(out / "report.json") and not (out / "write_ledger.json").exists():\n'
+R4_PRESENT = 'if not stat.S_ISDIR(entries[name].st_mode) and name != "write_ledger.json"\n'
+R4_UNLISTABLE = '        if not stat.S_ISREG(entries[name].st_mode):\n            raise _refusal(f"WRITE_LEDGER_UNLISTABLE:{name}", integrity)\n'
+R4_CASES = [
+    # D4-1: no LIVE resume, one mutant per entrance
+    ("R4 D4-1 the command line resumes with --mode LIVE", XR,
+     '        if args.command == "resume" and args.mode == "LIVE":  # D4-1: there is no LIVE resume; an interrupted LIVE run is closed\n',
+     '        if False:  # D4-1: there is no LIVE resume; an interrupted LIVE run is closed\n', R4_RESUME_CLI),
+    ("R4 D4-1 a run bound to LIVE resumes under a SIMULATION Runner", XR, '(manifest["mode"] == "LIVE" or self.mode == "LIVE")',
+     '(self.mode == "LIVE")', R4_RESUME_RUN),
+    ("R4 D4-1 a LIVE Runner resumes", XR, '(manifest["mode"] == "LIVE" or self.mode == "LIVE")', '(manifest["mode"] == "LIVE")', R4_RESUME_LIVE),
+    ("R4 D4-1 nothing refuses a LIVE resume", XR, R4_LIVE_CHECK, '            if False:  # D4-1: there is no LIVE resume, only close\n', R4_RESUME_RUN),
+    ("R4 D4-1 nothing refuses a LIVE resume (seen by the [K] LIVE matrix)", XR, R4_LIVE_CHECK,
+     '            if False:  # D4-1: there is no LIVE resume, only close\n', R4_LIVE_MATRIX),
+    # D4-2: the binding, in two files
+    ("R4 D4-2 the binding is not checked", XR, R4_BOUND_FIRST, '    return manifest["mode"]\n', R4_BINDING),
+    ("R4 D4-2 the binding is not checked (seen by the [K] LIVE matrix)", XR, R4_BOUND_FIRST, '    return manifest["mode"]\n', R4_LIVE_MATRIX),
+    ("R4 D4-2 only the mode is compared, not the manifest's sha256", XR,
+     '    _require(hashlib.sha256(content).hexdigest() == opened["manifest_sha256"],\n'
+     '             "RUN_BINDING_MANIFEST_MISMATCH:the manifest is not the one the run was opened with")\n',
+     '    _require(True, "RUN_BINDING_MANIFEST_MISMATCH:the manifest is not the one the run was opened with")\n', R4_BINDING),
+    ("R4 D4-2 only the sha256 is compared, not the mode", XR,
+     '    _require(opened["mode"] == manifest["mode"], "RUN_BINDING_MODE_MISMATCH:the manifest and the RUN_OPENED record disagree")\n',
+     '    _require(True, "RUN_BINDING_MODE_MISMATCH:the manifest and the RUN_OPENED record disagree")\n', R4_BINDING),
+    ("R4 D4-2 a journal without its binding record is accepted", XR, R4_BOUND_FIRST, '    if opened is None:\n        return manifest["mode"]\n',
+     R4_BINDING),
+    ("R4 D4-2 a late or repeated binding record is accepted", XR,
+     '                raise RunBlocked("RUN_BINDING_NOT_FIRST:a second or a late RUN_OPENED record")\n', '                pass\n', R4_BINDING),
+    ("R4 D4-2 the journal is created empty", XR,
+     '            atomic_write(self.log.path, journal_line({"phase": "RUN_OPENED", "t": time.time(), "mode": self.mode,\n'
+     '                                                      "manifest_sha256": sha256_text(manifest)}))\n',
+     '            atomic_write(self.log.path, "")\n', R4_OPENED),
+    ("R4 D4-2 the binding record hashes other bytes than the manifest's", XR, '"manifest_sha256": sha256_text(manifest)}',
+     '"manifest_sha256": sha256_text(manifest + " ")}', R4_OPENED),
+    ("R4 D4-2 an audit note ahead of the binding record changes the decision", XR,
+     '    head = next((index for index, row in enumerate(journal) if row.get("phase") not in AUDIT_NOTES), None)\n',
+     '    head = 0 if journal else None\n', X + "R2IntegrityTests.test_R2_any_resume_record_anywhere_changes_no_decision_and_no_reason"),
+    # D4-3: close
+    ("R4 D4-3 close builds an adapter", XR,
+     '            adapter = None if closing else self._adapter()  # D4-3: never for a close; resume: before the ledger is touched\n',
+     '            adapter = self._adapter()  # D4-3: never for a close; resume: before the ledger is touched\n', R4_NO_ADAPTER),
+    ("R4 D4-3 the command line closes in a mode the run is not bound to", XR,
+     '            runner = _closer(args, inspect_run(args.out)["manifest"]["mode"])\n', '            runner = _closer(args, "SIMULATION")\n', R4_NO_ADAPTER),
+    ("R4 D4-3 the gate refuses the CLOSE note it wrote", XR,
+     '            elif phase == "CLOSE":  # like RESUME, an audit note: none of its fields is read\n                pass\n', '', R4_NO_ADAPTER),
+    ("R4 D4-3 close reopens a finished run", XR,
+     '            if state["state"] != "RUNNING":\n                raise _refusal(f"RUN_IS_{state[\'state\']}: only an interrupted run can resume", inspection["integrity"])\n',
+     '            if state["state"] != "RUNNING" and not closing:\n'
+     '                raise _refusal(f"RUN_IS_{state[\'state\']}: only an interrupted run can resume", inspection["integrity"])\n', R4_CLOSE_REFUSES),
+    ("R4 D4-3 close reopens a finished run (seen by the [K] close refusals)", XR,
+     '            if state["state"] != "RUNNING":\n                raise _refusal(f"RUN_IS_{state[\'state\']}: only an interrupted run can resume", inspection["integrity"])\n',
+     '            if state["state"] != "RUNNING" and not closing:\n'
+     '                raise _refusal(f"RUN_IS_{state[\'state\']}: only an interrupted run can resume", inspection["integrity"])\n', R4_CLOSE_REFUSALS),
+    ("R4 D4-3 close reopens a certified run", XR, '            if inspection["certificate"] != "ABSENT":\n',
+     '            if inspection["certificate"] != "ABSENT" and not closing:\n', R4_CLOSE_REFUSES),
+    ("R4 D4-3 close skips the identity check", XR, '            if mismatched:\n', '            if mismatched and not closing:\n', R4_CLOSE_REFUSES),
+    ("R4 D4-3 a close ends HALTED for another reason than INTERRUPTED", XR,
+     'RunHalt("INTERRUPTED", None, "closed after an interruption; the close sent nothing")',
+     'RunHalt("REJECTED", None, "closed after an interruption; the close sent nothing")', R4_CLOSE_ENDS),
+    ("R4 D4-3 a close hides the stop settlements its journal holds", XR,
+     'if row.get("phase") == "SETTLED" and row.get("kind") in STOP_KINDS]', 'if False]', R4_CLOSE_ENDS),
+    ("R4 D4-3 an overrun already on the ledger closes as INTERRUPTED", XR, '        if overrun is None and self.ledger.state["overrun"]:\n',
+     '        if False:\n', R4_CLOSE_ENDS),
+    ("R4 D4-3 a close is not refused before it writes over an entry it cannot list", XR,
+     '            if closing:  # D4-5: a close always ends written up, so an entry no write ledger can list refuses it before any write\n'
+     '                _listable(self.out_dir, inspection["integrity"])\n', '', R4_LIST_WRITE),
+    # D4-4: rollback
+    ("R4 D4-4 a state rolled back beside a report is not detected", XR, R4_ROLLBACK_LINE, '    if False:\n', R4_ROLLBACK),
+    ("R4 D4-4 a state rolled back beside a report is not detected (seen by the [K] LIVE matrix)", XR, R4_ROLLBACK_LINE, '    if False:\n',
+     R4_LIVE_MATRIX),
+    # D4-5: the write ledger lists every entry, by path, without following a link
+    ("R4 D4-5 the list leaves out write_ledger.json by name at any depth", XR, R4_PRESENT,
+     'if not stat.S_ISDIR(entries[name].st_mode) and Path(name).name != "write_ledger.json"\n', R4_LIST_VERIFY),
+    ("R4 D4-5 the list leaves out write_ledger.json by name at any depth (seen by the inventory matrix)", XR, R4_PRESENT,
+     'if not stat.S_ISDIR(entries[name].st_mode) and Path(name).name != "write_ledger.json"\n', R4_INVENTORY),
+    ("R4 D4-5 the list skips links and special files", XR, R4_PRESENT, 'if stat.S_ISREG(entries[name].st_mode) and name != "write_ledger.json"\n',
+     R4_LIST_VERIFY),
+    ("R4 D4-5 the list skips directories", XR, '        _require(not stat.S_ISDIR(entries[name].st_mode), f"WRITE_LEDGER_UNLISTED:{name}")\n',
+     '        pass\n', R4_LIST_VERIFY),
+    ("R4 D4-5 a listed entry need not be a regular file", XR,
+     '        _require(name not in present or stat.S_ISREG(entries[name].st_mode), f"WRITE_LEDGER_NOT_A_REGULAR_FILE:{name}")\n',
+     '        pass\n', R4_LIST_VERIFY),
+    ("R4 D4-5 the walk follows links", XR, 'found[name] = entry.stat(follow_symlinks=False)', 'found[name] = entry.stat()', R4_LIST_VERIFY),
+    ("R4 D4-5 the write ledger itself may be a link", XR,
+     '    _require(written is not None and stat.S_ISREG(written.st_mode), "WRITE_LEDGER_INVALID_OR_UNREADABLE")\n',
+     '    _require(written is not None, "WRITE_LEDGER_INVALID_OR_UNREADABLE")\n', R4_LIST_VERIFY),
+    ("R4 D4-5 a write ledger is written over links and directories", XR, R4_UNLISTABLE, '        pass\n', R4_LIST_WRITE),
+    ("R4 D4-5 a write ledger quietly skips links and directories", XR, [
+        (R4_UNLISTABLE, '        pass\n'),
+        ('for name in sorted(entries) if name != "write_ledger.json"]',
+         'for name in sorted(entries) if name != "write_ledger.json" and stat.S_ISREG(entries[name].st_mode)]')], None, R4_LIST_WRITE),
+]
+CASES = PROFILE + RUNNER + PROBE + CODEPIN + REPAIR + BOUND + R2_CASES + R3_CASES + R3B_CASES + R4_CASES
