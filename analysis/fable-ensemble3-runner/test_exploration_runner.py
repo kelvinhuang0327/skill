@@ -676,6 +676,8 @@ class CrashAndResumeTests(RunnerCase):
         result, _, _ = self.run_it("zombie", faults=[{"path": "responses", "item_id": order[-1], "occurrence": 1, "fault": "huge_usage"}])
         self.assertEqual((result["state"], result["halt"]["reason"]), ("HALTED", "ATTEMPT_CAP_OVERRUN"))
         (self.root / "zombie" / "run_state.json").write_text(xr.canonical({"state": "RUNNING", "t": 0}))
+        for later in ("report.json", "write_ledger.json"):  # a kill before the state is written leaves neither: both are written after it
+            (self.root / "zombie" / later).unlink()
         again, sim = self.make("zombie", log=False)
         try:
             resumed = again.resume()
@@ -1055,10 +1057,70 @@ class RealArtifactRunnerTests(unittest.TestCase):
         self.assertEqual((code, resumed["state"]), (2, "BLOCKED"))  # a halted run can neither resume nor be extended
         self.assertIn("RUN_IS_HALTED", ",".join(resumed["reasons"]))
 
+    def test_R3B_a_reopened_certified_halted_run_cannot_resume_through_the_cli(self):
+        out = self.root / "r3b-certified-halted-cli"
+
+        def rejecting(public, **kwargs):
+            return SimulatedResponses(public, faults=[{"path": "responses", "item_id": None, "occurrence": 1, "fault": "http_400"}], **kwargs)
+
+        argv = ["--profile", str(self.profile), "--out", str(out), "--mode", "SIMULATION", "--allow-formal-simulation"]
+        with mock.patch.object(xr, "SimulatedResponses", rejecting):
+            code, halted = self.cli(["run"] + argv)
+        self.assertEqual((code, halted["state"], halted["halt"]["reason"]), (3, "HALTED", "REJECTED"))
+        self.assertTrue((out / "write_ledger.json").is_file())
+        (out / "run_state.json").write_text(xr.canonical({"state": "RUNNING", "t": 0}))
+        before = directory_digest(out)
+        server = (out / "simulated_server_log.jsonl").read_bytes()
+        code, refused = self.cli(["resume"] + argv)
+        self.assertEqual((code, refused["state"]), (2, "BLOCKED"))
+        self.assertEqual(refused["generation_calls"], 0)
+        self.assertIn("RUN_IS_CERTIFIED", ",".join(refused["reasons"]))
+        self.assertIn("WRITE_LEDGER_EXISTS_NOT_RECERTIFIED", (refused.get("integrity") or {}).get("flags", []))
+        self.assertEqual((directory_digest(out), (out / "simulated_server_log.jsonl").read_bytes()), (before, server))
+
+    def test_R3B_the_command_line_reports_generations_sent_before_a_refused_close(self):
+        out = self.root / "r3b-refused-close-cli"
+        original_append = xr.AppendLog.append
+
+        def rejecting(public, **kwargs):
+            return SimulatedResponses(public, faults=[{"path": "responses", "item_id": None, "occurrence": 1, "fault": "http_400"}], **kwargs)
+
+        def lose_rejected_settlement(log, record):
+            if record.get("phase") == "SETTLED" and record.get("kind") == "REJECTED":
+                return
+            return original_append(log, record)
+
+        with mock.patch.object(xr, "SimulatedResponses", rejecting), mock.patch.object(xr.AppendLog, "append", lose_rejected_settlement):
+            code, refused = self.cli(["run", "--profile", str(self.profile), "--out", str(out), "--mode", "SIMULATION", "--allow-formal-simulation"])
+        requests = [json.loads(line) for line in (out / "simulated_server_log.jsonl").read_text().splitlines()]
+        sent = sum(request["path"] == "responses" for request in requests)
+        self.assertEqual((code, refused["state"]), (2, "BLOCKED"))
+        self.assertIn("TERMINAL_RUN_JOURNAL_INCOMPLETE:HALTED_REJECTED:1_MISSING", ",".join(refused["reasons"]))
+        self.assertGreater(sent, 0)
+        self.assertEqual(refused["generation_calls"], sent)
+        self.assertGreater(refused["generation_calls"], 0)
+
     def test_check_command_exit_codes(self):
         self.assertEqual(self.cli(["check", "--profile", str(self.profile)])[0], 0)
         code, result = self.cli(["check", "--profile", str(self.profile), "--mode", "LIVE"])
         self.assertEqual((code, result["status"]), (2, "BLOCKED"))
+
+    def test_R3_the_command_line_carries_the_verdict_of_a_run_and_of_a_refused_resume(self):
+        out = self.root / "r3-halted-cli"
+
+        def rejecting(public, **kwargs):
+            return SimulatedResponses(public, faults=[{"path": "responses", "item_id": None, "occurrence": 1, "fault": "http_400"}], **kwargs)
+
+        with mock.patch.object(xr, "SimulatedResponses", rejecting):
+            ran = self.cli(["run", "--profile", str(self.profile), "--out", str(out), "--mode", "SIMULATION", "--allow-formal-simulation"])
+        gate = xr.inspect_run(out).get("integrity")
+        resumed = self.cli(["resume", "--profile", str(self.profile), "--out", str(out), "--mode", "SIMULATION", "--allow-formal-simulation"])
+        checked = self.cli(["check", "--profile", str(self.profile), "--out", str(out)])
+        replayed = self.cli(["replay", "--out", str(out)])
+        self.assertEqual({"run": (ran[0], ran[1].get("integrity")), "resume": (resumed[0], resumed[1].get("state"), resumed[1].get("integrity")),
+                          "check": (checked[0], checked[1].get("status"), checked[1].get("run_integrity")), "replay": (replayed[0], replayed[1].get("integrity"))},
+                         {"run": (3, gate), "resume": (2, "BLOCKED", gate), "check": (0, "PASS", gate), "replay": (0, gate)})
+        self.assertEqual(((gate or {}).get("status"), (gate or {}).get("state"), (gate or {}).get("halt_reason")), ("CLEAN", "HALTED", "REJECTED"))
 
 
 def directory_digest(out):
@@ -1371,6 +1433,16 @@ class RepairIntegrityTests(RunnerCase):
             self.assertEqual(directory_digest(package), before)
             self.note("J", entry=entry, no_B=True, bytecode=[], before_sha256=before,
                       after_sha256=directory_digest(package), outcome="PASS")
+        # R3 (legacy R7 selector, additions only): Apple's Python sends unsuppressed bytecode to a per-user cache when HOME is set,
+        # and a harness may hand this child its own PYTHONPYCACHEPREFIX; either way the copy above stays clean and proves nothing.
+        # -X pycache_prefix outranks both, so here every unsuppressed write of the copied product lands in a directory this test owns.
+        for entry in ("exploration_runner.py", "probe_2b.py"):
+            prefix = self.root / f"J-prefix-{entry}"
+            result = subprocess.run([sys.executable, "-X", f"pycache_prefix={prefix}", str(package / entry), "--help"], capture_output=True,
+                                    text=True, env={"PATH": "/usr/bin:/bin", "TMPDIR": str(self.root)}, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sorted(p.name for p in prefix.rglob("*.pyc") if clone.name in p.parts), [], entry)
+            self.note("J", entry=entry, no_B=True, explicit_cache_prefix=True, bytecode=[], outcome="PASS")
 
     def test_K_simulation_rejects_unmarked_callable_and_live_adapter_before_any_write(self):
         for index, transport in enumerate((lambda path, body: {}, api.ResponsesAdapter("x")._post)):
@@ -2317,6 +2389,878 @@ class R2IntegrityTests(JournalHelpers, RunnerCase):
             self.assertTrue(any(name.startswith("_lab.") for name in found[f"suppression removed / {entry}"]), entry)  # the check can see a write
             self.assertEqual(found[f"as shipped / {entry}"], [], entry)
         self.assertEqual([p for root in copies.values() for p in (root / "analysis").rglob("*.pyc") if root.name == "bytecode-shipped"], [])
+
+
+# --- R3: one terminal-integrity verdict, carried by every exit ---------------------------------------------------------------------
+# Written from the R3 Packet (D0-1..D0-6), not from the product: the oracle reuses the independent R2 oracle above, never calls the
+# runner's gate and never reads its constants.  The two flag names are the Packet's (D0-3) and the README's name for D0-4's
+# "resumable, with a gap"; an exit that carries no verdict at all carries no flag.
+TERMINAL_KINDS = ("COMPLETE", "REJECTED", "CAPABILITY", "ATTEMPT_CAP_OVERRUN", "OTHER", "PERSISTENCE")
+PERSISTENCE_FLAG, RESUMABLE_FLAG = "INCOMPLETE_JOURNAL_BY_PERSISTENCE_HALT", "RESUMABLE_JOURNAL_GAP"
+R3_ENTRANCES = ("inspect_run", "replay_run", "report", "write_ledger", "CLI check --out", "CLI replay", "Runner.resume",
+                "Runner API write accounting")
+R3_READ_ONLY = ("inspect_run", "replay_run", "CLI check --out", "CLI replay")
+R3_WRITERS = ("write_ledger", "Runner API write accounting")
+
+
+def oracle_missing(ledger: dict, records: list) -> set:
+    """Ledger facts with no concrete record of their own: a set difference, nothing else."""
+    cap = Decimal(ledger["attempt_cap"])
+    present = {found[0] for found in (oracle_fact(row, cap) for row in records) if found and found[0][0] != "PAYLOAD"}
+    return set(oracle_truth(ledger)) - present
+
+
+def oracle_reconciled(records: list) -> int:
+    return sum(1 for row in records if row.get("phase") in ("ROUND_RESERVED", "START", "SETTLED") and row.get("reconciled") is True)
+
+
+def oracle_terminal(state: dict, ledger: dict, records: list, certified=None) -> str:
+    """REFUSE, FLAG_PERSISTENCE, FLAG_RESUMABLE or ACCEPT.  The R2 rules decide first.  A journal whose certified records are known
+    and differ from them is refused (D0-5, R3-3).  Then a finished run may lack no ledger fact (D0-2), except that a PERSISTENCE
+    halt is flagged (D0-3); a running run with a gap is flagged as resumable (D0-4); everything else passes."""
+    if oracle_verdict(ledger, records) != "ACCEPT" or (certified is not None and records != certified):
+        return "REFUSE"
+    if not oracle_missing(ledger, records):
+        return "ACCEPT"
+    if state["state"] == "RUNNING":
+        return "FLAG_RESUMABLE"
+    return "FLAG_PERSISTENCE" if state["state"] == "HALTED" and state.get("reason") == "PERSISTENCE" else "REFUSE"
+
+
+def verdict_class(integrity) -> str:
+    """The class of the verdict an exit carries; an absent verdict carries no flag."""
+    flags = (integrity or {}).get("flags") or []
+    return "FLAG_PERSISTENCE" if PERSISTENCE_FLAG in flags else "FLAG_RESUMABLE" if RESUMABLE_FLAG in flags else "ACCEPT"
+
+
+def journal_text(rows: list) -> str:
+    """Rows exactly as the runner appends them, so an untouched list reproduces the journal byte for byte."""
+    return "".join(json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n" for row in rows)
+
+
+def directory_files(out: Path) -> dict:
+    return {str(p.relative_to(out)): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
+
+
+def restore_directory(out: Path, files: dict) -> None:
+    for path in [p for p in out.rglob("*") if p.is_file() and str(p.relative_to(out)) not in files]:
+        path.unlink()
+    for name, content in files.items():
+        if not (out / name).is_file() or (out / name).read_bytes() != content:
+            (out / name).write_bytes(content)
+
+
+class R3Gate(ProductGate):
+    """The product's own gate on in-memory records (see ProductGate), answering with the class of the verdict it returns."""
+
+    def __call__(self, rows: list):
+        self.rows = rows
+        try:
+            inspection = xr.inspect_run(self.out)
+        except xr.RunBlocked as blocked:
+            return "REFUSE", None, "REFUSED:" + str(blocked)
+        except Exception as exc:  # a crash is a disagreement with any verdict, never a refusal
+            return "CRASHED", None, f"CRASHED:{type(exc).__name__}:{exc}"
+        return verdict_class(inspection.get("integrity")), inspection.get("integrity"), "ACCEPTED"
+
+
+class TerminalHelpers(JournalHelpers):
+    """Finished-run builders and an every-exit observer shared by the R3 tests (no tests of its own)."""
+
+    def cli(self, argv):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = xr.main(argv)
+        return code, json.loads(output.getvalue())
+
+    def rows_of(self, name) -> list:
+        return xr.AppendLog(self.root / name / "attempts.jsonl").records()
+
+    def interrupted_at(self, name, position):
+        """A run killed in-process mid-call: the generation of order[position] in round 0 reached the server, nothing settled it."""
+        runner, sim = self.make(name, log=False)
+        runner.transport = self.dying(sim, runner.order[position], 1)
+        self.crashes(runner.start)
+        return runner, sim
+
+    def small_bank(self) -> Path:
+        bank = self.root / "r3-small-bank.json"
+        if not bank.exists():
+            manifest = json.loads(self.manifest.read_text())
+            manifest["items"] = manifest["items"][:2]
+            bank.write_text(json.dumps(manifest))
+        return bank
+
+    def r3_profile(self) -> Path:
+        """A profile that passes its own SIMULATION check, so `check --out` can show what the run adds to a PASS."""
+        import test_execution_profile as tp
+        directory = self.root / "r3-profile"
+        if not (directory / "profile.json").exists():
+            directory.mkdir(exist_ok=True)
+            tp.World(directory).save()
+        return directory / "profile.json"
+
+    def terminal_base(self, name, kind, bank=None, budget="50"):
+        """A finished run that ends in `kind`: COMPLETE, or HALTED for that reason at the second item's round-1 call.  Its first
+        slot is retried once after an infra error before generation, so second attempts and what they depend on are on record."""
+        runner, _ = self.journal_runner(name, bank or self.manifest, budget)
+        order = runner.order
+        faults = [{"path": "responses/input_tokens", "item_id": order[0], "occurrence": 1, "fault": "conn_error"}]
+        fault = {"REJECTED": "http_400", "CAPABILITY": "wrong_model", "ATTEMPT_CAP_OVERRUN": "huge_usage", "OTHER": "no_usage"}.get(kind)
+        if fault:
+            faults.append({"path": "responses", "item_id": order[1], "occurrence": 2, "fault": fault})
+        runner.transport = SimulatedResponses(runner.public, answer_for=self.answer, faults=faults)
+        append, fired = xr.AppendLog.append, []
+
+        def disk_full_once(log, record):  # PERSISTENCE: the paid response of that call cannot be written, once
+            if kind == "PERSISTENCE" and record["phase"] == "RESPONSE" and record.get("path") == "responses" \
+                    and record.get("slot") == f"{order[1]}:1" and not fired:
+                fired.append(True)
+                raise OSError(28, "No space left on device (injected)")
+            return append(log, record)
+
+        with mock.patch.object(xr.AppendLog, "append", disk_full_once):
+            result = self.completes(runner.start)
+        self.assertEqual((result["state"], (result["halt"] or {}).get("reason")),
+                         ("COMPLETE", None) if kind == "COMPLETE" else ("HALTED", kind))
+        return runner
+
+    def twin(self, runner):
+        """Another Runner bound to the same run (bank, budget, seed), with a simulated server of its own."""
+        sim = SimulatedResponses(runner.public, answer_for=self.answer)
+        return xr.Runner(runner.out_dir, mode="SIMULATION", bank_manifest=runner.bank_manifest, instructions="synthetic instructions",
+                         budget=str(runner.budget), attempt_cap=CAP, target_rounds=runner.target_rounds, seed=runner.seed,
+                         transport=sim), sim
+
+    @staticmethod
+    def final_settlements(rows, ledger) -> list:
+        """Indexes of settlements nothing on record depends on: the last attempt of each slot."""
+        return [i for i, row in enumerate(rows) if row["phase"] == "SETTLED" and row["attempt"] == ledger["slots"][row["slot"]]["attempts"]]
+
+    def refusal(self, call):
+        """(the refusal's name, the verdict it carries), or ("RETURNED", None)."""
+        try:
+            call()
+        except xr.RunBlocked as blocked:
+            return str(blocked).split(":")[0], getattr(blocked, "integrity", None)
+        except Exception as exc:
+            return f"CRASHED:{type(exc).__name__}", None
+        return "RETURNED", None
+
+    def every_exit(self, runner, *, profile, check_result=None) -> list:
+        """All eight R3 exits on the run directory, in R3_ENTRANCES order, each judged only by what it outputs: the class of the
+        verdict it carries (a refusal made before the gate accepted carries none), the requests that reached any server, and the
+        directory digest before and after.  A file an exit adds is recorded and removed, so every exit sees the same bytes."""
+        out = runner.out_dir
+        files, observations = directory_files(out), []
+        twin, sim = self.twin(runner)
+        server = out / "simulated_server_log.jsonl"
+
+        def sent():
+            return len(sim.requests) + len(getattr(runner.transport, "requests", [])) + (len(server.read_text().splitlines()) if server.exists() else 0)
+
+        def guarded(call):
+            try:
+                return call()
+            except xr.RunBlocked as blocked:
+                carried = getattr(blocked, "integrity", None)
+                return ("REFUSE" if carried is None else verdict_class(carried)), carried, "REFUSED:" + str(blocked)
+            except Exception as exc:
+                return "CRASHED", None, f"CRASHED:{type(exc).__name__}:{exc}"
+
+        def inspected():
+            verdict = xr.inspect_run(out).get("integrity")
+            return verdict_class(verdict), verdict, "ACCEPTED"
+
+        def replayed():
+            verdict = xr.replay_run(out).get("integrity")
+            return verdict_class(verdict), verdict, "RETURNED"
+
+        def closed():  # report: a finished run must never be closed (and so re-reported and re-certified) again
+            return "CLOSED_A_FINISHED_RUN_AGAIN", twin._finalize(None).get("integrity"), "RETURNED"
+
+        def resumed():
+            return "RESUMED_A_FINISHED_RUN", twin.resume().get("integrity"), "RETURNED"
+
+        def certified_by(writer):
+            def call():
+                writer._write_accounting()
+                verdict = json.loads((out / "write_ledger.json").read_text()).get("integrity")
+                return verdict_class(verdict), verdict, "CERTIFIED"
+            return call
+
+        def command(argv):
+            def call():
+                code, printed = self.cli(argv)
+                if code == 2 and printed.get("state") == "BLOCKED":
+                    carried = printed.get("integrity")
+                    return ("REFUSE" if carried is None else verdict_class(carried)), carried, "REFUSED:" + ",".join(printed["reasons"])
+                verdict = printed.get("run_integrity") if argv[0] == "check" else printed.get("integrity")
+                flagged = (verdict or {}).get("status") == "FLAGGED"
+                consistent = code == (4 if flagged else 0) and (argv[0] != "check" or printed.get("status") == ("FLAGGED" if flagged else "PASS"))
+                return (verdict_class(verdict) if consistent else f"EXIT_{code}_STATUS_{printed.get('status')}"), verdict, f"EXIT_{code}"
+            return call
+
+        calls = {"inspect_run": inspected, "replay_run": replayed, "report": closed, "write_ledger": certified_by(twin),
+                 "CLI check --out": command(["check", "--profile", str(profile), "--out", str(out)]),
+                 "CLI replay": command(["replay", "--out", str(out)]), "Runner.resume": resumed,
+                 "Runner API write accounting": certified_by(runner)}
+        for entrance in R3_ENTRANCES:
+            before, requests = directory_digest(out), sent()
+            patch = (mock.patch.object(ep, "check_profile", lambda *a, **k: copy.deepcopy(check_result))
+                     if check_result is not None and entrance == "CLI check --out" else contextlib.nullcontext())
+            with patch:
+                cls, carried, text = guarded(calls[entrance])
+            after = directory_digest(out)
+            row = {"entrance": entrance, "class": cls, "carried": carried, "text": text[:240], "requests": sent() - requests,
+                   "before_sha256": before, "after_sha256": after, "added": [], "altered": []}
+            if after != before:
+                now = {str(p.relative_to(out)) for p in out.rglob("*") if p.is_file()}
+                row["added"] = sorted(now - set(files))
+                row["altered"] = sorted(name for name in files if name not in now or (out / name).read_bytes() != files[name])
+                restore_directory(out, files)
+            observations.append(row)
+        return observations
+
+    @staticmethod
+    def exit_problems(observations, expected, *, certified) -> list:
+        """What is wrong with each exit, given the oracle's class: a refusal is the gate's own, everywhere, with no write and no
+        request; otherwise every exit carries the gate's verdict verbatim, read-only exits write nothing, a finished run is
+        never closed or resumed again, and a write ledger is written once, alone, and only where none exists."""
+        reference, problems = observations[0], []
+        for row in observations:
+            wrong = []
+            if row["class"] != expected:
+                wrong.append("CLASS")
+            if row["requests"]:
+                wrong.append("REQUESTS")
+            if expected == "REFUSE":
+                if row["before_sha256"] != row["after_sha256"]:
+                    wrong.append("WROTE")
+                if row["text"] != reference["text"]:
+                    wrong.append("NOT_THE_GATE_REFUSAL")
+            else:
+                if row["carried"] != reference["carried"] or row["carried"] is None:
+                    wrong.append("VERDICT_NOT_CARRIED")
+                if row["entrance"] in R3_WRITERS and not certified:
+                    if (row["text"], row["added"], row["altered"]) != ("CERTIFIED", ["write_ledger.json"], []):
+                        wrong.append("NOT_CERTIFIED_ONCE")
+                elif row["before_sha256"] != row["after_sha256"]:
+                    wrong.append("WROTE")
+                if row["entrance"] in ("report", "Runner.resume") and not row["text"].startswith("REFUSED:RUN_IS_"):
+                    wrong.append("FINISHED_RUN_REOPENED")
+                if row["entrance"] in R3_WRITERS and certified and not row["text"].startswith("REFUSED:WRITE_LEDGER_ALREADY_CERTIFIED"):
+                    wrong.append("CERTIFIED_AGAIN")
+            if wrong:
+                problems.append((row["entrance"], wrong, row["class"], row["text"][:120]))
+        return problems
+
+
+class TerminalOracleTests(TerminalHelpers, RunnerCase):
+    """R3-4: the R2 oracle extended to every finished state, and compared with all eight exits, not only the gate."""
+
+    STRIDE = 37  # the all-exit pass: every delete-1 case, every delete-2 case that removes two fact records, and every 37th other
+
+    @staticmethod
+    def new_tally(**extra) -> dict:
+        return JournalOracleTests.new_tally(exit_cases=0, exit_disagreements=0, exit_causes={}, exit_samples=[], bases={}, **extra)
+
+    def real_judge(self, out):
+        """The gate through the real file reads: the damaged rows are written as the runner writes them, then restored."""
+        path = out / "attempts.jsonl"
+
+        def judge(rows):
+            original = path.read_bytes()
+            path.write_text(journal_text(rows))
+            try:
+                verdict = xr.inspect_run(out).get("integrity")
+            except xr.RunBlocked as blocked:
+                return "REFUSE", None, "REFUSED:" + str(blocked)
+            except Exception as exc:
+                return "CRASHED", None, f"CRASHED:{type(exc).__name__}:{exc}"
+            finally:
+                path.write_bytes(original)
+            return verdict_class(verdict), verdict, "ACCEPTED"
+        return judge
+
+    def gate_compare(self, judge, state, ledger, kind, family, rows, index, tally, *, forged_too=True, certified=None) -> None:
+        """Oracle vs the gate on `rows` and, when `forged_too`, plus a forged reconciled record (of an absent fact, or of a fact the
+        ledger holds) and plus a forged RESUME note.  An accepted verdict must also name exactly the oracle's missing facts and
+        count its reconciled records; a RESUME note may change nothing."""
+        truth = oracle_truth(ledger)
+        missing = sorted(oracle_missing(ledger, rows))
+        claims = [fact_name(f) for f in missing] + [fact_name(f) for f in sorted(set(truth) - set(missing))]
+        variants = [("none", [])]
+        if forged_too:
+            refill = missing[0] if missing else sorted(truth)[index % len(truth)]
+            variants += [("reconciled-absent", [absent_records(ledger)[index % 3]]), ("reconciled-present", [forged_record(ledger, refill)])]
+        for forged_kind, forged in variants:
+            plain = None
+            for k in ((None, 1 + index % 8) if forged_too else (None,)):
+                variant = rows + forged + ([] if k is None else [forged_resume(claims, k)])
+                expected = oracle_terminal(state, ledger, variant, certified)
+                cls, verdict, text = judge(variant)
+                tally["comparisons"] += 1
+                tally["oracle"][expected] = tally["oracle"].get(expected, 0) + 1
+                tally["product"][cls] = tally["product"].get(cls, 0) + 1
+                cause = None
+                if cls != expected:
+                    cause = f"{expected}->{cls}"
+                elif cls != "REFUSE":
+                    named = sorted(fact_name(f) for f in oracle_missing(ledger, variant))
+                    if verdict is None:
+                        cause = "NO_VERDICT_RETURNED"
+                    elif (verdict.get("state"), sorted(verdict.get("missing") or []), verdict.get("missing_count"), verdict.get("reconciled")) \
+                            != (state["state"], named, len(named), oracle_reconciled(variant)):
+                        cause = "VERDICT_CONTENT"
+                if cause:
+                    tally["disagreements"] += 1
+                    tally["disagreement_causes"][cause] = tally["disagreement_causes"].get(cause, 0) + 1
+                    if len(tally["samples"]) < 12:
+                        tally["samples"].append({"base": kind, "family": family, "case": index, "forged": forged_kind, "resume_claims": k,
+                                                 "oracle": expected, "product": text[:160], "verdict": verdict})
+                if k is None:
+                    plain = (cls, verdict, text)
+                elif (cls, verdict, text) != plain:
+                    tally["resume_changed_outcome"] += 1
+                    if len(tally["i4_samples"]) < 6:
+                        tally["i4_samples"].append({"base": kind, "case": index, "with_resume": text[:120], "without": plain[2][:120]})
+
+    def exit_compare(self, runner, state, ledger, kind, family, rows, tally, *, profile, check_result, certified=None) -> None:
+        out = runner.out_dir
+        expected = oracle_terminal(state, ledger, rows, certified)
+        path = out / "attempts.jsonl"
+        original = path.read_bytes()
+        path.write_text(journal_text(rows))
+        try:
+            observations = self.every_exit(runner, profile=profile, check_result=check_result)
+        finally:
+            path.write_bytes(original)
+        tally["exit_cases"] += 1
+        tally["exit_oracle"] = tally.get("exit_oracle", {})
+        tally["exit_oracle"][expected] = tally["exit_oracle"].get(expected, 0) + 1
+        for entrance, wrong, cls, text in self.exit_problems(observations, expected, certified=certified is not None):
+            tally["exit_disagreements"] += 1
+            for cause in wrong:
+                key = f"{entrance}:{cause}"
+                tally["exit_causes"][key] = tally["exit_causes"].get(key, 0) + 1
+            if len(tally["exit_samples"]) < 16:
+                tally["exit_samples"].append({"base": kind, "family": family, "certified": certified is not None, "entrance": entrance,
+                                              "oracle": expected, "product": cls, "wrong": wrong, "text": text})
+
+    def small_finished_bases(self):
+        """The six small finished runs (two items, three rounds), uncertified, then R2's small running base: (kind, runner or
+        None, out, rows, ledger, state).  Uncertified here: certified journals are the random tests' first half."""
+        bank, budget = self.small_bank(), str(2 * 2 * CAP * 3)
+        bases = [(kind, self.terminal_base("t-" + kind.lower(), kind, bank, budget)) for kind in TERMINAL_KINDS] + [("RUNNING", None)]
+        for kind, runner in bases:
+            out = self.small_base() if runner is None else runner.out_dir
+            if (out / "write_ledger.json").exists():
+                (out / "write_ledger.json").unlink()
+            rows, ledger = xr.AppendLog(out / "attempts.jsonl").records(), json.loads((out / "ledger.json").read_text())
+            self.assertEqual(journal_text(rows), (out / "attempts.jsonl").read_text())  # the harness writes what the runner writes
+            yield kind, runner, out, rows, ledger, json.loads((out / "run_state.json").read_text())
+
+    def large_finished_bases(self):
+        """The six large finished runs (eight items, five rounds), as they finished, certified, with 520 seeded random damages each."""
+        for kind in TERMINAL_KINDS:
+            runner = self.terminal_base("big-" + kind.lower(), kind)
+            out = runner.out_dir
+            rows, ledger = xr.AppendLog(out / "attempts.jsonl").records(), json.loads((out / "ledger.json").read_text())
+            self.assertEqual(journal_text(rows), (out / "attempts.jsonl").read_text())
+            rng = random.Random(f"{ORACLE_SEED}:{kind}")
+            yield kind, runner, out, rows, ledger, json.loads((out / "run_state.json").read_text()), [random_damage(rng, ledger, rows) for _ in range(520)]
+
+    def test_R3_oracle_agrees_with_the_gate_on_every_single_and_double_damage_of_each_finished_state(self):
+        tally = self.new_tally(test="exhaustive-small-gate")
+        for kind, runner, out, rows, ledger, state in self.small_finished_bases():
+            with R3Gate(out) as gate:
+                base = gate(rows)
+                tally["bases"][kind] = {"records": len(rows), "ledger_facts": len(oracle_truth(ledger)), "oracle": oracle_terminal(state, ledger, rows),
+                                        "product": base[0], "verdict_status": (base[1] or {}).get("status"), "cases": 0}
+                for index, (family, damaged) in enumerate(exhaustive_damage(rows)):
+                    tally["families"][family] = tally["families"].get(family, 0) + 1
+                    tally["bases"][kind]["cases"] += 1
+                    self.gate_compare(gate, state, ledger, kind, family, damaged, index, tally)
+        tally["cases"] = sum(tally["families"].values())
+        print("R3_ORACLE " + json.dumps(tally, sort_keys=True))
+        self.assertEqual({kind: (b["oracle"], b["product"]) for kind, b in tally["bases"].items()},
+                         {kind: ("ACCEPT", "ACCEPT") for kind in TERMINAL_KINDS + ("RUNNING",)})
+        self.assertGreater(min(tally["oracle"].get(v, 0) for v in ("ACCEPT", "REFUSE", "FLAG_PERSISTENCE", "FLAG_RESUMABLE")), 0)
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+        self.assertEqual((tally["resume_changed_outcome"], tally["i4_samples"]), (0, []))
+
+    def test_R3_oracle_agrees_with_every_exit_on_single_and_double_damage_of_each_finished_state(self):
+        profile = self.r3_profile()
+        check_result = ep.check_profile(profile)  # the profile half of `check` does not depend on the run: computed once, for speed
+        tally = self.new_tally(test="exhaustive-small-exits", stride=self.STRIDE)
+        for kind, runner, out, rows, ledger, state in self.small_finished_bases():
+            if runner is None:
+                continue  # a running run's write exits would carry it on: its exits are R2's, its verdicts the gate test's
+            facts = sum(row["phase"] in ("ROUND_RESERVED", "START", "SETTLED") for row in rows)
+            tally["bases"][kind] = {"records": len(rows), "exit_cases": 0}
+            for index, (family, damaged) in enumerate(exhaustive_damage(rows)):
+                two_facts = family == "delete-2" and sum(r["phase"] in ("ROUND_RESERVED", "START", "SETTLED") for r in damaged) == facts - 2
+                if family == "delete-1" or two_facts or index % self.STRIDE == 0:
+                    tally["bases"][kind]["exit_cases"] += 1
+                    tally["families"][family] = tally["families"].get(family, 0) + 1
+                    self.exit_compare(runner, state, ledger, kind, family, damaged, tally, profile=profile, check_result=check_result)
+        print("R3_ORACLE " + json.dumps(tally, sort_keys=True))
+        self.assertGreaterEqual(tally["exit_cases"], 600)
+        self.assertGreater(min(tally["exit_oracle"].get(v, 0) for v in ("ACCEPT", "REFUSE", "FLAG_PERSISTENCE")), 0)
+        self.assertEqual((tally["exit_disagreements"], tally["exit_samples"]), (0, []))
+
+    def test_R3_oracle_agrees_with_the_gate_on_seeded_random_damage_of_each_large_finished_state_certified_or_not(self):
+        tally = self.new_tally(test="random-large-gate", seed=f"{ORACLE_SEED}:<kind>", cross_check={})
+        for kind, runner, out, rows, ledger, state, cases in self.large_finished_bases():
+            tally["bases"][kind] = {"records": len(rows), "cases": len(cases)}
+            judge = self.real_judge(out)  # certified: the write ledger the run wrote is in place and lists exactly these records
+            for index, (family, damaged) in enumerate(cases):
+                tally["families"][family.split("+")[0]] = tally["families"].get(family.split("+")[0], 0) + 1
+                self.gate_compare(judge, state, ledger, kind, family, damaged, index, tally, forged_too=False, certified=rows)
+            (out / "write_ledger.json").unlink()  # uncertified: the same damage, plus forged records and notes, in memory
+            with R3Gate(out) as gate:
+                for index, (family, damaged) in enumerate(cases):
+                    self.gate_compare(gate, state, ledger, kind, family, damaged, index, tally)
+                mocked = [gate(damaged) for _, damaged in cases[:40]]
+            unpatched = [self.real_judge(out)(damaged) for _, damaged in cases[:40]]
+            tally["cross_check"][kind] = mocked == unpatched
+        tally["cases"] = sum(b["cases"] for b in tally["bases"].values())
+        print("R3_ORACLE " + json.dumps(tally, sort_keys=True))
+        self.assertGreaterEqual(min(b["cases"] for b in tally["bases"].values()), 500)
+        self.assertEqual(tally["cross_check"], {kind: True for kind in TERMINAL_KINDS})
+        self.assertGreater(min(tally["oracle"].get(v, 0) for v in ("ACCEPT", "REFUSE", "FLAG_PERSISTENCE")), 0)
+        self.assertEqual((tally["disagreements"], tally["samples"]), (0, []))
+        self.assertEqual((tally["resume_changed_outcome"], tally["i4_samples"]), (0, []))
+
+    def test_R3_oracle_agrees_with_every_exit_on_seeded_random_damage_of_each_large_finished_state_certified_or_not(self):
+        profile = self.r3_profile()
+        check_result = ep.check_profile(profile)
+        tally = self.new_tally(test="random-large-exits", seed=f"{ORACLE_SEED}:<kind>", per_variant=24)
+        for kind, runner, out, rows, ledger, state, cases in self.large_finished_bases():
+            tally["bases"][kind] = {"records": len(rows), "certified_exit_cases": 24, "uncertified_exit_cases": 24}
+            for family, damaged in cases[:24]:
+                self.exit_compare(runner, state, ledger, kind, family, damaged, tally, profile=profile, check_result=check_result, certified=rows)
+            (out / "write_ledger.json").unlink()
+            for family, damaged in cases[:24]:
+                self.exit_compare(runner, state, ledger, kind, family, damaged, tally, profile=profile, check_result=check_result)
+        print("R3_ORACLE " + json.dumps(tally, sort_keys=True))
+        self.assertEqual(tally["exit_cases"], len(TERMINAL_KINDS) * 48)
+        self.assertGreater(min(tally["exit_oracle"].get(v, 0) for v in ("ACCEPT", "REFUSE", "FLAG_PERSISTENCE")), 0)
+        self.assertEqual((tally["exit_disagreements"], tally["exit_samples"]), (0, []))
+
+
+class TerminalMatrixTests(TerminalHelpers, RunnerCase):
+    """R3-2: {COMPLETE, HALTED for each reason} x {0..4 missing settlements} x {all eight exits} x {journal changed after a clean
+    finish without its write ledger, journal changed after the write ledger was written}."""
+
+    @staticmethod
+    def expectation(kind, source, missing) -> str:
+        if missing == 0:
+            return "CLEAN"
+        if missing == 4:
+            return "REFUSE:ATTEMPTS_BEHIND_LEDGER"
+        if kind != "PERSISTENCE":
+            return "REFUSE:TERMINAL_RUN_JOURNAL_INCOMPLETE"
+        return "REFUSE:WRITE_LEDGER_MISMATCH:attempts.jsonl" if source == "certified" else "FLAGGED"
+
+    def cell_problems(self, observations, expectation, *, kind, missing, certified) -> list:
+        if expectation.startswith("REFUSE:"):
+            problems = self.exit_problems(observations, "REFUSE", certified=certified)
+            if not observations[0]["text"].startswith("REFUSED:" + expectation[len("REFUSE:"):]):
+                problems.append(("inspect_run", ["REASON"], observations[0]["class"], observations[0]["text"][:120]))
+            return problems
+        cls = "FLAG_PERSISTENCE" if expectation == "FLAGGED" else "ACCEPT"
+        problems = self.exit_problems(observations, cls, certified=certified)
+        verdict = observations[0]["carried"] or {}
+        want = (("FLAGGED", [PERSISTENCE_FLAG]) if expectation == "FLAGGED" else ("CLEAN", []), missing, "HALTED" if kind != "COMPLETE" else "COMPLETE")
+        if ((verdict.get("status"), verdict.get("flags")), verdict.get("missing_count"), verdict.get("state")) != want:
+            problems.append(("inspect_run", ["VERDICT_CONTENT"], observations[0]["class"], json.dumps(verdict)[:120]))
+        return problems
+
+    def test_R3_terminal_matrix_every_finished_state_every_missing_count_every_exit_both_sources(self):
+        profile = self.r3_profile()
+        failures, cells = [], 0
+        for kind in TERMINAL_KINDS:
+            runner = self.terminal_base("m-" + kind.lower(), kind)
+            out = runner.out_dir
+            rows, ledger = xr.AppendLog(out / "attempts.jsonl").records(), json.loads((out / "ledger.json").read_text())
+            settled = self.final_settlements(rows, ledger)
+            self.assertGreaterEqual(len(settled), 4, kind)
+            certificate, journal = (out / "write_ledger.json").read_bytes(), (out / "attempts.jsonl").read_bytes()
+            for source in ("certified", "uncertified"):
+                if source == "uncertified":
+                    (out / "write_ledger.json").unlink()
+                for missing in range(5):
+                    dropped = set(settled[len(settled) - missing:])
+                    (out / "attempts.jsonl").write_text(journal_text([r for i, r in enumerate(rows) if i not in dropped]))
+                    expectation = self.expectation(kind, source, missing)
+                    observations = self.every_exit(runner, profile=profile)
+                    problems = self.cell_problems(observations, expectation, kind=kind, missing=missing, certified=source == "certified")
+                    if expectation == "FLAGGED":  # once certified with its flags, it is certified once and stays flagged
+                        twin, sim = self.twin(runner)
+                        files = directory_files(out)
+                        first = self.refusal(twin._write_accounting)
+                        written = directory_files(out)
+                        again = self.refusal(twin._write_accounting)
+                        try:
+                            later = xr.inspect_run(out)
+                        except xr.RunBlocked as blocked:
+                            later = {"refused": str(blocked)}
+                        carried = observations[0]["carried"]
+                        if (first, again, directory_files(out), later.get("integrity"), later.get("certificate"), sim.requests) != (
+                                ("RETURNED", None), ("WRITE_LEDGER_ALREADY_CERTIFIED", carried), written, carried, "VERIFIED", []):
+                            problems.append(("write_ledger", ["NOT_WRITE_ONCE"], "", f"{first} {again} {later.get('refused', '')}"[:160]))
+                        restore_directory(out, files)
+                    for row in observations:
+                        cells += 1
+                        print("R3_MATRIX " + json.dumps({"state": kind, "source": source, "missing": missing, "expected": expectation,
+                                                         "entrance": row["entrance"], "outcome": row["text"], "class": row["class"],
+                                                         "flags": (row["carried"] or {}).get("flags"), "requests": row["requests"],
+                                                         "before_sha256": row["before_sha256"], "after_sha256": row["after_sha256"],
+                                                         "added": row["added"]}, sort_keys=True))
+                    failures += [(kind, source, missing) + problem for problem in problems]
+                (out / "attempts.jsonl").write_bytes(journal)
+            (out / "write_ledger.json").write_bytes(certificate)
+        self.assertEqual(cells, len(TERMINAL_KINDS) * 2 * 5 * len(R3_ENTRANCES))
+        self.assertEqual(failures, [])
+
+
+class R3IntegrityTests(TerminalHelpers, RunnerCase):
+    """R3-1/R3-3/D0-3/D0-5: named regressions for the terminal verdict, its carriage, the close, and the write-once ledger."""
+
+    def drop(self, out, indexes) -> list:
+        rows = xr.AppendLog(out / "attempts.jsonl").records()
+        (out / "attempts.jsonl").write_text(journal_text([r for i, r in enumerate(rows) if i not in set(indexes)]))
+        return [rows[i] for i in indexes]
+
+    def test_R3B_only_a_second_regular_link_of_the_write_ledger_is_exempt(self):
+        self.completes(lambda: self.run_it("r3b-publication"))
+        out = self.root / "r3b-publication"
+        certificate = out / "write_ledger.json"
+        profile = self.r3_profile()
+        genuine = out / ("write_ledger.json." + "a" * 32 + ".tmp")
+        os.link(certificate, genuine)
+        before = directory_digest(out)
+        for call in (lambda: xr.inspect_run(out), lambda: xr.replay_run(out)):
+            self.assertEqual(self.completes(call)["certificate"], "VERIFIED")
+            self.assertEqual(directory_digest(out), before)
+        for argv, key in ((["check", "--profile", str(profile), "--out", str(out)], "run_certificate"),
+                          (["replay", "--out", str(out)], "certificate")):
+            code, accepted = self.completes(lambda: self.cli(argv))
+            self.assertEqual((code, accepted[key]), (0, "VERIFIED"))
+            self.assertEqual(directory_digest(out), before)
+        genuine.unlink()
+
+        elsewhere = self.root / "r3b-other-file"
+        elsewhere.write_bytes(certificate.read_bytes())
+        cases = (
+            ("equal-content copy", "write_ledger.json." + "b" * 32 + ".tmp", "copy"),
+            ("symlink to certificate", "write_ledger.json." + "c" * 32 + ".tmp", "symlink-certificate"),
+            ("symlink elsewhere", "write_ledger.json." + "d" * 32 + ".tmp", "symlink-elsewhere"),
+            ("hard link in subdirectory", "nested/write_ledger.json." + "e" * 32 + ".tmp", "hardlink"),
+            ("short name", "write_ledger.json." + "f" * 31 + ".tmp", "hardlink"),
+            ("long name", "write_ledger.json." + "f" * 33 + ".tmp", "hardlink"),
+            ("uppercase name", "write_ledger.json." + "A" * 32 + ".tmp", "hardlink"),
+            ("different content", "write_ledger.json." + "0" * 32 + ".tmp", "different"),
+            ("unrelated file", ".DS_Store", "different"),
+        )
+        observed, expected = {}, {}
+        for label, relative, kind in cases:
+            extra = out / relative
+            extra.parent.mkdir(exist_ok=True)
+            if kind == "hardlink":
+                os.link(certificate, extra)
+            elif kind.startswith("symlink"):
+                extra.symlink_to(certificate if kind == "symlink-certificate" else elsewhere)
+            else:
+                extra.write_bytes(certificate.read_bytes() if kind == "copy" else b"not the write ledger")
+            try:
+                before = directory_digest(out)
+                reason = "WRITE_LEDGER_UNLISTED:" + relative
+                texts = []
+                for call in (lambda: xr.inspect_run(out), lambda: xr.replay_run(out)):
+                    try:
+                        call()
+                        texts.append("RETURNED")
+                    except xr.RunBlocked as blocked:
+                        texts.append(str(blocked))
+                    except Exception as exc:  # a crash is another observation, never a refusal
+                        texts.append(f"CRASHED:{type(exc).__name__}")
+                for argv in (["check", "--profile", str(profile), "--out", str(out)], ["replay", "--out", str(out)]):
+                    code, printed = self.completes(lambda: self.cli(argv))
+                    texts.append((code, printed.get("state"), reason in printed.get("reasons", [])))
+                observed[label] = (texts, directory_digest(out) == before)
+            finally:
+                extra.unlink()
+                if extra.parent != out:
+                    extra.parent.rmdir()
+            expected[label] = ([reason, reason, (2, "BLOCKED", True), (2, "BLOCKED", True)], True)
+        self.assertEqual(observed, expected)  # one assertion outside any subTest: the mutation classifier only sees those
+
+    def test_R3_a_finished_run_lacking_a_fact_is_refused_unless_a_persistence_halt_left_it_which_is_flagged(self):
+        bank, budget = self.small_bank(), str(2 * 2 * CAP * 3)
+        observed, expected = {}, {}
+        for kind in TERMINAL_KINDS:
+            runner = self.terminal_base("f1-" + kind.lower(), kind, bank, budget)
+            out = runner.out_dir
+            (out / "write_ledger.json").unlink()  # the gate's own rule, without the write ledger's help
+            clean = xr.inspect_run(out).get("integrity") or {}
+            rows, ledger = xr.AppendLog(out / "attempts.jsonl").records(), json.loads((out / "ledger.json").read_text())
+            lost = self.drop(out, [self.final_settlements(rows, ledger)[-1]])[0]
+            try:
+                verdict = xr.inspect_run(out).get("integrity") or {}
+                outcome = ("ACCEPTED", verdict.get("status"), verdict.get("flags"), verdict.get("missing"))
+            except xr.RunBlocked as blocked:
+                outcome = ("REFUSED", str(blocked).split(":")[0])
+            observed[kind] = ((clean.get("status"), clean.get("flags"), clean.get("missing")), outcome)
+            expected[kind] = (("CLEAN", [], []), ("ACCEPTED", "FLAGGED", [PERSISTENCE_FLAG], [f"SETTLED:{lost['slot']}:{lost['attempt']}"])
+                              if kind == "PERSISTENCE" else ("REFUSED", "TERMINAL_RUN_JOURNAL_INCOMPLETE"))
+        print("R3_GATE " + json.dumps(observed, sort_keys=True))
+        self.assertEqual(observed, expected)
+
+    def test_R3_every_exit_carries_the_one_gate_verdict_verbatim(self):
+        bank, budget, profile = self.small_bank(), str(2 * 2 * CAP * 3), self.r3_profile()
+        # a PERSISTENCE halt with two settlements it never wrote, not yet certified
+        runner = self.terminal_base("f2-persist", "PERSISTENCE", bank, budget)
+        out = runner.out_dir
+        (out / "write_ledger.json").unlink()
+        rows, ledger = xr.AppendLog(out / "attempts.jsonl").records(), json.loads((out / "ledger.json").read_text())
+        self.drop(out, self.final_settlements(rows, ledger)[-2:])
+        # Every direct product call below goes through `completes`: a refusal or crash where a value is expected is a failed
+        # assertion, never an ERROR (the mutation rule counts assertions only).
+        gate = self.completes(lambda: xr.inspect_run(out)).get("integrity") or {}
+        self.assertEqual((gate.get("status"), gate.get("flags"), gate.get("missing_count")), ("FLAGGED", [PERSISTENCE_FLAG], 2))
+        twin, sim = self.twin(runner)
+        carried = {"replay_run": self.completes(lambda: xr.replay_run(out)).get("integrity")}
+        code, printed = self.completes(lambda: self.cli(["check", "--profile", str(profile), "--out", str(out)]))
+        carried["CLI check --out"] = (code, printed.get("status"), printed.get("run_integrity"))
+        code, printed = self.completes(lambda: self.cli(["replay", "--out", str(out)]))
+        carried["CLI replay"] = (code, printed.get("integrity"))
+        carried["report"] = self.refusal(lambda: twin._finalize(None))
+        carried["Runner.resume"] = self.refusal(twin.resume)
+        carried["write_ledger"] = self.refusal(twin._write_accounting)
+        carried["write_ledger content"] = json.loads((out / "write_ledger.json").read_text()).get("integrity") if (out / "write_ledger.json").exists() else None
+        carried["write_ledger again"] = self.refusal(twin._write_accounting)
+        replayed = self.completes(lambda: xr.replay_run(out))
+        carried["replay_run after certification"] = (replayed.get("integrity"), replayed.get("certificate"))
+        self.assertEqual(carried, {"replay_run": gate, "CLI check --out": (4, "FLAGGED", gate), "CLI replay": (4, gate),
+                                   "report": ("RUN_IS_HALTED", gate), "Runner.resume": ("RUN_IS_HALTED", gate), "write_ledger": ("RETURNED", None),
+                                   "write_ledger content": gate, "write_ledger again": ("WRITE_LEDGER_ALREADY_CERTIFIED", gate),
+                                   "replay_run after certification": (gate, "VERIFIED")})
+        self.assertEqual(sim.requests, [])
+        # a run that crashed in the START window: the gap it resumed with is noted, and the record written back stays flagged
+        name = "f2-backfill"
+        first, _ = self.make(name, log=False)
+        with self.crash_on("START"):
+            self.crashes(first.start)
+        out = self.root / name
+        gap = self.completes(lambda: xr.inspect_run(out)).get("integrity") or {}
+        code, printed = self.completes(lambda: self.cli(["check", "--profile", str(profile), "--out", str(out)]))
+        self.assertEqual((gap.get("state"), gap.get("flags"), gap.get("missing_count"), code, printed.get("status"), printed.get("run_integrity")),
+                         ("RUNNING", [RESUMABLE_FLAG], 1, 4, "FLAGGED", gap))
+        resumed, sim2 = self.make(name, log=False)
+        result = self.completes(resumed.resume)
+        final = self.completes(lambda: xr.inspect_run(out)).get("integrity") or {}
+        self.assertEqual((final.get("state"), final.get("status"), final.get("flags"), final.get("reconciled"), final.get("missing")),
+                         ("COMPLETE", "FLAGGED", ["RECONCILED_FROM_LEDGER"], 1, []))
+        note = [r for r in xr.AppendLog(out / "attempts.jsonl").records() if r["phase"] == "RESUME"][-1]
+        replayed = self.completes(lambda: xr.replay_run(out))
+        code, printed = self.completes(lambda: self.cli(["check", "--profile", str(profile), "--out", str(out)]))
+        code2, printed2 = self.completes(lambda: self.cli(["replay", "--out", str(out)]))
+        self.assertEqual({"RESUME note": note["reconciliation"]["ledger_ahead"], "Runner.resume": result.get("integrity"),
+                          "report.json": json.loads((out / "report.json").read_text()).get("integrity"),
+                          "write_ledger.json": json.loads((out / "write_ledger.json").read_text()).get("integrity"),
+                          "replay_run": replayed.get("integrity"), "replay_run report": (replayed.get("report") or {}).get("integrity"),
+                          "CLI check --out": (code, printed.get("status"), printed.get("run_integrity")), "CLI replay": (code2, printed2.get("integrity"))},
+                         {"RESUME note": gap.get("missing"), "Runner.resume": final, "report.json": final, "write_ledger.json": final, "replay_run": final,
+                          "replay_run report": final, "CLI check --out": (4, "FLAGGED", final), "CLI replay": (4, final)})
+        self.assertEqual(len([r for r in sim2.requests if r["path"] == "responses"]), 39)
+
+    def test_R3_check_out_prints_the_run_verdict_and_is_never_a_plain_pass_for_a_run_the_gate_flags(self):
+        profile = self.r3_profile()
+        self.run_it("f5-clean")
+        runner = self.terminal_base("f5-persist", "PERSISTENCE", self.small_bank(), str(2 * 2 * CAP * 3))
+        (runner.out_dir / "write_ledger.json").unlink()
+        rows, ledger = xr.AppendLog(runner.out_dir / "attempts.jsonl").records(), json.loads((runner.out_dir / "ledger.json").read_text())
+        self.drop(runner.out_dir, self.final_settlements(rows, ledger)[-1:])
+        self.run_it("f5-damaged")
+        self.drop(self.root / "f5-damaged", [max(self.final_settlements(self.rows_of("f5-damaged"), self.ledger("f5-damaged")))])
+        gap, _ = self.make("f5-gap", log=False)
+        with self.crash_on("SETTLED"):
+            self.crashes(gap.start)
+        observed = {}
+        for name in ("f5-clean", "f5-persist", "f5-damaged", "f5-gap"):
+            code, printed = self.cli(["check", "--profile", str(profile), "--out", str(self.root / name)])
+            verdict = printed.get("run_integrity") or {}
+            observed[name] = (code, printed.get("status") or printed.get("state"), verdict.get("status"), verdict.get("flags"),
+                              [r.split(":")[0] for r in printed.get("reasons", [])])
+        self.assertEqual(observed, {"f5-clean": (0, "PASS", "CLEAN", [], []), "f5-persist": (4, "FLAGGED", "FLAGGED", [PERSISTENCE_FLAG], []),
+                                    "f5-damaged": (2, "BLOCKED", None, None, ["TERMINAL_RUN_JOURNAL_INCOMPLETE"]),
+                                    "f5-gap": (4, "FLAGGED", "FLAGGED", [RESUMABLE_FLAG], [])})
+
+    def test_R3_a_write_ledger_is_written_once_and_a_reopened_certified_run_is_never_certified_again(self):
+        _, runner, _ = self.run_it("f3")
+        out = self.root / "f3"
+        certificate, before = (out / "write_ledger.json").read_bytes(), directory_digest(out)
+        twin, sim = self.make("f3", log=False)
+        refused = {"fresh writer": self.refusal(twin._write_accounting)[0], "the run's own writer": self.refusal(runner._write_accounting)[0],
+                   "close again": self.refusal(lambda: twin._finalize(None))[0]}
+        self.assertEqual(refused, {"fresh writer": "WRITE_LEDGER_ALREADY_CERTIFIED", "the run's own writer": "WRITE_LEDGER_ALREADY_CERTIFIED",
+                                   "close again": "RUN_IS_COMPLETE"})
+        self.assertEqual((directory_digest(out), (out / "write_ledger.json").read_bytes(), sim.requests), (before, certificate, []))
+        self.interrupted_at("f3-open", 3)
+        open_before = directory_digest(self.root / "f3-open")
+        writer, _ = self.make("f3-open", log=False)
+        self.assertEqual(self.refusal(writer._write_accounting)[0], "WRITE_LEDGER_RUN_NOT_TERMINAL")
+        self.assertEqual(directory_digest(self.root / "f3-open"), open_before)
+        # a certified run reopened by rewriting its state cannot resume; the close retains its second defence
+        (out / "run_state.json").write_text(xr.canonical({"state": "RUNNING", "t": 0}))
+        self.assertIn("WRITE_LEDGER_EXISTS_NOT_RECERTIFIED", (xr.inspect_run(out).get("integrity") or {}).get("flags", []))
+        again, sim2 = self.make("f3", log=False)
+        reopened_before = directory_digest(out)
+        reason, verdict = self.refusal(again.resume)
+        self.assertEqual(reason, "RUN_IS_CERTIFIED")
+        self.assertIn("WRITE_LEDGER_EXISTS_NOT_RECERTIFIED", (verdict or {}).get("flags", []))
+        self.assertEqual((directory_digest(out), (out / "write_ledger.json").read_bytes(), sim2.requests), (reopened_before, certificate, []))
+        closed = self.completes(lambda: runner._finalize(None))
+        self.assertEqual((closed["state"], (out / "write_ledger.json").read_bytes(), sim2.requests), ("COMPLETE", certificate, []))
+        self.assertIn("WRITE_LEDGER_EXISTS_NOT_RECERTIFIED", (closed.get("integrity") or {}).get("flags", []))
+        self.assertIn("WRITE_LEDGER_EXISTS_NOT_RECERTIFIED", (json.loads((out / "report.json").read_text()).get("integrity") or {}).get("flags", []))
+        self.assertBlocks("WRITE_LEDGER_MISMATCH", lambda: xr.inspect_run(out))
+
+    def test_R3_any_byte_changed_after_certification_is_refused_by_every_read_only_exit(self):
+        profile = self.r3_profile()
+        self.run_it("f4")
+        out = self.root / "f4"
+        files, rows = directory_files(out), self.rows_of("f4")
+        listing = json.loads(files["write_ledger.json"])
+        request = next(i for i, r in enumerate(rows) if r["phase"] == "REQUEST")
+        # a settlement and the next slot's start: causally unrelated, so the R2 rules accept the swap and only the certificate sees it
+        a = max(i for i in range(len(rows) - 1) if rows[i]["phase"] == "SETTLED" and rows[i + 1]["phase"] == "START")
+        swapped = list(rows)
+        swapped[a], swapped[a + 1] = rows[a + 1], rows[a]
+        report = json.loads(files["report.json"])
+        changes = {
+            "journal: a request record deleted": ("attempts.jsonl", journal_text(rows[:request] + rows[request + 1:]), "WRITE_LEDGER_MISMATCH:attempts.jsonl"),
+            "journal: a RESUME note appended": ("attempts.jsonl", journal_text(rows + [forged_resume([], 1)]), "WRITE_LEDGER_MISMATCH:attempts.jsonl"),
+            "journal: two unrelated settlements swapped": ("attempts.jsonl", journal_text(swapped), "WRITE_LEDGER_MISMATCH:attempts.jsonl"),
+            "journal: the same records, spaced differently": ("attempts.jsonl", "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+                                                              "WRITE_LEDGER_MISMATCH:attempts.jsonl"),
+            "ledger: the same content, formatted differently": ("ledger.json", json.dumps(json.loads(files["ledger.json"])), "WRITE_LEDGER_MISMATCH:ledger.json"),
+            "report edited": ("report.json", xr.canonical({**report, "classification": ["EDITED"]}), "WRITE_LEDGER_MISMATCH:report.json"),
+            "runs edited": ("runs.json", xr.canonical({}), "WRITE_LEDGER_MISMATCH:runs.json"),
+            "state rewritten": ("run_state.json", xr.canonical({"state": "COMPLETE", "t": 1.0}), "WRITE_LEDGER_MISMATCH:run_state.json"),
+            "a file added": ("notes.txt", "added after the run", "WRITE_LEDGER_UNLISTED:notes.txt"),
+            "a listed file removed": ("runs.json", None, "WRITE_LEDGER_MISMATCH:runs.json"),
+            "the certificate's verdict edited": ("write_ledger.json", xr.canonical({**listing, "integrity": {**listing.get("integrity", {}), "status": "EDITED"}}),
+                                                 "WRITE_LEDGER_INTEGRITY_MISMATCH"),
+            "the certificate unreadable": ("write_ledger.json", "{not json", "WRITE_LEDGER_INVALID_OR_UNREADABLE"),
+        }
+        failures = []
+        for label, (name, content, reason) in changes.items():
+            restore_directory(out, files)
+            if content is None:
+                (out / name).unlink()
+            else:
+                (out / name).write_text(content)
+            for entrance, call in (("inspect_run", lambda: xr.inspect_run(out)), ("replay_run", lambda: xr.replay_run(out)),
+                                   ("CLI check --out", lambda: self.cli(["check", "--profile", str(profile), "--out", str(out)])),
+                                   ("CLI replay", lambda: self.cli(["replay", "--out", str(out)]))):
+                before = directory_digest(out)
+                try:
+                    value = call()
+                    text = ("REFUSED:" + ",".join(value[1]["reasons"]) if isinstance(value, tuple) and value[1].get("state") == "BLOCKED"
+                            else f"NOT_REFUSED:{json.dumps(value if isinstance(value, tuple) else sorted(value))[:120]}")
+                except xr.RunBlocked as blocked:
+                    text = "REFUSED:" + str(blocked)
+                except Exception as exc:
+                    text = f"CRASHED:{type(exc).__name__}:{exc}"
+                ok = text.startswith("REFUSED:" + reason) and directory_digest(out) == before
+                print("R3_CERTIFICATE " + json.dumps({"change": label, "entrance": entrance, "outcome": text[:160], "ok": ok}, sort_keys=True))
+                if not ok:
+                    failures.append((label, entrance, text[:160]))
+        restore_directory(out, files)
+        self.assertEqual(failures, [])
+
+    def test_R3_a_run_that_lost_a_fact_closes_flagged_only_after_a_persistence_halt_and_is_otherwise_refused_before_it_closes(self):
+        ITEM = "eng-foreign-writer"
+        probe, _ = self.make("f6-probe", log=False)
+        lost = f"{probe.order[0]}:0"  # the first slot's settlement is the fact the disk loses; the stop comes later, at ITEM
+        self.assertNotEqual(probe.order[0], ITEM)
+        observed = {}
+        for case in ("persistence-halt", "rejected-halt", "complete", "settlement-write-fails"):
+            name = "f6-" + case
+            faults = [{"path": "responses", "item_id": ITEM, "occurrence": 1, "fault": "http_400"}] if case == "rejected-halt" else []
+            runner, sim = self.make(name, log=False, faults=faults)
+            out, seen = runner.out_dir, {}
+            append, finalize = xr.AppendLog.append, xr.Runner._finalize
+
+            def lossy(log, record, case=case, lost=lost, seen=seen):
+                if record["phase"] == "SETTLED" and record.get("slot") == lost and "lost" not in seen:
+                    seen["lost"] = True
+                    if case == "settlement-write-fails":
+                        raise OSError(28, "No space left on device (injected)")
+                    return None  # the disk acknowledged the record and lost it
+                if case == "persistence-halt" and record["phase"] == "RESPONSE" and record.get("path") == "responses" \
+                        and record.get("slot") == f"{ITEM}:0":
+                    raise OSError(28, "No space left on device (injected)")
+                return append(log, record)
+
+            def watched(runner_, halted, seen=seen):
+                seen["before_close"] = directory_digest(runner_.out_dir)
+                return finalize(runner_, halted)
+
+            with mock.patch.object(xr.AppendLog, "append", lossy), mock.patch.object(xr.Runner, "_finalize", watched):
+                try:
+                    result = runner.start()
+                    outcome = ("RETURNED", result["state"], (result["halt"] or {}).get("reason"), result.get("integrity"))
+                except xr.RunBlocked as blocked:
+                    outcome = ("REFUSED", str(blocked))
+                except OSError as exc:
+                    outcome = ("OSERROR", str(exc))
+            state = json.loads((out / "run_state.json").read_text())["state"]
+            # through `completes`: a refusal or crash where a value is expected is a failed assertion, never an ERROR
+            verdict = (self.completes(lambda: xr.inspect_run(out)).get("integrity") or {})
+            observed[case] = {"outcome": outcome[:2] if outcome[0] != "RETURNED" else outcome[:3], "state": state,
+                              "verdict": (verdict.get("status"), verdict.get("flags"), verdict.get("missing")),
+                              "close_reached": "before_close" in seen,
+                              "unchanged_by_the_close": (seen["before_close"] == directory_digest(out))
+                              if "before_close" in seen and outcome[0] != "RETURNED" else None,
+                              "files": sorted(p.name for p in out.iterdir())}
+            if outcome[0] == "RETURNED":
+                certificate = self.completes(lambda: json.loads((out / "write_ledger.json").read_text())).get("integrity")
+                observed[case]["carried"] = {"result": outcome[3] == verdict,
+                                             "report.json": self.completes(lambda: json.loads((out / "report.json").read_text())).get("integrity") == verdict,
+                                             "write_ledger.json": certificate == verdict, "certificate": self.completes(lambda: xr.inspect_run(out)).get("certificate"),
+                                             "resume": self.refusal(self.twin(runner)[0].resume) == ("RUN_IS_HALTED", verdict)}
+            else:  # left RUNNING with the gap: a clean resume writes the lost fact back before anything else
+                kept = len(xr.AppendLog(out / "attempts.jsonl").records())
+                again, sim2 = self.make(name, log=False)
+                closed = self.completes(again.resume)
+                new = xr.AppendLog(out / "attempts.jsonl").records()[kept:]
+                observed[case]["resume"] = {"first_record": (new[0]["phase"], new[0].get("slot"), new[0].get("reconciled")),
+                                            "flags": (closed.get("integrity") or {}).get("flags")}
+                print("R3_CLOSE " + json.dumps({"case": case, "resumed_state": closed["state"], "halt": closed["halt"],
+                                                "new_generations": len([r for r in sim2.requests if r["path"] == "responses"])}, sort_keys=True))
+        print("R3_CLOSE " + json.dumps(observed, sort_keys=True, default=str))
+        named = f"SETTLED:{lost}:1"
+        written_back = {"first_record": ("SETTLED", lost, True), "flags": ["RECONCILED_FROM_LEDGER"]}
+        self.assertEqual({case: {k: v for k, v in row.items() if k != "files"} for case, row in observed.items()}, {
+            "persistence-halt": {"outcome": ("RETURNED", "HALTED", "PERSISTENCE"), "state": "HALTED", "close_reached": True,
+                                 "verdict": ("FLAGGED", [PERSISTENCE_FLAG], [named]), "unchanged_by_the_close": None,
+                                 "carried": {"result": True, "report.json": True, "write_ledger.json": True, "certificate": "VERIFIED", "resume": True}},
+            "rejected-halt": {"outcome": ("REFUSED", "TERMINAL_RUN_JOURNAL_INCOMPLETE:HALTED_REJECTED:1_MISSING"), "state": "RUNNING",
+                              "close_reached": True, "verdict": ("FLAGGED", [RESUMABLE_FLAG], [named]), "unchanged_by_the_close": True,
+                              "resume": written_back},
+            "complete": {"outcome": ("REFUSED", "TERMINAL_RUN_JOURNAL_INCOMPLETE:COMPLETE:1_MISSING"), "state": "RUNNING", "close_reached": True,
+                         "verdict": ("FLAGGED", [RESUMABLE_FLAG], [named]), "unchanged_by_the_close": True, "resume": written_back},
+            # a settlement that fails to write loudly never reaches the close at all: the run stops RUNNING with the gap (D0-3 evidence)
+            "settlement-write-fails": {"outcome": ("OSERROR", "[Errno 28] No space left on device (injected)"), "state": "RUNNING",
+                                       "close_reached": False, "verdict": ("FLAGGED", [RESUMABLE_FLAG], [named]), "unchanged_by_the_close": None,
+                                       "resume": written_back}})
+        self.assertNotIn("report.json", observed["complete"]["files"])  # the refused close wrote nothing: no report, no write ledger
+        self.assertNotIn("write_ledger.json", observed["rejected-halt"]["files"])
 
 
 if __name__ == "__main__":

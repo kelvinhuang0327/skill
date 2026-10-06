@@ -18,7 +18,9 @@ Accounting rules (the point of this module):
     kept, nothing is scored, and the run can be neither resumed nor extended;
   * the attempt log never vouches for itself: a ledger fact counts as recorded only through its own concrete record, and a
     RESUME record is an audit note no gate reads; resume first writes every lost fact back, from the ledger, as its own
-    record marked reconciled.
+    record marked reconciled;
+  * a finished run lacks no ledger fact: the one gate refuses one that does, at every exit, except a PERSISTENCE halt, which
+    is flagged; every exit carries the gate's integrity verdict verbatim, and the write ledger is written once, never redone.
 Never relaunches an existing run; resume continues only an interrupted one, after recovery.
 """
 from __future__ import annotations
@@ -30,7 +32,9 @@ import json
 import math
 import os
 import random
+import re
 import socket
+import stat
 import sys
 import time
 import urllib.error
@@ -56,6 +60,8 @@ MANIFEST_ARTIFACT = "FABLE_ENSEMBLE3_R1_RUN_MANIFEST"
 # Every ledger write is followed by its log record before the next ledger write, and resume writes each missing fact back before
 # it does anything else, so a legitimate crash leaves at most one fact without a record; the rest is the fixed tolerance.
 MAX_UNACKNOWLEDGED_AHEAD = 3
+FACT_PHASES = ("ROUND_RESERVED", "START", "SETTLED")  # the concrete records of ledger facts
+PUBLICATION_TEMP = re.compile(r"write_ledger\.json\.[0-9a-f]{32}\.tmp")
 REPORT_METRICS = (
     "single", "single_gated", "maj3", "gated", "cov3", "disagreement", "coverage_gap", "vote_effect", "checker_effect",
     "aggregation_effect", "total_effect", "crit_single", "crit_single_gated", "crit_maj3", "crit_gated", "crit_checker",
@@ -65,7 +71,13 @@ REPORT_METRICS = (
 
 
 class RunBlocked(ValueError):
-    """The run must not start (or resume); nothing was sent."""
+    """The requested operation is refused; a refused close may follow requests already sent by this invocation.
+
+    A refusal made after the gate accepted the run (it is finished, it is already certified, ...) carries the gate's
+    integrity verdict in `integrity`, verbatim; a refusal by the gate itself is the verdict and carries none.
+    """
+
+    integrity: Optional[dict] = None
 
 
 class RunHalt(Exception):
@@ -105,6 +117,24 @@ def atomic_write(path: Path, text: str) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_dir(path.parent)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def publish_once(path: Path, text: str) -> None:
+    """Write `path` exactly once: a durable temporary file is hard-linked into place, which fails if `path` already exists."""
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise RunBlocked(f"WRITE_LEDGER_ALREADY_CERTIFIED: {path.name} is written once and never recomputed") from exc
         _fsync_dir(path.parent)
     finally:
         if temporary.exists():
@@ -175,6 +205,84 @@ def fact_name(fact) -> str:
     return f"{phase}:{where}" if attempt is None else f"{phase}:{where}:{attempt}"
 
 
+def _refusal(reason: str, integrity: dict) -> RunBlocked:
+    """A refusal made after the gate accepted the run: it carries the gate's verdict, verbatim."""
+    blocked = RunBlocked(reason)
+    blocked.integrity = integrity
+    return blocked
+
+
+def journal_integrity(state: dict, missing: list, records: List[dict], *, certified_before: bool) -> dict:
+    """The one integrity verdict of a run, for the run state `state`; every exit carries it verbatim, none may drop it.
+
+    A legitimate run writes every log record before its state becomes COMPLETE or HALTED, so a finished run may lack no ledger
+    fact: one that does is refused.  The one exception is a PERSISTENCE halt, the state of a run whose log could not be written;
+    it is flagged with the facts it lacks and is never a clean result.  A RUNNING run with a gap is flagged as resumable.
+    Ledger facts written back from the ledger stay flagged, and so does a write ledger that already exists for a run that is
+    RUNNING again: it is never recomputed.
+    """
+    names, flags = [fact_name(fact) for fact in missing], []
+    if missing:
+        if state["state"] == "RUNNING":
+            flags.append("RESUMABLE_JOURNAL_GAP")
+        elif state["state"] == "HALTED" and state.get("reason") == "PERSISTENCE":
+            flags.append("INCOMPLETE_JOURNAL_BY_PERSISTENCE_HALT")
+        else:
+            label = state["state"] if state["state"] == "COMPLETE" else f"HALTED_{state.get('reason')}"
+            raise RunBlocked(f"TERMINAL_RUN_JOURNAL_INCOMPLETE:{label}:{len(missing)}_MISSING")
+    reconciled = sum(1 for row in records if row["phase"] in FACT_PHASES and row.get("reconciled") is True)
+    if reconciled:
+        flags.append("RECONCILED_FROM_LEDGER")
+    if certified_before:
+        flags.append("WRITE_LEDGER_EXISTS_NOT_RECERTIFIED")
+    return {"status": "FLAGGED" if flags else "CLEAN", "state": state["state"],
+            "halt_reason": state.get("reason") if state["state"] == "HALTED" else None,
+            "missing": names, "missing_count": len(names), "reconciled": reconciled, "flags": flags}
+
+
+def _publication_leftover(path: Path, certificate: Path) -> bool:
+    """Accept only a correctly named second regular link of the write ledger's own file, beside that file."""
+    if path.is_symlink() or path.parent != certificate.parent or not PUBLICATION_TEMP.fullmatch(path.name):
+        return False
+    leftover, written = path.lstat(), certificate.lstat()
+    return stat.S_ISREG(leftover.st_mode) and (leftover.st_dev, leftover.st_ino) == (written.st_dev, written.st_ino)
+
+
+def _verify_certificate(out: Path, integrity: dict) -> None:
+    """A finished run's write ledger still holds: every file it lists has those bytes, nothing else is there, same verdict."""
+    listing = _read_state(out / "write_ledger.json", "WRITE_LEDGER_INVALID_OR_UNREADABLE")
+    files = listing.get("files")
+    _require(isinstance(files, list) and all(isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                                             and isinstance(entry.get("sha256"), str) for entry in files)
+             and len({entry["path"] for entry in files}) == len(files), "WRITE_LEDGER_INVALID_OR_UNREADABLE")
+    listed = {entry["path"]: entry["sha256"] for entry in files}
+    present = {str(path.relative_to(out)) for path in out.rglob("*")
+               if path.is_file() and path.name != "write_ledger.json" and not _publication_leftover(path, out / "write_ledger.json")}
+    for name in sorted(set(listed) | present):
+        _require(name in listed, f"WRITE_LEDGER_UNLISTED:{name}")
+        _require(name in present and ep.sha256_file(out / name) == listed[name], f"WRITE_LEDGER_MISMATCH:{name}")
+    _require(listing.get("integrity") == integrity, "WRITE_LEDGER_INTEGRITY_MISMATCH")
+
+
+def _judged(out: Path, inspection: dict, closing: Optional[dict]) -> dict:
+    """The verdict half of the gate, for both of its returns: the run as it is, then (when closing) the state about to be written."""
+    certified_before = (out / "write_ledger.json").exists()
+    state = inspection["state"]
+    integrity = journal_integrity(state, inspection["missing"], inspection["records"],
+                                  certified_before=certified_before and state["state"] == "RUNNING")
+    certificate = "ABSENT"
+    if certified_before:
+        certificate = "PRESENT_WHILE_RUNNING"
+        if state["state"] != "RUNNING":
+            _verify_certificate(out, integrity)
+            certificate = "VERIFIED"
+    if closing is not None:  # only after the run as it is has been judged, so every exit refuses a damaged run for one reason
+        if state["state"] != "RUNNING":
+            raise _refusal(f"RUN_IS_{state['state']}: only a running run is closed and only once", integrity)
+        integrity = journal_integrity(closing, inspection["missing"], inspection["records"], certified_before=certified_before)
+    return {**inspection, "integrity": integrity, "certificate": certificate}
+
+
 def reconciled_record(fact, slots: dict) -> dict:
     """The concrete log record of a ledger fact whose own record was lost, derived from the ledger alone.
 
@@ -194,7 +302,7 @@ def reconciled_record(fact, slots: dict) -> dict:
     return record
 
 
-def inspect_run(out_dir) -> dict:
+def inspect_run(out_dir, *, closing: Optional[dict] = None) -> dict:
     """Read-only gate for every run-state consumer: a function of the manifest, state, ledger and concrete log records only.
 
     Ledger writes precede log writes, so the ledger may be ahead of the log, never behind it: a record of a fact the ledger does
@@ -202,6 +310,10 @@ def inspect_run(out_dir) -> dict:
     is missing, and more than MAX_UNACKNOWLEDGED_AHEAD missing facts are refused.  Nothing the log says about itself counts: a
     RESUME record is an audit note and none of its fields is read.  Missing ledger + an empty log is pre-first-save.
     Torn log tails are refused rather than repaired or silently certified.
+
+    The result carries `integrity` (journal_integrity: a finished run lacking a fact is refused here, for every exit at once)
+    and `certificate`; a finished run's write ledger must still hold.  `closing` is the state `_finalize` is about to write:
+    the run must be RUNNING, and the verdict is for that state, so a close that would be refused writes nothing at all.
     """
     out = Path(out_dir)
     if not (out / "run_manifest.json").is_file():
@@ -237,8 +349,8 @@ def inspect_run(out_dir) -> dict:
     ledger_path = out / "ledger.json"
     if not ledger_path.exists():
         _require(not records and state["state"] == "RUNNING", "LEDGER_MISSING:no ledger to replay")
-        return {"manifest": manifest, "state": state, "ledger": None, "records": records, "missing": [],
-                "reconciliation": {"pre_first_save": True, "ledger_ahead": []}}
+        return _judged(out, {"manifest": manifest, "state": state, "ledger": None, "records": records, "missing": [],
+                             "reconciliation": {"pre_first_save": True, "ledger_ahead": []}}, closing)
     ledger = _read_state(ledger_path, "LEDGER_INVALID_OR_UNREADABLE")
     try:
         slots = ledger["slots"]
@@ -359,8 +471,8 @@ def inspect_run(out_dir) -> dict:
         if isinstance(exc, RunBlocked):
             raise
         raise RunBlocked("LEDGER_OR_ATTEMPTS_SHAPE_INVALID") from exc
-    return {"manifest": manifest, "state": state, "ledger": ledger, "records": records, "missing": missing,
-            "reconciliation": {"pre_first_save": False, "ledger_ahead": [fact_name(fact) for fact in missing]}}
+    return _judged(out, {"manifest": manifest, "state": state, "ledger": ledger, "records": records, "missing": missing,
+                         "reconciliation": {"pre_first_save": False, "ledger_ahead": [fact_name(fact) for fact in missing]}}, closing)
 
 
 # --- inputs ----------------------------------------------------------------------------------------------------------
@@ -448,6 +560,7 @@ class Recorder:
         self.expected_instructions_sha256 = expected_instructions_sha256
         self.slot = self.attempt = None
         self.generation_sent = False
+        self.generation_requests = 0
         self.last_generation = None
 
     def begin_attempt(self, slot: str, attempt: int) -> None:
@@ -468,6 +581,7 @@ class Recorder:
                       "body": {key: value for key, value in body.items() if key != "instructions"}})
         if path == "responses":
             self.generation_sent = True
+            self.generation_requests += 1
         try:
             response = self.inner(path, body)
         except BaseException as exc:
@@ -506,10 +620,12 @@ def rounds_reserved(ledger_state: dict, order: List[str], planned: int) -> int:
     return sum(1 for index in range(planned) if f"{order[0]}:{index}" in ledger_state["slots"])
 
 
-def finished_report(public, labels, runs, *, mode: str, ledger_state: dict, order: List[str], planned: int, target: int) -> dict:
+def finished_report(public, labels, runs, *, mode: str, ledger_state: dict, order: List[str], planned: int, target: int,
+                    integrity: dict) -> dict:
     kind = "SIMULATION_NOT_A_RESULT" if mode == "SIMULATION" else "EXPLORATION_RESULT_UNREVIEWED"
     report = build_report(public, labels, runs, kind=kind, ledger_state=ledger_state)
-    report.update(halted=False, planned_rounds=planned, rounds_reserved=rounds_reserved(ledger_state, order, planned), target_rounds=target)
+    report.update(halted=False, planned_rounds=planned, rounds_reserved=rounds_reserved(ledger_state, order, planned), target_rounds=target,
+                  integrity=integrity)
     return report
 
 
@@ -580,6 +696,10 @@ class Runner:
         self.recorder: Optional[Recorder] = None
         self.planned = 0
         self._lock_fd: Optional[int] = None
+
+    @property
+    def generation_calls(self) -> int:
+        return 0 if self.recorder is None else self.recorder.generation_requests
 
     # --- identity, state, lock ---------------------------------------------------------------------------------------
     def _identity(self) -> dict:
@@ -680,10 +800,12 @@ class Runner:
             inspection = inspect_run(self.out_dir)  # repeat under flock; no PID write until all refusal checks pass
             manifest, state = inspection["manifest"], inspection["state"]
             if state["state"] != "RUNNING":
-                raise RunBlocked(f"RUN_IS_{state['state']}: only an interrupted run can resume")
+                raise _refusal(f"RUN_IS_{state['state']}: only an interrupted run can resume", inspection["integrity"])
+            if inspection["certificate"] != "ABSENT":
+                raise _refusal("RUN_IS_CERTIFIED: a write ledger exists so the run was closed and a certified run is never resumed", inspection["integrity"])
             mismatched = sorted(key for key, value in self._identity().items() if manifest.get(key) != value)
             if mismatched:
-                raise RunBlocked("RESUME_IDENTITY_MISMATCH:" + ";".join(mismatched))
+                raise _refusal("RESUME_IDENTITY_MISMATCH:" + ";".join(mismatched), inspection["integrity"])
             self.planned = manifest["planned_rounds"]
             adapter = self._adapter()  # before the ledger is touched: a wiring error must not recover or change anything
             self._stamp_lock()
@@ -825,14 +947,18 @@ class Runner:
 
     # --- the end -----------------------------------------------------------------------------------------------------
     def _finalize(self, halted: Optional[RunHalt]) -> dict:
-        inspect_run(self.out_dir)
+        closing = {"state": "COMPLETE"} if halted is None else {"state": "HALTED", "reason": halted.reason}
+        # The one gate judges the journal against the state about to be written, before a byte of it is written.  A run that
+        # lacks a ledger fact is refused here and stays RUNNING, for resume to write the fact back first; a PERSISTENCE halt is
+        # the one stop that may close with facts its log could not take, and it closes flagged, never clean.
+        integrity = inspect_run(self.out_dir, closing=closing)["integrity"]
         runs = saved_runs(self.public, self.ledger, self.target_rounds)
         atomic_write(self.out_dir / "runs.json", canonical(runs))
         kind = "SIMULATION_NOT_A_RESULT" if self.mode == "SIMULATION" else "EXPLORATION_RESULT_UNREVIEWED"
         reserved = rounds_reserved(self.ledger.state, self.order, self.planned)
         if halted is None:
             report = finished_report(self.public, self.labels, runs, mode=self.mode, ledger_state=self.ledger.state, order=self.order,
-                                     planned=self.planned, target=self.target_rounds)
+                                     planned=self.planned, target=self.target_rounds, integrity=integrity)
             state, halt = "COMPLETE", None
             self._set_state("COMPLETE")
         else:
@@ -840,29 +966,42 @@ class Runner:
             report = {"kind": kind, "halted": True, "halt": halt, "scoring": None, "planned_rounds": self.planned,
                       "rounds_reserved": reserved, "target_rounds": self.target_rounds,
                       "ledger": {"spent_upper_usd": self.ledger.state["spent_upper"], "attempt_cap_usd": self.ledger.state["attempt_cap"],
-                                 "budget_usd": self.ledger.state["budget"], "overrun": self.ledger.state["overrun"]}}
+                                 "budget_usd": self.ledger.state["budget"], "overrun": self.ledger.state["overrun"]},
+                      "integrity": integrity}
             state = "HALTED"
             self._set_state("HALTED", **halt)
         atomic_write(self.out_dir / "report.json", canonical(report))
-        self._write_accounting()
-        return {"state": state, "halt": halt, "report": report, "out_dir": str(self.out_dir)}
+        if "WRITE_LEDGER_EXISTS_NOT_RECERTIFIED" not in integrity["flags"]:  # write-once: an existing write ledger is never redone
+            self._write_accounting()
+        return {"state": state, "halt": halt, "report": report, "integrity": integrity, "out_dir": str(self.out_dir)}
 
     def _write_accounting(self) -> None:
-        """Every file this run left in its directory, with hashes; the runner writes nowhere else."""
-        inspect_run(self.out_dir)
+        """Every file this run left in its directory, with hashes, and the gate's verdict; the runner writes nowhere else.
+
+        Written once, for a finished run only: an existing write ledger is never recomputed, so a journal changed after it was
+        written can never be made the current version by writing it again.
+        """
+        inspection = inspect_run(self.out_dir)
+        integrity = inspection["integrity"]
+        if inspection["state"]["state"] == "RUNNING":
+            raise _refusal("WRITE_LEDGER_RUN_NOT_TERMINAL: only a finished run is written up", integrity)
+        if (self.out_dir / "write_ledger.json").exists():
+            raise _refusal("WRITE_LEDGER_ALREADY_CERTIFIED: a write ledger is written once and never recomputed", integrity)
         files = [{"path": str(path.relative_to(self.out_dir)), "bytes": path.stat().st_size, "sha256": ep.sha256_file(path)}
                  for path in sorted(self.out_dir.rglob("*")) if path.is_file() and path.name != "write_ledger.json"]
-        atomic_write(self.out_dir / "write_ledger.json", canonical({
-            "out_dir": str(self.out_dir.resolve()), "files": files, "writes_outside_out_dir": [],
-            "note": "no temporary file survives; the runner opens no path outside out_dir"}))
+        publish_once(self.out_dir / "write_ledger.json", canonical({
+            "out_dir": str(self.out_dir.resolve()), "files": files, "writes_outside_out_dir": [], "integrity": integrity,
+            "note": "no temporary file survives; the runner opens no path outside out_dir; written once, never recomputed"}))
 
 
 # --- replay ----------------------------------------------------------------------------------------------------------
 def replay_run(out_dir) -> dict:
-    """Rebuild a finished run's verified runs (and report) from the ledger alone; never writes anything."""
+    """Rebuild a finished run's verified runs (and report) from the ledger alone; never writes anything.  The gate's verdict
+    is carried verbatim, at the top and in the rebuilt report."""
     out_dir = Path(out_dir)
     inspection = inspect_run(out_dir)
     manifest = inspection["manifest"]
+    integrity = inspection["integrity"]
     bank = manifest["bank_manifest"]
     try:
         _, public, labels = load_bank(bank["ref"], expected_sha256=bank["sha256"])
@@ -878,8 +1017,9 @@ def replay_run(out_dir) -> dict:
     report = None
     if state == "COMPLETE":
         report = finished_report(public, labels, runs, mode=manifest["mode"], ledger_state=ledger.state, order=manifest["item_order"],
-                                 planned=manifest["planned_rounds"], target=manifest["target_rounds"])
-    return {"state": state, "runs": runs, "matches_saved_runs": None if saved is None else saved == runs, "report": report}
+                                 planned=manifest["planned_rounds"], target=manifest["target_rounds"], integrity=integrity)
+    return {"state": state, "runs": runs, "matches_saved_runs": None if saved is None else saved == runs, "report": report,
+            "integrity": integrity, "certificate": inspection["certificate"]}
 
 
 # --- gates and command line ------------------------------------------------------------------------------------------
@@ -967,26 +1107,34 @@ def main(argv=None) -> int:
     check.add_argument("--mode", default="SIMULATION", choices=MODES)
     check.add_argument("--out", help="also check this run directory through the common integrity gate")
     args = parser.parse_args(argv)
+    runner = None
     try:
         if args.command == "check":
-            if args.out:
-                inspect_run(args.out)
+            inspection = inspect_run(args.out) if args.out else None
             result = ep.check_profile(args.profile, mode=args.mode)
+            if inspection is not None:  # the run's verdict, verbatim: a run the gate flags is never a plain PASS
+                result = {**result, "run_integrity": inspection["integrity"], "run_certificate": inspection["certificate"]}
+                if not result["reasons"] and inspection["integrity"]["status"] != "CLEAN":
+                    result["status"] = "FLAGGED"
             print(json.dumps(result, indent=2))
+            if result["status"] == "FLAGGED":
+                return 4
             return 0 if not result["reasons"] else 2
         if args.command == "replay":
             result = replay_run(args.out)
             print(json.dumps({k: v for k, v in result.items() if k != "runs"}, indent=2, sort_keys=True))
-            return 0
+            return 0 if result["integrity"]["status"] == "CLEAN" else 4
         if args.command == "resume":
             inspect_run(args.out)
         runner = _runner(args, resume=args.command == "resume")
         result = runner.start() if args.command == "run" else runner.resume()
     except RunBlocked as blocked:
-        print(json.dumps({"state": "BLOCKED", "reasons": str(blocked).split(","), "generation_calls": 0}, indent=2))
+        print(json.dumps({"state": "BLOCKED", "reasons": str(blocked).split(","), "generation_calls": 0 if runner is None else runner.generation_calls,
+                          **({} if blocked.integrity is None else {"integrity": blocked.integrity})}, indent=2))
         return 2
     print(json.dumps({"state": result["state"], "halt": result["halt"], "out_dir": result["out_dir"],
-                      "kind": result["report"]["kind"], "generation_calls_are_simulated": args.mode == "SIMULATION"}, indent=2))
+                      "kind": result["report"]["kind"], "generation_calls_are_simulated": args.mode == "SIMULATION",
+                      "integrity": result["integrity"]}, indent=2))
     return 3 if result["state"] == "HALTED" else 0
 
 
