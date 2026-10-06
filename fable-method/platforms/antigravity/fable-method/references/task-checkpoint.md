@@ -560,6 +560,18 @@ closed. The task-scoped lock serializes this transition and successor claim
 with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
+
+A terminal failed recovery successor requires separate explicit authorization:
+use `--retry-recover-run` with its failed successor execution ID, the same
+checkpoint/worktree locators, and the complete newly authorized argv after
+`--`. Each explicit retry creates a distinct successor and pins the previous
+record and terminal capture hashes; it never rewrites that previous edge or
+retries automatically. Successful, active, incomplete, ordinary non-recovery,
+or ambiguous sources are refused. Recovery predecessor IDs are historical
+provenance (`recovery_parent_execution_id`), while `parent_execution_id` names
+only active protected descendants; the retry owns a fresh inherited-lock
+lineage. Existing records without verifiable recovery provenance fail closed.
+
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)

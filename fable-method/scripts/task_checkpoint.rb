@@ -1644,7 +1644,8 @@ class ExecutionRecord
                                 keyword_init: true)
 
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
-                :durable_capture_path, :started_at, :ended_at, :parent_execution_id
+                :durable_capture_path, :started_at, :ended_at, :parent_execution_id,
+                :recovery_old_execution_id, :recovery_parent_execution_id
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1656,6 +1657,8 @@ class ExecutionRecord
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @parent_execution_id = (attrs[:parent_execution_id] || attrs['parent_execution_id'])&.to_s
+    @recovery_old_execution_id = (attrs[:recovery_old_execution_id] || attrs['recovery_old_execution_id'])&.to_s
+    @recovery_parent_execution_id = (attrs[:recovery_parent_execution_id] || attrs['recovery_parent_execution_id'])&.to_s
   end
 
   def to_h
@@ -1671,6 +1674,8 @@ class ExecutionRecord
     }
     # Only nested records carry lineage, so top-level record bytes are unchanged.
     data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
+    data['recovery_old_execution_id'] = @recovery_old_execution_id unless @recovery_old_execution_id.nil?
+    data['recovery_parent_execution_id'] = @recovery_parent_execution_id unless @recovery_parent_execution_id.nil?
     data
   end
 
@@ -2208,14 +2213,16 @@ class ExecutionRecord
   # caller must not proceed, under the exact same rules
   # recover_before_execution already applies to that existing record.
   def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?),
-                    parent_execution_id: nil)
+                    parent_execution_id: nil, recovery_old_execution_id: nil, recovery_parent_execution_id: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
       pid: pid,
       status: STATUS_STARTED,
       started_at: Time.now.utc.iso8601,
-      parent_execution_id: parent_execution_id
+      parent_execution_id: parent_execution_id,
+      recovery_old_execution_id: recovery_old_execution_id,
+      recovery_parent_execution_id: recovery_parent_execution_id
     )
 
     begin
@@ -2232,24 +2239,26 @@ class ExecutionRecord
   class UnresolvedExecutionStateError < StandardError; end
 end
 
-# One immutable stale-execution disposition and old->successor link per
-# original execution. The deterministic successor identity makes a retry
-# resolve the same durable transition instead of manufacturing another run.
+# One durable transition per execution edge. Ordinary recovery links a stale
+# execution to its first successor; an explicit terminal-failure retry links
+# that failed successor to a distinct successor without rewriting either edge.
 class ExecutionRecoveryTransition
   SCHEMA_VERSION = 1
   STATUS_RESERVED = 'SUCCESSOR_RESERVED'
   DISPOSITION_TERMINATED_INCOMPLETE = ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+  DISPOSITION_FAILED_RECOVERY = 'PRIOR_RECOVERY_SUCCESSOR_FAILED'
 
   attr_accessor :schema_version, :task_id, :old_execution_id, :old_execution_sha256,
                 :old_disposition, :successor_execution_id, :application_state_path,
                 :application_state_sha256, :worktree_path, :successor_command_sha256,
-                :status, :created_at, :successor_attempt_history
+                :status, :created_at, :successor_attempt_history, :old_capture_sha256
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
     @task_id = (attrs[:task_id] || attrs['task_id'])&.to_s
     @old_execution_id = (attrs[:old_execution_id] || attrs['old_execution_id'])&.to_s
     @old_execution_sha256 = (attrs[:old_execution_sha256] || attrs['old_execution_sha256'])&.to_s
+    @old_capture_sha256 = (attrs[:old_capture_sha256] || attrs['old_capture_sha256'])&.to_s
     @old_disposition = (attrs[:old_disposition] || attrs['old_disposition'])&.to_s
     @successor_execution_id = (attrs[:successor_execution_id] || attrs['successor_execution_id'])&.to_s
     @application_state_path = (attrs[:application_state_path] || attrs['application_state_path'])&.to_s
@@ -2264,7 +2273,7 @@ class ExecutionRecoveryTransition
   end
 
   def to_h
-    {
+    data = {
       'schema_version' => @schema_version,
       'task_id' => @task_id,
       'old_execution_id' => @old_execution_id,
@@ -2279,6 +2288,8 @@ class ExecutionRecoveryTransition
       'created_at' => @created_at,
       'successor_attempt_history' => @successor_attempt_history
     }
+    data['old_capture_sha256'] = @old_capture_sha256 if @old_capture_sha256
+    data
   end
 
   def to_json(*args)
@@ -2334,6 +2345,85 @@ class ExecutionRecoveryTransition
     end
   rescue ExecutionRecord::ValidationError => e
     raise ExecutionRecord::UnresolvedExecutionStateError, "stale execution record is malformed: #{e.message}"
+  end
+
+  # A retry source must be a captured, failed recovery successor whose entire
+  # chain still reaches the original stale execution. Each edge has its own
+  # immutable record/capture and a transition bound to those exact bytes.
+  def self.verify_failed_successor!(repo_root:, task_id:, execution_id:, visited: [])
+    id = execution_id.to_s
+    if id.empty? || %w[. ..].include?(id) || id.match?(/[\/\\\x00]/) || visited.include?(id) || visited.length >= 64
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'recovery retry lineage is cyclic or ambiguous'
+    end
+    record_path = ExecutionRecord.default_path(repo_root, task_id, id)
+    if File.symlink?(record_path) || !File.file?(record_path)
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'prior recovery successor record is missing or not regular'
+    end
+    record_bytes = File.binread(record_path)
+    record = ExecutionRecord.from_json(record_bytes)
+    root_id = record.recovery_old_execution_id.to_s
+    if record.schema_version != ExecutionRecord::SCHEMA_VERSION || record.task_id != task_id.to_s ||
+       record.execution_id != id || root_id.empty? || %w[. ..].include?(root_id) ||
+       root_id.match?(/[\/\\\x00]/) || record.status != ExecutionRecord::STATUS_COMPLETED ||
+       !record.pid.is_a?(Integer) || !record.pid.positive? || record.started_at.to_s.empty? ||
+       record.ended_at.to_s.empty?
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'prior execution is not a terminal recovery successor'
+    end
+    capture_path = DurableCommandCapture.default_path(repo_root, task_id, id)
+    if record.durable_capture_path != capture_path || File.symlink?(capture_path) || !File.file?(capture_path)
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'prior recovery capture is missing or ambiguous'
+    end
+    capture_bytes = File.binread(capture_path)
+    capture = DurableCommandCapture.from_json(capture_bytes)
+    unless capture.schema_version == DurableCommandCapture::SCHEMA_VERSION && capture.complete?
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'prior recovery capture is not durably terminal'
+    end
+    raise ExecutionRecord::UnresolvedExecutionStateError, 'RECOVERY_SUCCESSOR_ALREADY_SUCCEEDED' if capture.exit_status == 0
+
+    signaled = capture.exit_status.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(capture.exit_status)
+    signal_number = signaled[1].to_i if signaled
+    unless (capture.exit_status.is_a?(Integer) && (1..255).cover?(capture.exit_status)) ||
+           (signal_number && Signal.list.value?(signal_number) &&
+             !%w[STOP CONT].any? { |name| Signal.list[name] == signal_number })
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'prior recovery failure result is ambiguous'
+    end
+
+    parent_id = record.recovery_parent_execution_id
+    if parent_id
+      parent, _parent_bytes, source_sha, source_capture_sha, parent_transition = verify_failed_successor!(
+        repo_root: repo_root, task_id: task_id, execution_id: parent_id, visited: visited + [id]
+      )
+      unless parent.recovery_old_execution_id == root_id
+        raise ExecutionRecord::UnresolvedExecutionStateError, 'recovery retry root identity does not match'
+      end
+      source_id = parent_id
+      disposition = DISPOSITION_FAILED_RECOVERY
+    else
+      _original, _original_bytes, source_sha = verify_stale_execution!(
+        repo_root: repo_root, task_id: task_id, old_execution_id: root_id
+      )
+      source_id = root_id
+      source_capture_sha = nil
+      disposition = DISPOSITION_TERMINATED_INCOMPLETE
+    end
+    transition_path = default_path(repo_root, task_id, source_id)
+    transition = load(transition_path)
+    transition.assert_compatible!(
+      task_id: task_id, old_execution_id: source_id, old_execution_sha256: source_sha,
+      old_capture_sha256: source_capture_sha, old_disposition: disposition,
+      application_state_path: transition.application_state_path,
+      worktree_path: transition.worktree_path, command_sha256: command_sha256!(capture.command)
+    )
+    if transition.successor_execution_id != id ||
+       (parent_id && (transition.application_state_path != parent_transition.application_state_path ||
+                      transition.worktree_path != parent_transition.worktree_path))
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'recovery successor lineage does not match its transition'
+    end
+    transition.verify_readback!(transition_path)
+    [record, record_bytes, Digest::SHA256.hexdigest(record_bytes),
+     Digest::SHA256.hexdigest(capture_bytes), transition]
+  rescue ExecutionRecord::ValidationError, DurableCommandCapture::ValidationError => e
+    raise ExecutionRecord::UnresolvedExecutionStateError, "prior recovery provenance is malformed: #{e.message}"
   end
 
   def self.reserve!(repo_root:, task_id:, old_execution_id:, application_state_path:, worktree_path:, command:)
@@ -2397,6 +2487,62 @@ class ExecutionRecoveryTransition
     transition
   end
 
+  def self.reserve_retry!(repo_root:, task_id:, prior_execution_id:, application_state_path:, worktree_path:, command:)
+    prior, _bytes, prior_sha, capture_sha, prior_transition = verify_failed_successor!(
+      repo_root: repo_root, task_id: task_id, execution_id: prior_execution_id
+    )
+    state_path = normalized_application_state_path(application_state_path)
+    cwd_path = normalized_worktree_path(worktree_path)
+    unless state_path == prior_transition.application_state_path && cwd_path == prior_transition.worktree_path
+      raise ExecutionRecord::UnresolvedExecutionStateError, 'recovery retry checkpoint or worktree identity changed'
+    end
+    command_sha256 = command_sha256!(command)
+    path = default_path(repo_root, task_id, prior_execution_id)
+    if File.exist?(path) || File.symlink?(path)
+      transition = load(path)
+      transition.assert_compatible!(
+        task_id: task_id, old_execution_id: prior_execution_id, old_execution_sha256: prior_sha,
+        old_capture_sha256: capture_sha, old_disposition: DISPOSITION_FAILED_RECOVERY,
+        application_state_path: state_path, worktree_path: cwd_path, command_sha256: command_sha256
+      )
+      transition.verify_readback!(path)
+      return transition
+    end
+
+    successor_id = successor_id_for(task_id, prior_execution_id)
+    successor_path = ExecutionRecord.default_path(repo_root, task_id, successor_id)
+    if File.exist?(successor_path) || File.symlink?(successor_path)
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            "retry successor '#{successor_id}' already exists without a recovery transition"
+    end
+    state_sha256 = application_state_sha256!(state_path)
+    candidate = new(
+      task_id: task_id, old_execution_id: prior.execution_id, old_execution_sha256: prior_sha,
+      old_capture_sha256: capture_sha, old_disposition: DISPOSITION_FAILED_RECOVERY,
+      successor_execution_id: successor_id, application_state_path: state_path,
+      application_state_sha256: state_sha256, worktree_path: cwd_path,
+      successor_command_sha256: command_sha256, status: STATUS_RESERVED,
+      created_at: Time.now.utc.iso8601, successor_attempt_history: []
+    )
+    begin
+      candidate.save_if_absent!(path)
+    rescue Errno::EEXIST
+      # A concurrent explicit retry may have reserved this exact edge.
+    end
+    transition = load(path)
+    transition.assert_compatible!(
+      task_id: task_id, old_execution_id: prior_execution_id, old_execution_sha256: prior_sha,
+      old_capture_sha256: capture_sha, old_disposition: DISPOSITION_FAILED_RECOVERY,
+      application_state_path: state_path, worktree_path: cwd_path, command_sha256: command_sha256
+    )
+    unless transition.application_state_sha256 == state_sha256
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'application-state bytes changed while the retry transition was being reserved'
+    end
+    transition.verify_readback!(path)
+    transition
+  end
+
   def self.load(file_path)
     if File.symlink?(file_path) || !File.file?(file_path)
       raise ValidationError, "recovery transition '#{file_path}' is missing or not a regular file"
@@ -2433,14 +2579,15 @@ class ExecutionRecoveryTransition
   end
 
   def assert_compatible!(task_id:, old_execution_id:, old_execution_sha256:, application_state_path:,
-                         worktree_path:, command_sha256:)
+                         worktree_path:, command_sha256:, old_disposition: DISPOSITION_TERMINATED_INCOMPLETE,
+                         old_capture_sha256: nil)
     valid_history = @successor_attempt_history.all? do |entry|
       entry.is_a?(Hash) && entry['record_json'].is_a?(String) &&
         entry['record_sha256'] == Digest::SHA256.hexdigest(entry['record_json'])
     end
     unless @schema_version == SCHEMA_VERSION && @task_id == task_id.to_s &&
            @old_execution_id == old_execution_id.to_s && @old_execution_sha256 == old_execution_sha256 &&
-           @old_disposition == DISPOSITION_TERMINATED_INCOMPLETE &&
+           @old_disposition == old_disposition && @old_capture_sha256 == old_capture_sha256 &&
            @successor_execution_id == self.class.successor_id_for(task_id, old_execution_id) &&
            @application_state_path == application_state_path &&
            @application_state_sha256.to_s.match?(/\A[0-9a-f]{64}\z/) &&
@@ -2481,17 +2628,31 @@ class ExecutionRecoveryTransition
   end
 
   def self.acquire_successor!(repo_root:, task_id:, old_execution_id:, application_state_path:,
-                              worktree_path:, command:, pid:)
+                              worktree_path:, command:, pid:, retry_attempt: false)
     ExecutionRecord.with_task_lock(repo_root, task_id) do
-      _old_record, _old_bytes, = verify_stale_execution!(
-        repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
-      )
+      if retry_attempt
+        prior, = verify_failed_successor!(repo_root: repo_root, task_id: task_id,
+                                          execution_id: old_execution_id)
+        root_id = prior.recovery_old_execution_id
+      else
+        _old_record, _old_bytes, = verify_stale_execution!(
+          repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
+        )
+        root_id = old_execution_id
+      end
       ExecutionRecord.verify_no_active_owner!(repo_root, task_id,
-                                              except_execution_ids: [old_execution_id.to_s])
-      transition = reserve!(repo_root: repo_root, task_id: task_id,
-                            old_execution_id: old_execution_id,
-                            application_state_path: application_state_path,
-                            worktree_path: worktree_path, command: command)
+                                              except_execution_ids: retry_attempt ? [] : [old_execution_id.to_s])
+      transition = if retry_attempt
+                     reserve_retry!(repo_root: repo_root, task_id: task_id,
+                                    prior_execution_id: old_execution_id,
+                                    application_state_path: application_state_path,
+                                    worktree_path: worktree_path, command: command)
+                   else
+                     reserve!(repo_root: repo_root, task_id: task_id,
+                              old_execution_id: old_execution_id,
+                              application_state_path: application_state_path,
+                              worktree_path: worktree_path, command: command)
+                   end
       transition_path = default_path(repo_root, task_id, old_execution_id)
       transition.verify_readback!(transition_path)
 
@@ -2505,17 +2666,24 @@ class ExecutionRecoveryTransition
         record_bytes = File.binread(successor_path)
         record = ExecutionRecord.from_json(record_bytes)
         unless record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
-               record.task_id == task_id.to_s && record.execution_id == successor_id
+               record.task_id == task_id.to_s && record.execution_id == successor_id &&
+               (!retry_attempt || (record.recovery_old_execution_id == root_id &&
+                                   record.recovery_parent_execution_id == old_execution_id.to_s))
           raise ExecutionRecord::UnresolvedExecutionStateError, 'successor execution identity is ambiguous'
         end
 
         if record.status == ExecutionRecord::STATUS_COMPLETED
           unless record.durable_capture_path == expected_capture_path &&
+                 (!retry_attempt || (!File.symlink?(expected_capture_path) &&
+                                     record.started_at && record.ended_at)) &&
                  record.classify == ExecutionRecord::CLASSIFICATION_COMPLETED
             raise ExecutionRecord::UnresolvedExecutionStateError,
                   'successor terminal record or durable capture is ambiguous'
           end
           capture = DurableCommandCapture.load(record.durable_capture_path)
+          if retry_attempt && command_sha256!(capture.command) != transition.successor_command_sha256
+            raise ExecutionRecord::UnresolvedExecutionStateError, 'retry successor capture command identity changed'
+          end
           ExecutionRecord::Recovery.new(classification: ExecutionRecord::CLASSIFICATION_COMPLETED,
                                         execution_record: record, durable_capture: capture,
                                         recovery_transition: transition)
@@ -2538,7 +2706,9 @@ class ExecutionRecoveryTransition
           transition.archive_successor_attempt!(transition_path, record_bytes)
           resumed = ExecutionRecord.new(task_id: task_id, execution_id: successor_id, pid: pid,
                                         status: ExecutionRecord::STATUS_STARTED,
-                                        started_at: Time.now.utc.iso8601)
+                                        started_at: Time.now.utc.iso8601,
+                                        recovery_old_execution_id: root_id,
+                                        recovery_parent_execution_id: retry_attempt ? old_execution_id : nil)
           resumed.save(successor_path)
           verified = ExecutionRecord.load(successor_path)
           unless verified.schema_version == ExecutionRecord::SCHEMA_VERSION &&
@@ -2555,7 +2725,9 @@ class ExecutionRecoveryTransition
       else
         transition.verify_application_state!
         recovery = ExecutionRecord.acquire!(successor_path, task_id: task_id,
-                                             execution_id: successor_id, pid: pid)
+                                             execution_id: successor_id, pid: pid,
+                                             recovery_parent_execution_id: retry_attempt ? old_execution_id : nil,
+                                             recovery_old_execution_id: root_id)
         unless recovery.classification.nil? && recovery.execution_record &&
                recovery.execution_record.task_id == task_id.to_s &&
                recovery.execution_record.execution_id == successor_id &&
@@ -2642,17 +2814,19 @@ if __FILE__ == $PROGRAM_NAME
 
     opts.separator '   or: task_checkpoint.rb --run --repo PATH --worktree PATH --task-id ID --execution-id ID -- <argv...>'
     opts.separator '   or: task_checkpoint.rb --recover-run --repo PATH --worktree PATH --task-id ID --execution-id OLD_ID --application-state PATH -- <argv...>'
+    opts.separator '   or: task_checkpoint.rb --retry-recover-run --repo PATH --worktree PATH --task-id ID --execution-id FAILED_SUCCESSOR_ID --application-state PATH -- <argv...>'
     opts.on('--reconcile', 'Reconcile live state against checkpoint (default)') { selected_modes << (mode = :reconcile) }
     opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
     opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
     opts.on('--run', 'Acquire, capture, and complete a task-owned execution, or reuse its result') { selected_modes << (mode = :run) }
     opts.on('--recover-run', 'Explicitly resume one stale execution through a durable successor transition') { selected_modes << (mode = :recover_run) }
+    opts.on('--retry-recover-run', 'Explicitly retry one terminal failed recovery successor') { selected_modes << (mode = :retry_recover_run) }
 
     opts.on('--repo PATH', 'Live repository path; --run requires the absolute stable record root') { |v| options[:repository] = v }
     opts.on('--worktree PATH', 'Live worktree path; --run uses only this absolute upstream cwd') { |v| options[:worktree] = v }
     opts.on('--task-id ID', 'Caller-supplied stable task identity for --run') { |v| options[:task_id] = v }
     opts.on('--execution-id ID', 'Caller-supplied stable execution identity for --run') { |v| options[:execution_id] = v }
-    opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by --recover-run') { |v| options[:application_state] = v }
+    opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by recovery operations') { |v| options[:application_state] = v }
     opts.on('--head SHA', 'Override live git HEAD SHA') { |v| options[:head] = v }
     opts.on('--tree SHA', 'Override live git tree SHA') { |v| options[:tree] = v }
     opts.on('--branch NAME', 'Override live git branch') { |v| options[:branch] = v }
@@ -2676,9 +2850,13 @@ if __FILE__ == $PROGRAM_NAME
     if selected_modes.include?(:recover_run) && selected_modes != [:recover_run]
       raise OptionParser::InvalidArgument, '--recover-run cannot be combined with another mode'
     end
-    if %i[run recover_run].include?(mode)
+    if selected_modes.include?(:retry_recover_run) && selected_modes != [:retry_recover_run]
+      raise OptionParser::InvalidArgument, '--retry-recover-run cannot be combined with another mode'
+    end
+    if %i[run recover_run retry_recover_run].include?(mode)
+      mode_flag = { run: 'run', recover_run: 'recover-run', retry_recover_run: 'retry-recover-run' }.fetch(mode)
       unless upstream_argv && !upstream_argv.empty? && ARGV == upstream_argv && !upstream_argv.first.empty?
-        raise OptionParser::InvalidArgument, "--#{mode == :run ? 'run' : 'recover-run'} requires upstream argv after -- and no positional arguments before it"
+        raise OptionParser::InvalidArgument, "--#{mode_flag} requires upstream argv after -- and no positional arguments before it"
       end
       %i[repository worktree].each do |key|
         value = options[key]
@@ -2693,13 +2871,13 @@ if __FILE__ == $PROGRAM_NAME
           raise OptionParser::InvalidArgument, "--#{key.to_s.tr('_', '-')} must supply a stable non-empty path component"
         end
       end
-      if mode == :recover_run
+      if %i[recover_run retry_recover_run].include?(mode)
         value = options[:application_state]
         unless value && Pathname.new(value).absolute?
-          raise OptionParser::InvalidArgument, '--recover-run requires an absolute --application-state file path'
+          raise OptionParser::InvalidArgument, "--#{mode_flag} requires an absolute --application-state file path"
         end
       elsif options[:application_state]
-        raise OptionParser::InvalidArgument, '--application-state is only valid with --recover-run'
+        raise OptionParser::InvalidArgument, '--application-state is only valid with recovery operations'
       end
     end
   rescue OptionParser::ParseError => e
@@ -2708,16 +2886,17 @@ if __FILE__ == $PROGRAM_NAME
     exit 2
   end
 
-  if %i[run recover_run].include?(mode)
+  if %i[run recover_run retry_recover_run].include?(mode)
     begin
       nested_request = nil
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
-      if mode == :recover_run
+      if %i[recover_run retry_recover_run].include?(mode)
         recovery = ExecutionRecoveryTransition.acquire_successor!(
           repo_root: options[:repository], task_id: options[:task_id],
           old_execution_id: options[:execution_id],
           application_state_path: options[:application_state],
-          worktree_path: options[:worktree], command: upstream_argv, pid: Process.pid
+          worktree_path: options[:worktree], command: upstream_argv, pid: Process.pid,
+          retry_attempt: mode == :retry_recover_run
         )
         record_path = ExecutionRecord.default_path(
           options[:repository], options[:task_id], recovery.execution_record.execution_id
@@ -2773,7 +2952,7 @@ if __FILE__ == $PROGRAM_NAME
       capture_signal = nil
       case recovery.classification
       when nil
-        before_spawn = if mode == :recover_run
+        before_spawn = if %i[recover_run retry_recover_run].include?(mode)
                          lambda do
                            transition = recovery.recovery_transition
                            transition_path = ExecutionRecoveryTransition.default_path(
@@ -2781,6 +2960,19 @@ if __FILE__ == $PROGRAM_NAME
                            )
                            transition.verify_readback!(transition_path)
                            transition.verify_application_state!
+                           if mode == :retry_recover_run
+                             prior, _prior_bytes, prior_sha, capture_sha, =
+                               ExecutionRecoveryTransition.verify_failed_successor!(
+                                 repo_root: options[:repository], task_id: options[:task_id],
+                                 execution_id: options[:execution_id]
+                               )
+                             unless prior.recovery_old_execution_id == record.recovery_old_execution_id &&
+                                    transition.old_execution_sha256 == prior_sha &&
+                                    transition.old_capture_sha256 == capture_sha
+                               raise ExecutionRecord::UnresolvedExecutionStateError,
+                                     'recovery retry parent changed before successor child launch'
+                             end
+                           end
                          end
                        end
         capture_command = lambda do |task_lock, child_env|
