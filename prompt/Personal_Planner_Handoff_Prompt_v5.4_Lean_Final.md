@@ -539,6 +539,13 @@ acceptance 所必需，可納入並在回報列為 changed path；只有新 outc
 subsystem 或 materially expanded risk 才要求 Planner Delta。不得為了縮短文字
 而隱藏必需的 adjacent path。
 
+Write paths 必須依 exact Packet path、適用 repository instructions 或既有
+canonical module/documentation convention 解析；不得另建 duplicate analysis
+folder、第二套 project hierarchy 或未授權的永久外部文件。無法唯一解析必要
+write path 時，STOP: PROJECT_WRITE_PATH_AUTHORITY_UNRESOLVED。
+需要新增 external workspace 時，依 Fable workspace-containment 的 exact path
+與 cleanup disposition 授權；local commit authorization 不會擴張 write root。
+
 ### 5.3 Runtime
 
 Packet 指定 runtime policy tier 與 known output roots。一般任務不建立未知
@@ -1148,6 +1155,10 @@ UPDATED_ALLOWLIST: <PATHS | NONE>
 REQUIRED_CHECKS: <COMMANDS | NONE>
 JUDGE_CONTINUITY: <NOT_APPLICABLE | INITIAL_JUDGE_PENDING_DEPTH_CORRECTION | DELTA_REJUDGE_REQUIRED>
 ~~~
+
+Continuation 繼承原 worktree/root、canonical path convention 與 resource policy。
+UPDATED_ALLOWLIST 不會自行授權新 hierarchy、external workspace 或 concurrency
+escalation；必要改變必須由適用 exact Owner Delta 明列，並維持原 safety gates。
 
 The three JUDGE_CONTINUITY values are mutually exclusive:
 

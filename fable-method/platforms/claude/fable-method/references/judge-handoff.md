@@ -9,6 +9,7 @@
 - [Remediation limit](#remediation-limit)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
+- [Containment and memory evaluation](#containment-and-memory-evaluation)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -254,6 +255,20 @@ Final-tree identity is Worker-owned: the Planner supplies Judge mode/depth but
 must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
+
+## Containment and memory evaluation
+
+When containment or memory writes are load-bearing for the Packet, evaluate
+those boundaries read-only against the actual final tree and filesystem under
+[workspace containment](workspace-containment.md) and
+[memory boundary](memory-boundary.md). Compare only the current task's T0/T1
+interval; historical absence is an accepted baseline, and unattributed sibling
+changes are report-only unless they affect canonical state or a required input.
+Check that task-created workspaces and persistent memory/handoff writes have
+exact path and purpose authorization. Do not broaden this into an automatic
+workspace or memory audit. The Judge reports observed violations; it does not
+create, remove, or repair them. Remediation stays Worker-owned under the normal
+one-remediation limit. This check adds no Judge trigger or authorization.
 
 ## Verdict and lifecycle boundaries
 
