@@ -72,7 +72,7 @@ def apply(text: str, old, new):
     return text, ""
 
 
-def run_case(base: Path, tmp: Path, index: int, case) -> dict:
+def run_case(base: Path, tmp: Path, index: int, case, timeout: int = 180) -> dict:
     name, target, old, new, check = case
     work_root = tmp / f"m{index}"
     shutil.copytree(base, work_root, symlinks=True)
@@ -90,22 +90,64 @@ def run_case(base: Path, tmp: Path, index: int, case) -> dict:
         return {"name": name, "status": "INVALID", "detail": f"does not compile: {exc.msg}"}
     destination.write_text(mutated)
     imports, reason = mc._imports_cleanly(work, destination)
-    run = mc._run_tests(work, [check], 180) if imports else None
+    started = time.monotonic()
+    run = mc._run_tests(work, [check], timeout) if imports else None
+    elapsed = time.monotonic() - started
     expected = check.split(".")[-1]
-    killed = bool(imports and not run.load_error and run.failures.get(expected) == "FAIL")
+    killed = bool(imports and not run.timed_out and not run.load_error and run.failures.get(expected) == "FAIL")
+    outcome = ("IMPORT_ERROR" if run is None else "TIMEOUT" if run.timed_out else
+               "LOAD_ERROR" if run.load_error else run.failures.get(expected) or
+               ("ERROR" if run.returncode else "PASS"))
     shutil.rmtree(work_root, ignore_errors=True)
-    return {"name": name, "status": "KILLED" if killed else "NOT_KILLED", "expected_test": check, "imports": imports,
+    return {"name": name, "status": "KILLED" if killed else "TIMED_OUT" if outcome == "TIMEOUT" else "NOT_KILLED",
+            "expected_test": check, "imports": imports, "test_outcome": outcome,
+            "timed_out": None if run is None else run.timed_out, "timeout_seconds": timeout,
+            "test_elapsed_seconds": elapsed, "returncode": None if run is None else run.returncode,
+            "load_error": None if run is None else run.load_error,
             "detail": reason if not imports else "", "observed_failures": None if run is None else run.failures}
+
+
+def captured_run(runner, captures, *args, **kwargs):
+    """Preserve partial output on timeout, then propagate it to the verified checker."""
+    started = time.time()
+    def output(value):
+        return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+    try:
+        result = runner(*args, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        if kwargs.get("capture_output"):
+            captures.append({"argv": args[0], "cwd": str(kwargs.get("cwd", "")),
+                             "start_epoch": started, "end_epoch": time.time(), "returncode": None,
+                             "timed_out": True, "timeout_seconds": kwargs.get("timeout"),
+                             "stdout": output(exc.stdout), "stderr": output(exc.stderr)})
+        raise
+    if kwargs.get("capture_output"):
+        captures.append({"argv": args[0], "cwd": str(kwargs.get("cwd", "")),
+                         "start_epoch": started, "end_epoch": time.time(), "returncode": result.returncode,
+                         "timed_out": False, "timeout_seconds": kwargs.get("timeout"),
+                         "stdout": result.stdout, "stderr": result.stderr})
+    return result
+
+
+def positive_timeout(value):
+    seconds = int(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive number of seconds")
+    return seconds
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check-patterns", action="store_true", help="only verify that every pattern matches the source exactly once")
-    parser.add_argument("--only", default="")
-    parser.add_argument("--workers", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--only", action="append", default=[], help="case-name substring; repeat to select multiple cases")
+    parser.add_argument("--case-timeout", type=positive_timeout, default=180,
+                        help="per-mutant timeout in seconds; a timeout never counts as a kill")
+    parser.add_argument("--workers", type=int, choices=(1, 2), default=1)
     parser.add_argument("--results-json", help="retain exact subprocess output and assertion classifications here")
     args = parser.parse_args()
-    cases = [case for case in CASES if args.only in case[0]]
+    cases = [case for case in CASES if not args.only or any(part in case[0] for part in args.only)]
+    if not cases:
+        parser.error("no mutation cases matched --only")
     if args.check_patterns:
         bad, tests = 0, known_tests()
         for name, target, old, new, check in cases:
@@ -120,28 +162,25 @@ def main() -> int:
     captures = []
     run = subprocess.run
     def capture(*a, **kw):
-        started = time.time()
-        result = run(*a, **kw)
-        if kw.get("capture_output"):
-            captures.append({"argv": a[0], "cwd": str(kw.get("cwd", "")), "start_epoch": started, "end_epoch": time.time(),
-                             "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
-        return result
+        return captured_run(run, captures, *a, **kw)
     if args.results_json:
         subprocess.run = capture
     with tempfile.TemporaryDirectory(prefix="ensemble3-runner-mutants-") as tmp:
         tmp = Path(tmp)
         base = build_base(tmp)
-        baseline = mc._run_tests(base / "analysis" / "fable-ensemble3-runner", MODULES, 900)
+        baseline_tests = list(dict.fromkeys(case[4] for case in cases)) if args.only else MODULES
+        baseline = mc._run_tests(base / "analysis" / "fable-ensemble3-runner", baseline_tests, 900)
         if args.results_json:
             Path(args.results_json).write_text(json.dumps({"baseline": baseline.__dict__, "captures": captures}, indent=2) + "\n")
         if baseline.returncode or baseline.failures or baseline.load_error:
             raise SystemExit(f"baseline red: {baseline.failures}")
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            results = list(pool.map(lambda pair: run_case(base, tmp, pair[0], pair[1]), enumerate(cases)))
+            results = list(pool.map(lambda pair: run_case(base, tmp, pair[0], pair[1], args.case_timeout), enumerate(cases)))
     killed = sum(r["status"] == "KILLED" for r in results)
     if args.results_json:
         subprocess.run = run
-        Path(args.results_json).write_text(json.dumps({"results": results, "captures": captures}, indent=2) + "\n")
+        Path(args.results_json).write_text(json.dumps({"baseline": baseline.__dict__, "baseline_tests": baseline_tests,
+                                                     "results": results, "captures": captures}, indent=2) + "\n")
     for r in results:
         print(f"{r['status']:<14} {r['name']}" + ("" if r["status"] == "KILLED" else f"   {r.get('detail') or r.get('observed_failures')}"))
     print(f"\n{killed}/{len(results)} killed")
