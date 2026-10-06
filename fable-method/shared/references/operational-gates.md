@@ -334,10 +334,12 @@ HARNESS_EXECUTION_PERMISSION: UNKNOWN
 and stop before the production mutation rather than switching to an alternate
 wrapper, introducing a heredoc/tmp-shell workaround, or assuming a different
 invocation shape is equivalent. Owner authorization and harness capability
-remain separate gates: a standalone Owner authorization for the mutation does
+remain separate gates: exact direct Owner authorization for the mutation does
 not itself establish `HARNESS_EXECUTION_PERMISSION`, and an `ALLOWED` probe
-result never substitutes for standalone Owner authorization where one is
-required.
+result never substitutes for that authorization. One direct Owner message may
+contain both the authorization and executable Packet; applicable prior direct
+Owner authorization may be reused under the existing conversation-boundary
+contract. This probe adds no two-message requirement.
 
 ## Runtime outputs
 

@@ -43,7 +43,7 @@ class ProductionMutationIncidentContractTest < Minitest::Test
 
   def test_owner_authorization_and_harness_capability_are_separate_gates
     assert_match(/Owner authorization and harness capability\nremain separate gates/, OPERATIONAL_GATES)
-    assert_match(/an `ALLOWED` probe\nresult never substitutes for standalone Owner authorization/, OPERATIONAL_GATES)
+    assert_match(/an `ALLOWED` probe\nresult never substitutes for that authorization/, OPERATIONAL_GATES)
   end
 
   def test_preflight_scoped_to_production_not_ordinary_commands

@@ -480,14 +480,16 @@ it is not evidence-progressing RCA.
 
 ### 5.1A Runtime write-surface preflight
 
-For that same real production/runtime mutation, require the harness capability
-before execution. This refines the existing missing-required-capability stop:
+For that same real production/runtime mutation, reuse the canonical Fable
+capability tri-state and the same-harness probe in operational-gates.md:
 
-EXECUTION_CAPABILITY_REQUIRED: YES | NO
-EXECUTION_CAPABILITY_STATUS: PASS | BLOCKED | NOT_REQUIRED
+CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
 
-If capability is required and is not PASS, STOP:
-HARNESS_EXECUTION_PERMISSION_BLOCKED
+`ALLOWED` requires direct evidence from the exact harness/wrapper/launcher chain
+that will invoke the mutation. `UNKNOWN` and `BLOCKED` never permit execution;
+stop before mutation without substituting another execution path. Capability
+is separate from the exact direct Owner authorization in §4.3: neither an
+`ALLOWED` probe nor a resolved write surface grants authorization.
 
 Distinct from capability preflight:
 
@@ -502,8 +504,8 @@ data safety, or rollback semantics. Does not apply to ordinary local unit
 tests, read-only reviews, pure QA, documentation-only tasks, or routine local
 implementation where runtime write authorization is irrelevant.
 
-Before standalone authorization for the real mutation is requested or
-consumed, resolve the exact runtime entrypoint's load-bearing writes and
+Before the applicable exact direct Owner authorization in §4.3 is requested
+or consumed, resolve the exact runtime entrypoint's load-bearing writes and
 include the complete relevant write surface in the authorization synthesis:
 
 RUNTIME_WRITE_SURFACE_REQUIRED: YES | NO

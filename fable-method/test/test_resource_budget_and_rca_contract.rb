@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require_relative 'support/contract_fixtures'
 
 class ResourceBudgetAndRcaContractTest < Minitest::Test
+  include ContractFixtures
   SHARED_ROOT = File.expand_path('../shared', __dir__)
   SKILL = File.read(File.join(SHARED_ROOT, 'SKILL.md'))
   OPERATIONAL_GATES = File.read(File.join(SHARED_ROOT, 'references', 'operational-gates.md'))
@@ -49,7 +51,17 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   def test_cpu_heavy_default_is_two
     assert_equal 'SHARED_WORKSTATION', resource_value('RESOURCE_POLICY')
     assert_equal 2, Integer(resource_value('CPU_BOUND_DEFAULT_WORKERS'))
-    assert_match(/CPU-heavy work uses the `SHARED_WORKSTATION` budget/, SKILL)
+    gates = linked_reference(SKILL, 'operational-gates.md')
+    assert_equal OPERATIONAL_GATES, gates
+    assert_guarded_contract(gates, [
+      'This budget applies only to CPU-heavy work; do not artificially limit ordinary low-CPU commands.',
+      'It must not raise concurrency above 2 without direct Owner authorization;',
+      'Never use unrestricted CPU-heavy worker selection'
+    ], weakenings: {'must not raise concurrency above 2' => 'may raise concurrency above 2'})
+    assert_equal 'FORBIDDEN', resource_value('AUTO_CPU_SCALING')
+    assert_equal 'FORBIDDEN', resource_value('ALL_CORE_EXECUTION')
+    assert cpu_request_permitted?(workers: 1, cpu_heavy: true)
+    refute cpu_request_permitted?(workers: 3, cpu_heavy: true)
   end
 
   def test_cpu_heavy_max_without_owner_authorization_is_two
@@ -91,25 +103,35 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   end
 
   def test_fourth_evidence_progressing_rca_step_is_permitted
-    assert_match(/fourth or later\nevidence-progressing step is permitted/, SKILL)
-    assert_match(/no arbitrary numeric ceiling/, SKILL)
+    failures = linked_reference(SKILL, 'failure-modes.md')
+    assert_guarded_contract(failures, [
+      'Evidence-progressing RCA has no arbitrary numeric ceiling, but stop when scope, safety, authority, capability, proportionality, or discriminating evidence is exhausted.',
+      'Each continuation must test a falsifiable hypothesis and materially reduce uncertainty.'
+    ], weakenings: {'no arbitrary numeric ceiling' => 'a maximum of three attempts'})
+    refute_match(/(?:fourth|later|\d+(?:st|nd|rd|th)) (?:attempt|step).*forbidden/i, RCA_CONTRACT)
   end
 
   def test_identical_blind_retry_is_not_evidence_progress
-    assert_match(/Identical blind retries and speculative patches are not evidence progress/, SKILL)
-    assert_match(/must test a falsifiable hypothesis/, SKILL)
-    assert_match(/materially reduce uncertainty/, SKILL)
+    assert_guarded_contract(linked_reference(SKILL, 'failure-modes.md'), [
+      'Identical blind retries and speculative patches are not evidence progress.',
+      'Each continuation must test a falsifiable hypothesis and materially reduce uncertainty.',
+      'When a correction is applied, rerun the real check and retain its actual output.'
+    ], weakenings: {'are not evidence progress.' => 'are evidence progress.'})
   end
 
   def test_no_fixed_numeric_retry_terminal_rule_remains
     refute_match(/evidence-backed attempts\s*<\s*\d+/i, RCA_CONTRACT)
     refute_match(/BLOCKED_AFTER_[A-Z0-9]+_EVIDENCE_BACKED_ATTEMPTS/, RCA_CONTRACT)
     refute_match(/#{NUMBER_WORD}-attempt bound/i, RCA_CONTRACT)
-    refute_match(/after (?:exactly )?#{NUMBER_WORD} evidence-backed (?:failed )?(?:attempts|failures),? stop/i,
-                 RCA_CONTRACT)
-    assert_match(/This is not unlimited retry permission/, SKILL)
-    assert_match(/stop when scope, safety, authority, capability, proportionality, or\ndiscriminating evidence is exhausted/,
-                 SKILL)
+    refute_match(/after (?:exactly )?#{NUMBER_WORD} evidence-backed (?:failed )?(?:attempts|failures),? stop/i, RCA_CONTRACT)
+    assert_guarded_contract(SKILL, [
+      'stop when scope, safety, authority, capability, proportionality, or discriminating evidence is exhausted.'
+    ], weakenings: {'discriminating evidence is exhausted.' => 'attempt number reaches three.'})
+    failures = linked_reference(SKILL, 'failure-modes.md')
+    assert_guarded_contract(failures, [
+      'External credentials, permissions, missing runtimes, and unresolved authority remain blockers.',
+      'A stop token is final for the current task authority: no mutation, equivalent command substitution, metadata workaround, upstream rewrite, or retry under a different action class until a new authoritative Owner instruction or valid Continuation Delta.'
+    ])
   end
 
   def ordinal_judge_trigger_clauses(text)
@@ -160,11 +182,17 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   end
 
   def test_material_unknown_remains_the_uncertainty_trigger
-    assert_match(/verification, or material unknown evidence\./, SKILL)
-    assert_match(
-      /A single acceptance failure is not\na trigger at any attempt number; material unknown still applies\./,
-      SKILL
-    )
+    assert_guarded_contract(SKILL, [
+      'A Judge trigger requires both a listed category and a material consequence:',
+      'explicit independent verification, or material unknown evidence.',
+      'A single acceptance failure is not a trigger by itself.'
+    ], weakenings: {
+      'or material unknown evidence.' => '.',
+      'not a trigger by itself.' => 'always a trigger.'
+    })
+    ordinal_fixture = SKILL + ' A second failed attempt automatically triggers the Judge.'
+    refute_empty ordinal_judge_trigger_clauses(ordinal_fixture)
+    assert_empty ordinal_judge_trigger_clauses(SKILL)
   end
 
   def test_judge_handoff_defers_to_skill_for_the_trigger_definition

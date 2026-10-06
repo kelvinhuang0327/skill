@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require_relative 'support/contract_fixtures'
 
 class PlannerV54RoutingRegressionTest < Minitest::Test
+  include ContractFixtures
   REPOSITORY_ROOT = File.expand_path('../..', __dir__)
   FIXTURE_COUNT = 12
   DEFERRED_RESOURCE_CASES = {
@@ -60,12 +62,16 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       'Scope 外的 unrelated dirty path、compatible descendant 或',
       'harmless environment difference 記錄後繼續；managed overlapping dirty ownership'
     )
-    assert_fable(
-      'descendant, unrelated outside-scope dirty path, or harmless environment',
-      'difference is evidence to report, not a stop.',
-      'Preserve unrelated owner changes.',
-      'Never reset, restore, stash, or clean unrelated/Owner work.'
-    )
+    gates = linked_reference(FABLE, 'operational-gates.md')
+    assert_guarded_contract(FABLE, [
+      'Stop on unexplained changes;',
+      'do not use cwd as authority, overwrite owner work, or reset, restore, stash, or clean unrelated state.',
+      'Unrelated out-of-scope dirt or harmless environment differences are report-only.'
+    ], weakenings: {'report-only.' => 'a reason to reset owner files.'})
+    assert_guarded_contract(gates, [
+      'A compatible descendant, unrelated out-of-scope dirt, or harmless environment difference is report-only.',
+      'The preflight STOP conditions are wrong repository, incompatible base/ref, overlapping dirty ownership, active concurrent mutation, missing required capability, or an explicit safety restriction.'
+    ], weakenings: {'overlapping dirty ownership,' => ''})
   end
 
   # Expected: STOP_WITH_EVIDENCE rather than taking over managed dirty work.
@@ -97,11 +103,19 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '- Focused and affected regressions by default.',
       '- Add full suite, Judge, browser, DB invariance, evidence or lifecycle cleanup only when applicable.'
     )
-    assert_fable(
-      'command exit statuses and',
-      'raw summaries, runtime evidence, filesystem ledger, unknowns, failed attempts,',
-      'and final-tree identity.'
-    )
+    handoff = linked_reference(FABLE, 'judge-handoff.md')
+    reporting = linked_reference(FABLE, 'reporting.md')
+    assert_guarded_contract(handoff, [
+      'Include commands, exit statuses, and raw summaries',
+      'all unknowns and failed attempts;',
+      'the complete filesystem write/retained/deleted ledger.'
+    ], weakenings: {'all unknowns and failed attempts;' => 'only successful attempts;'})
+    assert_guarded_contract(reporting, [
+      'Earlier failures, aborts, timeouts, and terminations remain in the attempt and filesystem ledgers.',
+      'Every `VERIFIED` claim must trace to an observed command or runtime result.',
+      'NOT RUN / BLOCKED: <checks not run and why>'
+    ])
+    assert_guarded_contract(FABLE, ['Run the named acceptance and only directly relevant surrounding checks.'])
   end
 
   # Expected: explicit direct Owner authorization plus the higher-risk CTO/Judge
@@ -175,12 +189,17 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '不能取代它，同一 Worker conversation 中仍適用的 prior authorization 可依 §4.3',
       '重用。'
     )
-    assert_fable(
-      'Push, publication, deployment, remote changes, PR',
-      'creation or merge, destructive operations, credentials, secrets, production',
-      'writes, migrations, external messages, and unrelated products require',
-      'explicit direct Owner authorization.'
-    )
+    gates = linked_reference(FABLE, 'operational-gates.md')
+    assert_guarded_contract(FABLE, [
+      'an outward-facing, irreversible, destructive, production, deployment, or other high-risk action requires direct Owner authorization for the exact action and target.'
+    ], weakenings: {'requires direct Owner authorization' => 'requires assistant approval'})
+    assert_guarded_contract(PLANNER, [
+      'High-risk authorization 的 provenance 是 direct-message requirement，不是 two-message requirement。',
+      'SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO',
+      'authorization for a different action or target。'
+    ])
+    assert_includes gates, 'OWNER_DIRECT_PACKET_AUTHORIZATION'
+    refute_match(/Before standalone authorization/, PLANNER)
   end
 
   # Expected: exactly one primary next task.
@@ -856,6 +875,7 @@ class PlannerReportingVocabularyTest < Minitest::Test
 end
 
 class PlannerRuntimeWriteSurfacePreflightTest < Minitest::Test
+  include ContractFixtures
   REPOSITORY_ROOT = File.expand_path('../..', __dir__)
   PLANNER = File.read(
     File.join(REPOSITORY_ROOT, 'prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
@@ -931,8 +951,21 @@ class PlannerRuntimeWriteSurfacePreflightTest < Minitest::Test
   # 6 — existing execution-capability preflight semantics are unchanged, and
   # the two preflights remain explicitly distinct.
   def test_execution_capability_preflight_preserved_and_distinct
-    assert_includes PLANNER, 'EXECUTION_CAPABILITY_REQUIRED: YES | NO'
-    assert_includes PLANNER, "STOP:\nHARNESS_EXECUTION_PERMISSION_BLOCKED"
+    preflight = PLANNER.split('### 5.1A Runtime write-surface preflight', 2).last.split('### 5.2', 2).first
+    assert_includes preflight, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
+    assert_includes preflight, '`UNKNOWN` and `BLOCKED` never permit execution;'
+    assert_includes preflight, 'neither an'
+    assert_includes preflight, '`ALLOWED` probe nor a resolved write surface grants authorization.'
+    refute_includes preflight, 'EXECUTION_CAPABILITY_STATUS'
+    refute_includes preflight, 'standalone authorization'
+    assert_guarded_contract(preflight, [
+      'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED',
+      '`ALLOWED` requires direct evidence from the exact harness/wrapper/launcher chain that will invoke the mutation.',
+      '`UNKNOWN` and `BLOCKED` never permit execution;',
+      'stop before mutation without substituting another execution path.',
+      'Capability is separate from the exact direct Owner authorization in §4.3:',
+      '`ALLOWED` probe nor a resolved write surface grants authorization.'
+    ], weakenings: {'`UNKNOWN` and `BLOCKED` never permit execution;' => '`UNKNOWN` permits execution;'})
     assert_includes PLANNER, 'CAPABILITY PREFLIGHT: Can the harness execute the real action?'
     assert_includes PLANNER, 'WRITE-SURFACE PREFLIGHT: What load-bearing durable/runtime writes will that action cause?'
   end
