@@ -9,6 +9,7 @@
 - [Shared workstation resource budget](#shared-workstation-resource-budget)
 - [Attempts and process termination](#attempts-and-process-termination)
 - [Git action tiers](#git-action-tiers)
+- [Canonical successor and source remediation dedup](#canonical-successor-and-source-remediation-dedup)
 - [Worktrees and mutation evidence](#worktrees-and-mutation-evidence)
 - [Continuity](#continuity)
 
@@ -510,6 +511,27 @@ canonical main advanced, inspect bounded path overlap and direct consumers of
 candidate-modified state. Run only the focused prospective integration check
 when a direct dependency exists; main advancing alone does not require a full
 suite.
+
+## Canonical successor and source remediation dedup
+
+Use this evaluation branch only when preparing to remediate an older source, resolving a publication conflict, or when direct clues of a potential successor already exist; do not add global successor discovery to ordinary tasks.
+
+Evaluation authority is strictly bounded by canonical source and the current task acceptance; inspect only known candidates, directly related changes, and direct dependencies.
+
+Full supersession (`SUPERSEDED_BY_CANONICAL`):
+When all required deliverables and acceptance criteria are completely covered by a successor reachable in canonical source, and required verification evidence applies, record `SUPERSEDED_BY_CANONICAL` and stop duplicate source remediation.
+
+Partial supersession:
+Enumerate covered and missing acceptance items explicitly; continue only with the authorized missing delta inside the current scope.
+
+Insufficient evidence or absent successor:
+If evidence is incomplete or no confirmable successor exists, do not declare completion; identify the minimum gap or continue authorized source remediation. Matching paths, similar commit titles, or an isolated green CI run alone do not prove equivalence.
+
+Evidence and status boundaries:
+Prior candidate test results must never be relabeled as a successor PASS. `SUPERSEDED_BY_CANONICAL` must never be reported as old PR MERGED. Content equivalence must never be used to delete an exact deployed source that still requires preservation.
+
+Safety and authorization invariants:
+Determining canonical supersession does NOT authorize closing PRs, pushing, merging, force-deleting, or creating preservation refs; nor does it supersede active runtime ownership, standalone destructive authorization, or existing safety gates.
 
 ## Worktrees and mutation evidence
 

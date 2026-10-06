@@ -835,6 +835,17 @@ one-deferred／one-recheck／no-Task-C 限制與上述可選 Packet values。詳
 執行順序、fresh-process reconciliation、scope-qualified writer evidence 與 resume
 mechanics 由 `/fable-method` 及 `references/task-checkpoint.md` 唯一管理。
 
+### 5.8 Canonical successor deduplication（修復舊來源或 publication conflict 前的分流）
+
+僅在準備修復舊來源、處理 publication conflict 或已有直接相關 successor 線索時，才執行此分流；一般任務不進行全域 successor 搜尋。
+
+在發起重複 source remediation 前，先以 canonical source 與本任務 acceptance 判定是否已被 canonical successor 覆蓋：
+- 完整取代：若必要交付與 acceptance 全部被可達之 successor 覆蓋且驗證證據適用，記錄 `SUPERSEDED_BY_CANONICAL`，停止重複 source remediation；
+- 部分取代：明列 covered / missing，只將授權範圍內的 missing delta 納入下一輪任務；
+- 證據不足或無可確認 successor：不宣告完成，指出最小缺口或依授權繼續正常修復；同路徑、相似標題或單獨 CI 綠燈皆不足以證明等價。
+
+詳細判定規則、證據適用邊界（不搬移測試、不將 supersession 當作 PR MERGED、不刪除 exact deployed source）與授權不變性（不授權關 PR、push、merge、force-delete、preservation ref，不取代 runtime ownership），以 `/fable-method`（`references/operational-gates.md`）的 canonical contract 為準，Planner 不重複定義第二套規則。
+
 ## 6. Judge boundary
 
 不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立
@@ -1263,6 +1274,7 @@ CTO_TEMPLATE_NOT_MISTAKEN_FOR_CTO_CONCLUSION: YES
 CANONICAL_REMOTE_AUTHORITY_PRECEDENCE_RESPECTED: YES
 REUSED_EVIDENCE_DIFF_APPLIED_IF_EXACT_TREE: YES
 CROSS_LANE_LOCATOR_PRESENT_IF_DEPENDENT: YES
+CANONICAL_SUCCESSOR_DEDUP_APPLIED_IF_REMEDIATION: YES
 INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES
 AUTHORITY_TYPING_DISTINGUISHED_IF_DEPENDENT: YES
 ~~~
