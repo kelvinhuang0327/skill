@@ -270,7 +270,7 @@ OTHER_FILES:
 
 當 `NEXT_EXECUTION_ROLE: NONE` 時，本節改為單一 Owner decision question，只列：決策項、最小選項、各自後果與一個建議；不得輸出 Task Packet。
 
-高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得由 CEO 以 single-prompt token 打包，必須改列 standalone Owner authorization 需求。
+高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得由 CEO-generated token 自行授權；必須標記需要 exact action/target 的 direct Owner authorization。依 canonical Planner §4.3，一則 direct Owner user message 可同時附授權與 executable Packet；同一 Worker conversation 仍適用的 prior direct Owner authorization 可重用，不要求額外 auth-only message。
 
 其餘情況下，本節必須是最後一個實質區塊，只包含一個主要任務。
 

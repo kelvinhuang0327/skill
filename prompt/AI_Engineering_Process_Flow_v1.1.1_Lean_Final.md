@@ -10,7 +10,7 @@
 - 最大程度實作；
 - CTO／CEO 按需介入，不是每輪必經；
 - Planner 是一般情況下產生施工單的最後一站；
-- 高風險任務才啟用完整治理與 standalone Owner authorization。
+- 高風險任務才啟用完整治理與 direct Owner authorization。
 
 ---
 
@@ -78,7 +78,7 @@ Worker / Handoff
 → CTO
 → CEO
 → Planner
-→ standalone Owner Authorization
+→ direct Owner Authorization
 → Worker
 ```
 
@@ -100,7 +100,7 @@ Worker / Handoff
 | 需要 new outcome／unrelated subsystem／materially expanded risk | Planner Minimal Continuation Delta |
 | 跨 API／DB／frontend 且 boundary 不明 | CTO → Planner |
 | 兩個產品方向皆合理 | CEO；技術有疑問才先 CTO |
-| Production DB／deploy／不可逆操作 | CTO → CEO → Planner → standalone authorization |
+| Production DB／deploy／不可逆操作 | CTO → CEO → Planner → direct Owner authorization |
 
 ---
 
@@ -112,7 +112,7 @@ Worker / Handoff
 2. current working directory 不得自動成為 authority。
 3. Handoff 只保存事實與來源，不自動延伸上一輪授權。
 4. 一般低風險任務可用 single-prompt authorization。
-5. 高風險任務必須 standalone Owner authorization。
+5. 高風險任務必須 direct Owner authorization。 exact action/target 與 provenance 依 canonical Planner §4.3；授權與 executable Packet 可由 Owner 在同一則 direct user message 送出，仍適用的 prior authorization 可重用，不要求額外 auth-only message。
 6. 平台／harness permission 與 Owner authorization 分開處理。
 7. Dirty ownership 不明時不得接管。
 8. 外部 mutation 結果不明時，先 bounded read-after-write，再決定是否重試。
@@ -139,7 +139,7 @@ Worker / Handoff
 
 - Dirty takeover／concurrency risk → 兩次 bounded snapshot。
 - Auth／security／DB migration／跨模組 lineage → BOUNDED Judge 或 CTO review。
-- Production／financial／irreversible → standalone authorization＋FULL／Tier 2 gates。
+- Production／financial／irreversible → direct Owner authorization＋FULL／Tier 2 gates。
 - Durable evidence 將成為另一個 repo 的 authority → evidence seal。
 - User-facing flow真正需要 browser evidence → browser journey。
 

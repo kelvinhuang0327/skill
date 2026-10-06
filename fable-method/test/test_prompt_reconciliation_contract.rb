@@ -51,6 +51,33 @@ class PromptReconciliationContractTest < Minitest::Test
     refute_includes flow, '`Personal_Planner_Handoff_Prompt_v5.4.1_Lean_Final.md`'
   end
 
+  def test_active_role_handoffs_inherit_owner_direct_packet_without_self_authorization
+    roles = %w[CTO_Technical_Review_Prompt_v2.1_Lean_Final.md CEO_Decision_Review_Prompt_v2.1_Lean_Final.md]
+    roles.each do |name|
+      role = name.split('_').first
+      text = File.read(File.join(ROOT, 'prompt', name))
+      assert_guarded_contract(text, [
+        "不得由 #{role}-generated token 自行授權；",
+        'exact action/target 的 direct Owner authorization。',
+        '一則 direct Owner user message 可同時附授權與 executable Packet；',
+        'prior direct Owner authorization 可重用，不要求額外 auth-only message。'
+      ], weakenings: {"不得由 #{role}-generated token 自行授權；" => "可由 #{role} 自行授權；"})
+      refute_includes text, 'standalone Owner authorization'
+    end
+    handoff = File.read(File.join(ROOT, 'prompt/Personal_Web_Conversation_Handoff_Prompt_v3.1_Lean_Final.md'))
+    assert_guarded_contract(handoff, [
+      '不要把 quoted authorization 寫成已授權。',
+      'exact action/target 授權與 executable Packet；',
+      '仍適用且未被 supersede 的 prior direct Owner authorization 可重用，不要求額外 auth-only message。'
+    ], weakenings: {'不要把 quoted authorization 寫成已授權。' => '把 quoted authorization 寫成已授權。'})
+    flow = File.read(File.join(ROOT, 'prompt/AI_Engineering_Process_Flow_v1.1.1_Lean_Final.md'))
+    assert_guarded_contract(flow, [
+      '若與角色文件衝突，以 Planner v5.4 的 Authority／Authorization 規則為準。',
+      '高風險任務必須 direct Owner authorization。',
+      'exact action/target 與 provenance 依 canonical Planner §4.3；'
+    ])
+  end
+
   def test_historical_e399_prompt_bytes_are_preserved_exactly
     assert_equal '5e116e50f347a126fa7c3af19c93c80648d7fd8461ff55b34310e5bf336d44e6', Digest::SHA256.file(File.join(ROOT, 'prompt/old/e399412', 'Personal_Planner_Handoff_Prompt_v5.3.3_Lean_Final.md')).hexdigest
     assert_equal '62eccabf6210eab85dc47f0b898e83e033278804f4fc59c478c51c19e36677f4', Digest::SHA256.file(File.join(ROOT, 'prompt/old/e399412', 'Personal_Planner_Handoff_Prompt_v5.3.2_Lean_Final.md')).hexdigest

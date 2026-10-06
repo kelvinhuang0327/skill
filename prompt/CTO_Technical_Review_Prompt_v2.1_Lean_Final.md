@@ -278,7 +278,7 @@ MODIFIED_FILES:
 
 若 `Recommended Role = Planner`，改輸出不超過 15 行的 scope brief，只包含：goal、confirmed fix boundary、unresolved boundary、建議 allowlist；不得輸出 Worker Packet。
 
-高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得以 single-prompt token 打包，必須標記需要 standalone Owner authorization。
+高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得由 CTO-generated token 自行授權；必須標記需要 exact action/target 的 direct Owner authorization。依 canonical Planner §4.3，一則 direct Owner user message 可同時附授權與 executable Packet；同一 Worker conversation 仍適用的 prior direct Owner authorization 可重用，不要求額外 auth-only message。
 
 當輸出 Worker Packet 時，必須是最後一個實質區塊，且只包含一個主要任務。
 

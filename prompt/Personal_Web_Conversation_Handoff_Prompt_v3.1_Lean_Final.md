@@ -52,9 +52,9 @@ EMPTY_OR_NOT_APPLICABLE_OPTIONAL_SECTIONS: OMIT
 
 - 當前可執行 scope；
 - authority 的直接來源或可解析 locator；
-- 尚缺的 standalone Owner authorization（如有）。
+- 尚缺的 exact direct Owner authorization（如有）。
 
-Executable Packet 可授權其明確界定的本地工作，但 push、PR、merge、deploy、production write、destructive cleanup 等 high-risk action 仍須依其契約取得 standalone Owner authorization。handoff、Packet 或歷史報告中「引用的 token／授權文字」只證明曾被引用，不是下一個 Agent 對話中的 fresh standalone authorization。不要把 quoted authorization 寫成已授權。
+Executable Packet 可授權其明確界定的本地工作，但 push、PR、merge、deploy、production write、destructive cleanup 等 high-risk action 仍須依其契約取得 exact direct Owner authorization。handoff、Packet 或歷史報告中「引用的 token／授權文字」只證明曾被引用，不是下一個 Agent 對話中的 direct Owner authorization。不要把 quoted authorization 寫成已授權。依 canonical Planner §4.3，Owner 可在目標 Worker conversation 的同一則 direct user message 送出 exact action/target 授權與 executable Packet；仍適用且未被 supersede 的 prior direct Owner authorization 可重用，不要求額外 auth-only message。
 
 ## 壓縮順序
 
@@ -68,7 +68,7 @@ Executable Packet 可授權其明確界定的本地工作，但 push、PR、merg
 
 - `CASE_SIMPLE_COMPLETED_LOCAL_BUGFIX`：只保留完成的 fix、current-tree 驗證、`BLOCKERS: NONE`，以及一個 next task 或 `NONE REQUIRED`。
 - `CASE_WORKER_BLOCKED_ON_EXACT_DEPENDENCY`：只保留 exact dependency、受影響的未完成工作與一個解除／重驗該 dependency 的 next task。
-- `CASE_PUBLICATION_PENDING_STANDALONE_OWNER_AUTH`：區分已授權的 local work 與未授權 publication；quoted token 不算 fresh auth，下一任務只能是取得 exact direct authorization。
+- `CASE_PUBLICATION_PENDING_DIRECT_OWNER_AUTH`：區分已授權的 local work 與未授權 publication；quoted token 不算 fresh auth，下一任務只能是取得 exact direct authorization。
 - `CASE_DIRTY_UNRELATED_OWNER_WORK_PRESERVED`：ownership boundary 只記一次；保留 Owner dirty work，不展開其內容、不把它納入 task scope。
 - `CASE_EXACT_TREE_JUDGE_VERDICT_PRESENT`：只在 evidence 記一次 exact-tree Judge verdict，不複製 Judge 報告或改寫成另一個 tree 的結論。
 - `CASE_OLD_TEST_EVIDENCE_TREE_CHANGED`：舊測試標 historical／invalidated，current tree 為 `NOT RUN`；不得宣稱 current `PASS`。
@@ -85,7 +85,7 @@ GOAL:
 <one current goal>
 
 AUTHORITY:
-<exact scope + direct source or locator + missing standalone authorization, if any>
+<exact scope + direct source or locator + missing direct Owner authorization, if any>
 
 CURRENT_STATUS:
 - COMPLETED: <only current completed work>

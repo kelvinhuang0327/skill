@@ -129,7 +129,7 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     )
     assert_cto(
       'DB／data claim是load-bearing → read-only DB identity／schema／count；',
-      '高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得以 single-prompt token 打包，必須標記需要 standalone Owner authorization。'
+      '高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得由 CTO-generated token 自行授權；必須標記需要 exact action/target 的 direct Owner authorization。'
     )
   end
 
