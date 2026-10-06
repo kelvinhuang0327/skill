@@ -173,4 +173,80 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
     refute_match(/acceptance failure/i, JUDGE_HANDOFF,
                  'judge-handoff.md restates Judge-trigger semantics instead of deferring to SKILL.md')
   end
+
+  def compacted_skill
+    SKILL.gsub(/\s+/, ' ')
+  end
+
+  def recovery_clause(state)
+    compacted_skill[/`#{Regexp.escape(state)}`:[^`]{0,160}/] || ''
+  end
+
+  def test_expensive_execution_recovery_classifies_exactly_four_states
+    prose = compacted_skill
+    %w[ACTIVE COMPLETE_VALID TERMINATED_INCOMPLETE UNRESOLVED].each do |state|
+      assert_includes SKILL, "`#{state}`", "shared Skill dropped recovery state #{state}"
+    end
+    assert_match(
+      /classify the prior execution as exactly one of `ACTIVE`, `COMPLETE_VALID`, `TERMINATED_INCOMPLETE`, or `UNRESOLVED`/,
+      prose
+    )
+    assert_match(
+      /Session, quota, shell, or handoff loss does not prove execution failure/,
+      prose
+    )
+    assert_match(
+      /Resolve the exact scope-qualified process\/writer and canonical durable output/,
+      prose
+    )
+    assert_match(/File existence alone is not `COMPLETE_VALID`/, prose)
+  end
+
+  def test_no_duplicate_launch_while_active_or_unresolved
+    prose = compacted_skill
+    assert_match(/`ACTIVE`: wait, observe, or attach; never launch a duplicate/, prose)
+    assert_match(/`UNRESOLVED`: stop rather than risk concurrent or duplicate execution/, prose)
+    refute_match(/rerun is permitted/, recovery_clause('ACTIVE'))
+    refute_match(/rerun is permitted/, recovery_clause('UNRESOLVED'))
+    refute_match(/launch a duplicate/, recovery_clause('ACTIVE').sub(/never launch a duplicate/, ''))
+  end
+
+  def test_complete_valid_reuses_output_and_does_not_rerun
+    prose = compacted_skill
+    assert_match(/`COMPLETE_VALID`: reuse the existing output; do not rerun/, prose)
+    refute_match(/rerun is permitted/, recovery_clause('COMPLETE_VALID'))
+  end
+
+  def test_rerun_is_permitted_only_on_terminated_incomplete
+    assert_match(/`TERMINATED_INCOMPLETE`: rerun is permitted/, compacted_skill)
+    %w[ACTIVE COMPLETE_VALID UNRESOLVED].each do |state|
+      refute_match(/rerun is permitted/, recovery_clause(state),
+                   "#{state} must not authorize rerun")
+    end
+  end
+
+  def test_determinism_reuses_same_result_without_upstream_recomputation
+    prose = compacted_skill
+    assert_match(
+      /When acceptance concerns serialization or artifact byte determinism, reuse the same already-computed semantic result/,
+      prose
+    )
+    assert_match(/independently serialize or reconstruct the serialized bytes, and compare them/, prose)
+    assert_match(
+      /Do not rerun an expensive upstream computation solely for byte-level determinism/,
+      prose
+    )
+  end
+
+  def test_independent_replay_is_required_only_when_packet_makes_replay_acceptance
+    prose = compacted_skill
+    assert_match(
+      /Independent algorithm\/process replay is required only when the Packet explicitly makes replay part of acceptance/,
+      prose
+    )
+    assert_match(
+      /Do not weaken existing `NOT RUN`, retry-ledger, RCA, Judge, or evidence-honesty rules/,
+      prose
+    )
+  end
 end

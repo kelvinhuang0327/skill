@@ -137,6 +137,10 @@ Preserve `/fable-method <task>`, `/fable-method plan <task>`, `/fable-method aud
 
 Use the bounded no-Packet flow in [worked examples](references/examples.md#compact-flow-without-a-packet); do not turn it into a second plan when an authoritative Packet already resolves the work.
 
+Session, quota, shell, or handoff loss does not prove execution failure. Resolve the exact scope-qualified process/writer and canonical durable output, then classify the prior execution as exactly one of `ACTIVE`, `COMPLETE_VALID`, `TERMINATED_INCOMPLETE`, or `UNRESOLVED`. `ACTIVE`: wait, observe, or attach; never launch a duplicate. `COMPLETE_VALID`: reuse the existing output; do not rerun. File existence alone is not `COMPLETE_VALID`; the durable output must satisfy its task acceptance and available terminal evidence. `TERMINATED_INCOMPLETE`: rerun is permitted only if the original task authority allows that rerun; classification does not grant new scope or authorization. `UNRESOLVED`: stop rather than risk concurrent or duplicate execution.
+
+When acceptance concerns serialization or artifact byte determinism, reuse the same already-computed semantic result, independently serialize or reconstruct the serialized bytes, and compare them. Do not rerun an expensive upstream computation solely for byte-level determinism. Independent algorithm/process replay is required only when the Packet explicitly makes replay part of acceptance. Do not weaken existing `NOT RUN`, retry-ledger, RCA, Judge, or evidence-honesty rules.
+
 ## Final artifact gate
 
 Every changed path must be authorized and every `PASS` tied to observed evidence. Do not report terminal success while a mandatory criterion is `NOT RUN`, unresolved, or contradicted. Distinguish `NOT RUN`, `BLOCKED`, and `UNKNOWN`; never claim publication, runtime success, or cleanup without observing it. See [outcome-first reporting](references/reporting.md#final-artifact-gate) and [Judge handoff](references/judge-handoff.md).
