@@ -238,14 +238,19 @@ window, not a universal safety constant. Do not poll indefinitely. Stable scoped
 evidence permits progress; unexplained scoped mutation stops the write and
 requires ownership reconciliation.
 
-`TaskCheckpoint.scope_qualified_active_writer?` evaluates this evidence without
-discovering or scheduling processes. The caller supplies the exact worktree,
-task-owned paths, before/after snapshots, and any observed process target paths.
-Snapshot drift is active mutation. With stable snapshots, only an observed
-target path overlapping the exact worktree or owned surface counts; names such
-as `pytest`, `python`, or `Agent` without that path evidence do not. The exposed
-default observation value is five seconds, but callers may choose another
-bounded interval when the task requires it.
+`TaskCheckpoint.scope_qualified_active_writer?` is an optional convenience in
+the source helper (`fable-method/scripts/task_checkpoint.rb`). Installed
+builds intentionally exclude executable helpers, so helper absence is never a
+blocker. The explicit bounded before/after snapshots are authoritative. If the
+helper is unavailable, capture the exact designated worktree and task-owned
+paths, branch, HEAD, tree, full status (including staged, unstaged, and
+untracked paths), and each owned path's identity/content metadata; repeat the
+same capture after a bounded interval. Any difference is active mutation.
+With stable snapshots, count a process only when directly observed target
+paths overlap the exact worktree or owned surface; a process name alone is
+insufficient. Unresolved writer ownership remains fail-closed. The default
+observation is about five seconds, but callers may choose another bounded
+interval when the task requires it.
 
 ## Long-running execution recovery
 
