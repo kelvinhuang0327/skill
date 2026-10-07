@@ -214,24 +214,23 @@ re-Judge. If the same finding is refuted again, stop with
 ## Durable terminal capture
 
 When a Judge-owned long-running command has a load-bearing terminal result,
-persist it with `DurableCommandCapture`
-(`fable-method/scripts/task_checkpoint.rb`) to
-`.fable/checkpoints/<task_id>/captures/<capture_id>.json` before that result
-is relied upon for the final verdict: exact argv, exact stdout, exact stderr,
-underlying process exit status, and start/end timestamps. The durable file,
-not UI or subagent streaming, is the sole authority for that result.
+persist exact argv, stdout, stderr, underlying process exit status, and
+start/end timestamps to
+`.fable/checkpoints/<task_id>/captures/<capture_id>.json` before relying on
+that result for the final verdict. The optional `DurableCommandCapture` API in
+`fable-method/scripts/task_checkpoint.rb` is not included in the canonical
+installed build, and its absence is never a blocker. The complete scriptless
+fallback is to run the exact command through an available process runner that
+captures stdout, stderr, and the underlying exit status, then write those
+observed fields and timestamps to the same durable file using ordinary file
+tools. The durable file, not UI or streaming output, is the authority.
 
-`DurableCommandCapture#verdict` returns `PASS` only when the record is
-complete and the exit status is exactly `0`; a non-zero exit status is always
-`FAIL`, never `PASS`. Missing, unreadable, or incomplete evidence is always
-`UNKNOWN_UNVERIFIABLE` rather than an inferred `PASS` or a guessed failure
-class. Losing one command's evidence does not invalidate a sibling capture
-file; rerun only the specific unresolved load-bearing command.
-
-`DurableCommandCapture` never reads or persists the parent environment: it
-captures exactly the argv it was given and exactly the stdout/stderr the
-command produced, reusing this repository's existing lack of a broader
-redaction system rather than inventing a new one.
+Apply the same verdict rules manually: `PASS` only when the record is complete
+and the exit status is exactly `0`; non-zero is `FAIL`; missing, unreadable,
+or incomplete evidence is `UNKNOWN_UNVERIFIABLE`, never an inferred result.
+Losing one command's evidence does not invalidate sibling captures; resolve
+only the specific missing command. Capture exactly the argv and produced
+streams; do not add parent-environment data.
 
 ## Handoff payload
 

@@ -610,14 +610,20 @@ exact-head, behind remote, stable task-owned dirty, ownership unresolved,
 duplicate-dirty blocked, already released clean baseline, absent, or unsafe.
 Ownership unresolved and unsafe states stop execution.
 
-Writer evidence is scoped, not name-based. Use
-`TaskCheckpoint.scope_qualified_active_writer?` with before/after snapshots of
-the exact branch, HEAD, tree, status, and task-owned paths. Snapshot drift is
-active mutation. With stable snapshots, a process counts only when observed
-target paths overlap the selected worktree or ownership surface; an unrelated
-`pytest`, `python`, or Agent process elsewhere is not
-`ACTIVE_CONCURRENT_MUTATION`. The default quiescence observation is a bounded
-approximately-five-second interval, not a magic constant or a polling loop.
+Writer evidence is scoped, not name-based. Observable before/after snapshots
+are authoritative. `TaskCheckpoint.scope_qualified_active_writer?` in the
+optional source helper (`fable-method/scripts/task_checkpoint.rb`) is a
+convenience only; the canonical platform build intentionally excludes
+executable helpers, and its absence is never a blocker. The complete fallback
+is to record the exact designated worktree and task-owned paths, branch, HEAD,
+tree, full status (including staged, unstaged, and untracked paths), and each
+owned path's identity/content metadata; repeat that same snapshot after a
+bounded observation interval. Any difference is active mutation. With stable
+snapshots, count a process only when directly observed target paths overlap
+the exact worktree or owned surface; a process name alone is insufficient.
+If process ownership or the scoped state remains unresolved, fail closed. The
+default observation is approximately five seconds, not a magic constant or a
+polling loop.
 
 Before each load-bearing mutation, retain:
 

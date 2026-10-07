@@ -724,7 +724,8 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'EXACT_WORKTREE: <one exact absolute worktree authorized by the current Packet>',
       'EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorized by the current Packet>',
       'EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR',
-      'When `PRESENT_RUNNABLE`, Workers MUST use the protected `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not allowed.',
+      'When `PRESENT_RUNNABLE`, the optional CLI may be used for its lock and capture guarantees.',
+      'Its absence from an installed skill is not a blocker; when unavailable before execution, evaluate the bounded direct-local fallback below rather than treating the missing file as an ownership fact.',
       'Direct-local fallback is permitted only when launcher absence or unavailability is positively proven before execution begins.',
       'It requires `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked argv that exactly matches one allowlisted vector, and `EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local effects.',
       'When either pre-execution absence status is proven and every precondition holds, bounded direct-local execution is permitted.',
@@ -738,8 +739,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'This narrow exception does not weaken the normal requirement that high-risk or external actions use their existing authorization and supported execution path.'
     ]
     weakenings = {
-      'Workers MUST use' => 'Workers may use',
-      'Direct-local fallback is not allowed.' => 'Direct-local fallback is allowed.',
+      'is not a blocker;' => 'is a blocker;',
       'positively proven before execution begins' => 'assumed at any time',
       'argv that exactly matches one allowlisted vector' => 'argv that is broadly equivalent to an allowlisted vector',
       'LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local effects' => 'LOCAL_ONLY_NO_HIGH_RISK` optional for external effects',
