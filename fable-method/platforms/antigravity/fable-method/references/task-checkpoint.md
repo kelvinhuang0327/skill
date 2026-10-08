@@ -137,14 +137,28 @@ not add a lifecycle state. `SCHEMA_VERSION` remains `1`.
   - task completed or blocked.
 - Do **not** write a checkpoint on every command or shell execution.
 - Do **not** store command transcripts inside the checkpoint.
-- Every `TaskCheckpoint#save` opens the fixed `#{file_path}.lock` sidecar without
-  truncation and acquires `File#flock(File::LOCK_EX)` after creating the parent
-  directory, before any checkpoint existence/read/revision decision. Failure to
-  acquire raises; there is no unlocked fallback. The sidecar is never deleted
-  by save, so conforming processes continue to lock the same pathname/inode.
+- For a Git-backed checkpoint path, `TaskCheckpoint#save` resolves and verifies
+  the Git common metadata directory and requires it to be outside the worktree
+  or under the worktree's real `.git` metadata directory. A separate Git
+  directory placed in stash-managed worktree contents fails closed with an
+  instruction to move Git metadata outside the worktree. The lock store also
+  requires its explicit generation-2 marker,
+  `fable-locks/repository-generation.json`, before acquiring a
+  path-scoped anchor under
+  `fable-locks/checkpoint-sidecar/<identity-hash>/checkpoint.lock`. The marker
+  is initialized only through an explicit offline migration step after all
+  legacy protected workers and inherited children are quiescent; an absent
+  marker is a migration gate even when a stash temporarily hides legacy files.
+  The anchor's private directory and `authority.json` bind the repository and
+  checkpoint path to the lock's device/inode. Symlinks, ownership or identity
+  mismatches, and a legacy adjacent `#{file_path}.lock` fail closed. Files
+  outside Git retain the fixed adjacent sidecar behavior. There is no unlocked
+  fallback.
 - The lock covers existence, read, parse, expected-revision comparison, revision
-  calculation, and the complete same-directory temporary write, close, and
-  atomic rename. Successful rename is the commit point. No subprocess is
+  calculation, and the complete temporary write, close, and atomic rename.
+  Git-backed saves stage beside the stable lock anchor and require the checkpoint
+  directory to share its filesystem, so worktree stash operations cannot replace
+  the temporary inode. Successful rename is the commit point. No subprocess is
   launched while holding this lock.
 - With `expected_revision`, a matching stored revision increments by 1 and a
   stale revision raises `ConcurrencyError`. Without it, an incoming revision
@@ -338,16 +352,34 @@ caller must not proceed, under the exact same rules `recover_before_execution`
 already applies to that existing record. The CLI below owns this sequence for
 Worker launches; Workers must not manually compose acquire/run/complete.
 
-The protected CLI also serializes task-scoped ownership checks with
-`.fable/checkpoints/<task_id>/execution.lock`. While holding this lock it
-checks the other execution records for a live or unresolved owner, then
-acquires the requested identity atomically. Before launching an upstream
-child, it reacquires the lock and passes the open lock descriptor to that
-child. The OS lock therefore stays held if the wrapper dies while the
-application child is still running, and a retry fails closed until that child
-exits. The lock file is retained; the OS releases the lock when the last
-inherited descriptor closes. This protects one task writer across distinct
-execution IDs and wrapper crashes.
+The protected CLI serializes task-scoped ownership checks with
+`fable-locks/task-execution/<identity-hash>/execution.lock` inside the Git
+common metadata directory resolved from the verified `--repo` worktree root.
+The common directory must be outside the worktree or inside its real `.git`
+metadata directory, which Git stash preserves. If `--separate-git-dir` points
+to another directory inside stash-managed worktree contents, lock setup stops
+before creating a marker or anchor and instructs the operator to move Git
+metadata outside the worktree.
+Before creating or opening any generation-2 anchor, it requires the explicit
+`fable-locks/repository-generation.json` marker. Missing or mismatched markers
+stop at a migration gate; ordinary acquisition never bootstraps a repository
+generation. Initialize the marker offline only after confirming every legacy
+protected worker and inherited child is quiescent. This repository-wide gate
+also blocks a new worker while `git stash -u` temporarily hides all old
+worktree lock and record files. The private task anchor manifest binds
+generation 2, repository root, task ID, and lock device/inode. Each open verifies
+the directory, manifest, and lock file before taking ownership. While holding
+this lock the CLI checks the other
+execution records for a live or unresolved owner, then acquires the requested
+identity atomically. Before launching an upstream child, it reacquires the lock
+and passes the open lock descriptor to that child. The OS lock therefore stays
+held if the wrapper dies while the application child is still running, and a
+retry fails closed until that child exits. A detected legacy
+`.fable/checkpoints/<task_id>/execution.lock`, or legacy task state without a
+verified generation-2 anchor, stops at an explicit migration gate. The CLI never
+automatically migrates a task. The OS releases the lock when the last inherited
+descriptor closes. This protects one task writer across distinct execution IDs
+and wrapper crashes, including worktree stash replacement.
 
 ### Protected run entrypoint
 
@@ -430,8 +462,8 @@ record root only through the task-lock descriptor it inherited. The same task
 ID, or a copied environment, is never sufficient. A normal `--run`, or a
 validated `--recover-run` successor, writes its own execution ID (the
 successor ID for a recovery), task ID, resolved record root, and the SHA-256 of
-a new random lineage secret into the held `execution.lock`, passes that
-descriptor to its child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
+a new random lineage secret into the held generation-2 `execution.lock`, passes
+that descriptor to its child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
 `FABLE_PROTECTED_RUN_RECORD_ROOT`, `FABLE_PROTECTED_RUN_LOCK_FD`,
 `FABLE_PROTECTED_RUN_LOCK_IDENTITY` (`<dev>:<inode>`),
 `FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID`, and
@@ -441,7 +473,8 @@ nested launcher (for example, Python `subprocess` needs `pass_fds`).
 
 When those variables name this exact task and resolved root, the nested
 launcher exits `1` with the existing classifications unless: the descriptor is
-this task's owned regular `execution.lock` with the named identity; a fresh
+this task's owned regular `execution.lock` in the manifest-verified common
+metadata anchor with the named identity; a fresh
 open of that path cannot take the lock while the inherited descriptor can
 re-assert it; the lock's lineage names this task and root and matches the
 secret; and the parent chain reaches that lineage owner through `STARTED`
