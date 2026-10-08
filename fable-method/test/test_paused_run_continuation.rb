@@ -146,6 +146,21 @@ class PausedRunContinuationTest < Minitest::Test
     File.binwrite(@checkpoint, JSON.pretty_generate(@checkpoint_fields))
   end
 
+  def advance_scientific_checkpoint_after_continuation
+    File.open(@journal, 'ab') do |file|
+      file.write("#{JSON.generate(journal_row(624, NEXT_ATTEMPT, NEXT_ATTEMPT, 'RUN3',
+                                               @checkpoint_fields.fetch('source_sha256'),
+                                               @checkpoint_fields.fetch('baseline_sha256')))}\n")
+    end
+    @checkpoint_fields['scientific_status'] = 'PAUSED_RESUMABLE'
+    @checkpoint_fields['completed_attempts'] = NEXT_ATTEMPT
+    @checkpoint_fields['next_expected_attempt'] = NEXT_ATTEMPT + 1
+    @checkpoint_fields['journal_prefix_sha256'] = Digest::SHA256.file(@journal).hexdigest
+    @checkpoint_fields['journal_record_count'] += 1
+    @checkpoint_fields['journal_execution_ids'] = %w[RUN1 RUN2 RUN3]
+    write_checkpoint
+  end
+
   def journal_row(sequence, first_attempt, last_attempt, execution_id, source_sha, baseline_sha)
     {
       'sequence' => sequence,
@@ -205,6 +220,25 @@ class PausedRunContinuationTest < Minitest::Test
     assert_equal 'RUN3', record.execution_id
   end
 
+  def test_completed_successor_replays_after_checkpoint_and_journal_advance
+    old_record = File.binread(record_path('RUN2'))
+    old_capture = File.binread(capture_path('RUN2'))
+    stdout, stderr, status = run_cli(cli_args)
+    assert status.success?, "continuation failed: #{stdout} #{stderr}"
+    run3_record = File.binread(record_path('RUN3'))
+    run3_capture = File.binread(capture_path('RUN3'))
+
+    advance_scientific_checkpoint_after_continuation
+    replay_out, replay_err, replay_status = run_cli(cli_args)
+
+    assert replay_status.success?, "advanced-checkpoint replay failed: #{replay_out} #{replay_err}"
+    assert_equal NEXT_ATTEMPT.to_s, File.read(@attempt_marker)
+    assert_equal run3_record, File.binread(record_path('RUN3'))
+    assert_equal run3_capture, File.binread(capture_path('RUN3'))
+    assert_equal old_record, File.binread(record_path('RUN2'))
+    assert_equal old_capture, File.binread(capture_path('RUN2'))
+  end
+
   def test_wrong_checkpoint_sha_does_not_match_owner_authorization
     File.open(@checkpoint, 'ab') { |file| file.write("\n") }
 
@@ -232,6 +266,22 @@ class PausedRunContinuationTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, 'source or baseline bytes do not match'
+    refute File.exist?(record_path('RUN3'))
+  end
+
+  def test_discontinuous_original_journal_prefix_blocks_continuation
+    rows = File.readlines(@journal, chomp: true).map { |line| JSON.parse(line) }
+    rows.fetch(1)['first_attempt'] += 1
+    journal_bytes = rows.map { |row| "#{JSON.generate(row)}\n" }.join
+    File.binwrite(@journal, journal_bytes)
+    @checkpoint_fields['journal_prefix_sha256'] = Digest::SHA256.hexdigest(journal_bytes)
+    write_checkpoint
+    write_authorization
+
+    _stdout, stderr, status = run_cli(cli_args)
+
+    refute status.success?
+    assert_includes stderr, 'original journal prefix is not contiguous at record 2'
     refute File.exist?(record_path('RUN3'))
   end
 

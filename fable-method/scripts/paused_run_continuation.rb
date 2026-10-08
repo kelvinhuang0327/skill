@@ -81,6 +81,18 @@ class PausedRunContinuationTransition
         reject_unrecovered_stale: true
       )
 
+      completed_replay = completed_successor_replay(
+        repo_root: repo_root,
+        task_id: task_id,
+        predecessor_execution_id: predecessor_execution_id,
+        successor_execution_id: successor_execution_id,
+        application_state_path: application_state_path,
+        owner_authorization_path: owner_authorization_path,
+        worktree_path: worktree,
+        command: command
+      )
+      return completed_replay if completed_replay
+
       expected = expected_transition_fields(
         repo_root: repo_root,
         task_id: task_id,
@@ -159,6 +171,148 @@ class PausedRunContinuationTransition
     end
   rescue ExecutionRecord::ValidationError, ExecutionRecoveryTransition::ValidationError => e
     raise ExecutionRecord::UnresolvedExecutionStateError, "paused continuation is malformed: #{e.message}"
+  end
+
+  def self.completed_successor_replay(repo_root:, task_id:, predecessor_execution_id:,
+                                      successor_execution_id:, application_state_path:,
+                                      owner_authorization_path:, worktree_path:, command:)
+    successor_path = ExecutionRecord.default_path(repo_root, task_id, successor_execution_id)
+    return nil unless File.exist?(successor_path) || File.symlink?(successor_path)
+
+    recovery = ExecutionRecord.recover_before_execution(successor_path)
+    return nil unless recovery.classification == ExecutionRecord::CLASSIFICATION_COMPLETED
+
+    record = recovery.execution_record
+    unless record && record.task_id == task_id.to_s &&
+           record.execution_id == successor_execution_id.to_s &&
+           record.continuation_from_execution_id == predecessor_execution_id.to_s &&
+           sha256?(record.continuation_checkpoint_sha256) &&
+           sha256?(record.continuation_transition_sha256)
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'completed successor is not bound to the requested paused continuation'
+    end
+
+    transition_path = default_path(repo_root, task_id, record.continuation_checkpoint_sha256)
+    transition = load(transition_path)
+    unless transition.file_sha256(transition_path) == record.continuation_transition_sha256
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'completed successor continuation transition does not match its immutable execution record'
+    end
+
+    validate_completed_replay_binding!(
+      repo_root: repo_root,
+      task_id: task_id,
+      predecessor_execution_id: predecessor_execution_id,
+      successor_execution_id: successor_execution_id,
+      application_state_path: application_state_path,
+      owner_authorization_path: owner_authorization_path,
+      worktree_path: worktree_path,
+      command: command,
+      record: record,
+      recovery: recovery,
+      transition: transition
+    )
+    Recovery.new(classification: ExecutionRecord::CLASSIFICATION_COMPLETED,
+                 execution_record: record, durable_capture: recovery.durable_capture,
+                 recovery_transition: transition)
+  end
+
+  def self.validate_completed_replay_binding!(repo_root:, task_id:, predecessor_execution_id:,
+                                               successor_execution_id:, application_state_path:,
+                                               owner_authorization_path:, worktree_path:, command:,
+                                               record:, recovery:, transition:)
+    checkpoint_path = ExecutionRecoveryTransition.normalized_application_state_path(application_state_path)
+    authorization_path = ExecutionRecoveryTransition.normalized_application_state_path(owner_authorization_path)
+    worktree = ExecutionRecoveryTransition.normalized_worktree_path(worktree_path)
+    command_sha256 = ExecutionRecoveryTransition.command_sha256!(command)
+    unless transition.schema_version == SCHEMA_VERSION && transition.status == STATUS_RESERVED &&
+           transition.task_id == task_id.to_s &&
+           transition.predecessor_execution_id == predecessor_execution_id.to_s &&
+           transition.successor_execution_id == successor_execution_id.to_s &&
+           transition.checkpoint_sha256 == record.continuation_checkpoint_sha256 &&
+           transition.checkpoint_path == checkpoint_path &&
+           transition.owner_authorization_path == authorization_path &&
+           transition.worktree_path == worktree &&
+           transition.successor_command_sha256 == command_sha256 &&
+           transition.scientific_status == SCIENTIFIC_PAUSED &&
+           integer?(transition.completed_attempts) && transition.completed_attempts.positive? &&
+           integer?(transition.total_attempts) && transition.total_attempts > transition.completed_attempts &&
+           integer?(transition.next_attempt) && transition.next_attempt == transition.completed_attempts + 1 &&
+           transition.next_attempt <= transition.total_attempts &&
+           integer?(transition.journal_record_count) && transition.journal_record_count.positive? &&
+           transition.journal_execution_ids.is_a?(Array) && !transition.journal_execution_ids.empty? &&
+           transition.journal_execution_ids.last == predecessor_execution_id.to_s &&
+           sha256?(transition.journal_prefix_sha256) && sha256?(transition.source_sha256) &&
+           sha256?(transition.baseline_sha256) && transition.journal_execution_evidence.is_a?(Hash) &&
+           transition.journal_execution_evidence.keys.sort == transition.journal_execution_ids.sort
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'completed successor continuation metadata does not match the requested replay'
+    end
+
+    source_path, _source_bytes, source_sha256 = stable_input!(transition.source_path, 'source')
+    baseline_path, _baseline_bytes, baseline_sha256 = stable_input!(transition.baseline_path, 'baseline')
+    unless source_path == transition.source_path && baseline_path == transition.baseline_path &&
+           source_sha256 == transition.source_sha256 && baseline_sha256 == transition.baseline_sha256
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'original source or baseline bytes no longer match the completed continuation'
+    end
+
+    authorization_path_read, authorization_bytes, =
+      stable_input!(owner_authorization_path, 'Owner authorization')
+    authorization = authorization_bytes.dup.force_encoding(Encoding::UTF_8)
+    target = authorization_target(
+      task_id: transition.task_id,
+      predecessor_execution_id: transition.predecessor_execution_id,
+      successor_execution_id: transition.successor_execution_id,
+      checkpoint_sha256: transition.checkpoint_sha256,
+      journal_sha256: transition.journal_prefix_sha256,
+      source_sha256: transition.source_sha256,
+      baseline_sha256: transition.baseline_sha256,
+      next_attempt: transition.next_attempt,
+      worktree_path: transition.worktree_path,
+      command_sha256: transition.successor_command_sha256
+    )
+    unless authorization_path_read == transition.owner_authorization_path && authorization.valid_encoding? &&
+           Digest::SHA256.hexdigest(authorization_bytes) == transition.authorization_text_sha256 &&
+           TaskReconciler.conversation_authorized?(ACTION, [authorization], authorization_target: target)
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'Owner authorization does not match the completed continuation replay'
+    end
+
+    transition.journal_execution_ids.each do |execution_id|
+      expected_evidence = transition.journal_execution_evidence.fetch(execution_id)
+      actual_evidence = completed_execution_evidence!(
+        repo_root, task_id, execution_id,
+        require_exit_status: execution_id == predecessor_execution_id.to_s ? 1 : nil
+      )
+      unless actual_evidence == expected_evidence
+        raise ExecutionRecord::UnresolvedExecutionStateError,
+              "original journal execution '#{execution_id}' changed after continuation"
+      end
+    end
+    predecessor_evidence = transition.journal_execution_evidence.fetch(predecessor_execution_id.to_s)
+    unless transition.predecessor_execution_sha256 == predecessor_evidence.fetch('execution_sha256') &&
+           transition.predecessor_capture_sha256 == predecessor_evidence.fetch('capture_sha256')
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'completed successor predecessor evidence is inconsistent'
+    end
+
+    capture_path = DurableCommandCapture.default_path(repo_root, task_id, successor_execution_id)
+    unless record.durable_capture_path == capture_path &&
+           recovery.durable_capture.is_a?(DurableCommandCapture) &&
+           record.classify == ExecutionRecord::CLASSIFICATION_COMPLETED
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'completed successor terminal record or capture is ambiguous'
+    end
+    _resolved_capture_path, capture_bytes, = stable_input!(capture_path, 'successor terminal capture')
+    capture = DurableCommandCapture.from_json(capture_bytes)
+    unless capture.complete? && capture.to_h == recovery.durable_capture.to_h &&
+           capture.command == command &&
+           ExecutionRecoveryTransition.command_sha256!(capture.command) == transition.successor_command_sha256
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'completed successor terminal capture does not match its authorized command'
+    end
+    true
   end
 
   def self.expected_transition_fields(repo_root:, task_id:, predecessor_execution_id:,
