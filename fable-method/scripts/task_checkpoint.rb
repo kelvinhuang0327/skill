@@ -1553,7 +1553,7 @@ class DurableCommandCapture
   # work; the block must not propagate a signal itself. child_env only sets or
   # unsets the named variables for the child; it is never persisted.
   def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil,
-                           child_env: nil, execution_identity: nil)
+                           child_env: nil, execution_identity: nil, on_child_spawn: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
@@ -1610,6 +1610,11 @@ class DurableCommandCapture
       spawn_env = child_env ? [child_env] : []
       Open3.popen3(*spawn_env, [command.first, command.first], *command.drop(1), spawn_opts) do |stdin, stdout, stderr, wait_thr|
         upstream_pgid = wait_thr.pid
+        if execution_identity
+          execution_identity['scientific_child_pid'] = wait_thr.pid
+          execution_identity['scientific_child_process_group_id'] = wait_thr.pid
+        end
+        on_child_spawn.call(wait_thr.pid) if on_child_spawn
         stdin.close
         forward_signal.call(pending_signal) if pending_signal
 
@@ -1695,7 +1700,8 @@ class ExecutionRecord
                                 keyword_init: true)
 
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
-                :durable_capture_path, :started_at, :ended_at, :parent_execution_id
+                :durable_capture_path, :started_at, :ended_at, :parent_execution_id,
+                :scientific_child_pid, :session_id, :process_group_id
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1707,6 +1713,9 @@ class ExecutionRecord
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @parent_execution_id = (attrs[:parent_execution_id] || attrs['parent_execution_id'])&.to_s
+    @scientific_child_pid = attrs[:scientific_child_pid] || attrs['scientific_child_pid']
+    @session_id = attrs[:session_id] || attrs['session_id']
+    @process_group_id = attrs[:process_group_id] || attrs['process_group_id']
   end
 
   def to_h
@@ -1722,6 +1731,9 @@ class ExecutionRecord
     }
     # Only nested records carry lineage, so top-level record bytes are unchanged.
     data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
+    data['scientific_child_pid'] = @scientific_child_pid unless @scientific_child_pid.nil?
+    data['session_id'] = @session_id unless @session_id.nil?
+    data['process_group_id'] = @process_group_id unless @process_group_id.nil?
     data
   end
 
@@ -2153,6 +2165,44 @@ class ExecutionRecord
     self
   end
 
+  def register_process_context!(file_path, session_id:, process_group_id:)
+    unless session_id.is_a?(Integer) && session_id.positive? &&
+           process_group_id.is_a?(Integer) && process_group_id.positive?
+      raise ArgumentError, 'session and process-group IDs must be positive integers'
+    end
+
+    update_started_record!(file_path) do
+      @session_id = session_id
+      @process_group_id = process_group_id
+    end
+  end
+
+  def register_scientific_child!(file_path, child_pid)
+    unless child_pid.is_a?(Integer) && child_pid.positive?
+      raise ArgumentError, 'scientific child PID must be a positive integer'
+    end
+
+    update_started_record!(file_path) do
+      if @scientific_child_pid && @scientific_child_pid != child_pid
+        raise self.class::UnresolvedExecutionStateError, 'scientific child PID changed after launch'
+      end
+      @scientific_child_pid = child_pid
+    end
+  end
+
+  def update_started_record!(file_path)
+    stored = self.class.load(file_path)
+    unless stored.task_id == @task_id && stored.execution_id == @execution_id &&
+           stored.pid == @pid && stored.status == STATUS_STARTED
+      raise self.class::UnresolvedExecutionStateError, 'execution record changed before process metadata was persisted'
+    end
+
+    yield
+    save(file_path)
+    self
+  end
+  private :update_started_record!
+
   def evidence_complete?
     return false if @durable_capture_path.to_s.strip.empty?
 
@@ -2165,15 +2215,26 @@ class ExecutionRecord
   def classify(pid_alive: self.class.method(:pid_alive?))
     case @status
     when STATUS_STARTED
-      liveness = begin
-                   pid_alive.call(@pid)
-                 rescue StandardError
-                   nil
-                 end
-      case liveness
-      when true then CLASSIFICATION_ACTIVE
-      when false then CLASSIFICATION_TERMINATED_INCOMPLETE
-      else CLASSIFICATION_STATE_UNRESOLVED
+      owner_liveness = begin
+                         pid_alive.call(@pid)
+                       rescue StandardError
+                         nil
+                       end
+      child_liveness = if @scientific_child_pid.nil?
+                         false
+                       else
+                         begin
+                           pid_alive.call(@scientific_child_pid)
+                         rescue StandardError
+                           nil
+                         end
+                       end
+      if owner_liveness == true || child_liveness == true
+        CLASSIFICATION_ACTIVE
+      elsif owner_liveness.nil? || child_liveness.nil?
+        CLASSIFICATION_STATE_UNRESOLVED
+      else
+        CLASSIFICATION_TERMINATED_INCOMPLETE
       end
     when STATUS_COMPLETED
       evidence_complete? ? CLASSIFICATION_COMPLETED : CLASSIFICATION_TERMINATED_INCOMPLETE
@@ -2759,6 +2820,48 @@ if __FILE__ == $PROGRAM_NAME
     exit 2
   end
 
+  # Keep the protected execution owner in a session that is independent of
+  # the interactive caller. The caller remains a lightweight waiter while it
+  # is alive; if its app/session exits, the worker retains the task lock and
+  # continues to persist the exact terminal capture.
+  if %i[run recover_run].include?(mode)
+    unless Process.respond_to?(:fork) && Process.respond_to?(:setsid)
+      warn 'ERROR: protected long runs require fork and setsid for session isolation'
+      exit 2
+    end
+
+    worker_pid = Process.fork
+    if worker_pid
+      previous_int_handler = Signal.trap('INT') do
+        begin
+          Process.kill('INT', worker_pid)
+        rescue Errno::ESRCH
+          # The protected worker finished before the caller's interrupt.
+        end
+      end
+      begin
+        _waited_pid, worker_status = Process.waitpid2(worker_pid)
+      ensure
+        Signal.trap('INT', previous_int_handler)
+      end
+      if worker_status.signaled?
+        signal = worker_status.termsig
+        Signal.trap(signal, 'SYSTEM_DEFAULT') unless signal == Signal.list['KILL']
+        Process.kill(signal, Process.pid)
+        exit(128 + signal)
+      end
+      exit(worker_status.exitstatus || 1)
+    else
+      begin
+        Process.setsid
+        STDIN.reopen(File::NULL, 'r')
+      rescue StandardError => e
+        warn "ERROR: unable to isolate protected execution session: #{e.message}"
+        exit 1
+      end
+    end
+  end
+
   if %i[run recover_run].include?(mode)
     begin
       nested_request = nil
@@ -2814,18 +2917,30 @@ if __FILE__ == $PROGRAM_NAME
       end
 
       emit_capture = lambda do |candidate|
-        $stdout.binmode.write(candidate.stdout)
-        $stderr.binmode.write(candidate.stderr)
-        $stdout.flush
-        $stderr.flush
+        begin
+          $stdout.binmode.write(candidate.stdout)
+          $stderr.binmode.write(candidate.stderr)
+          $stdout.flush
+          $stderr.flush
+        rescue Errno::EPIPE, Errno::EIO
+          # The originating app may close its terminal while the detached
+          # worker finishes. The capture and execution record are already durable.
+        end
       end
 
       result = nil
       capture_signal = nil
       case recovery.classification
       when nil
+        record.register_process_context!(record_path,
+                                         session_id: Process.getsid(0), process_group_id: Process.getpgrp)
         execution_identity = DurableCommandCapture.capture_execution_identity(
           repository_path: options[:repository], worktree_path: options[:worktree]
+        ).merge(
+          'execution_id' => record.execution_id,
+          'launcher_pid' => record.pid,
+          'launcher_session_id' => record.session_id,
+          'launcher_process_group_id' => record.process_group_id
         )
         before_spawn = if mode == :recover_run
                          lambda do
@@ -2841,7 +2956,10 @@ if __FILE__ == $PROGRAM_NAME
           DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
                                                 chdir: options[:worktree], before_spawn: before_spawn,
                                                 inherited_lock: task_lock, child_env: child_env,
-                                                execution_identity: execution_identity) do |candidate|
+                                                execution_identity: execution_identity,
+                                                on_child_spawn: lambda do |child_pid|
+                                                  record.register_scientific_child!(record_path, child_pid)
+                                                end) do |candidate|
             result, capture_signal = validate_capture.call(candidate)
             record.complete!(record_path, durable_capture_path: capture_path)
             emit_capture.call(candidate)
