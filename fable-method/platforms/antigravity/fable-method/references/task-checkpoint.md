@@ -9,6 +9,7 @@
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
 - [Long-running execution recovery](#long-running-execution-recovery)
+- [Owner-authorized paused execution continuation](#owner-authorized-paused-execution-continuation)
 - [Bounded launcher fallback](#bounded-launcher-fallback)
 - [Publication live-state classifier](#publication-live-state-classifier)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
@@ -565,6 +566,77 @@ closed. The task-scoped lock serializes this transition and successor claim
 with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
+
+## Owner-authorized paused execution continuation
+
+`--recover-run` remains limited to one dead, incomplete `STARTED` execution.
+It continues to reject every terminal predecessor, including a `COMPLETED`
+execution with a complete capture. A checkpoint-safe scientific pause uses a
+separate `--continue-paused-run` mode: it creates a new protected execution
+record and leaves the completed predecessor record and terminal capture byte
+for byte unchanged.
+
+The continuation accepts only an exact `PAUSED_RESUMABLE` application
+checkpoint with a positive completed-attempt cursor, `next_expected_attempt`
+equal to `completed_attempts + 1`, and `completed_attempts < total_attempts`.
+Its newline-terminated journal prefix must have the declared record count and
+SHA-256, contiguous sequence numbers and attempt ranges starting at attempt 1,
+and matching source/baseline SHA-256 values on every record. The ordered
+execution IDs in that prefix must resolve to completed protected execution
+records with complete terminal captures; the named predecessor must own the
+last journal record and have captured exit status `1`. The source and baseline
+files are hashed again from their current regular, owned files.
+
+Before a successor can start, the task lock and execution records must show no
+active or unresolved scientific writer. The continuation requires a direct
+Owner authorization token from the current conversation, supplied as the
+plain-text `--owner-authorization` file. It uses the existing conversation
+authorization validator and requires the exact action `CONTINUE_PAUSED_RUN`
+and a target containing all of these values in order, joined by `|`:
+
+```text
+task_id=<task-id>|predecessor_execution_id=<old-id>|successor_execution_id=<new-id>|checkpoint_sha256=<checkpoint-sha256>|journal_prefix_sha256=<journal-sha256>|source_sha256=<source-sha256>|baseline_sha256=<baseline-sha256>|next_attempt=<attempt>|worktree_path=<resolved-worktree>|successor_command_sha256=<argv-sha256>
+```
+
+The authorization text is hashed into the transition. Do not manufacture a
+token or reuse a quoted, Planner, or assistant authorization. A changed
+checkpoint, source, baseline, journal, command, worktree, Owner token, or
+successor identity fails closed.
+
+Use the distinct protected entrypoint:
+
+```text
+ruby task_checkpoint.rb \
+  --continue-paused-run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --previous-execution-id <completed-paused-execution-id> \
+  --execution-id <new-successor-id> \
+  --application-state <absolute-scientific-checkpoint-file> \
+  --owner-authorization <current-owner-message-token-file> \
+  -- <original argv...>
+```
+
+The immutable transition is stored at
+`.fable/checkpoints/<task_id>/continuations/<checkpoint-sha256>.json`. It binds
+the new execution identity to the predecessor record and capture hashes, the
+checkpoint and validated journal prefix, source/baseline hashes, exact
+authorization, resolved worktree, exact argv, and next attempt. A second
+successor for the same checkpoint is refused. Once the successor `STARTED`
+record is durable, an interrupted launch is never started again; a completed
+successor follows ordinary durable-capture replay. The child receives
+`FABLE_PAUSED_CONTINUATION_PREDECESSOR_EXECUTION_ID`,
+`FABLE_PAUSED_CONTINUATION_CHECKPOINT_SHA256`, and
+`FABLE_PAUSED_CONTINUATION_NEXT_ATTEMPT` to resume from the exact expected
+attempt.
+
+Generic `--run` and stale `--recover-run` records do not carry paused
+continuation authority. Neither a generic failed execution nor a
+scientific-terminal checkpoint is eligible through this mode. Historical
+execution outcomes are not reinterpreted; only a new authorized continuation
+can claim a `PAUSED_RESUMABLE` checkpoint.
+
 ## Publication live-state classifier
 
 `PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)

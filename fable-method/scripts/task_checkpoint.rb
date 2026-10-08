@@ -608,6 +608,11 @@ end
 class TaskReconciler
   attr_reader :checkpoint, :options
 
+  def self.conversation_authorized?(action, auth_tokens, authorization_target: nil)
+    allocate.send(:conversation_authorized?, action, auth_tokens,
+                  authorization_target: authorization_target)
+  end
+
   ReconciliationResult = Struct.new(
     :verdict,
     :reason,
@@ -1644,7 +1649,9 @@ class ExecutionRecord
                                 keyword_init: true)
 
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
-                :durable_capture_path, :started_at, :ended_at, :parent_execution_id
+                :durable_capture_path, :started_at, :ended_at, :parent_execution_id,
+                :continuation_from_execution_id, :continuation_checkpoint_sha256,
+                :continuation_transition_sha256
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1656,6 +1663,12 @@ class ExecutionRecord
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @parent_execution_id = (attrs[:parent_execution_id] || attrs['parent_execution_id'])&.to_s
+    @continuation_from_execution_id =
+      (attrs[:continuation_from_execution_id] || attrs['continuation_from_execution_id'])&.to_s
+    @continuation_checkpoint_sha256 =
+      (attrs[:continuation_checkpoint_sha256] || attrs['continuation_checkpoint_sha256'])&.to_s
+    @continuation_transition_sha256 =
+      (attrs[:continuation_transition_sha256] || attrs['continuation_transition_sha256'])&.to_s
   end
 
   def to_h
@@ -1671,6 +1684,11 @@ class ExecutionRecord
     }
     # Only nested records carry lineage, so top-level record bytes are unchanged.
     data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
+    unless @continuation_from_execution_id.nil?
+      data['continuation_from_execution_id'] = @continuation_from_execution_id
+      data['continuation_checkpoint_sha256'] = @continuation_checkpoint_sha256
+      data['continuation_transition_sha256'] = @continuation_transition_sha256
+    end
     data
   end
 
@@ -2208,14 +2226,18 @@ class ExecutionRecord
   # caller must not proceed, under the exact same rules
   # recover_before_execution already applies to that existing record.
   def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?),
-                    parent_execution_id: nil)
+                    parent_execution_id: nil, continuation_from_execution_id: nil,
+                    continuation_checkpoint_sha256: nil, continuation_transition_sha256: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
       pid: pid,
       status: STATUS_STARTED,
       started_at: Time.now.utc.iso8601,
-      parent_execution_id: parent_execution_id
+      parent_execution_id: parent_execution_id,
+      continuation_from_execution_id: continuation_from_execution_id,
+      continuation_checkpoint_sha256: continuation_checkpoint_sha256,
+      continuation_transition_sha256: continuation_transition_sha256
     )
 
     begin
@@ -2627,6 +2649,9 @@ class ExecutionRecoveryTransition
   class ValidationError < StandardError; end
 end
 
+# Checkpoint-specific paused continuation is a distinct authorization mode.
+require_relative 'paused_run_continuation'
+
 # CLI interface when executed directly
 if __FILE__ == $PROGRAM_NAME
   require 'optparse'
@@ -2642,17 +2667,21 @@ if __FILE__ == $PROGRAM_NAME
 
     opts.separator '   or: task_checkpoint.rb --run --repo PATH --worktree PATH --task-id ID --execution-id ID -- <argv...>'
     opts.separator '   or: task_checkpoint.rb --recover-run --repo PATH --worktree PATH --task-id ID --execution-id OLD_ID --application-state PATH -- <argv...>'
+    opts.separator '   or: task_checkpoint.rb --continue-paused-run --repo PATH --worktree PATH --task-id ID --previous-execution-id OLD_ID --execution-id NEW_ID --application-state PATH --owner-authorization PATH -- <argv...>'
     opts.on('--reconcile', 'Reconcile live state against checkpoint (default)') { selected_modes << (mode = :reconcile) }
     opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
     opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
     opts.on('--run', 'Acquire, capture, and complete a task-owned execution, or reuse its result') { selected_modes << (mode = :run) }
     opts.on('--recover-run', 'Explicitly resume one stale execution through a durable successor transition') { selected_modes << (mode = :recover_run) }
+    opts.on('--continue-paused-run', 'Start a new execution from an exactly authorized PAUSED_RESUMABLE checkpoint') { selected_modes << (mode = :continue_paused_run) }
 
     opts.on('--repo PATH', 'Live repository path; --run requires the absolute stable record root') { |v| options[:repository] = v }
     opts.on('--worktree PATH', 'Live worktree path; --run uses only this absolute upstream cwd') { |v| options[:worktree] = v }
     opts.on('--task-id ID', 'Caller-supplied stable task identity for --run') { |v| options[:task_id] = v }
     opts.on('--execution-id ID', 'Caller-supplied stable execution identity for --run') { |v| options[:execution_id] = v }
-    opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by --recover-run') { |v| options[:application_state] = v }
+    opts.on('--previous-execution-id ID', 'Completed protected execution that owns the paused journal prefix') { |v| options[:previous_execution_id] = v }
+    opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by a protected continuation') { |v| options[:application_state] = v }
+    opts.on('--owner-authorization PATH', 'Current Owner authorization text binding the exact continuation target') { |v| options[:owner_authorization] = v }
     opts.on('--head SHA', 'Override live git HEAD SHA') { |v| options[:head] = v }
     opts.on('--tree SHA', 'Override live git tree SHA') { |v| options[:tree] = v }
     opts.on('--branch NAME', 'Override live git branch') { |v| options[:branch] = v }
@@ -2676,9 +2705,13 @@ if __FILE__ == $PROGRAM_NAME
     if selected_modes.include?(:recover_run) && selected_modes != [:recover_run]
       raise OptionParser::InvalidArgument, '--recover-run cannot be combined with another mode'
     end
-    if %i[run recover_run].include?(mode)
+    if selected_modes.include?(:continue_paused_run) && selected_modes != [:continue_paused_run]
+      raise OptionParser::InvalidArgument, '--continue-paused-run cannot be combined with another mode'
+    end
+    if %i[run recover_run continue_paused_run].include?(mode)
       unless upstream_argv && !upstream_argv.empty? && ARGV == upstream_argv && !upstream_argv.first.empty?
-        raise OptionParser::InvalidArgument, "--#{mode == :run ? 'run' : 'recover-run'} requires upstream argv after -- and no positional arguments before it"
+        flag = { run: 'run', recover_run: 'recover-run', continue_paused_run: 'continue-paused-run' }.fetch(mode)
+        raise OptionParser::InvalidArgument, "--#{flag} requires upstream argv after -- and no positional arguments before it"
       end
       %i[repository worktree].each do |key|
         value = options[key]
@@ -2693,13 +2726,33 @@ if __FILE__ == $PROGRAM_NAME
           raise OptionParser::InvalidArgument, "--#{key.to_s.tr('_', '-')} must supply a stable non-empty path component"
         end
       end
-      if mode == :recover_run
+      if %i[recover_run continue_paused_run].include?(mode)
         value = options[:application_state]
         unless value && Pathname.new(value).absolute?
-          raise OptionParser::InvalidArgument, '--recover-run requires an absolute --application-state file path'
+          flag = mode == :recover_run ? '--recover-run' : '--continue-paused-run'
+          raise OptionParser::InvalidArgument, "#{flag} requires an absolute --application-state file path"
         end
       elsif options[:application_state]
-        raise OptionParser::InvalidArgument, '--application-state is only valid with --recover-run'
+        raise OptionParser::InvalidArgument, '--application-state is only valid with --recover-run or --continue-paused-run'
+      end
+      if mode == :continue_paused_run
+        previous_id = options[:previous_execution_id]
+        if previous_id.to_s.strip.empty? || %w[. ..].include?(previous_id) || previous_id.match?(/[\/\\\x00]/)
+          raise OptionParser::InvalidArgument,
+                '--continue-paused-run requires a stable --previous-execution-id'
+        end
+        if previous_id == options[:execution_id]
+          raise OptionParser::InvalidArgument,
+                '--previous-execution-id and --execution-id must identify different executions'
+        end
+        value = options[:owner_authorization]
+        unless value && Pathname.new(value).absolute?
+          raise OptionParser::InvalidArgument,
+                '--continue-paused-run requires an absolute --owner-authorization file path'
+        end
+      elsif options[:previous_execution_id] || options[:owner_authorization]
+        raise OptionParser::InvalidArgument,
+              '--previous-execution-id and --owner-authorization are only valid with --continue-paused-run'
       end
     end
   rescue OptionParser::ParseError => e
@@ -2708,7 +2761,7 @@ if __FILE__ == $PROGRAM_NAME
     exit 2
   end
 
-  if %i[run recover_run].include?(mode)
+  if %i[run recover_run continue_paused_run].include?(mode)
     begin
       nested_request = nil
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
@@ -2717,6 +2770,18 @@ if __FILE__ == $PROGRAM_NAME
           repo_root: options[:repository], task_id: options[:task_id],
           old_execution_id: options[:execution_id],
           application_state_path: options[:application_state],
+          worktree_path: options[:worktree], command: upstream_argv, pid: Process.pid
+        )
+        record_path = ExecutionRecord.default_path(
+          options[:repository], options[:task_id], recovery.execution_record.execution_id
+        )
+      elsif mode == :continue_paused_run
+        recovery = PausedRunContinuationTransition.acquire_successor!(
+          repo_root: options[:repository], task_id: options[:task_id],
+          predecessor_execution_id: options[:previous_execution_id],
+          successor_execution_id: options[:execution_id],
+          application_state_path: options[:application_state],
+          owner_authorization_path: options[:owner_authorization],
           worktree_path: options[:worktree], command: upstream_argv, pid: Process.pid
         )
         record_path = ExecutionRecord.default_path(
@@ -2740,7 +2805,9 @@ if __FILE__ == $PROGRAM_NAME
       unless record && record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
              record.task_id == options[:task_id] &&
              (mode == :run ? record.execution_id == options[:execution_id] :
-               record.execution_id == recovery.recovery_transition.successor_execution_id)
+               (mode == :recover_run ? record.execution_id == recovery.recovery_transition.successor_execution_id :
+                 record.execution_id == options[:execution_id] &&
+                   record.continuation_from_execution_id == options[:previous_execution_id]))
         raise ExecutionRecord::UnresolvedExecutionStateError, 'execution record identity or schema is malformed'
       end
       capture_path = DurableCommandCapture.default_path(
@@ -2782,6 +2849,25 @@ if __FILE__ == $PROGRAM_NAME
                            transition.verify_readback!(transition_path)
                            transition.verify_application_state!
                          end
+                       elsif mode == :continue_paused_run
+                         lambda do
+                           transition = recovery.recovery_transition
+                           transition_path = PausedRunContinuationTransition.default_path(
+                             options[:repository], options[:task_id], transition.checkpoint_sha256
+                           )
+                           transition.verify_readback!(transition_path)
+                           transition.verify_inputs!(
+                             repo_root: options[:repository],
+                             application_state_path: options[:application_state],
+                             owner_authorization_path: options[:owner_authorization],
+                             worktree_path: options[:worktree], command: upstream_argv
+                           )
+                           ExecutionRecord.verify_no_active_owner!(
+                             options[:repository], options[:task_id],
+                             except_execution_ids: [record.execution_id],
+                             reject_unrecovered_stale: true
+                           )
+                         end
                        end
         capture_command = lambda do |task_lock, child_env|
           DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
@@ -2811,7 +2897,7 @@ if __FILE__ == $PROGRAM_NAME
                     ExecutionRecord.with_task_lock(options[:repository], options[:task_id]) do |task_lock|
                       ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
                                                               except_execution_ids: [record.execution_id],
-                                                              reject_unrecovered_stale: mode == :run)
+                                                              reject_unrecovered_stale: %i[run continue_paused_run].include?(mode))
                       # A normal run and a recovery successor both own this lock
                       # while their upstream command runs, so each may delegate
                       # nested execution through its protected lineage.
@@ -2824,6 +2910,16 @@ if __FILE__ == $PROGRAM_NAME
                                   else
                                     ExecutionRecord.without_nested_capability_env
                                   end
+                      child_env.merge!(PausedRunContinuationTransition.without_child_environment)
+                      if mode == :continue_paused_run
+                        recovery.recovery_transition.verify_inputs!(
+                          repo_root: options[:repository],
+                          application_state_path: options[:application_state],
+                          owner_authorization_path: options[:owner_authorization],
+                          worktree_path: options[:worktree], command: upstream_argv
+                        )
+                        child_env.merge!(recovery.recovery_transition.child_environment)
+                      end
                       capture_command.call(task_lock, child_env)
                     end
                   end
