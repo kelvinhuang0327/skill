@@ -9,6 +9,7 @@ require 'time'
 require 'digest'
 require 'tempfile'
 require 'securerandom'
+require 'shellwords'
 
 # TaskCheckpoint encapsulates the minimal, durable, authoritative continuation state
 # for Fable Worker execution across sessions and model boundaries.
@@ -1402,6 +1403,7 @@ class DurableCommandCapture
   # allowlisted for durability and nested lineage, but give it a separate
   # child slot so ordinary protected children receive FD 9 closed.
   INHERITED_TASK_LOCK_CHILD_FD = 10
+  INHERITED_HEAVY_SCIENTIFIC_LEASE_CHILD_FD = 11
 
   VERDICT_PASS = 'PASS'
   VERDICT_FAIL = 'FAIL'
@@ -1503,7 +1505,7 @@ class DurableCommandCapture
   # work; the block must not propagate a signal itself. child_env only sets or
   # unsets the named variables for the child; it is never persisted.
   def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil,
-                           child_env: nil)
+                           inherited_locks: nil, child_env: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
@@ -1545,12 +1547,18 @@ class DurableCommandCapture
 
       spawn_opts = { pgroup: true, close_others: true }
       spawn_opts[:chdir] = chdir if chdir
-      if inherited_lock
-        unless inherited_lock.respond_to?(:fileno) && !inherited_lock.closed?
-          raise ArgumentError, 'inherited_lock must be an open file descriptor'
+      locks_to_inherit = Array(inherited_locks)
+      locks_to_inherit << inherited_lock if inherited_lock
+      locks_to_inherit = locks_to_inherit.uniq
+      if locks_to_inherit.length > 2
+        raise ArgumentError, 'at most the task and heavy-scientific lock descriptors may be inherited'
+      end
+      locks_to_inherit.each_with_index do |lock, index|
+        unless lock.respond_to?(:fileno) && !lock.closed?
+          raise ArgumentError, 'inherited locks must be open file descriptors'
         end
-        lock_fd = inherited_lock.fileno
-        spawn_opts[INHERITED_TASK_LOCK_CHILD_FD] = lock_fd
+        child_fd = index.zero? ? INHERITED_TASK_LOCK_CHILD_FD : INHERITED_HEAVY_SCIENTIFIC_LEASE_CHILD_FD
+        spawn_opts[child_fd] = lock.fileno
       end
       before_spawn.call if before_spawn
       # The executable/argv0 pair also prevents Ruby's single-string shell
@@ -1608,6 +1616,396 @@ class DurableCommandCapture
 
   class ValidationError < StandardError; end
   class LoadError < StandardError; end
+end
+
+# A single host-wide slot across protected heavy scientific --run executions.
+# The lock file is stable; ownership metadata is atomically replaced under its
+# flock and is deliberately limited to the launch identity needed for stale
+# owner recovery.
+class HeavyScientificLease
+  DEFAULT_LOCK_PATH = File.join('/tmp', "fable-heavy-scientific-slot-#{Process.uid}.lock").freeze
+  ENV_FD = 'FABLE_HEAVY_SCIENTIFIC_LEASE_FD'
+  ENV_IDENTITY = 'FABLE_HEAVY_SCIENTIFIC_LEASE_IDENTITY'
+  ENV_TASK_ID = 'FABLE_HEAVY_SCIENTIFIC_LEASE_TASK_ID'
+  ENV_EXECUTION_ID = 'FABLE_HEAVY_SCIENTIFIC_LEASE_EXECUTION_ID'
+  ENV_RECORD_ROOT = 'FABLE_HEAVY_SCIENTIFIC_LEASE_RECORD_ROOT'
+  ENV_WORKTREE = 'FABLE_HEAVY_SCIENTIFIC_LEASE_WORKTREE'
+  ENV_RUN_ROOT = 'FABLE_HEAVY_SCIENTIFIC_LEASE_RUN_ROOT'
+  ENV_KEYS = [ENV_FD, ENV_IDENTITY, ENV_TASK_ID, ENV_EXECUTION_ID,
+              ENV_RECORD_ROOT, ENV_WORKTREE, ENV_RUN_ROOT].freeze
+  METADATA_KEYS = %w[TASK_ID EXECUTION_ID PID PROCESS_START_IDENTITY WORKTREE RUN_ROOT ACQUIRED_AT].freeze
+
+  class Error < StandardError; end
+  class SlotOwned < Error; end
+  class LegacyWriterActive < Error
+    attr_reader :writers
+
+    def initialize(writers)
+      @writers = writers
+      super('STOP_ONCE: HEAVY_SCIENTIFIC_WRITER_ACTIVE')
+    end
+  end
+  class OwnershipUnresolved < Error; end
+
+  attr_reader :lock, :metadata, :lock_path
+
+  def self.heavy_command?(task_id, command)
+    return true if task_id.to_s.match?(/B649|SCIENTIFIC|WBC/i)
+
+    Array(command).any? do |argument|
+      value = argument.to_s.downcase
+      value.include?('/.task-data/') || value.include?('b649_k') || value.include?('b649-k') ||
+        %w[tbr_engine ldr_engine exact_score.py].include?(File.basename(value)) ||
+        value.include?('lottolab.research')
+    end
+  end
+
+  def self.run_root_from_command(command, worktree)
+    argv = Array(command).map(&:to_s)
+    argv.each_with_index do |argument, index|
+      value = if %w[--run-root --run_root].include?(argument)
+                argv[index + 1]
+              elsif argument.start_with?('--run-root=')
+                argument.split('=', 2).last
+              elsif argument.start_with?('--run_root=')
+                argument.split('=', 2).last
+              end
+      return File.expand_path(value) if value && Pathname.new(value).absolute?
+    end
+    File.realpath(worktree)
+  rescue SystemCallError => e
+    raise OwnershipUnresolved, "protected worktree could not be resolved for the heavy lease: #{e.message}"
+  end
+
+  def self.clear_capability_env
+    ENV_KEYS.map { |key| [key, nil] }.to_h
+  end
+
+  def self.nested_capability_request(env = ENV)
+    values = ENV_KEYS.map { |key| env[key] }
+    return nil if values.all?(&:nil?)
+    unless values.all? { |value| value.is_a?(String) && !value.empty? }
+      raise OwnershipUnresolved, 'nested heavy-scientific lease capability is incomplete'
+    end
+
+    ENV_KEYS.zip(values).to_h
+  end
+
+  def self.process_start_identity(pid)
+    output, status = Open3.capture2('/bin/ps', '-ww', '-p', Integer(pid).to_s, '-o', 'lstart=')
+    return nil unless status.success?
+
+    identities = output.lines.map(&:strip).reject(&:empty?)
+    identities.length == 1 ? identities.first : nil
+  rescue SystemCallError, ArgumentError
+    nil
+  end
+
+  def self.legacy_heavy_writers_once
+    output, status = Open3.capture2('/bin/ps', '-ww', '-axo', 'pid=,ppid=,%cpu=,%mem=,state=,command=')
+    raise OwnershipUnresolved, 'legacy heavy-writer snapshot could not be read safely' unless status.success?
+
+    rows = output.lines.map do |line|
+      fields = line.strip.split(/\s+/, 6)
+      raise OwnershipUnresolved, 'legacy heavy-writer snapshot was unparseable' unless fields.length == 6
+
+      pid, parent, cpu, memory, state, command = fields
+      begin
+        [Integer(pid), Integer(parent), Float(cpu), Float(memory), state, command]
+      rescue ArgumentError
+        raise OwnershipUnresolved, 'legacy heavy-writer snapshot contained invalid process identity'
+      end
+    end
+    parents = rows.each_with_object({}) { |row, memo| memo[row[0]] = row[1] }
+    ancestors = []
+    current = Process.pid
+    until current.zero? || ancestors.include?(current)
+      ancestors << current
+      current = parents.fetch(current, 0)
+    end
+
+    rows.each_with_object([]) do |(pid, _parent, cpu, memory, state, command), writers|
+      next if ancestors.include?(pid) || state.start_with?('Z')
+
+      begin
+        argv = Shellwords.split(command)
+      rescue ArgumentError
+        argv = command.split
+      end
+      next if argv.empty?
+
+      executable = File.basename(argv.first).downcase
+      scientific = command.include?('/.task-data/') ||
+                   argv.any? { |arg| arg.downcase.include?('b649_k') || arg.downcase.include?('b649-k') } ||
+                   argv.any? { |arg| %w[tbr_engine ldr_engine exact_score.py].include?(File.basename(arg)) } ||
+                   command.include?('lottolab.research')
+      computational = executable.include?('python') || %w[tbr_engine ldr_engine].include?(executable) ||
+                      (scientific && cpu >= 5.0 &&
+                       !%w[ruby zsh bash sh ps tail cat].include?(executable))
+      next unless scientific && computational
+
+      evidence = { 'PID' => pid, 'COMMAND' => command, 'CPU_PERCENT' => cpu, 'MEMORY_PERCENT' => memory }
+      argv.each do |argument|
+        next unless argument.start_with?('/') && argument.include?('/.task-data/')
+
+        worktree, suffix = argument.split('/.task-data/', 2)
+        task_id = suffix.to_s.split('/', 2).first
+        if task_id && task_id.match?(/\A[A-Za-z0-9_-]+\z/)
+          evidence['TASK_ID'] = task_id
+          evidence['WORKTREE'] = worktree
+          break
+        end
+      end
+      writers << evidence
+    end
+  rescue SystemCallError => e
+    raise OwnershipUnresolved, "legacy heavy-writer snapshot failed: #{e.message}"
+  end
+
+  def self.default_metadata_path(lock_path = DEFAULT_LOCK_PATH)
+    "#{lock_path}.owner.json"
+  end
+
+  def initialize(task_id:, execution_id:, worktree:, run_root:, record_root: nil, lock_path: DEFAULT_LOCK_PATH,
+                 legacy_writer_checker: nil)
+    @task_id = task_id.to_s
+    @execution_id = execution_id.to_s
+    @worktree = File.realpath(worktree)
+    @record_root = File.realpath(record_root || worktree)
+    @run_root = File.expand_path(run_root.to_s)
+    @lock_path = File.expand_path(lock_path.to_s)
+    @metadata_path = self.class.default_metadata_path(@lock_path)
+    @legacy_writer_checker = legacy_writer_checker || self.class.method(:legacy_heavy_writers_once)
+    @lock = nil
+    @metadata = nil
+    @owned = false
+  rescue SystemCallError => e
+    raise OwnershipUnresolved, "heavy lease identity could not be resolved: #{e.message}"
+  end
+
+  def self.acquire!(**kwargs)
+    new(**kwargs).tap(&:acquire!)
+  end
+
+  def owned?
+    @owned
+  end
+
+  def acquire!
+    FileUtils.mkdir_p(File.dirname(@lock_path))
+    flags = File::RDWR | File::CREAT
+    flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+    @lock = File.open(@lock_path, flags, 0o600)
+    validate_lock_file!
+    unless @lock.flock(File::LOCK_EX | File::LOCK_NB)
+      raise SlotOwned, 'STOPPED_HEAVY_SLOT_OWNED'
+    end
+
+    recover_stale_metadata!
+    writers = @legacy_writer_checker.call
+    raise LegacyWriterActive, writers unless Array(writers).empty?
+
+    start_identity = self.class.process_start_identity(Process.pid)
+    raise OwnershipUnresolved, 'current protected launcher process identity is unavailable' unless start_identity
+
+    @metadata = {
+      'TASK_ID' => @task_id,
+      'EXECUTION_ID' => @execution_id,
+      'PID' => Process.pid,
+      'PROCESS_START_IDENTITY' => start_identity,
+      'WORKTREE' => @worktree,
+      'RUN_ROOT' => @run_root,
+      'ACQUIRED_AT' => Time.now.utc.iso8601
+    }
+    write_metadata!
+    @owned = true
+    self
+  rescue Error
+    release_lock_only
+    raise
+  rescue SystemCallError, IOError, JSON::ParserError => e
+    release_lock_only
+    raise OwnershipUnresolved, "heavy-scientific lease could not be established safely: #{e.message}"
+  end
+
+  def capability_env(child_fd: @lock.fileno)
+    raise OwnershipUnresolved, 'heavy lease is not held' unless @lock && !@lock.closed? && @metadata
+    stat = @lock.stat
+    {
+      ENV_FD => Integer(child_fd).to_s,
+      ENV_IDENTITY => "#{stat.dev}:#{stat.ino}",
+      ENV_TASK_ID => @metadata.fetch('TASK_ID'),
+      ENV_EXECUTION_ID => @metadata.fetch('EXECUTION_ID'),
+      ENV_RECORD_ROOT => @record_root,
+      ENV_WORKTREE => @metadata.fetch('WORKTREE'),
+      ENV_RUN_ROOT => @metadata.fetch('RUN_ROOT')
+    }
+  end
+
+  def self.verify_nested!(request:, repo_root:, task_id:, execution_id:, ancestor_execution_ids:,
+                          lock_path: DEFAULT_LOCK_PATH)
+    fd_text = request[ENV_FD].to_s
+    identity = request[ENV_IDENTITY].to_s
+    owner_task = request[ENV_TASK_ID].to_s
+    owner_execution = request[ENV_EXECUTION_ID].to_s
+    owner_root = request[ENV_RECORD_ROOT].to_s
+    unless fd_text.match?(/\A[1-9]\d{0,8}\z/) && fd_text.to_i >= 3 && identity.match?(/\A\d+:\d+\z/) &&
+           ExecutionRecord.stable_component?(owner_task) && ExecutionRecord.stable_component?(owner_execution) &&
+           Pathname.new(owner_root).absolute? && owner_task == task_id.to_s &&
+           owner_execution != execution_id.to_s && File.realpath(owner_root) == File.realpath(repo_root) &&
+           Array(ancestor_execution_ids).include?(owner_execution) &&
+           Pathname.new(request[ENV_WORKTREE].to_s).absolute? && Pathname.new(request[ENV_RUN_ROOT].to_s).absolute?
+      raise OwnershipUnresolved, 'nested heavy-scientific lease identity is out of scope or incomplete'
+    end
+
+    resolved_lock_path = File.expand_path(lock_path)
+    inherited = File.for_fd(Integer(fd_text), autoclose: false)
+    inherited_stat = inherited.stat
+    path_stat = File.lstat(resolved_lock_path)
+    unless inherited_stat.file? && inherited_stat.uid == Process.uid && path_stat.file? &&
+           [inherited_stat.dev, inherited_stat.ino] == identity.split(':').map(&:to_i) &&
+           [path_stat.dev, path_stat.ino] == [inherited_stat.dev, inherited_stat.ino]
+      raise OwnershipUnresolved, 'nested heavy-scientific lease descriptor identity does not match'
+    end
+    unless inherited.flock(File::LOCK_EX | File::LOCK_NB)
+      raise SlotOwned, 'STOPPED_HEAVY_SLOT_OWNED'
+    end
+
+    metadata_path = default_metadata_path(resolved_lock_path)
+    metadata = read_metadata_file!(metadata_path)
+    unless metadata && metadata['TASK_ID'] == owner_task && metadata['EXECUTION_ID'] == owner_execution &&
+           metadata['WORKTREE'] == request[ENV_WORKTREE] && metadata['RUN_ROOT'] == request[ENV_RUN_ROOT]
+      raise OwnershipUnresolved, 'nested heavy-scientific lease metadata does not match its capability'
+    end
+
+    File.open(resolved_lock_path, File::RDWR) do |probe|
+      unless [probe.stat.dev, probe.stat.ino] == [inherited_stat.dev, inherited_stat.ino]
+        raise OwnershipUnresolved, 'nested heavy-scientific lock path changed during verification'
+      end
+      if probe.flock(File::LOCK_EX | File::LOCK_NB)
+        probe.flock(File::LOCK_UN)
+        raise OwnershipUnresolved, 'nested heavy-scientific lease is not held by its protected parent'
+      end
+    end
+    lease = allocate
+    lease.instance_variable_set(:@task_id, owner_task)
+    lease.instance_variable_set(:@execution_id, owner_execution)
+    lease.instance_variable_set(:@worktree, owner_root)
+    lease.instance_variable_set(:@record_root, File.realpath(repo_root))
+    lease.instance_variable_set(:@run_root, request[ENV_RUN_ROOT])
+    lease.instance_variable_set(:@lock_path, resolved_lock_path)
+    lease.instance_variable_set(:@metadata_path, metadata_path)
+    lease.instance_variable_set(:@lock, inherited)
+    lease.instance_variable_set(:@metadata, metadata)
+    lease.instance_variable_set(:@owned, false)
+    lease
+  rescue SystemCallError, ArgumentError => e
+    raise OwnershipUnresolved, "nested heavy-scientific lease could not be verified: #{e.message}"
+  end
+
+  def release!
+    return unless @lock
+
+    if @owned
+      begin
+        current = self.class.read_metadata_file!(@metadata_path)
+        File.unlink(@metadata_path) if current == @metadata
+      rescue Error, SystemCallError, JSON::ParserError
+        # Preserve any ambiguous metadata. The next owner must prove it stale.
+      ensure
+        release_lock_only
+      end
+    else
+      @lock = nil # The inherited descriptor belongs to the protected parent.
+    end
+    nil
+  end
+
+  def self.read_metadata_file!(path)
+    return nil unless File.exist?(path) || File.symlink?(path)
+    raise OwnershipUnresolved, 'heavy lease metadata path is a symlink' if File.symlink?(path)
+
+    stat = File.lstat(path)
+    unless stat.file? && stat.uid == Process.uid && (stat.mode & 0o077).zero?
+      raise OwnershipUnresolved, 'heavy lease metadata file is not a private regular file'
+    end
+    data = JSON.parse(File.binread(path))
+    unless data.is_a?(Hash) && data.keys.sort == METADATA_KEYS.sort &&
+           data['TASK_ID'].is_a?(String) && !data['TASK_ID'].empty? &&
+           data['EXECUTION_ID'].is_a?(String) && !data['EXECUTION_ID'].empty? &&
+           data['PID'].is_a?(Integer) && data['PID'].positive? &&
+           data['PROCESS_START_IDENTITY'].is_a?(String) && !data['PROCESS_START_IDENTITY'].empty? &&
+           data['WORKTREE'].is_a?(String) && Pathname.new(data['WORKTREE']).absolute? &&
+           data['RUN_ROOT'].is_a?(String) && Pathname.new(data['RUN_ROOT']).absolute? &&
+           data['ACQUIRED_AT'].is_a?(String) && !data['ACQUIRED_AT'].empty?
+      raise OwnershipUnresolved, 'heavy lease metadata is incomplete or ambiguous'
+    end
+    data
+  rescue JSON::ParserError => e
+    raise OwnershipUnresolved, "heavy lease metadata is malformed: #{e.message}"
+  end
+
+  private
+
+  def validate_lock_file!
+    stat = @lock.stat
+    path_stat = File.lstat(@lock_path)
+    unless stat.file? && stat.uid == Process.uid && (stat.mode & 0o077).zero? &&
+           path_stat.file? && [stat.dev, stat.ino] == [path_stat.dev, path_stat.ino]
+      raise OwnershipUnresolved, 'heavy lease lock is not a private regular file'
+    end
+  end
+
+  def recover_stale_metadata!
+    existing = self.class.read_metadata_file!(@metadata_path)
+    return unless existing
+
+    state = owner_liveness(existing)
+    case state
+    when :dead
+      File.unlink(@metadata_path)
+    when :alive
+      raise SlotOwned, 'STOPPED_HEAVY_SLOT_OWNED'
+    else
+      raise OwnershipUnresolved, 'recorded heavy lease owner identity could not be established safely'
+    end
+  end
+
+  def owner_liveness(metadata)
+    Process.kill(0, metadata.fetch('PID'))
+    current_start = self.class.process_start_identity(metadata.fetch('PID'))
+    return :unknown unless current_start
+
+    current_start == metadata.fetch('PROCESS_START_IDENTITY') ? :alive : :dead
+  rescue Errno::ESRCH
+    :dead
+  rescue Errno::EPERM
+    :unknown
+  end
+
+  def write_metadata!
+    current = self.class.read_metadata_file!(@metadata_path)
+    raise OwnershipUnresolved, 'heavy lease metadata changed before atomic update' if current && current != @metadata
+
+    directory = File.dirname(@metadata_path)
+    temp_path = File.join(directory, ".heavy-scientific-lease-#{Process.pid}-#{SecureRandom.hex(8)}.tmp")
+    File.open(temp_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+      file.write(JSON.generate(@metadata))
+      file.flush
+      file.fsync
+    end
+    File.rename(temp_path, @metadata_path)
+  ensure
+    File.unlink(temp_path) if temp_path && File.file?(temp_path)
+  end
+
+  def release_lock_only
+    return unless @lock
+
+    @lock.close unless @lock.closed?
+    @lock = nil
+    @owned = false
+  end
 end
 
 # ExecutionRecord classifies a task-owned long-running execution that may
@@ -2819,11 +3217,15 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
     opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
     opts.on('--run', 'Acquire, capture, and complete a task-owned execution, or reuse its result') { selected_modes << (mode = :run) }
+    opts.on('--heavy-scientific', 'Acquire the machine-wide heavy-scientific slot for this protected --run') do
+      options[:heavy_scientific] = true
+    end
     opts.on('--recover-run', 'Explicitly resume one stale execution through a durable successor transition') { selected_modes << (mode = :recover_run) }
     opts.on('--retry-recover-run', 'Explicitly retry one terminal failed recovery successor') { selected_modes << (mode = :retry_recover_run) }
 
     opts.on('--repo PATH', 'Live repository path; --run requires the absolute stable record root') { |v| options[:repository] = v }
     opts.on('--worktree PATH', 'Live worktree path; --run uses only this absolute upstream cwd') { |v| options[:worktree] = v }
+    opts.on('--run-root PATH', 'Absolute run root recorded in the heavy-scientific lease') { |v| options[:run_root] = v }
     opts.on('--task-id ID', 'Caller-supplied stable task identity for --run') { |v| options[:task_id] = v }
     opts.on('--execution-id ID', 'Caller-supplied stable execution identity for --run') { |v| options[:execution_id] = v }
     opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by recovery operations') { |v| options[:application_state] = v }
@@ -2852,6 +3254,15 @@ if __FILE__ == $PROGRAM_NAME
     end
     if selected_modes.include?(:retry_recover_run) && selected_modes != [:retry_recover_run]
       raise OptionParser::InvalidArgument, '--retry-recover-run cannot be combined with another mode'
+    end
+    if options[:heavy_scientific] && mode != :run
+      raise OptionParser::InvalidArgument, '--heavy-scientific is only valid with --run'
+    end
+    if options[:run_root] && mode != :run
+      raise OptionParser::InvalidArgument, '--run-root is only valid with --run'
+    end
+    if options[:run_root] && !Pathname.new(options[:run_root]).absolute?
+      raise OptionParser::InvalidArgument, '--run-root must be an absolute path'
     end
     if %i[run recover_run retry_recover_run].include?(mode)
       mode_flag = { run: 'run', recover_run: 'recover-run', retry_recover_run: 'retry-recover-run' }.fetch(mode)
@@ -2885,6 +3296,12 @@ if __FILE__ == $PROGRAM_NAME
     warn parser
     exit 2
   end
+
+  heavy_scientific = mode == :run &&
+                     (options[:heavy_scientific] || HeavyScientificLease.heavy_command?(options[:task_id], upstream_argv))
+  heavy_run_root = if heavy_scientific
+                     options[:run_root] || HeavyScientificLease.run_root_from_command(upstream_argv, options[:worktree])
+                   end
 
   if %i[run recover_run retry_recover_run].include?(mode)
     begin
@@ -2975,13 +3392,71 @@ if __FILE__ == $PROGRAM_NAME
                            end
                          end
                        end
-        capture_command = lambda do |task_lock, child_env|
-          DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
-                                                chdir: options[:worktree], before_spawn: before_spawn,
-                                                inherited_lock: task_lock, child_env: child_env) do |candidate|
-            result, capture_signal = validate_capture.call(candidate)
-            record.complete!(record_path, durable_capture_path: capture_path)
-            emit_capture.call(candidate)
+        capture_blocked = lambda do |status_line, detail|
+          now = Time.now.utc.iso8601
+          candidate = DurableCommandCapture.new(command: upstream_argv, stdout: "#{status_line}\n",
+                                               stderr: detail.to_s, exit_status: 3,
+                                               started_at: now, ended_at: now)
+          candidate.save(capture_path)
+          result, capture_signal = validate_capture.call(candidate)
+          record.complete!(record_path, durable_capture_path: capture_path)
+          emit_capture.call(candidate)
+          candidate
+        end
+        capture_command = lambda do |task_lock, child_env, nested = nil|
+          lease = nil
+          begin
+            inherited_locks = [task_lock]
+            if heavy_scientific
+              lease = if nested
+                        request = HeavyScientificLease.nested_capability_request(ENV)
+                        if request
+                          HeavyScientificLease.verify_nested!(
+                            request: request, repo_root: options[:repository], task_id: options[:task_id],
+                            execution_id: record.execution_id,
+                            ancestor_execution_ids: nested.ancestor_execution_ids
+                          )
+                        else
+                          HeavyScientificLease.acquire!(
+                            task_id: options[:task_id], execution_id: record.execution_id,
+                            worktree: options[:worktree], run_root: heavy_run_root,
+                            record_root: options[:repository]
+                          )
+                        end
+                      else
+                        HeavyScientificLease.acquire!(
+                          task_id: options[:task_id], execution_id: record.execution_id,
+                          worktree: options[:worktree], run_root: heavy_run_root,
+                          record_root: options[:repository]
+                        )
+                      end
+              child_env = child_env.merge(lease.capability_env(
+                child_fd: DurableCommandCapture::INHERITED_HEAVY_SCIENTIFIC_LEASE_CHILD_FD
+              ))
+              inherited_locks << lease.lock
+              warn 'LEASE_ACQUIRED / WOULD_LAUNCH' if lease.owned?
+            else
+              child_env = child_env.merge(HeavyScientificLease.clear_capability_env)
+            end
+
+            DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
+                                                  chdir: options[:worktree], before_spawn: before_spawn,
+                                                  inherited_locks: inherited_locks, child_env: child_env) do |candidate|
+              result, capture_signal = validate_capture.call(candidate)
+              record.complete!(record_path, durable_capture_path: capture_path)
+              emit_capture.call(candidate)
+            end
+          rescue HeavyScientificLease::LegacyWriterActive => e
+            warn 'STOP_ONCE: HEAVY_SCIENTIFIC_WRITER_ACTIVE'
+            capture_blocked.call('STOP_ONCE: HEAVY_SCIENTIFIC_WRITER_ACTIVE', e.writers.inspect)
+          rescue HeavyScientificLease::SlotOwned => e
+            warn 'STOPPED_HEAVY_SLOT_OWNED'
+            capture_blocked.call('STOPPED_HEAVY_SLOT_OWNED', e.message)
+          rescue HeavyScientificLease::Error => e
+            warn 'STOPPED_HEAVY_SLOT_OWNED'
+            capture_blocked.call('STOPPED_HEAVY_SLOT_OWNED', "heavy lease failed closed: #{e.message}")
+          ensure
+            lease.release! if lease && lease.owned?
           end
         end
         capture = if nested_request
@@ -2998,7 +3473,7 @@ if __FILE__ == $PROGRAM_NAME
                     )
                     capture_command.call(nested.lock, ExecutionRecord.nested_capability_env(
                       options[:repository], options[:task_id], nested.lock, record.execution_id, nested.secret
-                    ))
+                    ), nested)
                   else
                     ExecutionRecord.with_task_lock(options[:repository], options[:task_id]) do |task_lock|
                       ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
