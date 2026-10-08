@@ -9,6 +9,391 @@ require 'time'
 require 'digest'
 require 'tempfile'
 require 'securerandom'
+require 'tmpdir'
+
+# StableLockAnchor puts flock authorities in Git's common metadata directory,
+# outside the worktree paths that `git stash -u` can remove. The manifest binds
+# the task/checkpoint identity to the lock inode, so a same-name replacement is
+# not silently accepted as a new authority.
+class StableLockAnchor
+  GENERATION = 2
+  FORMAT_VERSION = 1
+  REPOSITORY_GENERATION_FILENAME = 'repository-generation.json'
+
+  class Error < StandardError; end
+  class MigrationRequired < Error; end
+
+  class << self
+    def repository_root(repo_root)
+      root = File.realpath(File.expand_path(repo_root.to_s))
+      output, status = Open3.capture2('git', '-C', root, 'rev-parse', '--show-toplevel', err: File::NULL)
+      raise Error, "'#{root}' is not a readable Git worktree" unless status.success?
+
+      resolved_root = File.realpath(output.strip)
+      raise Error, "'#{root}' is not the Git worktree root '#{resolved_root}'" unless resolved_root == root
+
+      root
+    rescue SystemCallError => e
+      raise Error, "Git worktree root could not be verified: #{e.message}"
+    end
+
+    def repository_root_for_path(file_path)
+      absolute = File.expand_path(file_path.to_s)
+      parent = File.realpath(File.dirname(absolute))
+      output, status = Open3.capture2('git', '-C', parent, 'rev-parse', '--show-toplevel', err: File::NULL)
+      unless status.success?
+        raise Error, "Git worktree for '#{file_path}' could not be resolved" if git_marker_in_ancestors?(parent)
+
+        return nil
+      end
+
+      root = File.realpath(output.strip)
+      candidate = File.join(parent, File.basename(absolute))
+      prefix = "#{root}#{File::SEPARATOR}"
+      unless candidate == root || candidate.start_with?(prefix)
+        raise Error, "checkpoint path '#{file_path}' is outside its Git worktree"
+      end
+      root
+    rescue SystemCallError => e
+      raise Error, "checkpoint Git worktree could not be verified: #{e.message}"
+    end
+
+    def lock_path(repo_root, namespace, key, filename: 'lock')
+      root = repository_root(repo_root)
+      common = common_directory(root)
+      identity = lock_identity(root, namespace, key)
+      digest = Digest::SHA256.hexdigest(JSON.generate(identity))
+      File.join(common, 'fable-locks', namespace.to_s, digest, filename)
+    end
+
+    # This is deliberately an explicit offline step. Existing v1 workers do
+    # not know about a v2 task anchor, so ordinary lock acquisition must not
+    # infer that an absent worktree lock means there is no legacy owner.
+    def initialize_repository_generation!(repo_root, confirm_legacy_workers_quiescent: false)
+      root = repository_root(repo_root)
+      common = common_directory(root)
+      marker_path = repository_generation_path(common)
+      if File.exist?(marker_path) || File.symlink?(marker_path)
+        validate_repository_generation!(common, marker_path)
+        return true
+      end
+      unless confirm_legacy_workers_quiescent
+        raise MigrationRequired,
+              "repository '#{common}' has no generation-#{GENERATION} lock marker; migration gate required: " \
+              'confirm every legacy protected worker and inherited child is quiescent, then explicitly initialize offline'
+      end
+
+      common_root = File.dirname(marker_path)
+      ensure_private_directory!(common_root, common)
+      manifest = {
+        'format_version' => FORMAT_VERSION,
+        'generation' => GENERATION,
+        'common_directory' => common
+      }
+      Tempfile.create(['.repository-generation-', '.tmp'], common_root) do |temp|
+        temp.write(JSON.pretty_generate(manifest))
+        temp.flush
+        temp.fsync
+        begin
+          File.link(temp.path, marker_path)
+          sync_directory!(common_root)
+        rescue Errno::EEXIST
+          # A concurrent explicit initializer may have won; accept only its
+          # exact verified marker, never a same-name file by itself.
+          validate_repository_generation!(common, marker_path)
+        end
+      end
+      validate_repository_generation!(common, marker_path)
+      true
+    rescue Error, MigrationRequired
+      raise
+    rescue SystemCallError, JSON::ParserError => e
+      raise Error, "repository lock generation could not be initialized safely: #{e.message}"
+    end
+
+    def open_lock(repo_root, namespace, key, filename: 'lock', legacy_paths: [])
+      root = repository_root(repo_root)
+      common = common_directory(root)
+      validate_repository_generation!(common, repository_generation_path(common))
+      identity = lock_identity(root, namespace, key)
+      reject_legacy_paths!(legacy_paths, namespace)
+      common_root = File.join(common, 'fable-locks')
+      namespace_root = File.join(common_root, namespace.to_s)
+      ensure_private_directory!(common_root, common)
+      ensure_private_directory!(namespace_root, common_root)
+      digest = Digest::SHA256.hexdigest(JSON.generate(identity))
+      anchor_dir = File.join(namespace_root, digest)
+      ensure_anchor!(anchor_dir, identity, filename)
+      open_verified_lock(anchor_dir, identity, filename)
+    rescue Error
+      raise
+    rescue SystemCallError, JSON::ParserError => e
+      raise Error, "stable #{namespace} lock authority could not be verified: #{e.message}"
+    end
+
+    def open_existing_lock(repo_root, namespace, key, filename: 'lock', legacy_paths: [])
+      root = repository_root(repo_root)
+      common = common_directory(root)
+      validate_repository_generation!(common, repository_generation_path(common))
+      identity = lock_identity(root, namespace, key)
+      reject_legacy_paths!(legacy_paths, namespace)
+      common_root = File.join(common, 'fable-locks')
+      namespace_root = File.join(common_root, namespace.to_s)
+      validate_private_directory!(common_root, common)
+      validate_private_directory!(namespace_root, common_root)
+      digest = Digest::SHA256.hexdigest(JSON.generate(identity))
+      anchor_dir = File.join(namespace_root, digest)
+      raise Error, "stable #{namespace} lock anchor is missing" unless File.directory?(anchor_dir) && !File.symlink?(anchor_dir)
+
+      open_verified_lock(anchor_dir, identity, filename)
+    rescue Error
+      raise
+    rescue SystemCallError, JSON::ParserError => e
+      raise Error, "stable #{namespace} lock authority could not be verified: #{e.message}"
+    end
+
+    def assert_generation_available!(repo_root, namespace, key, legacy_paths: [], legacy_state_paths: [])
+      root = repository_root(repo_root)
+      common = common_directory(root)
+      validate_repository_generation!(common, repository_generation_path(common))
+      identity = lock_identity(root, namespace, key)
+      reject_legacy_paths!(legacy_paths, namespace)
+      digest = Digest::SHA256.hexdigest(JSON.generate(identity))
+      anchor_dir = File.join(common, 'fable-locks', namespace.to_s, digest)
+      unless File.exist?(anchor_dir) || File.symlink?(anchor_dir)
+        legacy_state_paths.each do |path|
+          if File.exist?(path) || File.symlink?(path)
+            raise MigrationRequired,
+                  "legacy #{namespace} state '#{path}' exists without a stable lock anchor; migration gate required: " \
+                  'confirm all old protected workers and inherited children are quiescent, then perform an explicitly authorized offline migration'
+          end
+        end
+      end
+      true
+    rescue Error, MigrationRequired
+      raise
+    rescue SystemCallError => e
+      raise Error, "stable #{namespace} lock generation could not be checked: #{e.message}"
+    end
+
+    private
+
+    def repository_generation_path(common)
+      File.join(common, 'fable-locks', REPOSITORY_GENERATION_FILENAME)
+    end
+
+    def validate_repository_generation!(common, marker_path)
+      unless File.exist?(marker_path) && !File.symlink?(marker_path)
+        raise MigrationRequired,
+              "repository '#{common}' has no generation-#{GENERATION} lock marker; migration gate required: " \
+              'confirm every legacy protected worker and inherited child is quiescent, then explicitly initialize offline'
+      end
+
+      marker_stat = File.lstat(marker_path)
+      verify_owned_regular!(marker_path, marker_stat)
+      manifest = JSON.parse(File.binread(marker_path))
+      expected = {
+        'format_version' => FORMAT_VERSION,
+        'generation' => GENERATION,
+        'common_directory' => common
+      }
+      unless expected.all? { |key, value| manifest[key] == value }
+        raise Error, "repository lock generation marker '#{marker_path}' has mismatched identity"
+      end
+      true
+    rescue Errno::ENOENT
+      raise MigrationRequired,
+            "repository '#{common}' has no generation-#{GENERATION} lock marker; migration gate required: " \
+            'confirm every legacy protected worker and inherited child is quiescent, then explicitly initialize offline'
+    end
+
+    def lock_identity(root, namespace, key)
+      {
+        'format_version' => FORMAT_VERSION,
+        'generation' => GENERATION,
+        'namespace' => namespace.to_s,
+        'repository' => root,
+        'key' => key.to_s
+      }
+    end
+
+    # File.realpath can preserve different case spellings for the same
+    # directory on a case-insensitive filesystem. Walk physical parents and
+    # compare directory identities instead of relying on lexical prefixes.
+    def physical_subtree_or_same?(ancestor, candidate)
+      ancestor_path = File.realpath(ancestor)
+      current = File.realpath(candidate)
+      loop do
+        return true if File.identical?(ancestor_path, current)
+
+        parent = File.dirname(current)
+        return false if parent == current
+
+        current = parent
+      end
+    end
+
+    def common_directory(root)
+      output, status = Open3.capture2('git', '-C', root, 'rev-parse', '--git-common-dir', err: File::NULL)
+      raise Error, "Git common metadata directory for '#{root}' could not be resolved" unless status.success?
+
+      path = File.realpath(File.expand_path(output.strip, root))
+      stat = File.lstat(path)
+      unless stat.directory? && stat.uid == Process.uid
+        raise Error, "Git common metadata directory '#{path}' is not an owned directory"
+      end
+      if physical_subtree_or_same?(root, path)
+        git_dir = File.join(root, '.git')
+        safe_git_dir = !File.symlink?(git_dir) && File.directory?(git_dir) &&
+                       begin
+                         real_git_dir = File.realpath(git_dir)
+                         physical_subtree_or_same?(real_git_dir, path)
+                       rescue SystemCallError
+                         false
+                       end
+        unless safe_git_dir
+          raise MigrationRequired,
+                "Git common metadata directory '#{path}' is inside stash-managed worktree '#{root}'; " \
+                'move Git metadata outside the worktree or use its real .git metadata directory before initializing Fable locks'
+        end
+      end
+      path
+    rescue Error, MigrationRequired
+      raise
+    rescue SystemCallError => e
+      raise Error, "Git common metadata directory could not be verified: #{e.message}"
+    end
+
+    def git_marker_in_ancestors?(path)
+      current = path
+      loop do
+        marker = File.join(current, '.git')
+        return true if File.exist?(marker) || File.symlink?(marker)
+
+        parent = File.dirname(current)
+        return false if parent == current
+
+        current = parent
+      end
+    end
+
+    def reject_legacy_paths!(paths, namespace)
+      Array(paths).each do |path|
+        next unless File.exist?(path) || File.symlink?(path)
+
+        raise MigrationRequired,
+              "legacy #{namespace} lock '#{path}' is present; migration gate required: " \
+              'confirm all old protected workers and inherited children are quiescent, then perform an explicitly authorized offline migration'
+      end
+    end
+
+    def ensure_private_directory!(path, parent)
+      begin
+        Dir.mkdir(path, 0o700)
+      rescue Errno::EEXIST
+        # Validate the existing directory below; never trust the path name alone.
+      end
+      validate_private_directory!(path, parent)
+    rescue SystemCallError => e
+      raise Error, "stable lock directory '#{path}' could not be verified: #{e.message}"
+    end
+
+    def validate_private_directory!(path, parent)
+      stat = File.lstat(path)
+      unless stat.directory? && !stat.symlink? && stat.uid == Process.uid && (stat.mode & 0o022).zero?
+        raise Error, "stable lock directory '#{path}' is not a private owned directory"
+      end
+      expected = File.join(File.realpath(parent), File.basename(path))
+      raise Error, "stable lock directory '#{path}' resolves outside its expected parent" unless File.realpath(path) == expected
+    rescue SystemCallError => e
+      raise Error, "stable lock directory '#{path}' could not be verified: #{e.message}"
+    end
+
+    def ensure_anchor!(anchor_dir, identity, filename)
+      unless File.exist?(anchor_dir) || File.symlink?(anchor_dir)
+        temporary_dir = Dir.mktmpdir('.anchor-init-', File.dirname(anchor_dir))
+        begin
+          lock_path = File.join(temporary_dir, filename)
+          flags = File::RDWR | File::CREAT | File::EXCL | nofollow_flag
+          File.open(lock_path, flags, 0o600) do |lock|
+            verify_owned_regular!(lock_path, lock.stat)
+            lock.fsync
+            manifest = identity.merge('lock_device' => lock.stat.dev, 'lock_inode' => lock.stat.ino)
+            File.open(File.join(temporary_dir, 'authority.json'), File::WRONLY | File::CREAT | File::EXCL | nofollow_flag, 0o600) do |file|
+              file.write(JSON.pretty_generate(manifest))
+              file.flush
+              file.fsync
+            end
+          end
+          sync_directory!(temporary_dir)
+          begin
+            File.rename(temporary_dir, anchor_dir)
+            sync_directory!(File.dirname(anchor_dir))
+          rescue SystemCallError
+            raise unless File.directory?(anchor_dir) && !File.symlink?(anchor_dir)
+          end
+        ensure
+          FileUtils.remove_entry_secure(temporary_dir) if File.directory?(temporary_dir)
+        end
+      end
+      validate_anchor!(anchor_dir, identity, filename)
+    end
+
+    def validate_anchor!(anchor_dir, identity, filename)
+      dir_stat = File.lstat(anchor_dir)
+      unless dir_stat.directory? && !dir_stat.symlink? && dir_stat.uid == Process.uid && (dir_stat.mode & 0o022).zero?
+        raise Error, "stable lock anchor '#{anchor_dir}' is not a private owned directory"
+      end
+
+      manifest_path = File.join(anchor_dir, 'authority.json')
+      manifest_stat = File.lstat(manifest_path)
+      verify_owned_regular!(manifest_path, manifest_stat)
+      manifest = JSON.parse(File.binread(manifest_path))
+      identity.each do |key, value|
+        raise Error, "stable lock anchor '#{anchor_dir}' has mismatched #{key}" unless manifest[key] == value
+      end
+
+      lock_path = File.join(anchor_dir, filename)
+      lock_stat = File.lstat(lock_path)
+      verify_owned_regular!(lock_path, lock_stat)
+      unless manifest['lock_device'] == lock_stat.dev && manifest['lock_inode'] == lock_stat.ino
+        raise Error, "stable lock anchor '#{anchor_dir}' lock inode changed"
+      end
+      manifest
+    rescue Errno::ENOENT => e
+      raise Error, "stable lock anchor '#{anchor_dir}' is incomplete: #{e.message}"
+    end
+
+    def open_verified_lock(anchor_dir, identity, filename)
+      manifest = validate_anchor!(anchor_dir, identity, filename)
+      lock_path = File.join(anchor_dir, filename)
+      lock = File.open(lock_path, File::RDWR | nofollow_flag)
+      verify_owned_regular!(lock_path, lock.stat)
+      unless lock.stat.dev == manifest['lock_device'] && lock.stat.ino == manifest['lock_inode']
+        lock.close
+        raise Error, "stable lock anchor '#{anchor_dir}' changed while opening"
+      end
+      lock
+    rescue SystemCallError => e
+      lock.close if defined?(lock) && lock && !lock.closed?
+      raise Error, "stable lock file '#{lock_path}' could not be opened safely: #{e.message}"
+    end
+
+    def verify_owned_regular!(path, stat)
+      unless stat.file? && !stat.symlink? && stat.uid == Process.uid && (stat.mode & 0o022).zero?
+        raise Error, "stable lock file '#{path}' is not an owned private regular file"
+      end
+    end
+
+    def nofollow_flag
+      File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : 0
+    end
+
+    def sync_directory!(path)
+      File.open(path, File::RDONLY) { |directory| directory.fsync }
+    end
+  end
+end
 
 # TaskCheckpoint encapsulates the minimal, durable, authoritative continuation state
 # for Fable Worker execution across sessions and model boundaries.
@@ -177,6 +562,27 @@ class TaskCheckpoint
     File.join(repo_root, '.fable', 'checkpoints', "#{task_id}.json")
   end
 
+  def self.lock_path_for(file_path)
+    absolute = File.expand_path(file_path.to_s)
+    repository = StableLockAnchor.repository_root_for_path(absolute)
+    return "#{absolute}.lock" unless repository
+
+    canonical_path = File.join(File.realpath(File.dirname(absolute)), File.basename(absolute))
+    relative_path = Pathname.new(canonical_path).relative_path_from(Pathname.new(repository)).to_s
+    StableLockAnchor.lock_path(repository, 'checkpoint-sidecar', relative_path, filename: 'checkpoint.lock')
+  end
+
+  def self.open_lock_for(file_path)
+    absolute = File.expand_path(file_path.to_s)
+    repository = StableLockAnchor.repository_root_for_path(absolute)
+    return File.open("#{absolute}.lock", File::RDWR | File::CREAT, 0o600) unless repository
+
+    canonical_path = File.join(File.realpath(File.dirname(absolute)), File.basename(absolute))
+    relative_path = Pathname.new(canonical_path).relative_path_from(Pathname.new(repository)).to_s
+    StableLockAnchor.open_lock(repository, 'checkpoint-sidecar', relative_path,
+                               filename: 'checkpoint.lock', legacy_paths: ["#{absolute}.lock"])
+  end
+
   def self.load(file_path)
     raise LoadError, "Checkpoint file does not exist: #{file_path}" unless File.file?(file_path)
 
@@ -192,10 +598,17 @@ class TaskCheckpoint
     dir = File.dirname(file_path)
     FileUtils.mkdir_p(dir)
 
-    # Keep this fixed sidecar: unlinking it could give waiting writers distinct
-    # lock inodes. Closing the descriptor releases the lock on every exit path.
-    File.open("#{file_path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
+    # Repository checkpoints use a Git-common metadata anchor so a worktree
+    # stash cannot replace the lock inode. Standalone files outside Git retain
+    # the adjacent sidecar behavior.
+    lock = self.class.open_lock_for(file_path)
+    begin
       raise IOError, 'Could not acquire checkpoint lock' unless lock.flock(File::LOCK_EX)
+      lock_directory = File.dirname(lock.path)
+      unless File.stat(lock_directory).dev == File.stat(dir).dev
+        raise IOError,
+              "stable checkpoint lock and checkpoint '#{file_path}' are on different filesystems; atomic replacement is unavailable"
+      end
 
       if File.exist?(file_path)
         existing_raw = File.read(file_path, encoding: 'UTF-8')
@@ -216,11 +629,16 @@ class TaskCheckpoint
       end
 
       @updated_at = Time.now.utc.iso8601
-      Tempfile.create(["#{File.basename(file_path)}.tmp.", ''], dir, encoding: 'UTF-8') do |temp|
+      # Stage beside the stable lock, in Git common metadata for repository
+      # checkpoints. A worktree stash must not remove and recreate the temporary
+      # inode while the atomic replacement is in flight.
+      Tempfile.create(["#{File.basename(file_path)}.tmp.", ''], lock_directory, encoding: 'UTF-8') do |temp|
         temp.write(to_json)
         temp.close
         File.rename(temp.path, file_path) # Commit point; no power-loss durability claim.
       end
+    ensure
+      lock.close unless lock.closed?
     end
     true
   end
@@ -1751,30 +2169,49 @@ class ExecutionRecord
   end
 
   def self.task_lock_path(repo_root, task_id)
+    StableLockAnchor.lock_path(repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock')
+  end
+
+  def self.legacy_task_lock_path(repo_root, task_id)
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'execution.lock')
+  end
+
+  def self.assert_task_lock_generation!(repo_root, task_id)
+    legacy_state_dir = File.join(repo_root, '.fable', 'checkpoints', task_id.to_s)
+    StableLockAnchor.assert_generation_available!(
+      repo_root, 'task-execution', task_id.to_s,
+      legacy_paths: [legacy_task_lock_path(repo_root, task_id)],
+      legacy_state_paths: [legacy_state_dir]
+    )
   end
 
   # Serializes task-scoped ownership checks and acquisition across distinct
   # execution IDs. Protected launches also pass this open descriptor to the
   # application child, so the OS lock remains held if the wrapper is killed.
   def self.with_task_lock(repo_root, task_id)
-    lock_path = task_lock_path(repo_root, task_id)
-    FileUtils.mkdir_p(File.dirname(lock_path))
-    if File.symlink?(lock_path)
-      raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' is a symlink"
-    end
-    File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
-      unless lock.stat.file? && lock.stat.uid == Process.uid
-        raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' is not an owned regular file"
-      end
+    assert_task_lock_generation!(repo_root, task_id)
+    lock = StableLockAnchor.open_lock(
+      repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock',
+      legacy_paths: [legacy_task_lock_path(repo_root, task_id)]
+    )
+    begin
       unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         raise DuplicateExecutionError, "task '#{task_id}' has another execution claim in progress"
       end
-      # A new hold ends any earlier lineage, so its record cannot be reused.
-      lock.truncate(0)
+      reset_task_lineage!(lock, repo_root, task_id)
 
       yield lock
+    ensure
+      lock.close unless lock.closed?
     end
+  end
+
+  def self.reset_task_lineage!(lock, repo_root, task_id)
+    lock.truncate(0)
+    lock.pwrite(JSON.generate('schema_version' => SCHEMA_VERSION, 'lock_generation' => StableLockAnchor::GENERATION,
+                              'task_id' => task_id.to_s, 'record_root' => File.realpath(repo_root)), 0)
+    lock.fsync
+    true
   end
 
   # Finds any live or unresolved record that could own this task's writer
@@ -1925,10 +2362,13 @@ class ExecutionRecord
     secret = nil
     unless execution_id.nil?
       secret = SecureRandom.hex(32)
-      lock.pwrite(JSON.generate('schema_version' => SCHEMA_VERSION, 'task_id' => task_id.to_s,
+      lock.pwrite(JSON.generate('schema_version' => SCHEMA_VERSION,
+                                'lock_generation' => StableLockAnchor::GENERATION, 'task_id' => task_id.to_s,
                                 'record_root' => File.realpath(repo_root),
                                 'execution_id' => execution_id.to_s,
                                 'capability_sha256' => Digest::SHA256.hexdigest(secret)), 0)
+    else
+      reset_task_lineage!(lock, repo_root, task_id)
     end
     lock.fsync
     secret
@@ -1987,29 +2427,29 @@ class ExecutionRecord
       raise UnresolvedExecutionStateError, 'nested protected-run capability is incomplete or malformed'
     end
 
-    lock_path = task_lock_path(repo_root, task_id)
-    if File.symlink?(lock_path) || !File.file?(lock_path)
-      raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' is missing or not a regular file"
-    end
+    assert_task_lock_generation!(repo_root, task_id)
     lock = begin
              File.for_fd(Integer(fd_text), autoclose: false)
            rescue Errno::EBADF
              raise UnresolvedExecutionStateError, 'inherited task-lock descriptor is not open'
            end
     lock_stat = lock.stat
-    path_stat = File.lstat(lock_path)
-    unless lock_stat.file? && lock_stat.uid == Process.uid && "#{lock_stat.dev}:#{lock_stat.ino}" == identity &&
-           [lock_stat.dev, lock_stat.ino] == [path_stat.dev, path_stat.ino]
-      raise UnresolvedExecutionStateError, "inherited descriptor is not task '#{task_id}' owned execution lock"
-    end
-
-    File.open(lock_path, File::RDONLY) do |probe|
-      unless [probe.stat.dev, probe.stat.ino] == [lock_stat.dev, lock_stat.ino]
-        raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' changed during verification"
+    probe = StableLockAnchor.open_existing_lock(
+      repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock',
+      legacy_paths: [legacy_task_lock_path(repo_root, task_id)]
+    )
+    begin
+      path_stat = probe.stat
+      unless lock_stat.file? && lock_stat.uid == Process.uid && "#{lock_stat.dev}:#{lock_stat.ino}" == identity &&
+             [lock_stat.dev, lock_stat.ino] == [path_stat.dev, path_stat.ino]
+        raise UnresolvedExecutionStateError, "inherited descriptor is not task '#{task_id}' owned execution lock"
       end
+
       if probe.flock(File::LOCK_EX | File::LOCK_NB)
         raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock is not held by a protected lineage"
       end
+    ensure
+      probe.close unless probe.closed?
     end
     unless lock.flock(File::LOCK_EX | File::LOCK_NB)
       raise DuplicateExecutionError, "task '#{task_id}' execution lock is held outside this protected lineage"
@@ -2036,6 +2476,7 @@ class ExecutionRecord
     end
     lineage = JSON.parse(lock.pread(size, 0))
     unless lineage.is_a?(Hash) && lineage['schema_version'] == SCHEMA_VERSION &&
+           lineage['lock_generation'] == StableLockAnchor::GENERATION &&
            lineage['task_id'] == task_id.to_s && lineage['record_root'] == File.realpath(repo_root) &&
            stable_component?(lineage['execution_id']) && lineage['capability_sha256'].to_s.match?(/\A[0-9a-f]{64}\z/)
       raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock lineage is ambiguous"
@@ -2764,6 +3205,7 @@ if __FILE__ == $PROGRAM_NAME
   if %i[run recover_run continue_paused_run].include?(mode)
     begin
       nested_request = nil
+      ExecutionRecord.assert_task_lock_generation!(options[:repository], options[:task_id])
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
       if mode == :recover_run
         recovery = ExecutionRecoveryTransition.acquire_successor!(

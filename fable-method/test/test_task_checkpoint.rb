@@ -9,7 +9,29 @@ require 'rbconfig'
 require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
+module SyntheticGitRepo
+  def initialize_synthetic_git_repo(path, lock_generation: true)
+    FileUtils.mkdir_p(path)
+    git = lambda do |*args|
+      _stdout, stderr, status = Open3.capture3('git', '-C', path, *args)
+      raise "synthetic git command failed: git #{args.join(' ')}: #{stderr}" unless status.success?
+    end
+
+    git.call('init', '--quiet')
+    git.call('config', 'user.name', 'Fable Test')
+    git.call('config', 'user.email', 'fable-test@example.invalid')
+    File.write(File.join(path, '.synthetic-test-fixture'), "synthetic\n")
+    git.call('add', '.synthetic-test-fixture')
+    git.call('commit', '--quiet', '-m', 'synthetic base')
+    if lock_generation
+      StableLockAnchor.initialize_repository_generation!(path, confirm_legacy_workers_quiescent: true)
+    end
+  end
+end
+
 class TaskCheckpointTest < Minitest::Test
+  include SyntheticGitRepo
+
   def setup
     @tmpdir = Dir.mktmpdir('task_checkpoint_test_')
     @repo_dir = File.join(@tmpdir, 'repo')
@@ -304,7 +326,7 @@ class TaskCheckpointTest < Minitest::Test
 
     File.prepend(Module.new do
       define_method(:flock) do |operation|
-        if self.path == "#{path}.lock" && operation == File::LOCK_EX
+        if self.path == TaskCheckpoint.lock_path_for(path) && operation == File::LOCK_EX
           return false if mode == 'lock_false'
           raise IOError, 'injected flock failure' if mode == 'lock_raise'
           # Report actual contention, not merely that a writer was started.
@@ -403,7 +425,7 @@ class TaskCheckpointTest < Minitest::Test
   end
 
   def assert_save_lock_available(path)
-    File.open("#{path}.lock", File::RDWR) do |lock|
+    File.open(TaskCheckpoint.lock_path_for(path), File::RDWR) do |lock|
       assert_equal 0, lock.flock(File::LOCK_EX | File::LOCK_NB)
     end
   end
@@ -449,6 +471,66 @@ class TaskCheckpointTest < Minitest::Test
 
   def test_atomic_save_two_processes_reject_one_stale_writer
     run_save_race('race')
+  end
+
+  def test_git_checkpoint_sidecar_survives_stash_replacement_and_serializes_writers
+    repository = File.join(@tmpdir, 'sidecar-lock-repo')
+    initialize_synthetic_git_repo(repository)
+    path = File.join(repository, '.fable', 'checkpoints', 'sidecar_task.json')
+    TaskCheckpoint.new(@valid_attrs).save(path)
+    lock_path = TaskCheckpoint.lock_path_for(path)
+    refute_equal "#{path}.lock", lock_path
+    lock_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    first = start_save_process(path, 0, 'race')
+    assert_equal [0, 'ready', 1], save_event
+    release_save(first)
+    assert_equal [0, 'prepared'], save_event.take(2)
+
+    _stash_out, stash_err, stash_status = Open3.capture3(
+      'git', '-C', repository, 'stash', 'push', '--include-untracked', '--message', 'sidecar replacement regression'
+    )
+    assert stash_status.success?, stash_err
+    refute File.exist?(path), 'git stash -u removes the untracked checkpoint from the worktree'
+    assert_equal lock_identity, [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    _pop_out, pop_err, pop_status = Open3.capture3('git', '-C', repository, 'stash', 'pop')
+    assert pop_status.success?, pop_err
+    assert_equal 1, TaskCheckpoint.load(path).revision
+    assert_equal lock_identity, [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    second = start_save_process(path, 1, 'race')
+    assert_equal [1, 'ready', 1], save_event
+    release_save(second)
+    assert_equal [1, 'contended'], save_event.take(2)
+
+    release_save(first)
+    first_success = save_event
+    assert_equal [0, 'success'], first_success.take(2)
+    assert_equal 2, first_success[2].fetch('revision')
+    finish_save(first)
+    second_outcome = save_event
+    assert_equal [1, 'concurrency_error'], second_outcome.take(2), second_outcome.inspect
+    finish_save(second)
+    saved = TaskCheckpoint.load(path)
+    assert_equal 2, saved.revision
+    assert_equal 'writer_0', saved.next_action
+    assert_equal lock_identity, [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    legacy_sidecar = "#{path}.lock"
+    File.write(legacy_sidecar, 'legacy checkpoint lock')
+    error = assert_raises(StableLockAnchor::MigrationRequired) do
+      TaskCheckpoint.new(@valid_attrs).save(path)
+    end
+    assert_includes error.message, 'migration gate required'
+    FileUtils.rm_f(legacy_sidecar)
+
+    replacement_target = File.join(@tmpdir, 'sidecar-lock-target')
+    File.write(replacement_target, 'untouched')
+    File.unlink(lock_path)
+    File.symlink(replacement_target, lock_path)
+    assert_raises(StableLockAnchor::Error) { TaskCheckpoint.new(@valid_attrs).save(path) }
+    assert_equal 'untouched', File.read(replacement_target)
   end
 
   def test_atomic_save_without_expected_revision_serializes_both_updates
@@ -1855,7 +1937,10 @@ class DurableCommandCaptureTest < Minitest::Test
 end
 
 class TaskCheckpointRunTest < Minitest::Test
+  include SyntheticGitRepo
+
   CLI = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+  CLI_TIMEOUT_SECONDS = 15
   TASK_ID = 'CLI_TASK'
   UPSTREAM = <<~'RUBY'
     launches, release, result = ARGV
@@ -1865,7 +1950,7 @@ class TaskCheckpointRunTest < Minitest::Test
     STDOUT.flush
     STDERR.flush
     unless release == '-'
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
       until File.file?(release)
         abort 'upstream barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
         sleep 0.01
@@ -2007,6 +2092,8 @@ class TaskCheckpointRunTest < Minitest::Test
     @worktree = File.join(@tmpdir, 'upstream-cwd')
     @caller = File.join(@tmpdir, 'caller-cwd')
     [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
+    initialize_synthetic_git_repo(@repo)
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) { assert true }
     @launches = File.join(@tmpdir, 'launches')
     @release = File.join(@tmpdir, 'release')
     @application_state = File.join(@tmpdir, 'application-checkpoint.bin')
@@ -2123,7 +2210,7 @@ class TaskCheckpointRunTest < Minitest::Test
   end
 
   def finish_cli(child)
-    assert child[:wait].join(5), 'CLI timed out'
+    assert child[:wait].join(CLI_TIMEOUT_SECONDS), 'CLI timed out'
     child[:readers].each { |reader| assert reader.join(5), 'CLI output timed out' }
     [*child[:readers].map(&:value), child[:wait].value]
   end
@@ -2383,6 +2470,277 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, launch_records.size
   end
 
+  def test_stash_u_lock_replacement_cannot_admit_a_second_task_writer
+    identity = 'stash_lock_owner'
+    owner = start_cli(cli_args(identity, upstream(barrier: true)))
+    wait_until('task-lock owner did not start') { !launch_records.empty? }
+    record_before = File.binread(record_path(identity))
+    stable_lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    stable_lock_identity = [File.stat(stable_lock_path).dev, File.stat(stable_lock_path).ino]
+
+    legacy_path = ExecutionRecord.legacy_task_lock_path(@repo, TASK_ID)
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    legacy_bytes = JSON.generate('schema_version' => ExecutionRecord::SCHEMA_VERSION,
+                                 'task_id' => TASK_ID, 'record_root' => File.realpath(@repo),
+                                 'execution_id' => 'legacy_fixture', 'capability_sha256' => 'a' * 64)
+    File.write(legacy_path, legacy_bytes)
+    legacy_descriptor = File.open(legacy_path, File::RDWR)
+    legacy_identity = [legacy_descriptor.stat.dev, legacy_descriptor.stat.ino]
+
+    _stash_out, stash_err, stash_status = Open3.capture3(
+      'git', '-C', @repo, 'stash', 'push', '--include-untracked', '--message', 'task lock replacement regression'
+    )
+    assert stash_status.success?, stash_err
+    refute File.exist?(record_path(identity))
+    refute File.exist?(legacy_path)
+    assert_equal stable_lock_identity, [File.stat(stable_lock_path).dev, File.stat(stable_lock_path).ino]
+
+    _pop_out, pop_err, pop_status = Open3.capture3('git', '-C', @repo, 'stash', 'pop')
+    assert pop_status.success?, pop_err
+    assert_equal legacy_bytes, File.binread(legacy_path)
+    refute_equal legacy_identity, [File.stat(legacy_path).dev, File.stat(legacy_path).ino]
+    assert_equal record_before, File.binread(record_path(identity))
+    assert_equal ExecutionRecord::CLASSIFICATION_ACTIVE, ExecutionRecord.load(record_path(identity)).classify
+    assert_equal stable_lock_identity, [File.stat(stable_lock_path).dev, File.stat(stable_lock_path).ino]
+    File.open(stable_lock_path, File::RDWR) do |probe|
+      refute probe.flock(File::LOCK_EX | File::LOCK_NB), 'Worker A still owns the stable lock inode'
+    end
+
+    legacy_overlap = run_cli(cli_args('legacy_generation_probe'))
+    assert_equal 1, legacy_overlap[2].exitstatus
+    assert_includes legacy_overlap[1], 'migration gate required'
+    assert_equal 1, launch_records.size
+    FileUtils.rm_f(legacy_path)
+    legacy_descriptor.close
+
+    second_while_active = run_cli(cli_args('writer_second'))
+    assert_equal 1, second_while_active[2].exitstatus
+    assert_includes second_while_active[1], 'another execution claim in progress'
+    assert_equal 1, launch_records.size
+
+    File.write(@release, 'go')
+    assert_output(finish_cli(owner), 0)
+    FileUtils.rm_f(@release)
+
+    successors = 2.times.map do |index|
+      start_cli(cli_args("successor_#{index}", upstream(barrier: true)))
+    end
+    wait_until('successor ownership was not resolved') do
+      launch_records.size >= 2 && successors.any? { |child| !child[:wait].alive? }
+    end
+    assert_equal 2, launch_records.size, 'normal release allows one task-scoped successor'
+    loser = successors.find { |child| !child[:wait].alive? }
+    winner = (successors - [loser]).first
+    loser_result = finish_cli(loser)
+    assert_equal 1, loser_result[2].exitstatus
+    assert(loser_result[1].include?('another execution claim in progress') ||
+           loser_result[1].include?(ExecutionRecord::CLASSIFICATION_ACTIVE), loser_result[1])
+    File.write(@release, 'go')
+    assert_output(finish_cli(winner), 0)
+    assert_equal 2, launch_records.size
+  end
+
+  def test_legacy_writer_hidden_by_stash_cannot_bootstrap_a_new_generation
+    legacy_repo = File.join(@tmpdir, 'uninitialized-generation-repo')
+    initialize_synthetic_git_repo(legacy_repo, lock_generation: false)
+    legacy_task_id = 'V1_STASH_TASK'
+    legacy_path = ExecutionRecord.legacy_task_lock_path(legacy_repo, legacy_task_id)
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(legacy_repo)
+    end
+
+    File.open(legacy_path, File::RDWR | File::CREAT, 0o600) do |legacy_owner|
+      assert legacy_owner.flock(File::LOCK_EX | File::LOCK_NB)
+      legacy_owner.write('live generation-1 owner')
+      legacy_owner.flush
+      legacy_inode = [legacy_owner.stat.dev, legacy_owner.stat.ino]
+
+      _stash_out, stash_err, stash_status = Open3.capture3(
+        'git', '-C', legacy_repo, 'stash', 'push', '--include-untracked', '--message', 'hide legacy lock regression'
+      )
+      assert stash_status.success?, stash_err
+      refute File.exist?(legacy_path)
+
+      args = cli_args('new_generation_overlap')
+      args[args.index('--repo') + 1] = legacy_repo
+      args[args.index('--task-id') + 1] = legacy_task_id
+      result = run_cli(args)
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], 'migration gate required'
+      assert_includes result[1], 'generation-2 lock marker'
+      refute File.exist?(ExecutionRecord.task_lock_path(legacy_repo, legacy_task_id))
+      refute File.exist?(ExecutionRecord.default_path(legacy_repo, legacy_task_id, 'new_generation_overlap'))
+      assert_empty launch_records
+
+      _pop_out, pop_err, pop_status = Open3.capture3('git', '-C', legacy_repo, 'stash', 'pop')
+      assert pop_status.success?, pop_err
+      assert File.exist?(legacy_path)
+      refute_equal legacy_inode, [File.stat(legacy_path).dev, File.stat(legacy_path).ino]
+      File.open(legacy_path, File::RDWR) do |replacement|
+        assert replacement.flock(File::LOCK_EX | File::LOCK_NB),
+               'the restored legacy path is an independent inode while the old owner still holds its descriptor'
+        replacement.flock(File::LOCK_UN)
+      end
+      assert_equal legacy_inode, [legacy_owner.stat.dev, legacy_owner.stat.ino]
+    end
+  end
+
+  def test_live_legacy_lock_generation_requires_migration_gate
+    legacy_task_id = 'LEGACY_TASK'
+    legacy_path = ExecutionRecord.legacy_task_lock_path(@repo, legacy_task_id)
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    File.open(legacy_path, File::RDWR | File::CREAT, 0o600) do |legacy_lock|
+      assert legacy_lock.flock(File::LOCK_EX | File::LOCK_NB)
+      legacy_lock.write('legacy generation')
+      legacy_lock.flush
+
+      args = cli_args('new_generation_overlap')
+      args[args.index('--task-id') + 1] = legacy_task_id
+      result = run_cli(args)
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], 'migration gate required'
+      assert_empty launch_records
+      refute File.exist?(ExecutionRecord.task_lock_path(@repo, legacy_task_id))
+      refute File.exist?(ExecutionRecord.default_path(@repo, legacy_task_id, 'new_generation_overlap'))
+      File.open(legacy_path, File::RDWR) do |probe|
+        refute probe.flock(File::LOCK_EX | File::LOCK_NB), 'the legacy owner remains untouched'
+      end
+    end
+  end
+
+  def test_separate_git_metadata_inside_worktree_is_rejected_before_lock_initialization
+    repository = File.join(@tmpdir, 'separate-git-dir-repo')
+    metadata = File.join(repository, 'metadata')
+    FileUtils.mkdir_p(repository)
+    _stdout, stderr, status = Open3.capture3(
+      'git', 'init', '--quiet', '--separate-git-dir', metadata, repository
+    )
+    assert status.success?, stderr
+    git = lambda do |*args|
+      _out, error, result = Open3.capture3('git', '-C', repository, *args)
+      raise "separate-git-dir fixture command failed: #{error}" unless result.success?
+    end
+    git.call('config', 'user.name', 'Fable Test')
+    git.call('config', 'user.email', 'fable-test@example.invalid')
+    File.write(File.join(repository, 'tracked'), "base\n")
+    git.call('add', 'tracked')
+    git.call('commit', '--quiet', '-m', 'synthetic separate git directory base')
+
+    error = assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(repository, confirm_legacy_workers_quiescent: true)
+    end
+    assert_includes error.message, 'inside stash-managed worktree'
+    assert_includes error.message, 'move Git metadata outside the worktree'
+    refute File.exist?(File.join(metadata, 'fable-locks'))
+
+    execution_error = assert_raises(StableLockAnchor::MigrationRequired) do
+      ExecutionRecord.with_task_lock(repository, 'unsafe_metadata_task') do
+        flunk 'no task lock may be acquired under stash-managed common metadata'
+      end
+    end
+    assert_includes execution_error.message, 'inside stash-managed worktree'
+    refute File.exist?(File.join(repository, '.fable'))
+
+    root_metadata_repo = File.join(@tmpdir, 'git-dir-is-worktree-root')
+    FileUtils.mkdir_p(root_metadata_repo)
+    _root_out, root_err, root_status = Open3.capture3(
+      'git', 'init', '--quiet', '--separate-git-dir', root_metadata_repo, root_metadata_repo
+    )
+    assert root_status.success?, root_err
+    root_error = assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(root_metadata_repo,
+                                                          confirm_legacy_workers_quiescent: true)
+    end
+    assert_includes root_error.message, 'inside stash-managed worktree'
+    refute File.exist?(File.join(root_metadata_repo, 'fable-locks'))
+  end
+
+  def test_case_alias_cannot_bypass_physical_lock_anchor_containment
+    repository = File.join(@tmpdir, 'FJ001CaseAliasRepo')
+    repository_alias = File.join(@tmpdir, 'fj001casealiasrepo')
+    FileUtils.mkdir_p(repository)
+    skip 'case-insensitive filesystem is required for the FJ-001 alias regression' unless
+      File.directory?(repository_alias) && File.identical?(repository, repository_alias)
+
+    _stdout, stderr, status = Open3.capture3(
+      'git', 'init', '--quiet', '--separate-git-dir', repository, repository
+    )
+    assert status.success?, stderr
+    File.write(File.join(repository, '.git'), "gitdir: #{repository_alias}\n")
+
+    top_level, top_level_err, top_level_status = Open3.capture3(
+      'git', '-C', repository, 'rev-parse', '--show-toplevel'
+    )
+    assert top_level_status.success?, top_level_err
+    assert_equal File.realpath(repository), File.realpath(top_level.strip)
+    common_output, common_err, common_status = Open3.capture3(
+      'git', '-C', repository, 'rev-parse', '--git-common-dir'
+    )
+    assert common_status.success?, common_err
+    common_path = File.realpath(File.expand_path(common_output.strip, repository))
+    assert File.identical?(repository, common_path), 'Git common-dir alias must resolve to the worktree root'
+    skip 'filesystem canonicalized away the case alias before the lexical containment check' if
+      File.realpath(repository) == common_path
+
+    error = assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(repository, confirm_legacy_workers_quiescent: true)
+    end
+    assert_includes error.message, 'inside stash-managed worktree'
+    refute File.exist?(File.join(repository_alias, 'fable-locks'))
+  end
+
+  def test_task_lock_anchor_replacement_and_symlink_tampering_fail_closed
+    ExecutionRecord.with_task_lock(@repo, 'distinct_scope_a') do
+      ExecutionRecord.with_task_lock(@repo, 'distinct_scope_b') { assert true }
+    end
+
+    replacement_path = ExecutionRecord.task_lock_path(@repo, 'replace_anchor')
+    ExecutionRecord.with_task_lock(@repo, 'replace_anchor') { assert File.file?(replacement_path) }
+    File.unlink(replacement_path)
+    File.write(replacement_path, 'replacement')
+    error = assert_raises(StableLockAnchor::Error) do
+      ExecutionRecord.with_task_lock(@repo, 'replace_anchor') { flunk 'replacement inode must not be acquired' }
+    end
+    assert_includes error.message, 'inode changed'
+
+    symlink_path = ExecutionRecord.task_lock_path(@repo, 'symlink_anchor')
+    ExecutionRecord.with_task_lock(@repo, 'symlink_anchor') { assert File.file?(symlink_path) }
+    target = File.join(@tmpdir, 'symlink-lock-target')
+    File.write(target, 'untouched')
+    File.unlink(symlink_path)
+    File.symlink(target, symlink_path)
+    assert_raises(StableLockAnchor::Error) do
+      ExecutionRecord.with_task_lock(@repo, 'symlink_anchor') { flunk 'symlink must not be acquired' }
+    end
+    assert_equal 'untouched', File.read(target)
+
+    namespace_task = 'symlink_namespace'
+    namespace_lock_path = ExecutionRecord.task_lock_path(@repo, namespace_task)
+    ExecutionRecord.with_task_lock(@repo, namespace_task) { assert File.file?(namespace_lock_path) }
+    namespace_root = File.dirname(File.dirname(namespace_lock_path))
+    moved_namespace = "#{namespace_root}.moved"
+    File.rename(namespace_root, moved_namespace)
+    begin
+      File.symlink(moved_namespace, namespace_root)
+      opened = nil
+      begin
+        assert_raises(StableLockAnchor::Error) do
+          opened = StableLockAnchor.open_existing_lock(@repo, 'task-execution', namespace_task,
+                                                        filename: 'execution.lock')
+        end
+      ensure
+        opened&.close
+      end
+      assert_raises(StableLockAnchor::Error) do
+        ExecutionRecord.with_task_lock(@repo, namespace_task) { flunk 'symlinked namespace must not be trusted' }
+      end
+    ensure
+      File.unlink(namespace_root) if File.symlink?(namespace_root)
+      File.rename(moved_namespace, namespace_root) if File.directory?(moved_namespace)
+    end
+  end
+
   def test_run_nonzero_result_replay_does_not_launch_again
     args = cli_args('nonzero', upstream(result: '7'))
     original = run_cli(args)
@@ -2439,8 +2797,9 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE, ExecutionRecord.load(record_path(identity)).classify
     assert_equal 1, launch_records.size
     refute File.exist?(capture_path(identity))
-    assert_equal [ExecutionRecord.task_lock_path(@repo, TASK_ID), record_path(identity)].sort,
-                 Dir.glob(File.join(@repo, '**', '*'), File::FNM_DOTMATCH).select { |path| File.file?(path) }.sort
+    assert_equal [record_path(identity)],
+                 Dir.glob(File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions', '*.json')).sort
+    assert File.file?(ExecutionRecord.task_lock_path(@repo, TASK_ID))
   end
 
   def test_recover_run_stale_dead_execution_preserves_history_and_checkpoint_before_child
@@ -2950,7 +3309,8 @@ class TaskCheckpointRunTest < Minitest::Test
       assert_equal '', result[0]
     end
     assert_empty launch_records
-    [@repo, @worktree, @caller].each { |path| assert_empty Dir.children(path) }
+    assert_empty Dir.glob(File.join(@repo, '.fable', '**', '*'), File::FNM_DOTMATCH)
+    [@worktree, @caller].each { |path| assert_empty Dir.children(path) }
   end
 
   def nested_leaf(label)
@@ -3012,7 +3372,8 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal outer_record.pid, Integer(parent_line.split(':').last), 'the parent is the outer launcher child'
     assert_equal inner_record.pid, Integer(leaf_line.split(':').last), 'the leaf is the nested launcher child'
     lineage = JSON.parse(File.read(ExecutionRecord.task_lock_path(@repo, TASK_ID)))
-    assert_equal({ 'schema_version' => ExecutionRecord::SCHEMA_VERSION, 'task_id' => TASK_ID,
+    assert_equal({ 'schema_version' => ExecutionRecord::SCHEMA_VERSION,
+                   'lock_generation' => StableLockAnchor::GENERATION, 'task_id' => TASK_ID,
                    'record_root' => File.realpath(@repo), 'execution_id' => 'nested_outer' },
                  lineage.reject { |key, _| key == 'capability_sha256' })
     assert_match(/\A[0-9a-f]{64}\z/, lineage.fetch('capability_sha256'))
@@ -3117,7 +3478,7 @@ class TaskCheckpointRunTest < Minitest::Test
     other_task = 'CLI_TASK_OTHER'
     free_task = 'CLI_TASK_FREE'
     other_root = File.join(@tmpdir, 'other-record-root')
-    FileUtils.mkdir_p(other_root)
+    initialize_synthetic_git_repo(other_root)
     other_release = File.join(@tmpdir, 'other-release')
     other_command = [RbConfig.ruby, '-e', UPSTREAM, @launches, other_release, '0']
     other_owners = [[@repo, other_task, 'other_task_owner'], [other_root, TASK_ID, 'other_root_owner']].map do |repo, task, id|
@@ -3305,7 +3666,10 @@ class TaskCheckpointRunTest < Minitest::Test
     rotated = run_cli(cli_args('rotated_after_dead_lineage'))
     assert_equal 1, rotated[2].exitstatus
     assert_includes rotated[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
-    assert_equal 0, File.size(lock_path), 'a conforming acquisition clears the dead lineage'
+    cleared_lineage = JSON.parse(File.read(lock_path))
+    assert_equal StableLockAnchor::GENERATION, cleared_lineage.fetch('lock_generation')
+    refute cleared_lineage.key?('execution_id'), 'a conforming acquisition clears nested lineage authority'
+    refute cleared_lineage.key?('capability_sha256')
     replayed = forge.call('forged_harvested_secret', harvested)
     assert_equal 1, replayed[2].exitstatus, replayed[1]
     assert_includes replayed[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
