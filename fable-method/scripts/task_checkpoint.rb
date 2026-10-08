@@ -9,6 +9,7 @@ require 'time'
 require 'digest'
 require 'tempfile'
 require 'securerandom'
+require 'rbconfig'
 
 # TaskCheckpoint encapsulates the minimal, durable, authoritative continuation state
 # for Fable Worker execution across sessions and model boundaries.
@@ -103,6 +104,11 @@ class TaskCheckpoint
     REQUIRED_FIELDS.each do |field|
       val = send(field)
       errors << "missing required field: #{field}" if val.nil? || val.to_s.strip.empty?
+    end
+
+    %i[repository worktree].each do |field|
+      path = send(field).to_s
+      errors << "#{field} must be an absolute locator" unless Pathname.new(path).absolute?
     end
 
     if @authoritative_packet_ref.to_s.strip == 'ORIGINAL_TASK_RULES_INHERITED: YES'
@@ -642,6 +648,17 @@ class TaskReconciler
   end
 
   def reconcile
+    if options[:worktree] &&
+       File.expand_path(options[:worktree]) != File.expand_path(checkpoint.worktree)
+      return ReconciliationResult.new(
+        verdict: 'STOP_UNRESOLVED',
+        reason: "Exact worktree locator mismatch: checkpoint requires '#{checkpoint.worktree}' but request names '#{options[:worktree]}'",
+        recommended_action: 'Use the checkpoint worktree locator or obtain an updated authoritative checkpoint',
+        checkpoint: checkpoint,
+        live_state: { worktree: options[:worktree] }
+      )
+    end
+
     live = capture_live_state
 
     # Guard 1: Repository Identity
@@ -1411,7 +1428,7 @@ class DurableCommandCapture
   EVIDENCE_UNKNOWN_UNVERIFIABLE = 'EVIDENCE_UNKNOWN_UNVERIFIABLE'
 
   attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :started_at, :ended_at,
-                :wrapper_signal
+                :wrapper_signal, :execution_identity
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1422,6 +1439,7 @@ class DurableCommandCapture
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @wrapper_signal = attrs[:wrapper_signal] || attrs['wrapper_signal']
+    @execution_identity = attrs[:execution_identity] || attrs['execution_identity']
   end
 
   def complete?
@@ -1436,7 +1454,7 @@ class DurableCommandCapture
   end
 
   def to_h
-    {
+    data = {
       'schema_version' => @schema_version,
       'command' => @command,
       'stdout' => @stdout,
@@ -1445,6 +1463,8 @@ class DurableCommandCapture
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
+    data['execution_identity'] = @execution_identity if @execution_identity
+    data
   end
 
   def to_json(*args)
@@ -1479,6 +1499,36 @@ class DurableCommandCapture
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'captures', "#{capture_id}.json")
   end
 
+  def self.capture_execution_identity(repository_path:, worktree_path:)
+    repository = File.realpath(repository_path)
+    worktree = File.realpath(worktree_path)
+    launcher = File.realpath(__FILE__)
+    git_value = lambda do |*arguments|
+      stdout, _stderr, status = Open3.capture3('git', '-C', worktree, *arguments)
+      status.success? ? stdout.strip : nil
+    rescue StandardError
+      nil
+    end
+    git_root = git_value.call('rev-parse', '--show-toplevel')
+    begin
+      git_root = File.realpath(git_root) if git_root
+    rescue SystemCallError, ArgumentError
+      git_root = nil
+    end
+    bound_git = git_root == worktree
+
+    {
+      'repository_path' => repository,
+      'worktree_path' => worktree,
+      'head' => bound_git ? git_value.call('rev-parse', 'HEAD') : nil,
+      'tree' => bound_git ? git_value.call('rev-parse', 'HEAD^{tree}') : nil,
+      'launcher_path' => launcher,
+      'launcher_sha256' => Digest::SHA256.file(launcher).hexdigest,
+      'runtime_executable' => File.realpath(RbConfig.ruby),
+      'runtime_version' => RUBY_DESCRIPTION
+    }
+  end
+
   # Classifies the evidence at file_path without inferring PASS/FAIL: missing,
   # unreadable, malformed, or incomplete evidence is always
   # EVIDENCE_UNKNOWN_UNVERIFIABLE rather than a guessed outcome.
@@ -1503,7 +1553,7 @@ class DurableCommandCapture
   # work; the block must not propagate a signal itself. child_env only sets or
   # unsets the named variables for the child; it is never persisted.
   def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil,
-                           child_env: nil)
+                           child_env: nil, execution_identity: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
@@ -1582,7 +1632,8 @@ class DurableCommandCapture
           stderr: stderr_str,
           exit_status: status.signaled? ? "SIGNALED:#{status.termsig}" : status.exitstatus,
           started_at: started_at,
-          ended_at: terminal_at
+          ended_at: terminal_at,
+          execution_identity: execution_identity
         )
         capture.save(file_path)
         yield capture if block_given?
@@ -2773,6 +2824,9 @@ if __FILE__ == $PROGRAM_NAME
       capture_signal = nil
       case recovery.classification
       when nil
+        execution_identity = DurableCommandCapture.capture_execution_identity(
+          repository_path: options[:repository], worktree_path: options[:worktree]
+        )
         before_spawn = if mode == :recover_run
                          lambda do
                            transition = recovery.recovery_transition
@@ -2786,7 +2840,8 @@ if __FILE__ == $PROGRAM_NAME
         capture_command = lambda do |task_lock, child_env|
           DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
                                                 chdir: options[:worktree], before_spawn: before_spawn,
-                                                inherited_lock: task_lock, child_env: child_env) do |candidate|
+                                                inherited_lock: task_lock, child_env: child_env,
+                                                execution_identity: execution_identity) do |candidate|
             result, capture_signal = validate_capture.call(candidate)
             record.complete!(record_path, durable_capture_path: capture_path)
             emit_capture.call(candidate)

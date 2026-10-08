@@ -611,6 +611,17 @@ class ClaudeExecutorTimeoutTests(unittest.TestCase):
         self.assertTrue(caught.exception.cleanup_complete)
         self.assertEqual(caught.exception.stdout, b"partial stdout\nfinal")
         self.assertEqual(caught.exception.stderr, b"partial stderr\nfinal")
+        diagnostics = caught.exception.diagnostic_record()
+        self.assertEqual(diagnostics["child_pid"], process.pid)
+        self.assertIsNotNone(diagnostics["spawn_started_at"])
+        self.assertIsNotNone(diagnostics["spawned_at"])
+        self.assertLessEqual(diagnostics["spawn_started_at"], diagnostics["spawned_at"])
+        self.assertEqual(diagnostics["ready_at"], diagnostics["spawned_at"])
+        self.assertEqual(diagnostics["runtime_executable"], "/offline/fake-claude")
+        self.assertEqual(diagnostics["runtime_version"], REQUIRED_VERSION)
+        self.assertEqual(diagnostics["returncode"], -signal.SIGKILL)
+        self.assertEqual(diagnostics["stderr"]["excerpt"], "partial stderr\nfinal")
+        self.assertFalse(diagnostics["stderr"]["excerpt_truncated"])
         sent_signals = [
             call.args[1]
             for call in killpg.call_args_list

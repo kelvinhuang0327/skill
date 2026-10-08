@@ -9,6 +9,7 @@ exact :class:`runner.ModelInvocation` built by the harness.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -17,6 +18,7 @@ import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -28,6 +30,7 @@ PROVIDER_EXECUTABLE = "/Users/kelvin/.local/bin/claude"
 REQUIRED_PROVIDER_VERSION = "2.1.245 (Claude Code)"
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 300.0
 DEFAULT_TERMINATION_GRACE_SECONDS = 2.0
+MAX_DIAGNOSTIC_STREAM_BYTES = 4096
 
 _MODEL_FAMILY_ALIASES = {"sonnet", "opus", "haiku", "fable"}
 _MODEL_FAMILY_PATTERN = re.compile(
@@ -80,6 +83,12 @@ class ProviderProcessError(ClaudeExecutorError):
         termination_method: str | None = None,
         signals_sent: Sequence[str] = (),
         cleanup_complete: bool = True,
+        child_pid: int | None = None,
+        spawn_started_at: str | None = None,
+        spawned_at: str | None = None,
+        ready_at: str | None = None,
+        runtime_executable: str | None = None,
+        runtime_version: str | None = None,
     ) -> None:
         super().__init__(message)
         self.argv = argv
@@ -90,6 +99,44 @@ class ProviderProcessError(ClaudeExecutorError):
         self.termination_method = termination_method
         self.signals_sent = tuple(signals_sent)
         self.cleanup_complete = cleanup_complete
+        self.child_pid = child_pid if type(child_pid) is int and child_pid > 0 else None
+        self.spawn_started_at = spawn_started_at
+        self.spawned_at = spawned_at
+        self.ready_at = ready_at
+        self.runtime_executable = runtime_executable
+        self.runtime_version = runtime_version
+
+    @staticmethod
+    def _stream_record(value: bytes) -> dict[str, Any]:
+        excerpt = value[:MAX_DIAGNOSTIC_STREAM_BYTES]
+        return {
+            "byte_count": len(value),
+            "sha256": hashlib.sha256(value).hexdigest(),
+            "excerpt": excerpt.decode("utf-8", errors="replace"),
+            "excerpt_truncated": len(value) > MAX_DIAGNOSTIC_STREAM_BYTES,
+        }
+
+    def diagnostic_record(self) -> dict[str, Any]:
+        """Return bounded, JSON-safe details for the existing result record."""
+
+        return {
+            "argv": list(self.argv),
+            "child_pid": self.child_pid,
+            "spawn_started_at": self.spawn_started_at,
+            "spawned_at": self.spawned_at,
+            # Popen returning is the only ready signal this adapter observes;
+            # it does not infer application readiness from a timeout.
+            "ready_at": self.ready_at,
+            "runtime_executable": self.runtime_executable,
+            "runtime_version": self.runtime_version,
+            "returncode": self.returncode,
+            "timed_out": self.timed_out,
+            "termination_method": self.termination_method,
+            "signals_sent": list(self.signals_sent),
+            "cleanup_complete": self.cleanup_complete,
+            "stdout": self._stream_record(self.stdout),
+            "stderr": self._stream_record(self.stderr),
+        }
 
 
 class ProviderOutputError(ClaudeExecutorError):
@@ -541,7 +588,9 @@ class ClaudeExecutor:
         expected_model = _expected_model_identity(invocation.argv)
 
         observed_version = self.verify_provider_version()
-        stdout, stderr, returncode = self._run_provider_process(invocation)
+        stdout, stderr, returncode = self._run_provider_process(
+            invocation, provider_version=observed_version
+        )
 
         if returncode != 0:
             raise ProviderProcessError(
@@ -573,7 +622,7 @@ class ClaudeExecutor:
         )
 
     def _run_provider_process(
-        self, invocation: ModelInvocation
+        self, invocation: ModelInvocation, *, provider_version: str | None = None
     ) -> tuple[bytes, bytes, int]:
         """Run the provider in a new session with bounded group termination."""
 
@@ -587,6 +636,7 @@ class ClaudeExecutor:
             "close_fds": True,
             "start_new_session": True,
         }
+        spawn_started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         try:
             if self.launch is None:
                 process = subprocess.Popen(invocation.argv, **launch_kwargs)
@@ -597,7 +647,17 @@ class ClaudeExecutor:
                 f"provider process failed to start: {exc}",
                 argv=invocation.argv,
                 returncode=None,
+                stdout=getattr(exc, "output", b"") or b"",
+                stderr=getattr(exc, "stderr", b"") or b"",
+                child_pid=getattr(exc, "pid", None),
+                spawn_started_at=spawn_started_at,
+                runtime_executable=self.provider_executable,
+                runtime_version=provider_version,
             ) from exc
+        spawned_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        child_pid = getattr(process, "pid", None)
+        if type(child_pid) is not int or child_pid <= 0:
+            child_pid = None
 
         try:
             stdout, stderr = process.communicate(
@@ -733,6 +793,12 @@ class ClaudeExecutor:
                 termination_method="->".join(termination_steps) or "termination_unavailable",
                 signals_sent=signals_sent,
                 cleanup_complete=cleanup_complete,
+                child_pid=child_pid,
+                spawn_started_at=spawn_started_at,
+                spawned_at=spawned_at,
+                ready_at=spawned_at,
+                runtime_executable=self.provider_executable,
+                runtime_version=provider_version,
             ) from timeout_error
         except OSError as exc:
             raise ProviderProcessError(
@@ -741,6 +807,12 @@ class ClaudeExecutor:
                 returncode=None,
                 stdout=getattr(exc, "output", b"") or b"",
                 stderr=getattr(exc, "stderr", b"") or b"",
+                child_pid=child_pid,
+                spawn_started_at=spawn_started_at,
+                spawned_at=spawned_at,
+                ready_at=spawned_at,
+                runtime_executable=self.provider_executable,
+                runtime_version=provider_version,
             ) from exc
 
         returncode = process.returncode
