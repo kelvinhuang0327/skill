@@ -9,6 +9,7 @@ require 'time'
 require 'digest'
 require 'tempfile'
 require 'securerandom'
+require 'rbconfig'
 
 # TaskCheckpoint encapsulates the minimal, durable, authoritative continuation state
 # for Fable Worker execution across sessions and model boundaries.
@@ -1407,6 +1408,22 @@ class DurableCommandCapture
   # allowlisted for durability and nested lineage, but give it a separate
   # child slot so ordinary protected children receive FD 9 closed.
   INHERITED_TASK_LOCK_CHILD_FD = 10
+  PROTECTED_CHILD_GATE_FD = 11
+  PROTECTED_CHILD_BOOTSTRAP = <<~'RUBY'
+    gate = IO.for_fd(Integer(ARGV.shift))
+    authorized = gate.read(1) == "\x01"
+    gate.close
+    exit 125 unless authorized
+
+    command = ARGV
+    abort 'protected child command is empty' if command.empty?
+    begin
+      exec([command.first, command.first], *command.drop(1))
+    rescue SystemCallError => e
+      warn "protected child exec failed: #{e.message}"
+      exit 127
+    end
+  RUBY
 
   VERDICT_PASS = 'PASS'
   VERDICT_FAIL = 'FAIL'
@@ -1508,7 +1525,7 @@ class DurableCommandCapture
   # work; the block must not propagate a signal itself. child_env only sets or
   # unsets the named variables for the child; it is never persisted.
   def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil,
-                           child_env: nil)
+                           child_env: nil, after_spawn: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
@@ -1520,6 +1537,8 @@ class DurableCommandCapture
     previous_handlers = {}
     installed_signals = []
     signal_names = %w[INT TERM]
+    gate_reader = nil
+    gate_writer = nil
     forward_signal = lambda do |signal|
       pgid = upstream_pgid
       next unless pgid
@@ -1554,8 +1573,13 @@ class DurableCommandCapture
         unless inherited_lock.respond_to?(:fileno) && !inherited_lock.closed?
           raise ArgumentError, 'inherited_lock must be an open file descriptor'
         end
+        unless after_spawn
+          raise ArgumentError, 'protected child ownership must be recorded before the child starts'
+        end
         lock_fd = inherited_lock.fileno
         spawn_opts[INHERITED_TASK_LOCK_CHILD_FD] = lock_fd
+        gate_reader, gate_writer = IO.pipe
+        spawn_opts[PROTECTED_CHILD_GATE_FD] = gate_reader.fileno
       end
       before_spawn.call if before_spawn
       # The executable/argv0 pair also prevents Ruby's single-string shell
@@ -1563,9 +1587,23 @@ class DurableCommandCapture
       # Pass spawn options as a positional hash because the inherited task-lock
       # descriptor uses an integer key on Ruby versions that reject it in **.
       spawn_env = child_env ? [child_env] : []
-      Open3.popen3(*spawn_env, [command.first, command.first], *command.drop(1), spawn_opts) do |stdin, stdout, stderr, wait_thr|
+      spawn_argv = if inherited_lock
+                     [RbConfig.ruby, '-e', PROTECTED_CHILD_BOOTSTRAP, '--',
+                      PROTECTED_CHILD_GATE_FD.to_s, *command]
+                   else
+                     command
+                   end
+      Open3.popen3(*spawn_env, [spawn_argv.first, spawn_argv.first], *spawn_argv.drop(1), spawn_opts) do |stdin, stdout, stderr, wait_thr|
         upstream_pgid = wait_thr.pid
         stdin.close
+        gate_reader.close if gate_reader && !gate_reader.closed?
+        gate_reader = nil
+        after_spawn.call(wait_thr.pid) if after_spawn
+        if gate_writer
+          gate_writer.write("\x01")
+          gate_writer.close
+          gate_writer = nil
+        end
         forward_signal.call(pending_signal) if pending_signal
 
         stdout_reader = Thread.new { stdout.read }
@@ -1605,6 +1643,7 @@ class DurableCommandCapture
       raise
     ensure
       upstream_pgid = nil
+      [gate_reader, gate_writer].compact.each { |io| io.close unless io.closed? }
       installed_signals.reverse_each do |name|
         Signal.trap(name, previous_handlers[name])
       end
@@ -1619,7 +1658,7 @@ end
 # have outlived its originating session, so a resuming Worker can decide
 # whether to reuse a completed result, avoid launching a duplicate, or fail
 # closed rather than guess. It never scans the OS process table; it only
-# inspects the exact PID this task itself recorded.
+# inspects the exact PIDs this task itself recorded.
 class ExecutionRecord
   SCHEMA_VERSION = 1
 
@@ -1648,7 +1687,10 @@ class ExecutionRecord
   NestedCapability = Struct.new(:lock, :parent_execution_id, :ancestor_execution_ids, :secret,
                                 keyword_init: true)
 
+  # pid tracks the launcher; protected_pid tracks its child while the child
+  # holds the inherited task lock and runs the protected command.
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
+                :protected_pid,
                 :durable_capture_path, :started_at, :ended_at, :parent_execution_id,
                 :continuation_from_execution_id, :continuation_checkpoint_sha256,
                 :continuation_transition_sha256
@@ -1658,6 +1700,7 @@ class ExecutionRecord
     @task_id = (attrs[:task_id] || attrs['task_id'])&.to_s
     @execution_id = (attrs[:execution_id] || attrs['execution_id'])&.to_s
     @pid = attrs.key?(:pid) ? attrs[:pid] : attrs['pid']
+    @protected_pid = attrs.key?(:protected_pid) ? attrs[:protected_pid] : attrs['protected_pid']
     @status = (attrs[:status] || attrs['status'])&.to_s
     @durable_capture_path = (attrs[:durable_capture_path] || attrs['durable_capture_path'])&.to_s
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
@@ -1682,7 +1725,8 @@ class ExecutionRecord
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
-    # Only nested records carry lineage, so top-level record bytes are unchanged.
+    data['protected_pid'] = @protected_pid unless @protected_pid.nil?
+    # Optional fields preserve the byte shape of historical top-level records.
     data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
     unless @continuation_from_execution_id.nil?
       data['continuation_from_execution_id'] = @continuation_from_execution_id
@@ -1754,6 +1798,19 @@ class ExecutionRecord
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'execution.lock')
   end
 
+  def self.verify_task_lock_path_identity!(lock, repo_root, task_id)
+    lock_path = task_lock_path(repo_root, task_id)
+    path_stat = File.lstat(lock_path)
+    lock_stat = lock.stat
+    unless path_stat.file? && lock_stat.file? && lock_stat.uid == Process.uid &&
+           [path_stat.dev, path_stat.ino] == [lock_stat.dev, lock_stat.ino]
+      raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' changed during verification"
+    end
+    true
+  rescue SystemCallError => e
+    raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' could not be verified: #{e.message}"
+  end
+
   # Serializes task-scoped ownership checks and acquisition across distinct
   # execution IDs. Protected launches also pass this open descriptor to the
   # application child, so the OS lock remains held if the wrapper is killed.
@@ -1770,6 +1827,7 @@ class ExecutionRecord
       unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         raise DuplicateExecutionError, "task '#{task_id}' has another execution claim in progress"
       end
+      verify_task_lock_path_identity!(lock, repo_root, task_id)
       # A new hold ends any earlier lineage, so its record cannot be reused.
       lock.truncate(0)
 
@@ -1997,11 +2055,10 @@ class ExecutionRecord
              raise UnresolvedExecutionStateError, 'inherited task-lock descriptor is not open'
            end
     lock_stat = lock.stat
-    path_stat = File.lstat(lock_path)
-    unless lock_stat.file? && lock_stat.uid == Process.uid && "#{lock_stat.dev}:#{lock_stat.ino}" == identity &&
-           [lock_stat.dev, lock_stat.ino] == [path_stat.dev, path_stat.ino]
+    unless lock_stat.file? && lock_stat.uid == Process.uid && "#{lock_stat.dev}:#{lock_stat.ino}" == identity
       raise UnresolvedExecutionStateError, "inherited descriptor is not task '#{task_id}' owned execution lock"
     end
+    verify_task_lock_path_identity!(lock, repo_root, task_id)
 
     File.open(lock_path, File::RDONLY) do |probe|
       unless [probe.stat.dev, probe.stat.ino] == [lock_stat.dev, lock_stat.ino]
@@ -2064,7 +2121,8 @@ class ExecutionRecord
       record = load(path)
       unless record.schema_version == SCHEMA_VERSION && record.task_id == task_id.to_s &&
              record.execution_id == current_id && record.status == STATUS_STARTED &&
-             record.pid.is_a?(Integer) && record.pid.positive? && record.durable_capture_path.to_s.empty?
+             record.pid.is_a?(Integer) && record.pid.positive? && record.protected_pid_valid? &&
+             record.durable_capture_path.to_s.empty?
         raise UnresolvedExecutionStateError,
               "protected parent execution '#{current_id}' is not an in-progress member of this lineage"
       end
@@ -2120,6 +2178,31 @@ class ExecutionRecord
     self
   end
 
+  def protect_child!(file_path, pid:)
+    unless @status == STATUS_STARTED && pid.is_a?(Integer) && pid.positive? && @protected_pid.nil?
+      raise UnresolvedExecutionStateError, 'protected child identity is invalid or already recorded'
+    end
+
+    persisted = self.class.load(file_path)
+    unless persisted.to_h == to_h
+      raise UnresolvedExecutionStateError, 'execution record changed before protected child ownership was recorded'
+    end
+
+    @protected_pid = pid
+    save(file_path)
+    persisted = self.class.load(file_path)
+    unless persisted.to_h == to_h
+      raise UnresolvedExecutionStateError, 'protected child ownership failed read-back verification'
+    end
+    self
+  rescue ValidationError, LoadError => e
+    raise UnresolvedExecutionStateError, "protected child ownership could not be recorded: #{e.message}"
+  end
+
+  def protected_pid_valid?
+    @protected_pid.nil? || (@protected_pid.is_a?(Integer) && @protected_pid.positive?)
+  end
+
   def evidence_complete?
     return false if @durable_capture_path.to_s.strip.empty?
 
@@ -2132,16 +2215,19 @@ class ExecutionRecord
   def classify(pid_alive: self.class.method(:pid_alive?))
     case @status
     when STATUS_STARTED
-      liveness = begin
-                   pid_alive.call(@pid)
-                 rescue StandardError
-                   nil
-                 end
-      case liveness
-      when true then CLASSIFICATION_ACTIVE
-      when false then CLASSIFICATION_TERMINATED_INCOMPLETE
-      else CLASSIFICATION_STATE_UNRESOLVED
+      return CLASSIFICATION_STATE_UNRESOLVED unless protected_pid_valid?
+
+      liveness = [@pid, @protected_pid].compact.map do |candidate_pid|
+        begin
+          pid_alive.call(candidate_pid)
+        rescue StandardError
+          nil
+        end
       end
+      return CLASSIFICATION_ACTIVE if liveness.include?(true)
+      return CLASSIFICATION_TERMINATED_INCOMPLETE if !liveness.empty? && liveness.all?(false)
+
+      CLASSIFICATION_STATE_UNRESOLVED
     when STATUS_COMPLETED
       evidence_complete? ? CLASSIFICATION_COMPLETED : CLASSIFICATION_TERMINATED_INCOMPLETE
     else
@@ -2344,15 +2430,16 @@ class ExecutionRecoveryTransition
             'only an unambiguous STARTED execution without terminal capture is eligible for stale recovery'
     end
 
-    case ExecutionRecord.pid_alive?(record.pid)
-    when true
+    case record.classify
+    when ExecutionRecord::CLASSIFICATION_ACTIVE
       raise ExecutionRecord::DuplicateExecutionError,
-            "stale execution '#{old_execution_id}' still has a live recorded pid=#{record.pid}"
-    when false
+            "stale execution '#{old_execution_id}' still has a live recorded process (pid=#{record.pid}, " \
+            "protected_pid=#{record.protected_pid.inspect})"
+    when ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
       [record, bytes, Digest::SHA256.hexdigest(bytes)]
     else
       raise ExecutionRecord::UnresolvedExecutionStateError,
-            "stale execution '#{old_execution_id}' pid liveness could not be established"
+            "stale execution '#{old_execution_id}' process liveness could not be established"
     end
   rescue ExecutionRecord::ValidationError => e
     raise ExecutionRecord::UnresolvedExecutionStateError, "stale execution record is malformed: #{e.message}"
@@ -2547,13 +2634,19 @@ class ExecutionRecoveryTransition
             raise ExecutionRecord::UnresolvedExecutionStateError,
                   'successor STARTED record is ambiguous and cannot be resumed'
           end
-          case ExecutionRecord.pid_alive?(record.pid)
-          when true
+          case record.classify
+          when ExecutionRecord::CLASSIFICATION_ACTIVE
             raise ExecutionRecord::DuplicateExecutionError,
-                  "successor execution '#{successor_id}' is already active (pid=#{record.pid})"
-          when nil
+                  "successor execution '#{successor_id}' is already active " \
+                  "(pid=#{record.pid}, protected_pid=#{record.protected_pid.inspect})"
+          when ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
             raise ExecutionRecord::UnresolvedExecutionStateError,
                   "successor execution '#{successor_id}' liveness is unresolved"
+          when ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+            # The terminal state is unresolved until this stale attempt is archived below.
+          else
+            raise ExecutionRecord::UnresolvedExecutionStateError,
+                  "successor execution '#{successor_id}' has an unknown liveness classification"
           end
 
           transition.verify_application_state!
@@ -2872,7 +2965,16 @@ if __FILE__ == $PROGRAM_NAME
         capture_command = lambda do |task_lock, child_env|
           DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
                                                 chdir: options[:worktree], before_spawn: before_spawn,
-                                                inherited_lock: task_lock, child_env: child_env) do |candidate|
+                                                inherited_lock: task_lock, child_env: child_env,
+                                                after_spawn: lambda do |child_pid|
+                                                  ExecutionRecord.verify_task_lock_path_identity!(
+                                                    task_lock, options[:repository], options[:task_id]
+                                                  )
+                                                  record.protect_child!(record_path, pid: child_pid)
+                                                  ExecutionRecord.verify_task_lock_path_identity!(
+                                                    task_lock, options[:repository], options[:task_id]
+                                                  )
+                                                end) do |candidate|
             result, capture_signal = validate_capture.call(candidate)
             record.complete!(record_path, durable_capture_path: capture_path)
             emit_capture.call(candidate)

@@ -2140,6 +2140,26 @@ class TaskCheckpointRunTest < Minitest::Test
     DurableCommandCapture.default_path(@repo, TASK_ID, identity)
   end
 
+  def replace_task_lock_path
+    lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    original_stat = File.stat(lock_path)
+    replacement_path = "#{lock_path}.replacement"
+    File.binwrite(replacement_path, "synthetic replacement lock\n")
+    File.rename(replacement_path, lock_path)
+    replacement_stat = File.stat(lock_path)
+    [[original_stat.dev, original_stat.ino], [replacement_stat.dev, replacement_stat.ino]]
+  ensure
+    FileUtils.rm_f(replacement_path) if replacement_path
+  end
+
+  def durable_evidence_snapshot
+    root = File.join(@repo, '.fable', 'checkpoints')
+    files = Dir.glob(File.join(root, '**', '*'), File::FNM_DOTMATCH).select do |path|
+      File.file?(path) && File.basename(path) != 'execution.lock'
+    end
+    files.sort.to_h { |path| [path, File.binread(path)] }.merge(@application_state => File.binread(@application_state))
+  end
+
   def recovery_transition_path(identity)
     ExecutionRecoveryTransition.default_path(@repo, TASK_ID, identity)
   end
@@ -2371,16 +2391,72 @@ class TaskCheckpointRunTest < Minitest::Test
   def test_run_rejects_different_execution_id_while_task_writer_is_active
     first = start_cli(cli_args('writer_first', upstream(barrier: true)))
     wait_until('first task writer did not start') { !launch_records.empty? }
+    lock_stat = File.stat(ExecutionRecord.task_lock_path(@repo, TASK_ID))
+    held_lock_identity = [lock_stat.dev, lock_stat.ino]
 
     second = run_cli(cli_args('writer_second'))
 
     assert_equal 1, second[2].exitstatus
     assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
     assert_equal 1, launch_records.size
+    lock_stat = File.stat(ExecutionRecord.task_lock_path(@repo, TASK_ID))
+    assert_equal held_lock_identity, [lock_stat.dev, lock_stat.ino], 'the writer and duplicate share the same lock inode'
     File.write(@release, 'go')
     first_result = finish_cli(first)
     assert_output(first_result, 0)
     assert_equal 1, launch_records.size
+  end
+
+  def test_run_rejects_different_execution_id_after_lock_path_replacement
+    first = start_cli(cli_args('writer_replaced_path', upstream(barrier: true)))
+    wait_until('first task writer did not start') { !launch_records.empty? }
+    original_identity, replacement_identity = replace_task_lock_path
+    refute_equal original_identity, replacement_identity
+    prior_record = File.binread(record_path('writer_replaced_path'))
+
+    second = run_cli(cli_args('writer_after_replacement'))
+
+    assert_equal 1, second[2].exitstatus
+    assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, launch_records.size
+    assert_equal prior_record, File.binread(record_path('writer_replaced_path'))
+    refute File.exist?(record_path('writer_after_replacement'))
+    File.write(@release, 'go')
+    assert_output(finish_cli(first), 0)
+  end
+
+  def test_nested_capability_rejects_inherited_descriptor_after_lock_path_replacement
+    go = File.join(@tmpdir, 'nested-after-lock-replacement-go')
+    nested_result_path = File.join(@tmpdir, 'nested-after-lock-replacement-result.json')
+    step = nested_step(inner_cli_args('nested_after_lock_replacement', nested_leaf('must_not_run')),
+                       result: nested_result_path, go: go)
+    owner = start_cli(cli_args('lock_replacement_outer', nested_parent([step], release: @release)))
+    wait_until('protected parent did not start') { launch_records.size == 1 }
+    original_identity, replacement_identity = replace_task_lock_path
+    refute_equal original_identity, replacement_identity
+
+    File.write(go, 'go')
+    wait_until('nested request did not finish') { File.file?(nested_result_path) }
+    nested = nested_result(nested_result_path)
+    assert_equal 1, nested.fetch('exitstatus')
+    assert_includes nested.fetch('stderr'), ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(record_path('nested_after_lock_replacement'))
+    assert_equal 1, launch_records.size
+
+    File.write(@release, 'go')
+    assert_equal 0, finish_cli(owner)[2].exitstatus
+  end
+
+  def test_terminal_execution_release_allows_a_future_execution
+    first = run_cli(cli_args('terminal_writer_first'))
+    assert_output(first, 0)
+    prior_record = File.binread(record_path('terminal_writer_first'))
+
+    second = run_cli(cli_args('terminal_writer_second'))
+
+    assert_output(second, 0)
+    assert_equal 2, launch_records.size
+    assert_equal prior_record, File.binread(record_path('terminal_writer_first'))
   end
 
   def test_run_nonzero_result_replay_does_not_launch_again
@@ -2795,6 +2871,10 @@ class TaskCheckpointRunTest < Minitest::Test
     wait_until('recovery successor child did not start') { !launch_records.empty? }
     child_pid = Integer(launch_records.first)
     wrapper_pid = first[:wait].pid
+    successor_record = ExecutionRecord.load(record_path(successor_execution_id(old_id)))
+    assert_equal wrapper_pid, successor_record.pid
+    assert_equal child_pid, successor_record.protected_pid,
+                 'the protected child PID must be durable before the scientific child starts'
 
     Process.kill('KILL', wrapper_pid)
     assert first[:wait].join(5), 'killed recovery wrapper was not reaped'
@@ -2820,6 +2900,52 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal successor_id, ExecutionRecoveryTransition.load(recovery_transition_path(old_id)).successor_execution_id
     records = Dir.glob(File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions', '*.json'))
     assert_equal [record_path(old_id), record_path(successor_id)].sort, records.sort
+  end
+
+  def test_recover_run_refuses_orphaned_child_after_lock_path_replacement_without_rewriting_history
+    old_id = 'orphaned_child_replaced_path_fixture'
+    seed_stale_execution(old_id)
+    checkpoint_path = TaskCheckpoint.default_path(@repo, TASK_ID)
+    journal_path = File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'journal.jsonl')
+    FileUtils.mkdir_p(File.dirname(checkpoint_path))
+    FileUtils.mkdir_p(File.dirname(journal_path))
+    File.binwrite(checkpoint_path, "synthetic historical checkpoint\n")
+    File.binwrite(journal_path, "synthetic historical journal row\n")
+
+    first = start_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+    wait_until('recovery successor child did not start') { !launch_records.empty? }
+    child_pid = Integer(launch_records.first)
+    wrapper_pid = first[:wait].pid
+
+    Process.kill('KILL', wrapper_pid)
+    assert first[:wait].join(5), 'killed recovery wrapper was not reaped'
+    assert_equal false, ExecutionRecord.pid_alive?(wrapper_pid)
+    assert_equal true, ExecutionRecord.pid_alive?(child_pid), 'the protected scientific child remains active'
+    original_identity, replacement_identity = replace_task_lock_path
+    refute_equal original_identity, replacement_identity
+    before = durable_evidence_snapshot
+
+    retry_child = nil
+    begin
+      retry_child = start_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
+      wait_until('recovery retry neither refused nor started a child') do
+        launch_records.size > 1 || !retry_child[:wait].alive?
+      end
+      assert_equal 1, launch_records.size, 'pathname replacement must not permit a second protected writer'
+      assert_equal before, durable_evidence_snapshot,
+                   'a rejected launch must preserve historical records, checkpoint, journal, and application state'
+      retry_result = finish_cli(retry_child)
+      assert_equal 1, retry_result[2].exitstatus
+      assert_includes retry_result[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    ensure
+      File.write(@release, 'go')
+    end
+
+    wait_until('orphaned scientific child did not exit after release') do
+      ExecutionRecord.pid_alive?(child_pid) == false
+    end
+    first[:readers].each { |reader| assert reader.join(5), 'orphaned child output pipe did not close' }
+    assert_equal 1, launch_records.size
   end
 
   def test_dead_started_recovery_successor_retry_preserves_nested_lineage_and_history
