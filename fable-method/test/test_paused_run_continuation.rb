@@ -23,6 +23,11 @@ class PausedRunContinuationTest < Minitest::Test
     @worktree = File.join(@tmpdir, 'worktree')
     @caller = File.join(@tmpdir, 'caller')
     [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
+    _git_out, git_err, git_status = Open3.capture3('git', '-C', @repo, 'init', '--quiet')
+    raise "synthetic repository initialization failed: #{git_err}" unless git_status.success?
+
+    StableLockAnchor.initialize_repository_generation!(@repo, confirm_legacy_workers_quiescent: true)
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) {}
     @source = File.join(@tmpdir, 'synthetic-source.rb')
     @baseline = File.join(@tmpdir, 'synthetic-baseline.json')
     @journal = File.join(@tmpdir, 'synthetic-journal.jsonl')
