@@ -138,11 +138,14 @@ not add a lifecycle state. `SCHEMA_VERSION` remains `1`.
   - task completed or blocked.
 - Do **not** write a checkpoint on every command or shell execution.
 - Do **not** store command transcripts inside the checkpoint.
-- Every `TaskCheckpoint#save` opens the fixed `#{file_path}.lock` sidecar without
-  truncation and acquires `File#flock(File::LOCK_EX)` after creating the parent
-  directory, before any checkpoint existence/read/revision decision. Failure to
-  acquire raises; there is no unlocked fallback. The sidecar is never deleted
-  by save, so conforming processes continue to lock the same pathname/inode.
+- Every `TaskCheckpoint#save` acquires `File#flock(File::LOCK_EX)` after creating
+  the parent directory, before any checkpoint existence/read/revision decision.
+  Failure to acquire raises; there is no unlocked fallback. A checkpoint inside a
+  Git worktree locks the generation-2 `checkpoint.lock` in a stable anchor under
+  Git's common metadata directory. A checkpoint outside Git keeps the adjacent
+  `#{file_path}.lock` sidecar, opened without truncation. Neither lock is deleted
+  by save, so conforming processes continue to lock the same inode. See
+  [Lock generation and migration](#lock-generation-and-migration).
 - The lock covers existence, read, parse, expected-revision comparison, revision
   calculation, and the complete same-directory temporary write, close, and
   atomic rename. Successful rename is the commit point. No subprocess is
@@ -339,9 +342,11 @@ caller must not proceed, under the exact same rules `recover_before_execution`
 already applies to that existing record. The CLI below owns this sequence for
 Worker launches; Workers must not manually compose acquire/run/complete.
 
-The protected CLI also serializes task-scoped ownership checks with
-`.fable/checkpoints/<task_id>/execution.lock`. While holding this lock it
-checks the other execution records for a live or unresolved owner, then
+The protected CLI also serializes task-scoped ownership checks with the
+generation-2 `execution.lock` in the task's stable anchor under Git's common
+metadata directory, not a worktree-local file under `.fable/checkpoints/<task_id>/`.
+While holding this lock it checks the other execution records for a live or
+unresolved owner, then
 acquires the requested identity atomically. Before launching an upstream
 child, it reacquires the lock and passes the open lock descriptor to that
 child. The OS lock therefore stays held if the wrapper dies while the
@@ -349,6 +354,26 @@ application child is still running, and a retry fails closed until that child
 exits. The lock file is retained; the OS releases the lock when the last
 inherited descriptor closes. This protects one task writer across distinct
 execution IDs and wrapper crashes.
+
+### Lock generation and migration
+
+Generation-2 protected locks are anchored in Git's common metadata directory
+(`git rev-parse --git-common-dir`), under `fable-locks/<namespace>/<digest>/`,
+not in the worktree. Each anchor's `authority.json` binds the generation,
+namespace, repository, and key to the lock file's device and inode. A
+same-name replacement, a symlink, or an inode change fails closed. The
+repository marker `fable-locks/repository-generation.json` must exist before any
+protected lock opens.
+
+Legacy worktree-local lock files (`.fable/checkpoints/<task_id>/execution.lock`
+and `<checkpoint>.lock`), and legacy task state without an anchor, are never
+treated as absent. They stop lock acquisition with a migration-required error.
+Migration is an explicit offline step, taken only under separate authorization
+after every legacy protected worker and inherited child is confirmed quiescent.
+Initializing the marker is `StableLockAnchor.initialize_repository_generation!`
+with `confirm_legacy_workers_quiescent: true`, and it is never inferred from an
+absent anchor. Workers must not clear the block by deleting, renaming, or
+recreating legacy lock files.
 
 ### Protected run entrypoint
 
