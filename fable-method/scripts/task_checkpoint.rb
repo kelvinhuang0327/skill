@@ -1701,7 +1701,7 @@ class ExecutionRecord
 
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
                 :durable_capture_path, :started_at, :ended_at, :parent_execution_id,
-                :scientific_child_pid, :session_id, :process_group_id
+                :scientific_child_pid, :session_id, :process_group_id, :task_lock_identity
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1716,6 +1716,7 @@ class ExecutionRecord
     @scientific_child_pid = attrs[:scientific_child_pid] || attrs['scientific_child_pid']
     @session_id = attrs[:session_id] || attrs['session_id']
     @process_group_id = attrs[:process_group_id] || attrs['process_group_id']
+    @task_lock_identity = attrs[:task_lock_identity] || attrs['task_lock_identity']
   end
 
   def to_h
@@ -1734,6 +1735,7 @@ class ExecutionRecord
     data['scientific_child_pid'] = @scientific_child_pid unless @scientific_child_pid.nil?
     data['session_id'] = @session_id unless @session_id.nil?
     data['process_group_id'] = @process_group_id unless @process_group_id.nil?
+    data['task_lock_identity'] = @task_lock_identity unless @task_lock_identity.nil?
     data
   end
 
@@ -1799,6 +1801,35 @@ class ExecutionRecord
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'execution.lock')
   end
 
+  def self.task_lock_identity(lock)
+    stat = lock.stat
+    "#{stat.dev}:#{stat.ino}"
+  end
+
+  def self.verify_task_lock_path_identity!(repo_root, task_id, lock)
+    lock_path = task_lock_path(repo_root, task_id)
+    if File.symlink?(lock_path)
+      raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' became a symlink"
+    end
+
+    path_stat = File.stat(lock_path)
+    unless path_stat.file? && "#{path_stat.dev}:#{path_stat.ino}" == task_lock_identity(lock)
+      raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' changed during acquisition"
+    end
+    true
+  rescue Errno::ENOENT, Errno::ELOOP => e
+    raise UnresolvedExecutionStateError, "task execution lock '#{lock_path}' changed during acquisition: #{e.message}"
+  end
+
+  def self.verify_record_lock_identity!(repo_root, task_id, record, lock)
+    verify_task_lock_path_identity!(repo_root, task_id, lock)
+    unless record.task_lock_identity == task_lock_identity(lock)
+      raise UnresolvedExecutionStateError,
+            "execution '#{record.execution_id}' has a missing or changed task lock identity"
+    end
+    true
+  end
+
   # Serializes task-scoped ownership checks and acquisition across distinct
   # execution IDs. Protected launches also pass this open descriptor to the
   # application child, so the OS lock remains held if the wrapper is killed.
@@ -1815,8 +1846,7 @@ class ExecutionRecord
       unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         raise DuplicateExecutionError, "task '#{task_id}' has another execution claim in progress"
       end
-      # A new hold ends any earlier lineage, so its record cannot be reused.
-      lock.truncate(0)
+      verify_task_lock_path_identity!(repo_root, task_id, lock)
 
       yield lock
     end
@@ -1954,11 +1984,12 @@ class ExecutionRecord
   end
 
   def self.acquire_task_owned!(repo_root, task_id, execution_id, pid:)
-    with_task_lock(repo_root, task_id) do
+    with_task_lock(repo_root, task_id) do |lock|
       verify_no_active_owner!(repo_root, task_id, except_execution_ids: [execution_id.to_s],
                               reject_unrecovered_stale: true)
       acquire!(default_path(repo_root, task_id, execution_id),
-               task_id: task_id, execution_id: execution_id, pid: pid)
+               task_id: task_id, execution_id: execution_id, pid: pid,
+               task_lock_identity: task_lock_identity(lock))
     end
   end
 
@@ -1966,6 +1997,7 @@ class ExecutionRecord
   # lineage secret, whose SHA-256 alone is stored. Only the lock holder writes
   # it, just before launching its child; nil leaves the lineage empty.
   def self.write_task_lineage!(lock, repo_root, task_id, execution_id)
+    verify_task_lock_path_identity!(repo_root, task_id, lock)
     lock.truncate(0)
     secret = nil
     unless execution_id.nil?
@@ -2138,20 +2170,22 @@ class ExecutionRecord
                             reject_unrecovered_stale: true,
                             nested_lineage_execution_ids: capability.ancestor_execution_ids)
     acquire!(default_path(repo_root, task_id, execution_id), task_id: task_id, execution_id: execution_id,
-             pid: pid, parent_execution_id: capability.parent_execution_id)
+             pid: pid, parent_execution_id: capability.parent_execution_id,
+             task_lock_identity: task_lock_identity(capability.lock))
   end
 
   def self.stable_component?(value)
     value.is_a?(String) && !value.strip.empty? && !%w[. ..].include?(value) && !value.match?(/[\/\\\x00]/)
   end
 
-  def self.start!(file_path, task_id:, execution_id:, pid:)
+  def self.start!(file_path, task_id:, execution_id:, pid:, task_lock_identity: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
       pid: pid,
       status: STATUS_STARTED,
-      started_at: Time.now.utc.iso8601
+      started_at: Time.now.utc.iso8601,
+      task_lock_identity: task_lock_identity
     )
     record.save(file_path)
     record
@@ -2320,14 +2354,15 @@ class ExecutionRecord
   # caller must not proceed, under the exact same rules
   # recover_before_execution already applies to that existing record.
   def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?),
-                    parent_execution_id: nil)
+                    parent_execution_id: nil, task_lock_identity: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
       pid: pid,
       status: STATUS_STARTED,
       started_at: Time.now.utc.iso8601,
-      parent_execution_id: parent_execution_id
+      parent_execution_id: parent_execution_id,
+      task_lock_identity: task_lock_identity
     )
 
     begin
@@ -2415,7 +2450,7 @@ class ExecutionRecoveryTransition
     "recovery-#{digest}"
   end
 
-  def self.verify_stale_execution!(repo_root:, task_id:, old_execution_id:)
+  def self.verify_stale_execution!(repo_root:, task_id:, old_execution_id:, task_lock_identity: nil)
     path = ExecutionRecord.default_path(repo_root, task_id, old_execution_id)
     if File.symlink?(path) || !File.file?(path)
       raise ExecutionRecord::UnresolvedExecutionStateError,
@@ -2439,6 +2474,10 @@ class ExecutionRecoveryTransition
       raise ExecutionRecord::DuplicateExecutionError,
             "stale execution '#{old_execution_id}' still has a live recorded pid=#{record.pid}"
     when false
+      if task_lock_identity && record.task_lock_identity != task_lock_identity
+        raise ExecutionRecord::UnresolvedExecutionStateError,
+              "stale execution '#{old_execution_id}' task lock identity is missing or changed"
+      end
       [record, bytes, Digest::SHA256.hexdigest(bytes)]
     else
       raise ExecutionRecord::UnresolvedExecutionStateError,
@@ -2448,9 +2487,11 @@ class ExecutionRecoveryTransition
     raise ExecutionRecord::UnresolvedExecutionStateError, "stale execution record is malformed: #{e.message}"
   end
 
-  def self.reserve!(repo_root:, task_id:, old_execution_id:, application_state_path:, worktree_path:, command:)
+  def self.reserve!(repo_root:, task_id:, old_execution_id:, application_state_path:, worktree_path:, command:,
+                    task_lock_identity: nil)
     old_record, old_bytes, old_sha256 = verify_stale_execution!(
-      repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
+      repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id,
+      task_lock_identity: task_lock_identity
     )
     path = default_path(repo_root, task_id, old_execution_id)
     state_path = normalized_application_state_path(application_state_path)
@@ -2594,16 +2635,19 @@ class ExecutionRecoveryTransition
 
   def self.acquire_successor!(repo_root:, task_id:, old_execution_id:, application_state_path:,
                               worktree_path:, command:, pid:)
-    ExecutionRecord.with_task_lock(repo_root, task_id) do
+    ExecutionRecord.with_task_lock(repo_root, task_id) do |task_lock|
+      task_lock_identity = ExecutionRecord.task_lock_identity(task_lock)
       _old_record, _old_bytes, = verify_stale_execution!(
-        repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
+        repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id,
+        task_lock_identity: task_lock_identity
       )
       ExecutionRecord.verify_no_active_owner!(repo_root, task_id,
                                               except_execution_ids: [old_execution_id.to_s])
       transition = reserve!(repo_root: repo_root, task_id: task_id,
                             old_execution_id: old_execution_id,
                             application_state_path: application_state_path,
-                            worktree_path: worktree_path, command: command)
+                            worktree_path: worktree_path, command: command,
+                            task_lock_identity: task_lock_identity)
       transition_path = default_path(repo_root, task_id, old_execution_id)
       transition.verify_readback!(transition_path)
 
@@ -2650,7 +2694,8 @@ class ExecutionRecoveryTransition
           transition.archive_successor_attempt!(transition_path, record_bytes)
           resumed = ExecutionRecord.new(task_id: task_id, execution_id: successor_id, pid: pid,
                                         status: ExecutionRecord::STATUS_STARTED,
-                                        started_at: Time.now.utc.iso8601)
+                                        started_at: Time.now.utc.iso8601,
+                                        task_lock_identity: task_lock_identity)
           resumed.save(successor_path)
           verified = ExecutionRecord.load(successor_path)
           unless verified.schema_version == ExecutionRecord::SCHEMA_VERSION &&
@@ -2667,7 +2712,8 @@ class ExecutionRecoveryTransition
       else
         transition.verify_application_state!
         recovery = ExecutionRecord.acquire!(successor_path, task_id: task_id,
-                                             execution_id: successor_id, pid: pid)
+                                             execution_id: successor_id, pid: pid,
+                                             task_lock_identity: task_lock_identity)
         unless recovery.classification.nil? && recovery.execution_record &&
                recovery.execution_record.task_id == task_id.to_s &&
                recovery.execution_record.execution_id == successor_id &&
@@ -2971,6 +3017,8 @@ if __FILE__ == $PROGRAM_NAME
                     nested = ExecutionRecord.verify_nested_capability!(
                       options[:repository], options[:task_id], record.execution_id, nested_request
                     )
+                    ExecutionRecord.verify_record_lock_identity!(options[:repository], options[:task_id],
+                                                                 record, nested.lock)
                     ExecutionRecord.verify_no_active_owner!(
                       options[:repository], options[:task_id],
                       except_execution_ids: [record.execution_id, *nested.ancestor_execution_ids],
@@ -2982,6 +3030,8 @@ if __FILE__ == $PROGRAM_NAME
                     ))
                   else
                     ExecutionRecord.with_task_lock(options[:repository], options[:task_id]) do |task_lock|
+                      ExecutionRecord.verify_record_lock_identity!(options[:repository], options[:task_id],
+                                                                   record, task_lock)
                       ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
                                                               except_execution_ids: [record.execution_id],
                                                               reject_unrecovered_stale: mode == :run)

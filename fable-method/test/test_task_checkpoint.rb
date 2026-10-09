@@ -2265,8 +2265,11 @@ class TaskCheckpointRunTest < Minitest::Test
   end
 
   def seed_stale_execution(identity, pid: dead_pid)
-    ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
-                           execution_id: identity, pid: pid)
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) do |lock|
+      ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
+                             execution_id: identity, pid: pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(lock))
+    end
   end
 
   def launch_records
@@ -2568,6 +2571,50 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, launch_records.size
   end
 
+  def test_run_rejects_replaced_lock_inode_while_active_owner_holds_original
+    first_id = 'replaced_lock_active_owner'
+    first = start_cli(cli_args(first_id, upstream(barrier: true)))
+    original_lock = nil
+    begin
+      wait_until('first task writer did not start') { !launch_records.empty? }
+      first_record = ExecutionRecord.load(record_path(first_id))
+      wait_until('first task writer did not persist its child PID') do
+        first_record = ExecutionRecord.load(record_path(first_id))
+        first_record.scientific_child_pid == Integer(launch_records.first.split(':').first)
+      end
+      first_record_bytes = File.binread(record_path(first_id))
+      lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+      original_lock = File.open(lock_path, File::RDWR)
+      original_identity = [original_lock.stat.dev, original_lock.stat.ino]
+      original_metadata = File.binread(lock_path)
+
+      File.unlink(lock_path)
+      File.write(lock_path, 'replacement lock metadata')
+      replacement_metadata = File.binread(lock_path)
+      replacement_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
+      refute_equal original_identity, replacement_identity, 'the fixture must replace the lock inode'
+
+      second = run_cli(cli_args('replaced_lock_active_contender'))
+
+      assert_equal 1, second[2].exitstatus
+      assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+      assert_equal 1, launch_records.size, 'the rejected contender must not invoke upstream'
+      refute File.exist?(record_path('replaced_lock_active_contender'))
+      assert_equal first_record_bytes, File.binread(record_path(first_id))
+      assert_equal original_identity, [original_lock.stat.dev, original_lock.stat.ino]
+      assert_equal original_metadata, original_lock.pread(original_metadata.bytesize, 0),
+                   'the first execution lock metadata must remain intact through rejection'
+      assert_equal replacement_metadata, File.binread(lock_path),
+                   'the rejected contender must not rewrite the replacement pathname'
+    ensure
+      File.write(@release, 'go')
+      original_lock&.close unless original_lock&.closed?
+    end
+
+    assert_output(finish_cli(first), 0)
+    assert_equal 1, launch_records.size
+  end
+
   def test_run_nonzero_result_replay_does_not_launch_again
     args = cli_args('nonzero', upstream(result: '7'))
     original = run_cli(args)
@@ -2668,6 +2715,86 @@ class TaskCheckpointRunTest < Minitest::Test
     successor = ExecutionRecord.load(record_path(successor_id))
     assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
     assert_equal recovery_upstream(old_id), DurableCommandCapture.load(successor.durable_capture_path).command
+  end
+
+  def test_recover_run_rejects_replaced_lock_inode_held_by_orphaned_child
+    old_id = 'replaced_lock_orphaned_child'
+    ready = File.join(@tmpdir, 'orphaned-lock-ready')
+    library = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+    lock_holder = <<~'RUBY'
+      require ARGV.shift
+      repo, task_id, ready_path, release_path = ARGV
+      ExecutionRecord.with_task_lock(repo, task_id) do |lock|
+        lock.write('first execution lock metadata')
+        lock.flush
+        lock.fsync
+        File.write(ready_path, "#{lock.stat.dev}:#{lock.stat.ino}")
+        sleep 0.01 until File.file?(release_path)
+      end
+    RUBY
+    holder_pid = Process.spawn(RbConfig.ruby, '-e', lock_holder, library, @repo, TASK_ID, ready, @release,
+                               out: File::NULL, err: File::NULL)
+    original_lock = nil
+    begin
+      wait_until('fake process A did not acquire the protected task lock') { File.file?(ready) }
+      lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+      original_lock = File.open(lock_path, File::RDWR)
+      original_identity = [original_lock.stat.dev, original_lock.stat.ino]
+      original_metadata = File.binread(lock_path)
+      assert_equal "#{original_identity[0]}:#{original_identity[1]}", File.read(ready)
+
+      ExecutionRecord.start!(record_path(old_id), task_id: TASK_ID, execution_id: old_id, pid: dead_pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(original_lock))
+      original_record = File.binread(record_path(old_id))
+
+      File.unlink(lock_path)
+      File.write(lock_path, 'replacement lock metadata')
+      replacement_metadata = File.binread(lock_path)
+      replacement_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
+      refute_equal original_identity, replacement_identity, 'the fixture must replace the lock inode'
+
+      result = run_cli(recovery_cli_args(old_id))
+
+      assert_equal 1, result[2].exitstatus,
+                   "stale recovery must fail closed; launches=#{launch_records.inspect} stderr=#{result[1].inspect}"
+      assert_empty launch_records, 'rejected recovery must not start a successor'
+      refute File.exist?(recovery_transition_path(old_id))
+      refute File.exist?(record_path(successor_execution_id(old_id)))
+      assert_equal original_record, File.binread(record_path(old_id))
+      assert_equal original_identity, [original_lock.stat.dev, original_lock.stat.ino]
+      assert_equal original_metadata, original_lock.pread(original_metadata.bytesize, 0),
+                   'the first execution lock metadata must remain intact through rejection'
+      assert_equal replacement_metadata, File.binread(lock_path),
+                   'a rejected recovery must not rewrite the replacement pathname'
+    ensure
+      File.write(@release, 'go')
+      original_lock&.close unless original_lock&.closed?
+      begin
+        Process.wait(holder_pid)
+      rescue Errno::ECHILD
+        # The fake lock-holder was already reaped.
+      end
+    end
+  end
+
+  def test_recover_run_fails_closed_for_legacy_stale_record_without_lock_identity
+    old_id = 'legacy_stale_without_lock_identity'
+    lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    FileUtils.mkdir_p(File.dirname(lock_path))
+    File.write(lock_path, 'legacy lock metadata')
+    ExecutionRecord.start!(record_path(old_id), task_id: TASK_ID, execution_id: old_id, pid: dead_pid)
+    old_record = File.binread(record_path(old_id))
+    old_lock_metadata = File.binread(lock_path)
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    assert_equal old_record, File.binread(record_path(old_id))
+    assert_equal old_lock_metadata, File.binread(lock_path)
+    refute File.exist?(recovery_transition_path(old_id))
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
   end
 
   def test_recover_run_refuses_live_stale_pid
