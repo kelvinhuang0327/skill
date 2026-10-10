@@ -165,6 +165,19 @@ class LegacyLockGeneration2MigrationTest < Minitest::Test
     refute generation_marker_exists?
     assert File.file?(fixture.fetch(:task_lock))
     assert File.file?(fixture.fetch(:checkpoint_lock))
+
+    authorization_path = owner_authorization_file(instance)
+    File.open(authorization_path, 'a') do |file|
+      file.puts 'LEGACY_WORKERS_AND_INHERITED_CHILDREN_QUIESCENT: NO'
+    end
+    error = assert_raises(LegacyLockGeneration2Migration::Error) do
+      instance.run(apply: true, owner_authorization_path: authorization_path)
+    end
+
+    assert_includes error.message, 'unambiguous positive quiescence attestation'
+    refute generation_marker_exists?
+    assert File.file?(fixture.fetch(:task_lock))
+    assert File.file?(fixture.fetch(:checkpoint_lock))
   end
 
   def test_inherited_child_keeps_legacy_lock_active_after_parent_closes

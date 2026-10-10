@@ -253,8 +253,11 @@ class LegacyLockGeneration2Migration
            TaskReconciler.conversation_authorized?(AUTHORIZATION_ACTION, [text], authorization_target: target)
       raise Error, 'Owner authorization does not exactly bind this generation-2 migration target'
     end
-    unless text.each_line.count { |line| line.strip == QUIESCENCE_ATTESTATION } == 1
-      raise Error, "Owner authorization must contain exactly one explicit quiescence attestation line: '#{QUIESCENCE_ATTESTATION}'"
+    quiescence_lines = text.each_line.select do |line|
+      line.match?(/\bLEGACY_WORKERS_AND_INHERITED_CHILDREN_QUIESCENT\b/)
+    end
+    unless quiescence_lines.length == 1 && quiescence_lines.first.strip == QUIESCENCE_ATTESTATION
+      raise Error, "Owner authorization must contain exactly one unambiguous positive quiescence attestation: '#{QUIESCENCE_ATTESTATION}'"
     end
 
     { identity: identity, sha256: digest }
