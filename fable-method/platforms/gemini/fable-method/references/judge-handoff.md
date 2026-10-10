@@ -9,6 +9,7 @@
 - [Remediation limit](#remediation-limit)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
+  - [Non-Git artifact route](#non-git-artifact-route)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -254,6 +255,35 @@ Final-tree identity is Worker-owned: the Planner supplies Judge mode/depth but
 must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
+
+### Non-Git artifact route
+
+When the judged output is a generated artifact under a non-Git source root (see
+[operational gates](operational-gates.md) on non-Git source roots), the handoff
+replaces the repository, branch, HEAD, and tree fields with a manifest-based
+snapshot identity. The Worker supplies:
+
+- `ARTIFACT_ROOT`: the exact absolute artifact root;
+- `BASELINE_MANIFEST` and `FINAL_MANIFEST`: the path, size, and SHA-256 of every
+  file under that root, captured before the first write and after the last. An
+  absent or empty root is recorded as an empty baseline manifest;
+- `ARTIFACT_SHA256`: the path and SHA-256 of each relevant artifact, taken from
+  the final manifest;
+- `MANIFEST_DELTA`: the added, changed, and removed paths between the two
+  manifests;
+- `WRITE_LEDGER`: this operation's write, retained, and deletion ledger,
+  including any artifact created and later deleted;
+- `ACCEPTANCE_CRITERIA`: the specific checks the Judge applies to each relevant
+  artifact, each with its command or inspection method.
+
+A manifest proves snapshot identity only: which bytes existed at two observed
+points. It is not Git provenance. Do not write a commit or tree value for a
+non-Git root, and do not derive one from a manifest hash. If the artifact cannot
+be reproduced, or a required manifest, hash, or ledger entry is missing, state
+`UNVERIFIABLE` or `UNKNOWN` with the exact missing item rather than filling the
+gap. This route does not change Judge launch authority, depth selection, or
+verdict standards; the Judge still derives its own trigger and depth from the
+Packet and evidence.
 
 ## Verdict and lifecycle boundaries
 
