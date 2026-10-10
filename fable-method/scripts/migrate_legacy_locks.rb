@@ -2,6 +2,8 @@
 # frozen_string_literal: true
 
 require 'optparse'
+require 'digest'
+require 'open3'
 require 'pathname'
 require_relative 'task_checkpoint'
 
@@ -11,6 +13,9 @@ require_relative 'task_checkpoint'
 # have been created and verified.
 class LegacyLockGeneration2Migration
   class Error < StandardError; end
+
+  AUTHORIZATION_ACTION = 'MIGRATE_LEGACY_LOCKS_TO_GENERATION_2'
+  QUIESCENCE_ATTESTATION = 'LEGACY_WORKERS_AND_INHERITED_CHILDREN_QUIESCENT: YES'
 
   Target = Struct.new(
     :namespace,
@@ -23,7 +28,7 @@ class LegacyLockGeneration2Migration
     :state_identity,
     keyword_init: true
   )
-  Plan = Struct.new(:repository, :task_ids, :checkpoint_paths, :targets, keyword_init: true)
+  Plan = Struct.new(:repository, :common_directory, :task_ids, :checkpoint_paths, :targets, keyword_init: true)
   Result = Struct.new(:plan, :applied, keyword_init: true)
 
   def initialize(repo_root:, checkpoint_paths: [])
@@ -32,25 +37,31 @@ class LegacyLockGeneration2Migration
     end
 
     @repository = StableLockAnchor.repository_root(repo_root)
+    @common_directory = common_directory(@repository)
     @checkpoint_paths = Array(checkpoint_paths)
   end
 
-  def run(apply: false, confirm_legacy_workers_quiescent: false)
-    if apply && !confirm_legacy_workers_quiescent
-      raise Error, '--apply requires --confirm-legacy-workers-quiescent'
-    end
-    if confirm_legacy_workers_quiescent && !apply
-      raise Error, '--confirm-legacy-workers-quiescent is only valid with --apply'
+  def run(apply: false, owner_authorization_path: nil)
+    if owner_authorization_path && !apply
+      raise Error, '--owner-authorization is only valid with --apply'
     end
 
     plan = build_plan
     return Result.new(plan: plan, applied: false) unless apply
+
+    authorization = validate_owner_authorization!(owner_authorization_path, plan)
 
     legacy_handles = []
     generation2_handles = []
     begin
       legacy_handles = acquire_legacy_locks(plan)
       assert_plan_unchanged!(plan)
+      validate_owner_authorization!(
+        owner_authorization_path,
+        plan,
+        expected_identity: authorization.fetch(:identity),
+        expected_sha256: authorization.fetch(:sha256)
+      )
 
       StableLockAnchor.initialize_repository_generation!(
         @repository,
@@ -74,6 +85,12 @@ class LegacyLockGeneration2Migration
       end
 
       assert_plan_unchanged!(plan)
+      validate_owner_authorization!(
+        owner_authorization_path,
+        plan,
+        expected_identity: authorization.fetch(:identity),
+        expected_sha256: authorization.fetch(:sha256)
+      )
       remove_legacy_locks!(plan, legacy_handles)
       verify_migrated_anchors!(plan)
       Result.new(plan: plan, applied: true)
@@ -86,6 +103,17 @@ class LegacyLockGeneration2Migration
     end
   rescue StableLockAnchor::Error, SystemCallError, JSON::ParserError => e
     raise Error, e.message
+  end
+
+  def authorization_target(plan)
+    scope = {
+      'repository' => plan.repository,
+      'common_directory' => plan.common_directory,
+      'task_ids' => plan.task_ids,
+      'checkpoint_paths' => plan.checkpoint_paths
+    }
+    digest = Digest::SHA256.hexdigest(JSON.generate(scope))
+    "legacy-lock-generation2-offline-migration:#{digest}"
   end
 
   private
@@ -141,16 +169,15 @@ class LegacyLockGeneration2Migration
     checkpoints = checkpoints.uniq.sort
     checkpoints.each do |checkpoint_path|
       legacy_path = "#{checkpoint_path}.lock"
-      next unless path_exists?(legacy_path)
-
-      legacy_identity = validate_legacy_lock!(legacy_path)
+      present = path_exists?(legacy_path)
+      legacy_identity = validate_legacy_lock!(legacy_path) if present
       relative_path = Pathname.new(checkpoint_path).relative_path_from(Pathname.new(@repository)).to_s
       targets << Target.new(
         namespace: 'checkpoint-sidecar',
         key: relative_path,
         filename: 'checkpoint.lock',
         legacy_path: legacy_path,
-        legacy_present: true,
+        legacy_present: present,
         legacy_identity: legacy_identity,
         state_path: checkpoint_path,
         state_identity: stat_identity(File.lstat(checkpoint_path))
@@ -159,6 +186,7 @@ class LegacyLockGeneration2Migration
 
     Plan.new(
       repository: @repository,
+      common_directory: @common_directory,
       task_ids: task_ids.uniq.sort,
       checkpoint_paths: checkpoints,
       targets: targets.uniq { |target| [target.namespace, target.key] }
@@ -209,6 +237,80 @@ class LegacyLockGeneration2Migration
     File.exist?(path) || File.symlink?(path)
   end
 
+  def validate_owner_authorization!(path, plan, expected_identity: nil, expected_sha256: nil)
+    unless path && Pathname.new(path.to_s).absolute?
+      raise Error, '--apply requires an absolute --owner-authorization PATH'
+    end
+
+    text, identity = read_owner_authorization(path)
+    digest = Digest::SHA256.hexdigest(text)
+    if expected_identity && (identity != expected_identity || digest != expected_sha256)
+      raise Error, 'Owner authorization changed during migration preflight'
+    end
+
+    target = authorization_target(plan)
+    unless authorization_pairs(text) == [[AUTHORIZATION_ACTION, target]] &&
+           TaskReconciler.conversation_authorized?(AUTHORIZATION_ACTION, [text], authorization_target: target)
+      raise Error, 'Owner authorization does not exactly bind this generation-2 migration target'
+    end
+    unless text.each_line.count { |line| line.strip == QUIESCENCE_ATTESTATION } == 1
+      raise Error, "Owner authorization must contain exactly one explicit quiescence attestation line: '#{QUIESCENCE_ATTESTATION}'"
+    end
+
+    { identity: identity, sha256: digest }
+  end
+
+  def authorization_pairs(text)
+    text.each_line.each_with_object([]) do |line, pairs|
+      action_field = /(?:\A|[^\w])(?:AUTHORIZED_)?ACTION\s*[:=]/i
+      target_field = /(?:\A|[^\w])(?:AUTHORIZED_)?TARGET\s*[:=]/i
+      next unless line.match?(action_field) || line.match?(target_field)
+
+      binding = line.match(/\A\s*(?:AUTHORIZED_)?ACTION\s*[:=]\s*([A-Z][A-Z0-9_]*)\s*;\s*(?:AUTHORIZED_)?TARGET\s*[:=]\s*(.+?)\s*\z/i)
+      raise Error, 'Owner authorization contains an unbound or ambiguous action/target' unless binding
+
+      pairs << [binding[1].strip.upcase, binding[2].strip]
+    end
+  end
+
+  def read_owner_authorization(path)
+    expanded = File.expand_path(path.to_s)
+    stat = File.lstat(expanded)
+    unless stat.file? && !stat.symlink? && stat.uid == Process.uid && (stat.mode & 0o022).zero?
+      raise Error, "Owner authorization '#{expanded}' is not an owned, non-writable regular file"
+    end
+
+    flags = File::RDONLY
+    flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+    File.open(expanded, flags) do |file|
+      opened_stat = file.stat
+      unless stat_identity(stat) == stat_identity(opened_stat)
+        raise Error, 'Owner authorization changed while opening'
+      end
+      bytes = file.read
+      final_stat = File.lstat(expanded)
+      unless stat_identity(final_stat) == stat_identity(opened_stat)
+        raise Error, 'Owner authorization changed while reading'
+      end
+      text = bytes.dup.force_encoding(Encoding::UTF_8)
+      raise Error, 'Owner authorization is not valid UTF-8 text' unless text.valid_encoding?
+
+      [text, stat_identity(opened_stat)]
+    end
+  rescue SystemCallError => e
+    raise Error, "Owner authorization could not be verified: #{e.message}"
+  end
+
+  def common_directory(repository)
+    output, status = Open3.capture2('git', '-C', repository, 'rev-parse', '--git-common-dir', err: File::NULL)
+    raise Error, "Git common directory for '#{repository}' could not be resolved" unless status.success?
+
+    common = output.strip
+    File.realpath(Pathname.new(common).absolute? ? common : File.join(repository, common))
+  rescue SystemCallError => e
+    raise Error, "Git common directory could not be verified: #{e.message}"
+  end
+
   def acquire_legacy_locks(plan)
     handles = []
     plan.targets.select(&:legacy_present).sort_by(&:legacy_path).each do |target|
@@ -247,6 +349,7 @@ class LegacyLockGeneration2Migration
 
   def plan_signature(plan)
     [
+      plan.common_directory,
       plan.task_ids,
       plan.checkpoint_paths,
       plan.targets.map do |target|
@@ -310,10 +413,11 @@ if __FILE__ == $PROGRAM_NAME
   options = { checkpoint_paths: [] }
   parser = OptionParser.new do |opts|
     opts.banner = <<~USAGE
-      Usage: migrate_legacy_locks.rb --repo PATH [--checkpoint PATH ...] [--apply --confirm-legacy-workers-quiescent]
+      Usage: migrate_legacy_locks.rb --repo PATH [--checkpoint PATH ...] [--apply --owner-authorization PATH]
 
       Without --apply, list the generation-2 anchors and legacy locks that would be migrated.
-      --checkpoint PATH may be repeated for legacy checkpoint files outside .fable/checkpoints.
+      --checkpoint PATH may be repeated for checkpoint files outside .fable/checkpoints.
+      Apply requires an exact Owner authorization file with the migration action, dry-run target, and quiescence attestation.
     USAGE
     opts.on('--repo PATH', 'Absolute Git worktree root to inspect') { |value| options[:repo_root] = value }
     opts.on('--checkpoint PATH', 'Additional checkpoint file whose adjacent .lock sidecar should be migrated') do |value|
@@ -322,9 +426,8 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--apply', 'Write generation-2 markers and anchors, then remove migrated lock sidecars') do
       options[:apply] = true
     end
-    opts.on('--confirm-legacy-workers-quiescent',
-            'Confirm every legacy protected worker and inherited child is quiescent') do
-      options[:confirm_legacy_workers_quiescent] = true
+    opts.on('--owner-authorization PATH', 'Current Owner authorization file binding the exact migration action and target') do |value|
+      options[:owner_authorization_path] = value
     end
   end
 
@@ -339,13 +442,16 @@ if __FILE__ == $PROGRAM_NAME
     )
     result = migration.run(
       apply: options.fetch(:apply, false),
-      confirm_legacy_workers_quiescent: options.fetch(:confirm_legacy_workers_quiescent, false)
+      owner_authorization_path: options[:owner_authorization_path]
     )
     puts(result.applied ? 'MIGRATED' : 'DRY RUN')
     puts "Repository: #{result.plan.repository}"
+    puts "Git common directory: #{result.plan.common_directory}"
     puts "Task anchors: #{result.plan.task_ids.length}"
     puts "Checkpoint files inspected: #{result.plan.checkpoint_paths.length}"
     puts "Legacy lock files to remove: #{result.plan.targets.count(&:legacy_present)}"
+    puts "Owner authorization binding: AUTHORIZED_ACTION: #{LegacyLockGeneration2Migration::AUTHORIZATION_ACTION}; AUTHORIZED_TARGET: #{migration.authorization_target(result.plan)}"
+    puts "Required quiescence attestation: #{LegacyLockGeneration2Migration::QUIESCENCE_ATTESTATION}"
     result.plan.targets.each do |target|
       puts "Anchor: #{target.namespace} #{target.key}"
       puts "Remove legacy lock: #{target.legacy_path}" if target.legacy_present
