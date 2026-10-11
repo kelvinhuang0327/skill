@@ -6,11 +6,14 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import ExitStack
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from unittest import mock
 
@@ -19,6 +22,7 @@ sys.dont_write_bytecode = True
 MODULE_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(MODULE_ROOT))
 import execution_controller as controller  # noqa: E402
+import claude_executor  # noqa: E402
 import runner  # noqa: E402
 
 
@@ -904,6 +908,205 @@ class ExecutionControllerOfflineTests(unittest.TestCase):
         self.assertEqual(ledger["known_spend_usd"], "0")
         self.assertEqual(ledger["unresolved_cost_items"], [])
         self.assertEqual(len(provider.invocations), 1)
+
+
+class DirectConsumerDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def make_controller(error: BaseException) -> tuple[Any, Any, Any, Any]:
+        active = controller.ExecutionController.__new__(controller.ExecutionController)
+        provider = FakeProvider("2.1.245 (Claude Code)", results=[error])
+        active.provider = provider
+        key = controller.AttemptKey("run-diagnostic-1", 1)
+        invocation = runner.ModelInvocation(
+            argv=(REAL_PROVIDER, "--print"),
+            cwd="/tmp/fable-worktree",
+            prompt="offline timeout diagnostic smoke",
+            environment={},
+            task_visible_run_id="session-0123456789abcdef0123456789abcdef",
+        )
+        authority = SimpleNamespace(
+            sha256="a" * 64,
+            executor_repository=Path("/tmp/fable-source"),
+            executor_head="b" * 40,
+            executor_tree="c" * 40,
+        )
+        ledger = {"lease_identity": {"device": 1, "inode": 2}}
+        attempt = {"status": "RESERVED"}
+        active._test_authority = authority
+        active._test_ledger = ledger
+        active._test_attempt = attempt
+        return active, provider, key, invocation
+
+    def run_consumer(self, error: BaseException) -> Any:
+        active, provider, key, invocation = self.make_controller(error)
+        authority = active._test_authority
+        ledger = active._test_ledger
+        attempt = active._test_attempt
+        with ExitStack() as patches:
+            patches.enter_context(
+                mock.patch.object(
+                    active, "_require_started", return_value=(authority, ledger)
+                )
+            )
+            patches.enter_context(
+                mock.patch.object(active, "_expected_invocation_key", return_value=key)
+            )
+            patches.enter_context(
+                mock.patch.object(active, "_find_attempt", return_value=attempt)
+            )
+            patches.enter_context(
+                mock.patch.object(
+                    active,
+                    "_validate_invocation",
+                    return_value=Path(invocation.cwd),
+                )
+            )
+            patches.enter_context(
+                mock.patch.object(active, "_persist_invocation_intent")
+            )
+            patches.enter_context(mock.patch.object(active, "_emit"))
+            patches.enter_context(
+                mock.patch.object(
+                    active,
+                    "_persist_provider_observation",
+                    side_effect=lambda _authority, _key, result: result,
+                )
+            )
+            result = active.invoke(key, invocation)
+        self.assertEqual(len(provider.invocations), 1)
+        return result
+
+    def test_timeout_diagnostics_reach_consumer_with_identity_and_bounded_streams(self) -> None:
+        error = claude_executor.ProviderProcessError(
+            "provider process timed out",
+            argv=("claude", "--print"),
+            returncode=-9,
+            stdout=b"partial stdout",
+            stderr=b"e" * 6000,
+            timed_out=True,
+            termination_method="SIGTERM->SIGKILL",
+            signals_sent=("SIGTERM", "SIGKILL"),
+            cleanup_complete=True,
+            child_pid=12345,
+            spawn_started_at="2026-10-04T00:00:00.000+00:00",
+            spawned_at="2026-10-04T00:00:00.001+00:00",
+            ready_at="2026-10-04T00:00:00.001+00:00",
+            runtime_executable=REAL_PROVIDER,
+            runtime_version="2.1.245 (Claude Code)",
+        )
+
+        result = self.run_consumer(error)
+
+        self.assertEqual(result.cost_status, "UNRESOLVED")
+        self.assertIsNone(result.exact_cost)
+        identity = result.result_record["execution_identity"]
+        self.assertEqual(identity["lease_identity"], {"device": 1, "inode": 2})
+        self.assertEqual(identity["run_id"], "run-diagnostic-1")
+        self.assertEqual(identity["attempt_ordinal"], 1)
+        self.assertEqual(identity["executor_repository"], "/tmp/fable-source")
+        self.assertEqual(identity["executor_head"], "b" * 40)
+        self.assertEqual(identity["executor_tree"], "c" * 40)
+        self.assertEqual(identity["worktree"], "/tmp/fable-worktree")
+        diagnostics = result.result_record["diagnostics"]
+        self.assertEqual(diagnostics["child_pid"], 12345)
+        self.assertEqual(diagnostics["returncode"], -9)
+        self.assertEqual(
+            diagnostics["spawn_started_at"], "2026-10-04T00:00:00.000+00:00"
+        )
+        self.assertEqual(diagnostics["ready_at"], "2026-10-04T00:00:00.001+00:00")
+        self.assertEqual(diagnostics["runtime_version"], "2.1.245 (Claude Code)")
+        self.assertEqual(diagnostics["stderr"]["byte_count"], 6000)
+        self.assertEqual(len(diagnostics["stderr"]["excerpt"].encode("utf-8")), 4096)
+        self.assertTrue(diagnostics["stderr"]["excerpt_truncated"])
+
+    def test_diagnostic_capture_failure_remains_unknown_and_unresolved(self) -> None:
+        error = RuntimeError("provider timeout")
+        error.diagnostic_record = lambda: (_ for _ in ()).throw(ValueError("broken"))
+
+        result = self.run_consumer(error)
+
+        self.assertEqual(result.cost_status, "UNRESOLVED")
+        self.assertIsNone(result.exact_cost)
+        self.assertEqual(
+            result.result_record["diagnostics"],
+            {"status": "UNKNOWN_UNVERIFIABLE", "reason": "ValueError"},
+        )
+
+
+class GitExecutorIdentityProbeLocatorTests(unittest.TestCase):
+    def test_local_only_commit_requires_the_exact_absolute_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "checkout"
+            remote = root / "origin.git"
+            repository.mkdir()
+
+            def run_git(path: Path, *arguments: str) -> bytes:
+                completed = subprocess.run(
+                    ["git", "-C", str(path), *arguments],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    self.fail(completed.stderr.decode("utf-8", errors="replace"))
+                return completed.stdout
+
+            run_git(repository, "init", "--quiet")
+            run_git(repository, "config", "user.name", "Fable test")
+            run_git(repository, "config", "user.email", "fable-test@example.invalid")
+            source = b"VALUE = 'local only'\n"
+            test_source = b"assert VALUE == 'local only'\n"
+            (repository / "source.py").write_bytes(source)
+            (repository / "test_source.py").write_bytes(test_source)
+            run_git(repository, "add", "source.py", "test_source.py")
+            run_git(repository, "commit", "--quiet", "-m", "local executor pin")
+            commit = run_git(repository, "rev-parse", "HEAD").decode().strip()
+            tree = run_git(repository, "rev-parse", "HEAD^{tree}").decode().strip()
+            run_git(remote.parent, "init", "--bare", "--quiet", str(remote))
+            run_git(repository, "remote", "add", "origin", str(remote))
+            self.assertEqual(run_git(repository, "ls-remote", "--heads", "origin"), b"")
+
+            authority = SimpleNamespace(
+                executor_repository=repository.resolve(),
+                executor_head=commit,
+                executor_tree=tree,
+                executor_source="source.py",
+                executor_source_sha256=hashlib.sha256(source).hexdigest(),
+                executor_test="test_source.py",
+                executor_test_sha256=hashlib.sha256(test_source).hexdigest(),
+            )
+            real_run = subprocess.run
+            with mock.patch.object(controller.subprocess, "run", wraps=real_run) as observed_git:
+                identity = controller.GitExecutorIdentityProbe().probe(authority)
+
+            commands = [call.args[0] for call in observed_git.call_args_list]
+            self.assertTrue(commands)
+            self.assertTrue(
+                all(
+                    command[:3] == ["git", "-C", str(repository.resolve())]
+                    for command in commands
+                )
+            )
+            self.assertFalse(any("ls-remote" in command for command in commands))
+            self.assertEqual(identity.head, commit)
+            self.assertEqual(identity.tree, tree)
+            self.assertEqual(identity.source_sha256, hashlib.sha256(source).hexdigest())
+            self.assertEqual(identity.test_sha256, hashlib.sha256(test_source).hexdigest())
+
+            authority.executor_repository = repository / "nested"
+            (repository / "nested").mkdir()
+            with self.assertRaisesRegex(
+                controller.ExecutorIdentityError, "not_git_toplevel"
+            ):
+                controller.GitExecutorIdentityProbe().probe(authority)
+
+            authority.executor_repository = Path("relative-checkout")
+            with self.assertRaisesRegex(
+                controller.ExecutorIdentityError, "absolute_locator"
+            ):
+                controller.GitExecutorIdentityProbe().probe(authority)
+
 
 
 if __name__ == "__main__":

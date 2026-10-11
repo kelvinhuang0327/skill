@@ -803,23 +803,45 @@ class GitExecutorIdentityProbe:
         return completed.stdout
 
     def probe(self, authority: ManifestAuthority) -> ExecutorIdentity:
+        locator = Path(authority.executor_repository)
+        if not locator.is_absolute():
+            raise ExecutorIdentityError("executor_repository_must_be_an_absolute_locator")
+        try:
+            repository = locator.resolve(strict=True)
+        except OSError as exc:
+            raise ExecutorIdentityError(
+                f"executor_repository_locator_unavailable:{type(exc).__name__}"
+            ) from exc
+        if not repository.is_dir():
+            raise ExecutorIdentityError("executor_repository_locator_not_a_directory")
+        observed_root = self._git(repository, "rev-parse", "--show-toplevel").decode(
+            "utf-8", errors="replace"
+        ).strip()
+        try:
+            canonical_root = Path(observed_root).resolve(strict=True)
+        except OSError as exc:
+            raise ExecutorIdentityError(
+                f"executor_repository_root_unavailable:{type(exc).__name__}"
+            ) from exc
+        if canonical_root != repository:
+            raise ExecutorIdentityError("executor_repository_locator_not_git_toplevel")
         observed_head = self._git(
-            authority.executor_repository,
+            repository,
             "rev-parse",
             f"{authority.executor_head}^{{commit}}",
         ).decode("ascii").strip()
         observed_tree = self._git(
-            authority.executor_repository,
+            repository,
             "rev-parse",
             f"{authority.executor_head}^{{tree}}",
         ).decode("ascii").strip()
         source = self._git(
-            authority.executor_repository,
+            repository,
             "show",
             f"{authority.executor_head}:{authority.executor_source}",
         )
         test = self._git(
-            authority.executor_repository,
+            repository,
             "show",
             f"{authority.executor_head}:{authority.executor_test}",
         )
@@ -2530,7 +2552,7 @@ class ExecutionController:
     def invoke(
         self, key: AttemptKey, invocation: ModelInvocation
     ) -> ProviderResult:
-        authority, _ = self._require_started()
+        authority, ledger = self._require_started()
         if key != self._expected_invocation_key():
             raise OrderingError("invocation_not_next_scheduled_attempt")
         attempt = self._find_attempt(key)
@@ -2552,13 +2574,41 @@ class ExecutionController:
             ):
                 raise TypeError("provider boundary returned malformed terminal evidence")
         except Exception as exc:
+            execution_identity = {
+                "manifest_sha256": authority.sha256,
+                "lease_identity": copy.deepcopy(ledger.get("lease_identity")),
+                "run_id": key.run_id,
+                "attempt_ordinal": key.attempt_ordinal,
+                "invocation_sha256": _sha256_bytes(
+                    _canonical_json(invocation.model_visible_record())
+                ),
+                "executor_repository": str(authority.executor_repository),
+                "executor_head": authority.executor_head,
+                "executor_tree": authority.executor_tree,
+                "worktree": str(workspace),
+            }
+            result_record: dict[str, Any] = {
+                "exception": repr(exc),
+                "execution_identity": execution_identity,
+            }
+            diagnostic_record = getattr(exc, "diagnostic_record", None)
+            if callable(diagnostic_record):
+                try:
+                    diagnostics = diagnostic_record()
+                except Exception as diagnostic_error:
+                    diagnostics = {
+                        "status": "UNKNOWN_UNVERIFIABLE",
+                        "reason": type(diagnostic_error).__name__,
+                    }
+                if isinstance(diagnostics, Mapping):
+                    result_record["diagnostics"] = dict(diagnostics)
             result = ProviderResult(
                 outcome="INFRA_ERROR",
                 cost_status="UNRESOLVED",
                 exact_cost=None,
                 raw_evidence=repr(exc).encode("utf-8"),
                 canonical_evidence={"provider_boundary_exception": type(exc).__name__},
-                result_record={"exception": repr(exc)},
+                result_record=result_record,
             )
         return self._persist_provider_observation(authority, key, result)
 

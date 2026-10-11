@@ -17,6 +17,22 @@ class ExplicitContractFailClosedTest < Minitest::Test
     paths.each_value { |path| assert File.file?(path), path }
   end
 
+  def test_declared_direct_consumer_requires_its_focused_smoke
+    contract = Parser.skill.gsub(/\s+/, ' ')
+    assert_includes contract,
+                    "When the declared acceptance surface includes the directly bound consumer of a changed runtime component, run the consumer's focused smoke alongside the focused check for that component; checking component identity alone does not verify its consumer API."
+  end
+
+  def test_fresh_judge_session_lineage_is_reported_without_context_reuse
+    handoff = File.read(File.expand_path('../shared/references/judge-handoff.md', __dir__))
+    assert_includes handoff, 'Request `<parent>-judge` for the first'
+    assert_includes handoff, '`<parent>-judge-rN`'
+    assert_includes handoff, 'JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>'
+    assert_includes handoff, 'JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>'
+    assert_includes handoff, 'JUDGE_SESSION_REUSED: NO'
+    assert_includes handoff, 'still run the independent Judge'
+  end
+
   def test_result_binding_nonzero_git_diff_check_cannot_be_pass
     refute Parser.load_bearing_pass?(
       command: 'git diff --check',

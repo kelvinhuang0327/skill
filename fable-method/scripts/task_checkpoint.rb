@@ -10,6 +10,7 @@ require 'digest'
 require 'tempfile'
 require 'securerandom'
 require 'tmpdir'
+require 'rbconfig'
 
 # StableLockAnchor puts flock authorities in Git's common metadata directory,
 # outside the worktree paths that `git stash -u` can remove. The manifest binds
@@ -488,6 +489,10 @@ class TaskCheckpoint
     REQUIRED_FIELDS.each do |field|
       val = send(field)
       errors << "missing required field: #{field}" if val.nil? || val.to_s.strip.empty?
+    end
+
+    %i[repository worktree].each do |field|
+      errors << "#{field} must be an absolute locator" unless Pathname.new(send(field).to_s).absolute?
     end
 
     if @authoritative_packet_ref.to_s.strip == 'ORIGINAL_TASK_RULES_INHERITED: YES'
@@ -1065,6 +1070,36 @@ class TaskReconciler
   end
 
   def reconcile
+    if options[:worktree] && !options[:worktree].to_s.strip.empty?
+      begin
+        expected_worktree = File.realpath(checkpoint.worktree)
+        requested_worktree = File.realpath(options[:worktree])
+      rescue SystemCallError => e
+        reason = if e.is_a?(Errno::ENOENT)
+                   "Worktree directory does not exist (exact locator could not be verified: #{e.class})"
+                 else
+                   "Exact worktree locator could not be verified: #{e.class}"
+                 end
+        return ReconciliationResult.new(
+          verdict: 'STOP_UNRESOLVED',
+          reason: reason,
+          recommended_action: 'Use the existing checkpoint worktree and verify both locators',
+          checkpoint: checkpoint,
+          live_state: { worktree: options[:worktree] }
+        )
+      end
+
+      unless requested_worktree == expected_worktree
+        return ReconciliationResult.new(
+          verdict: 'STOP_UNRESOLVED',
+          reason: "Exact worktree locator mismatch: checkpoint requires '#{checkpoint.worktree}' but request resolves to '#{requested_worktree}'",
+          recommended_action: 'Use the checkpoint worktree locator or obtain an updated authoritative checkpoint',
+          checkpoint: checkpoint,
+          live_state: { worktree: options[:worktree], resolved_worktree: requested_worktree }
+        )
+      end
+    end
+
     live = capture_live_state
 
     # Guard 1: Repository Identity
@@ -1834,7 +1869,7 @@ class DurableCommandCapture
   EVIDENCE_UNKNOWN_UNVERIFIABLE = 'EVIDENCE_UNKNOWN_UNVERIFIABLE'
 
   attr_accessor :schema_version, :command, :stdout, :stderr, :exit_status, :started_at, :ended_at,
-                :wrapper_signal
+                :wrapper_signal, :execution_identity
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -1845,6 +1880,7 @@ class DurableCommandCapture
     @started_at = (attrs[:started_at] || attrs['started_at'])&.to_s
     @ended_at = (attrs[:ended_at] || attrs['ended_at'])&.to_s
     @wrapper_signal = attrs[:wrapper_signal] || attrs['wrapper_signal']
+    @execution_identity = attrs[:execution_identity] || attrs['execution_identity']
   end
 
   def complete?
@@ -1859,7 +1895,7 @@ class DurableCommandCapture
   end
 
   def to_h
-    {
+    data = {
       'schema_version' => @schema_version,
       'command' => @command,
       'stdout' => @stdout,
@@ -1868,6 +1904,8 @@ class DurableCommandCapture
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
+    data['execution_identity'] = @execution_identity if @execution_identity
+    data
   end
 
   def to_json(*args)
@@ -1902,6 +1940,40 @@ class DurableCommandCapture
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'captures', "#{capture_id}.json")
   end
 
+  # Bind a terminal capture to the exact repository/worktree locator and the
+  # launcher/runtime that produced it. Git identity is recorded only when the
+  # execution worktree itself is the Git root; non-Git execution roots remain
+  # supported with explicit nil HEAD/tree values.
+  def self.capture_execution_identity(repository_path:, worktree_path:)
+    repository = StableLockAnchor.repository_root(repository_path)
+    worktree = File.realpath(worktree_path)
+    launcher = File.realpath(__FILE__)
+    git_value = lambda do |*arguments|
+      stdout, _stderr, status = Open3.capture3('git', '-C', worktree, *arguments, err: File::NULL)
+      status.success? ? stdout.strip : nil
+    rescue SystemCallError
+      nil
+    end
+    git_root = git_value.call('rev-parse', '--show-toplevel')
+    begin
+      git_root = File.realpath(git_root) if git_root
+    rescue SystemCallError
+      git_root = nil
+    end
+    bound_git = git_root == worktree
+
+    {
+      'repository_path' => repository,
+      'worktree_path' => worktree,
+      'head' => bound_git ? git_value.call('rev-parse', 'HEAD') : nil,
+      'tree' => bound_git ? git_value.call('rev-parse', 'HEAD^{tree}') : nil,
+      'launcher_path' => launcher,
+      'launcher_sha256' => Digest::SHA256.file(launcher).hexdigest,
+      'runtime_executable' => File.realpath(RbConfig.ruby),
+      'runtime_version' => RUBY_DESCRIPTION
+    }
+  end
+
   # Classifies the evidence at file_path without inferring PASS/FAIL: missing,
   # unreadable, malformed, or incomplete evidence is always
   # EVIDENCE_UNKNOWN_UNVERIFIABLE rather than a guessed outcome.
@@ -1926,7 +1998,7 @@ class DurableCommandCapture
   # work; the block must not propagate a signal itself. child_env only sets or
   # unsets the named variables for the child; it is never persisted.
   def self.run_and_capture(command, file_path:, chdir: nil, before_spawn: nil, inherited_lock: nil,
-                           child_env: nil)
+                           child_env: nil, execution_identity: nil)
     command = Array(command).map(&:to_s)
     raise ArgumentError, 'command must be a non-empty argv array' if command.empty?
 
@@ -1976,6 +2048,7 @@ class DurableCommandCapture
         spawn_opts[INHERITED_TASK_LOCK_CHILD_FD] = lock_fd
       end
       before_spawn.call if before_spawn
+      candidate_identity = execution_identity.respond_to?(:call) ? execution_identity.call : execution_identity
       # The executable/argv0 pair also prevents Ruby's single-string shell
       # fallback when the upstream argv contains only an executable name.
       # Pass spawn options as a positional hash because the inherited task-lock
@@ -2005,7 +2078,8 @@ class DurableCommandCapture
           stderr: stderr_str,
           exit_status: status.signaled? ? "SIGNALED:#{status.termsig}" : status.exitstatus,
           started_at: started_at,
-          ended_at: terminal_at
+          ended_at: terminal_at,
+          execution_identity: candidate_identity
         )
         capture.save(file_path)
         yield capture if block_given?
@@ -3314,7 +3388,13 @@ if __FILE__ == $PROGRAM_NAME
         capture_command = lambda do |task_lock, child_env|
           DurableCommandCapture.run_and_capture(upstream_argv, file_path: capture_path,
                                                 chdir: options[:worktree], before_spawn: before_spawn,
-                                                inherited_lock: task_lock, child_env: child_env) do |candidate|
+                                                inherited_lock: task_lock, child_env: child_env,
+                                                execution_identity: lambda {
+                                                  DurableCommandCapture.capture_execution_identity(
+                                                    repository_path: options[:repository],
+                                                    worktree_path: options[:worktree]
+                                                  )
+                                                }) do |candidate|
             result, capture_signal = validate_capture.call(candidate)
             record.complete!(record_path, durable_capture_path: capture_path)
             emit_capture.call(candidate)
