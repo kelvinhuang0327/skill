@@ -234,6 +234,14 @@ class TaskCheckpointTest < Minitest::Test
     assert cp.validate!
   end
 
+  def test_checkpoint_requires_absolute_repository_and_worktree_locators
+    %i[repository worktree].each do |field|
+      cp = TaskCheckpoint.new(@valid_attrs.merge(field => "relative/#{field}"))
+      error = assert_raises(TaskCheckpoint::ValidationError) { cp.validate! }
+      assert_match(/#{field} must be an absolute locator/, error.message)
+    end
+  end
+
   def test_checkpoint_fails_validation_when_required_fields_missing
     required = %i[task_id repository worktree authoritative_packet_ref current_head current_tree next_action]
     required.each do |field|
@@ -955,6 +963,32 @@ class TaskCheckpointTest < Minitest::Test
     )).reconcile
 
     assert_equal 'CONTINUE', result.verdict
+  end
+
+  def test_requested_worktree_must_resolve_to_the_checkpoint_worktree
+    other_worktree = File.join(@tmpdir, 'other-worktree')
+    FileUtils.mkdir_p(other_worktree)
+    checkpoint = TaskCheckpoint.new(@valid_attrs)
+
+    result = TaskReconciler.new(checkpoint, live_reconciliation_options(worktree: other_worktree)).reconcile
+
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Exact worktree locator mismatch/, result.reason)
+    assert_includes result.reason, @worktree_dir
+    assert_includes result.reason, other_worktree
+  end
+
+  def test_worktree_symlink_to_a_different_checkout_fails_closed
+    other_worktree = File.join(@tmpdir, 'other-worktree')
+    alias_worktree = File.join(@tmpdir, 'worktree-alias')
+    FileUtils.mkdir_p(other_worktree)
+    File.symlink(other_worktree, alias_worktree)
+    checkpoint = TaskCheckpoint.new(@valid_attrs)
+
+    result = TaskReconciler.new(checkpoint, live_reconciliation_options(worktree: alias_worktree)).reconcile
+
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Exact worktree locator mismatch/, result.reason)
   end
 
   # =========================================================================
@@ -2413,6 +2447,31 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal result[0], capture.stdout
     assert_equal result[1], capture.stderr
     assert_equal 1, launch_records.size
+  end
+
+  def test_run_cli_persists_candidate_identity_for_the_generation2_locked_worktree
+    identity = 'candidate_identity'
+    command = [RbConfig.ruby, '-e', 'puts Dir.pwd']
+    args = ['--run', '--repo', @repo, '--worktree', @repo,
+            '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
+
+    result = run_cli(args)
+
+    assert_equal 0, result[2].exitstatus, "stdout=#{result[0].inspect} stderr=#{result[1].inspect}"
+    capture = DurableCommandCapture.load(capture_path(identity))
+    candidate = capture.execution_identity
+    assert_equal File.realpath(@repo), candidate.fetch('repository_path')
+    assert_equal File.realpath(@repo), candidate.fetch('worktree_path')
+    assert_equal Open3.capture2('git', '-C', @repo, 'rev-parse', 'HEAD').first.strip,
+                 candidate.fetch('head')
+    assert_equal Open3.capture2('git', '-C', @repo, 'rev-parse', 'HEAD^{tree}').first.strip,
+                 candidate.fetch('tree')
+    launcher = File.realpath(CLI)
+    assert_equal launcher, candidate.fetch('launcher_path')
+    assert_equal Digest::SHA256.file(launcher).hexdigest, candidate.fetch('launcher_sha256')
+    assert_equal File.realpath(RbConfig.ruby), candidate.fetch('runtime_executable')
+    assert_equal RUBY_DESCRIPTION, candidate.fetch('runtime_version')
+    assert_equal File.realpath(@repo), result[0].strip
   end
 
   def test_run_real_cli_two_contenders_and_completed_replay
