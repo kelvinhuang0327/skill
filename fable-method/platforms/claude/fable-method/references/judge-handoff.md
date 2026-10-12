@@ -7,6 +7,7 @@
   - [Verification temp isolation](#verification-temp-isolation)
 - [Depth reconciliation](#depth-reconciliation)
 - [Remediation limit](#remediation-limit)
+- [Fresh Judge session lineage](#fresh-judge-session-lineage)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
   - [Non-Git artifact route](#non-git-artifact-route)
@@ -210,6 +211,32 @@ the finding-specific checks and, if load-bearing code/tests changed, the
 complete local suite once on the remediated tree. Then hand off a `DELTA`
 re-Judge. If the same finding is refuted again, stop with
 `BLOCKED_AFTER_JUDGE_REFUTATION`; do not start another cycle.
+
+## Fresh Judge session lineage
+
+Session naming is orchestration metadata only and never means context reuse: a
+Fresh Context Judge always has independent context. Request `<parent>-judge`
+for the first fresh Judge and `<parent>-judge-rN` for the nth fresh re-Judge
+after remediation, with `N` starting at 2. Resolve the parent name from the
+actual parent session; when it is unavailable, report
+`PARENT_SESSION_NAME: UNKNOWN` and do not invent a name. Report requested and
+actual names separately in every handoff:
+
+```text
+PARENT_SESSION_NAME: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>
+JUDGE_SESSION_RELATION: FRESH_CONTEXT_CHILD | FRESH_CONTEXT_REJUDGE
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_CAPABILITY: SUPPORTED | REQUEST_METADATA_ONLY | UNSUPPORTED | UNKNOWN
+JUDGE_SESSION_LINEAGE_RULE: first fresh Judge <parent>-judge; nth fresh re-Judge after remediation <parent>-judge-rN (N starts at 2)
+HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME: YES | NO | UNKNOWN
+```
+
+When the harness supports explicit child-session naming, use the requested
+name. When it supports request metadata only, emit the requested name but do
+not claim the actual session was renamed. When naming is unsupported, report
+`UNSUPPORTED` and continue the independent Fresh Context Judge.
 
 ## Durable terminal capture
 
