@@ -8,9 +8,15 @@
 - [Update semantics and revision protection](#update-semantics-and-revision-protection)
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
+- [Long-running execution recovery](#long-running-execution-recovery)
+- [Owner-authorized paused execution continuation](#owner-authorized-paused-execution-continuation)
+- [Bounded launcher fallback](#bounded-launcher-fallback)
+- [Publication live-state classifier](#publication-live-state-classifier)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
 - [Next action vocabulary](#next-action-vocabulary)
 - [Authorization boundary rules](#authorization-boundary-rules)
+- [Post-attempt remote observation](#post-attempt-remote-observation)
+- [Production mutation recovery incidents](#production-mutation-recovery-incidents)
 - [Terminal closure and archiving](#terminal-closure-and-archiving)
 
 ## Overview and core principles
@@ -65,7 +71,10 @@ minimal load-bearing fields:
 ```
 
 The five queue fields are backward-compatible and optional. A normal schema-1
-checkpoint omits them. `SCHEMA_VERSION` remains `1`.
+checkpoint omits them. After a successful recheck, `queue_disposition` is
+cleared while the other four fields remain as a consumed queue-run marker with
+`deferred_recheck_count: 1`. This marker is not an active deferred task and does
+not add a lifecycle state. `SCHEMA_VERSION` remains `1`.
 
 ### Field definitions
 
@@ -104,7 +113,9 @@ checkpoint omits them. `SCHEMA_VERSION` remains `1`.
   locators and inheritance-only statements fail closed.
 - `deferred_resume_action`: Task A's original continuation action, preserved
   separately while `next_action` is `RECHECK_DEFERRED_RESUME_GATE`.
-- `deferred_recheck_count`: Durable count constrained to `0` or `1`.
+- `deferred_recheck_count`: Durable count constrained to `0` or `1`. A value of
+  `1` remains durable after PASS so a fresh Worker cannot start a second
+  automatic queue cycle if the same transient blocker recurs.
 
 ## Storage and lifecycle
 
@@ -127,8 +138,31 @@ checkpoint omits them. `SCHEMA_VERSION` remains `1`.
   - task completed or blocked.
 - Do **not** write a checkpoint on every command or shell execution.
 - Do **not** store command transcripts inside the checkpoint.
-- Updates require incrementing `revision` by 1. A write attempting to update a
-  stale revision fails closed to prevent silent overwrites.
+- Every `TaskCheckpoint#save` acquires `File#flock(File::LOCK_EX)` after creating
+  the parent directory, before any checkpoint existence/read/revision decision.
+  Failure to acquire raises; there is no unlocked fallback. A checkpoint inside a
+  Git worktree locks the generation-2 `checkpoint.lock` in a stable anchor under
+  Git's common metadata directory. A checkpoint outside Git keeps the adjacent
+  `#{file_path}.lock` sidecar, opened without truncation. Neither lock is deleted
+  by save, so conforming processes continue to lock the same inode. See
+  [Lock generation and migration](#lock-generation-and-migration).
+- The lock covers existence, read, parse, expected-revision comparison, revision
+  calculation, and the complete same-directory temporary write, close, and
+  atomic rename. Successful rename is the commit point. No subprocess is
+  launched while holding this lock.
+- With `expected_revision`, a matching stored revision increments by 1 and a
+  stale revision raises `ConcurrencyError`. Without it, an incoming revision
+  less than or equal to the stored revision advances to stored revision + 1;
+  a higher incoming revision is retained. An absent checkpoint retains the
+  incoming revision, even with `expected_revision`. Malformed existing JSON
+  remains overwriteable, including with `expected_revision`.
+- An ordinary exception before rename closes/releases the lock and cleans this
+  invocation's uncommitted temporary file, preserving the previous checkpoint.
+  Process termination releases the OS lock; before rename the old checkpoint
+  remains authoritative and an orphan temporary file may remain. After rename
+  the new revision is committed even if the caller never receives success.
+  Readers use only the checkpoint path; `.lock` and temporary files are not
+  checkpoint state. This does not add fsync or power-loss durability guarantees.
 
 ## Deferred blocked-task queue
 
@@ -158,6 +192,9 @@ the Packet locator before changing Task A; and preserves the prior continuation
 action. Its `existing_deferred_checkpoints` keyword is mandatory: omission is
 an error rather than an implicit empty inventory. Persist Task A with revision
 protection **before** executing Task B.
+When bounded ownership surfaces are supplied, both Task A and Task B surfaces
+are required and any lexical overlap rejects the independence claim; a boolean
+confirmation cannot override contradictory ownership evidence.
 `TaskCheckpoint.validate_deferred_limit!` evaluates the explicit active-task
 inventory supplied by the Worker and permits at most one deferred checkpoint.
 It does not discover or schedule tasks.
@@ -169,15 +206,25 @@ The frozen sequence is:
 3. Task B reaches an end-of-task state: `COMPLETED`, `ABORTED`, or `BLOCKED`.
    `BLOCKED` ends Task B for this queue decision; do not search for Task C.
 4. Perform exactly one end-of-task recheck of Task A's transient blocker.
-5. On PASS, restore Task A to `IN_PROGRESS`, clear queue fields, and resume from
-   `deferred_resume_action`. On FAIL, retain `BLOCKED_DEFERRED`, set
+5. On PASS, restore Task A to `IN_PROGRESS`, clear only the active
+   `queue_disposition`, resume from `deferred_resume_action`, and retain the
+   Task B identity/action fields with `deferred_recheck_count: 1` as a consumed
+   run marker. On FAIL, retain `BLOCKED_DEFERRED`, set
    `deferred_recheck_count: 1`, and make no second automatic recheck.
+6. If the transient blocker recurs after PASS in the same queue run,
+   `TaskCheckpoint#block_recurrent_transient!` returns Task A to `BLOCKED` /
+   `BLOCKED_DEFERRED` with the consumed count intact. It does not expose an
+   authorized deferred task, execute Task B again, or select Task C; bounded
+   reconciliation returns `STOP_UNRESOLVED`.
 
 `TaskCheckpoint#recheck_deferred_resume_gate!` requires the exact Task B
 checkpoint and a terminal end-of-task state. A mismatched or still-running Task
 B, a Task B that is itself deferred, a second deferred checkpoint, or a second
 recheck fails closed. A fresh process reconstructs all queue state from Task A's
 checkpoint and the exact Task B checkpoint; chat memory is never required.
+`TaskCheckpoint#defer_for_authorized_task!` also rejects a checkpoint carrying
+the consumed marker, so callers cannot bypass the recurrence rule by presenting
+the same or a different Task B as a new automatic cycle.
 
 ## Scope-qualified writer and quiescence checks
 
@@ -195,6 +242,509 @@ window, not a universal safety constant. Do not poll indefinitely. Stable scoped
 evidence permits progress; unexplained scoped mutation stops the write and
 requires ownership reconciliation.
 
+`TaskCheckpoint.scope_qualified_active_writer?` is an optional convenience in
+the source helper (`fable-method/scripts/task_checkpoint.rb`). Installed
+builds intentionally exclude executable helpers, so helper absence is never a
+blocker. The explicit bounded before/after snapshots are authoritative. If the
+helper is unavailable, capture the exact designated worktree and task-owned
+paths, branch, HEAD, tree, full status (including staged, unstaged, and
+untracked paths), and each owned path's identity/content metadata; repeat the
+same capture after a bounded interval. Any difference is active mutation.
+With stable snapshots, count a process only when directly observed target
+paths overlap the exact worktree or owned surface; a process name alone is
+insufficient. Unresolved writer ownership remains fail-closed. The default
+observation is about five seconds, but callers may choose another bounded
+interval when the task requires it.
+
+## Long-running execution recovery
+
+`ExecutionRecord` (`fable-method/scripts/task_checkpoint.rb`) classifies a
+task-owned execution that may have outlived its originating session, so a
+resuming Worker never launches a silent duplicate of expensive or
+long-running work. It never scans the OS process table or maintains a
+registry; it inspects only the exact PID this task itself recorded.
+
+For long-running / sealed-evaluation recovery, distinguish
+`LOAD_BEARING_INPUT_IDENTITY` (logical input identity) from
+`CONTAINER_FILE_IDENTITY` (container/file identity) when the Packet defines
+them separately. The Packet owns the exact load-bearing input scope, the
+hash / identity definition, and whether whole-container identity is
+authoritative. The Worker must never decide for itself that the container is
+non-authoritative.
+
+When the Packet defines container/file identity as informational, a container
+file SHA/size/mtime change must not automatically invalidate or replay
+completed expensive computation if the Packet-authoritative logical input
+identity is unchanged. If the Packet makes whole-container identity
+authoritative, that identity remains binding. This is not a global rule that
+DB/container identity never matters.
+
+`EVALUATION_COMPLETE_UNSEALED` is a conditional evidence milestone for an
+expensive evaluation whose main computation completed but sealing/final
+aggregation/closure did not. On takeover, if compatible durable evidence
+confirms that milestone, reuse the completed computation and continue only
+the remaining authorized seal/finalization work. Do not claim this milestone
+unless evidence actually proves that the expensive evaluation portion
+completed.
+
+This milestone is not a new global lifecycle enum and does not mean the whole
+task is `COMPLETE`. It does not bypass existing checkpoint storage authority,
+protected execution, identity validation, recovery or STOP rules.
+
+**Storage**: `.fable/checkpoints/<task_id>/executions/<execution_id>.json`,
+alongside the checkpoint's own `.fable/checkpoints/<task_id>.json`.
+
+Workers launch applicable task-owned expensive / long-running commands through
+the [protected run entrypoint](#protected-run-entrypoint). The underlying
+`ExecutionRecord.recover_before_execution(file_path)` classifies exactly one:
+
+| Classification | Meaning | Behavior |
+|---|---|---|
+| `PRIOR_PROCESS_ACTIVE` | The recorded PID is still alive. | Raises `DuplicateExecutionError`; do not start a duplicate. |
+| `PRIOR_PROCESS_COMPLETED` | Status is `COMPLETED` with acceptance-complete durable evidence (see [Durable terminal capture](judge-handoff.md#durable-terminal-capture)). | Returns the existing durable capture for reuse; the upstream command is not rerun. |
+| `PRIOR_PROCESS_TERMINATED_INCOMPLETE` | The recorded PID is confirmed dead, or status is `COMPLETED` without acceptance-complete evidence. | Returns the classification only; rerun eligibility is left to the original task authority, not decided here. |
+| `PRIOR_PROCESS_STATE_UNRESOLVED` | Liveness could not be established, or the record exists but is unreadable/malformed. | Raises `UnresolvedExecutionStateError`; fail closed rather than risk an overlapping duplicate. |
+
+A record that was never created at all (nothing was ever started under this
+exact path — as opposed to a record that exists but fails to parse) returns a
+`Recovery` with a `nil` classification rather than any of the four states
+above: session or UI disappearance alone is never itself evidence of failure.
+
+`ExecutionRecord.start!` persists a `STARTED` record with the real PID before
+the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
+`durable_capture_path` once the work's durable terminal evidence exists.
+
+### Atomic acquisition boundary
+
+`recover_before_execution` (a check) and `start!` (a write) are two separate
+calls. Two independent contenders that both call `recover_before_execution`
+before either has called `start!` will both observe the `nil`-classification
+"no prior record" case and, without further coordination, could both proceed
+to invoke the upstream long-running command.
+
+`ExecutionRecord.acquire!(file_path, task_id:, execution_id:, pid:)` closes
+this gap: it is the canonical, atomic combination of the check and the write
+for one exact `task_id` + `execution_id`. It attempts to durably persist a
+`STARTED` record using create-temp-then-hardlink
+(`ExecutionRecord#save_if_absent!`), which the filesystem resolves atomically
+across concurrent callers and which never exposes a partially written record
+to a losing contender — unlike a separate existence check followed by a
+write.
+
+`acquire!` returns the same `Recovery` shape as `recover_before_execution`. A
+`nil` classification means this exact call won the race: the `STARTED`
+record is already durably persisted and returned as
+`recovery.execution_record`, and the caller should proceed to invoke the
+upstream command. Any other classification, or a raised
+`DuplicateExecutionError` / `UnresolvedExecutionStateError`, means a record
+already existed — a concurrent winner or an earlier session — and the losing
+caller must not proceed, under the exact same rules `recover_before_execution`
+already applies to that existing record. The CLI below owns this sequence for
+Worker launches; Workers must not manually compose acquire/run/complete.
+
+The protected CLI also serializes task-scoped ownership checks with the
+generation-2 `execution.lock` in the task's stable anchor under Git's common
+metadata directory, not a worktree-local file under `.fable/checkpoints/<task_id>/`.
+While holding this lock it checks the other execution records for a live or
+unresolved owner, then
+acquires the requested identity atomically. Before launching an upstream
+child, it reacquires the lock and passes the open lock descriptor to that
+child. The OS lock therefore stays held if the wrapper dies while the
+application child is still running, and a retry fails closed until that child
+exits. The lock file is retained; the OS releases the lock when the last
+inherited descriptor closes. This protects one task writer across distinct
+execution IDs and wrapper crashes.
+
+### Lock generation and migration
+
+Generation-2 protected locks are anchored in Git's common metadata directory
+(`git rev-parse --git-common-dir`), under `fable-locks/<namespace>/<digest>/`,
+not in the worktree. Each anchor's `authority.json` binds the generation,
+namespace, repository, and key to the lock file's device and inode. A
+same-name replacement, a symlink, or an inode change fails closed. The
+repository marker `fable-locks/repository-generation.json` must exist before any
+protected lock opens.
+
+Legacy worktree-local lock files (`.fable/checkpoints/<task_id>/execution.lock`
+and `<checkpoint>.lock`), and legacy task state without an anchor, are never
+treated as absent. They stop lock acquisition with a migration-required error.
+Migration is an explicit offline step, taken only under separate authorization
+after every legacy protected worker and inherited child is confirmed quiescent.
+Initializing the marker is `StableLockAnchor.initialize_repository_generation!`
+with `confirm_legacy_workers_quiescent: true`, and it is never inferred from an
+absent anchor. Workers must not clear the block by deleting, renaming, or
+recreating legacy lock files.
+
+### Protected run entrypoint
+
+Select the launcher checkout under SKILL.md's launcher-selection rule, then
+invoke:
+
+```text
+ruby <confirmed-Fable-checkout>/fable-method/scripts/task_checkpoint.rb \
+  --run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --execution-id <stable-execution-id> \
+  -- <upstream argv...>
+```
+
+`--repo` must explicitly name the original task's stable absolute
+ExecutionRecord / durable-capture root. It is never inferred from the CLI's
+current directory. `--worktree` must explicitly name an existing absolute
+directory and controls only the upstream command's working directory.
+`--task-id` and `--execution-id` are caller-supplied stable path components
+(non-empty, no path separators, neither `.` nor `..`). Preserve the same root
+and identities across sessions and models; never synthesize them from PID,
+timestamp, session, model, or current directory, including to bypass a stop.
+The original Packet still controls authorization and allowed output paths.
+
+The upstream spawn closes all unlisted descriptors and explicitly allowlists
+the task-lock descriptor at child FD 10. The protected parent may hold that
+same lock at another descriptor number. This keeps FD 9 closed for application
+runners that reserve it, while the child still holds the task lock if the
+wrapper dies. `FABLE_PROTECTED_RUN_LOCK_FD` names the child descriptor and is
+the only extra descriptor passed by this boundary.
+
+The foreground CLI owns the execution record with its own PID while it
+supervises the upstream process. Its only new-execution route is:
+
+```text
+ExecutionRecord.acquire!
+→ DurableCommandCapture.run_and_capture(argv, ...)
+→ ExecutionRecord#complete!
+```
+
+Only a successful acquisition owner invokes the exact argv after `--`,
+directly without shell-string reconstruction (including a single executable
+argument). The capture is persisted under
+`<repo>/.fable/checkpoints/<task_id>/captures/<execution_id>.json` before the
+execution record becomes `COMPLETED`.
+
+On `PRIOR_PROCESS_COMPLETED`, the CLI reuses the saved result without invoking
+upstream, reproduces captured stdout and stderr without added status text,
+and returns the captured exit code, including non-zero. A captured
+`SIGNALED:<number>` result flushes the captured streams and terminates the CLI
+with the same signal. Completion describes durable capture, not command success.
+
+`PRIOR_PROCESS_ACTIVE`, `PRIOR_PROCESS_TERMINATED_INCOMPLETE`, and
+`PRIOR_PROCESS_STATE_UNRESOLVED` stop with exit `1` and the classification on
+stderr; none launches upstream. Malformed/unreadable state fails closed.
+Terminated-incomplete state is retained: the CLI never deletes the record,
+rotates identity, or automatically reruns. Rerun authority remains with the
+original task contract. Invalid CLI arguments exit `2` before acquisition.
+
+**Protection boundary**: only long-running commands routed through
+`task_checkpoint.rb --run` or an explicitly authorized
+`task_checkpoint.rb --recover-run` receive this technical duplicate-execution
+protection. Arbitrary direct shell bypasses remain outside that enforcement
+boundary. Applicable Worker launches MUST use this CLI and must stop if it
+cannot be resolved, rather than silently fall back to a direct command.
+
+**Deployment requirement**: publication/activation is incomplete until a Worker
+can resolve a Fable checkout containing the merged Ruby CLI. Updating only
+installed SKILL text is insufficient when the installed package lacks the
+Ruby scripts. The placeholder above means that selected launcher, which
+defaults to the confirmed deployed checkout; an isolated task worktree is
+never the permanent canonical runtime path.
+
+### Nested protected runs
+
+A protected application may launch another `--run` for the same task ID and
+record root only through the task-lock descriptor it inherited. The same task
+ID, or a copied environment, is never sufficient. A normal `--run`, or a
+validated `--recover-run` successor, writes its own execution ID (the
+successor ID for a recovery), task ID, resolved record root, and the SHA-256 of
+a new random lineage secret into the held `execution.lock`, passes that
+descriptor to its child, and names it in `FABLE_PROTECTED_RUN_TASK_ID`,
+`FABLE_PROTECTED_RUN_RECORD_ROOT`, `FABLE_PROTECTED_RUN_LOCK_FD`,
+`FABLE_PROTECTED_RUN_LOCK_IDENTITY` (`<dev>:<inode>`),
+`FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID`, and
+`FABLE_PROTECTED_RUN_LINEAGE_SECRET`. The secret exists only in the lineage's
+environment. The application must keep that exact descriptor open for the
+nested launcher (for example, Python `subprocess` needs `pass_fds`).
+
+When those variables name this exact task and resolved root, the nested
+launcher exits `1` with the existing classifications unless: the descriptor is
+this task's owned regular `execution.lock` with the named identity; a fresh
+open of that path cannot take the lock while the inherited descriptor can
+re-assert it; the lock's lineage names this task and root and matches the
+secret; and the parent chain reaches that lineage owner through `STARTED`
+records. It then takes no second task-lock ownership, records its own execution
+with `parent_execution_id` and its own durable capture, and passes the same
+descriptor and secret on with itself as parent. Only the ancestors on that
+chain are exempt from the owner check; every record outside it keeps the normal
+active, stale, or unresolved refusal. A stale record whose valid recovery chain
+reaches an active successor on that verified chain is resolved for that
+lineage's own nested runs only. Variables scoped to another task or root grant
+nothing there; that caller gets ordinary top-level acquisition. Every
+conforming lock acquisition clears an earlier lineage, so a dead lineage cannot
+be revived, by copying its environment or otherwise, to skip stale recovery.
+`--recover-run` does not act on an inherited capability, and the stale
+predecessor stays historical evidence and never delegates. Once the recovery
+transition is valid, its deterministic successor takes the lock and establishes
+its own lineage from the successor execution ID, as a normal `--run` does; a
+retry of the same transition reuses that successor identity and therefore the
+same semantics. Independent writers remain refused.
+
+Wrapper death keeps its single-writer meaning: the surviving application child
+still holds the task lock, so unrelated `--run` and `--recover-run` attempts
+stay blocked while its descendants may still nest through the inherited
+descriptor. Lineage members are already the task's single writer and name their
+own parent chain; the shared lock does not serialize them. Each nested launcher
+re-checks after its own record is durable, so of two concurrent siblings at
+least one refuses. Launch nested runs sequentially.
+
+## Bounded launcher fallback
+
+Before selecting an execution path for a task-owned expensive or long-running
+launch, record:
+
+```text
+LAUNCHER_STATUS: PRESENT_RUNNABLE | ABSENT_PROVEN_BEFORE_EXECUTION | UNAVAILABLE_PROVEN_BEFORE_EXECUTION | UNCERTAIN | FAILURE_AFTER_DISCOVERY
+EXACT_WORKTREE: <one exact absolute worktree authorized by the current Packet>
+EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorized by the current Packet>
+EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR
+```
+
+- When `PRESENT_RUNNABLE`, Workers MUST use the protected
+  `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not
+  allowed.
+- Direct-local fallback is permitted only when launcher absence or
+  unavailability is positively proven before execution begins. It requires
+  `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked
+  argv that exactly matches one allowlisted vector, and
+  `EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local
+  effects. When either pre-execution absence status is proven and every
+  precondition holds, bounded direct-local execution is permitted.
+- Fallback is forbidden when effects are external, high-risk, destructive,
+  production-mutating, runtime-mutating, or unclear. Existing high-risk and
+  external authorization and supported-execution requirements remain
+  unchanged.
+- Do not use command substitution, shell composition, wrappers invented to
+  bypass the launcher, or alternate equivalent commands intended to route
+  around a denial.
+- When launcher availability is uncertain, do not fall back; use existing
+  capability and STOP rules.
+- If launcher selection succeeded and its execution later fails, record
+  `FAILURE_AFTER_DISCOVERY`, preserve the original failure, follow existing
+  RCA/STOP rules, and do not switch to direct-local execution.
+- A direct-local fallback never overrides an actual harness or platform
+  permission denial.
+- Resume of a task previously blocked by launcher availability requires
+  evidence that the currently loaded policy revision contains this fallback
+  contract and that every fallback precondition still holds.
+
+This narrow exception does not weaken the normal requirement that high-risk
+or external actions use their existing authorization and supported execution
+path.
+## Explicit stale recovery
+
+`--run` never recovers a stale record. A stale `STARTED` record blocks normal
+`--run` for the task even if the caller supplies a different execution ID;
+changing IDs cannot bypass the stale stop. After an explicit recovery chain
+reaches a completed successor, the successor remains available through normal
+durable-capture replay. A separate, explicitly authorized recovery may use:
+
+```text
+ruby task_checkpoint.rb \
+  --recover-run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --execution-id <old-execution-id> \
+  --application-state <absolute-durable-checkpoint-file> \
+  -- <original argv...>
+```
+
+The old record must be an exact, valid `STARTED` identity with a positive
+recorded PID that is definitely dead, no terminal capture, and unchanged
+historical bytes. Recovery fails closed for a live or indeterminate PID,
+terminal old execution, malformed identity, missing/non-regular/symlinked or
+non-owned application state, a competing active task owner, or any ambiguous
+successor state. The application-state file is never parsed or modified.
+
+Recovery preserves the old execution JSON byte-for-byte and writes its
+`PRIOR_PROCESS_TERMINATED_INCOMPLETE` disposition and old-record SHA-256 in
+`.fable/checkpoints/<task_id>/recoveries/<old_execution_id>.json`. The link
+uses one deterministic successor ID:
+`recovery-<SHA256(task_id + NUL + old_execution_id)>`. A pre-existing
+successor file without its matching transition is ambiguous and blocks
+recovery. The transition file is created with a same-directory atomic link,
+file and directory synchronization, then read back and identity-checked
+before the protected child can start. It also pins the resolved worktree and a
+SHA-256 of the original argv vector; a retry with a different command or
+worktree fails closed.
+
+After the transition is committed, recovery verifies the checkpoint SHA-256
+again immediately before child spawn. It must equal the bytes hashed when the
+transition was first reserved. If the recovery caller dies before child
+launch, retry reads the existing transition and reuses its exact successor
+identity. An active successor blocks a second recovery. A completed successor
+uses the normal durable-capture replay behavior. A dead `STARTED` successor
+may reuse that same identity only when no terminal capture exists and the
+application-state bytes still match; its prior record bytes are retained in
+the transition's attempt history before the successor record is renewed.
+Changed application state or any other ambiguous successor condition fails
+closed. The task-scoped lock serializes this transition and successor claim
+with normal protected `--run` acquisition. The launched child inherits the
+task-lock descriptor, so an orphaned child continues to own the task and a
+retry cannot launch another child until the orphan exits.
+
+## Owner-authorized paused execution continuation
+
+`--recover-run` remains limited to one dead, incomplete `STARTED` execution.
+It continues to reject every terminal predecessor, including a `COMPLETED`
+execution with a complete capture. A checkpoint-safe scientific pause uses a
+separate `--continue-paused-run` mode: it creates a new protected execution
+record and leaves the completed predecessor record and terminal capture byte
+for byte unchanged.
+
+The continuation accepts only an exact `PAUSED_RESUMABLE` application
+checkpoint with a positive completed-attempt cursor, `next_expected_attempt`
+equal to `completed_attempts + 1`, and `completed_attempts < total_attempts`.
+Its newline-terminated journal prefix must have the declared record count and
+SHA-256, contiguous sequence numbers and attempt ranges starting at attempt 1,
+and matching source/baseline SHA-256 values on every record. The ordered
+execution IDs in that prefix must resolve to completed protected execution
+records with complete terminal captures; the named predecessor must own the
+last journal record and have captured exit status `1`. The source and baseline
+files are hashed again from their current regular, owned files.
+
+Before a successor can start, the task lock and execution records must show no
+active or unresolved scientific writer. The continuation requires a direct
+Owner authorization token from the current conversation, supplied as the
+plain-text `--owner-authorization` file. It uses the existing conversation
+authorization validator and requires the exact action `CONTINUE_PAUSED_RUN`
+and a target containing all of these values in order, joined by `|`:
+
+```text
+task_id=<task-id>|predecessor_execution_id=<old-id>|successor_execution_id=<new-id>|checkpoint_sha256=<checkpoint-sha256>|journal_prefix_sha256=<journal-sha256>|source_sha256=<source-sha256>|baseline_sha256=<baseline-sha256>|next_attempt=<attempt>|worktree_path=<resolved-worktree>|successor_command_sha256=<argv-sha256>
+```
+
+The authorization text is hashed into the transition. Do not manufacture a
+token or reuse a quoted, Planner, or assistant authorization. A changed
+checkpoint, source, baseline, journal, command, worktree, Owner token, or
+successor identity fails closed.
+
+Use the distinct protected entrypoint:
+
+```text
+ruby task_checkpoint.rb \
+  --continue-paused-run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --previous-execution-id <completed-paused-execution-id> \
+  --execution-id <new-successor-id> \
+  --application-state <absolute-scientific-checkpoint-file> \
+  --owner-authorization <current-owner-message-token-file> \
+  -- <original argv...>
+```
+
+The immutable transition is stored at
+`.fable/checkpoints/<task_id>/continuations/<checkpoint-sha256>.json`. It binds
+the new execution identity to the predecessor record and capture hashes, the
+checkpoint and validated journal prefix, source/baseline hashes, exact
+authorization, resolved worktree, exact argv, and next attempt. A second
+successor for the same checkpoint is refused. Once the successor `STARTED`
+record is durable, an interrupted launch is never started again; a completed
+successor follows ordinary durable-capture replay. The child receives
+`FABLE_PAUSED_CONTINUATION_PREDECESSOR_EXECUTION_ID`,
+`FABLE_PAUSED_CONTINUATION_CHECKPOINT_SHA256`, and
+`FABLE_PAUSED_CONTINUATION_NEXT_ATTEMPT` to resume from the exact expected
+attempt.
+
+Generic `--run` and stale `--recover-run` records do not carry paused
+continuation authority. Neither a generic failed execution nor a
+scientific-terminal checkpoint is eligible through this mode. Historical
+execution outcomes are not reinterpreted; only a new authorized continuation
+can claim a `PAUSED_RESUMABLE` checkpoint.
+
+## Publication live-state classifier
+
+`PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
+resolves what is already true about a task's Git publication lifecycle from
+freshly-queried remote facts, so a stale checkpoint or Packet cannot cause an
+already-completed Ready/Merge/postmerge action to be replayed, nor a
+genuinely pending one to be silently skipped.
+
+It is a **derived live view only**: it holds no `save`/`load`, adds no
+lifecycle enum, and does not replace `PR_PUBLICATION_STATUS`,
+`POSTMERGE_LIFECYCLE_STATUS`, `BRANCH_CLEANUP_STATUS`, or
+`FULL_PR_LIFECYCLE_CLOSED`, which remain the authoritative reporting axes.
+Every call re-resolves remote branch existence and PR state at classification
+time; `checkpoint.pr_state` may be passed in as the identity to look up (via
+`named_pr_number`) but is never itself treated as live truth. The classifier
+determines **what is already true**; it never performs or authorizes a new
+external action, and the Git action tiers and standalone Owner authorization
+rules above are unchanged by its output.
+
+### Derived states
+
+| State | Meaning |
+|---|---|
+| `LOCAL_ONLY` | No remote branch and no associated pull request. |
+| `REMOTE_BRANCH_ONLY` | Remote branch exists; no open or merged pull request claims it. |
+| `DRAFT_PR_OPEN` | An open pull request exists and is still a draft. |
+| `READY_PR_OPEN` | An open, non-draft pull request already exists. |
+| `MERGED_POSTMERGE_PENDING` | The pull request is merged; no exact-identity verified postmerge evidence is present. |
+| `MERGED_POSTMERGE_COMPLETE` | The pull request is merged and verified postmerge evidence matches this exact identity (PR number and, when both sides have one, merge commit SHA). |
+| `IDENTITY_CONFLICT` | Live state cannot be trusted or safely attributed to this task (see below). Fails closed. |
+
+### Short-circuit contract
+
+| State | Ready | Merge | Postmerge | Terminal |
+|---|---|---|---|---|
+| `READY_PR_OPEN` | `SKIP_ALREADY_COMPLETE` | — | — | — |
+| `MERGED_POSTMERGE_PENDING` | `SKIP_ALREADY_COMPLETE` | `SKIP_ALREADY_COMPLETE` | `VERIFY_OR_COMPLETE_MISSING_POSTMERGE` | — |
+| `MERGED_POSTMERGE_COMPLETE` | `SKIP_ALREADY_COMPLETE` | `SKIP_ALREADY_COMPLETE` | `REUSE_VERIFIED_EVIDENCE_OR_VERIFY_ONLY_IF_MISSING` | `COMPLETION_HANDOFF` |
+| `IDENTITY_CONFLICT` | `STOP_UNRESOLVED` | `STOP_UNRESOLVED` | `STOP_UNRESOLVED` | — |
+
+`LOCAL_ONLY`, `REMOTE_BRANCH_ONLY`, and `DRAFT_PR_OPEN` carry no short-circuit
+(a `—` cell is `nil`, not an implied action): the caller proceeds with its
+Packet-defined flow normally.
+
+### Identity conflict (fail closed)
+
+Identity conflict is evaluated before any normal lifecycle state is assigned.
+At minimum, the classifier fails closed to `IDENTITY_CONFLICT` when:
+
+- the Packet-named PR (`named_pr_number`) does not exist;
+- the Packet-named PR's head branch does not match the task branch;
+- more than one *open* pull request claims the same task branch;
+- a resolved pull request's live head SHA is inconsistent with an explicitly
+  supplied `expected_head_sha` (skipped once the PR is `MERGED`, since its
+  head SHA is then historical rather than a live lineage signal);
+- live remote branch or PR state cannot be independently resolved at all
+  (the injected fetcher raises `PublicationLiveStateClassifier::PrLookupError`
+  — for example the `gh`/`git` call itself failed) rather than confidently
+  returning a negative result.
+
+This reuses the existing `STOP_UNRESOLVED` shape rather than inventing a
+second global conflict framework: `IDENTITY_CONFLICT`'s short-circuit actions
+are all `STOP_UNRESOLVED`, matching `TaskReconciler`'s own verdict vocabulary.
+
+### Fetchers and freshness
+
+Remote branch existence and PR facts are each resolved through an injectable
+fetcher (`remote_branch_exists_fetcher`, `pr_by_number_fetcher`,
+`prs_by_branch_fetcher`), mirroring `ExecutionRecord`'s injectable
+`pid_alive:` check. The default fetchers are real and network-backed
+(`git ls-remote --exit-code --heads` for branch existence,
+`gh pr view`/`gh pr list --state all` for PR facts) so the classifier is
+genuinely live by default; tests and other callers inject deterministic
+fetchers instead of exercising the network.
+
+Postmerge evidence reuse (`postmerge_evidence:`) is likewise identity-bound,
+not blind: it is only treated as satisfying `MERGED_POSTMERGE_COMPLETE` when
+its `pr_number` (and `merge_commit_sha`, when known on both sides) match the
+live merged PR exactly, and `verified` is exactly `true`. A caller integrating
+this classifier — for example to strengthen `TaskReconciler`'s existing
+`pr_state`-based terminal-status guard — decides how to source and act on
+that evidence; the classifier only reports whether the exact identity matches.
+
 ## Bounded reconciliation algorithm
 
 When a new Agent or session begins execution:
@@ -211,9 +761,11 @@ When a new Agent or session begins execution:
    - *Authoritative packet resolution*: If `checkpoint.authoritative_packet_ref`
      is an ephemeral session URI (`conversation://...`) or cannot be resolved to
      a readable file/git blob, verdict is `STOP_UNRESOLVED`.
-   - *Deferred Task B packet resolution*: For `BLOCKED_DEFERRED`, resolve
-     `next_authorized_task_packet_ref` independently. Missing, ephemeral, or
-     inheritance-only Task B authority is `STOP_UNRESOLVED`.
+   - *Deferred Task B packet resolution*: Before the one recheck is consumed,
+     resolve `next_authorized_task_packet_ref` independently for
+     `BLOCKED_DEFERRED`. Missing, ephemeral, or inheritance-only Task B
+     authority is `STOP_UNRESOLVED`. A consumed recurrence never executes Task
+     B again, so reconciliation stops on the consumed count instead.
    - *PR already merged / Terminal state*: If live PR is `MERGED` or checkpoint
      state is `COMPLETED`, verdict is `ALREADY_COMPLETED`.
    - *Next action already done*: If the recorded `next_action` was completed
@@ -235,6 +787,9 @@ When a new Agent or session begins execution:
 6. **Blocker & continuation check**:
    - If `queue_disposition` is `BLOCKED_DEFERRED` and the single recheck is
      already consumed, retain Task A and return `STOP_UNRESOLVED`; do not retry.
+   - If `queue_disposition` is absent but the consumed queue-run marker remains,
+     continue Task A normally from its current `next_action`; preserve the marker
+     across fresh sessions until task closure or a recurrent transient block.
    - If exact Task B evidence is absent or Task B remains `IN_PROGRESS`, return
      `CONTINUE` only for that named Task B and Packet. Never select Task C.
    - If exact Task B is `COMPLETED`, `ABORTED`, or `BLOCKED`, return `CONTINUE`
@@ -277,6 +832,69 @@ but **authorization does not transfer across conversation boundaries**.
   specifications, not live execution permission.
 - A durable Task B Packet proves which task is authorized; it does not transfer
   any standalone high-risk authorization into a fresh conversation.
+
+## Post-attempt remote observation
+
+After a remote mutation command returns nonzero or has an ambiguous result,
+exactly ONE read-only observation of the exact authorized target is permitted
+before deciding the mutation disposition. There is no retry loop. Observe only
+that target; do not add generic workspace or branch discovery.
+
+Classify the observation into exactly these outcomes:
+
+| Outcome | Observation | Required disposition |
+|---|---|---|
+| `AUTHORIZED_DESIRED_STATE` | The exact target is now exactly at the authorized desired state. | Treat the target as satisfied, but retain and report the original command result as failed or ambiguous. Do not rewrite that result as `PASS`, retry the mutation, or skip ordinary verification of the achieved desired state. |
+| `EXPECTED_PREVIOUS_STATE` | The exact target is still exactly at the expected pre-mutation state. | No advance was observed. Existing RCA and authorization rules determine continuation; this observation grants no retry permission. |
+| `ANOTHER_STATE` | The exact target is neither the authorized desired state nor the expected previous state. | Classify as drift or ambiguity and STOP. Do not retry or perform destructive reconciliation. |
+| `OBSERVATION_UNAVAILABLE` | The exact target cannot be observed reliably. | State is `UNKNOWN`. Do not infer no mutation, desired completion, or retry permission. |
+
+The rule is one observation, read-only, and exact-target scoped. It does not
+authorize a remote mutation, a retry, destructive reconciliation, production
+recovery, or a claim of deployment success. It does not change or replace
+production mutation recovery rules.
+
+## Production mutation recovery incidents
+
+`RECOVERY_REQUIRED`, an unresolved `PARTIAL` still requiring recovery, an
+unresolved `ROLLBACK_IN_PROGRESS`, or an equivalent explicit production
+recovery state is not a lifecycle enum — it is a **fact about the target
+production system** that a Worker observes, the same way
+`EVALUATION_COMPLETE_UNSEALED` above is a fact about an evaluation's progress
+rather than a new lifecycle value. When an authorized production mutation
+reaches such a state and the task's intended successful production acceptance
+is not satisfied, treat the production incident as **OPEN** and persist it
+before session handoff using the existing checkpoint contract, with no schema
+or enum change:
+
+```text
+task_lifecycle_state: BLOCKED
+current_blocker: <the exact observed production recovery state and cause>
+next_action: <one exact next action or recovery-disposition action>
+authorization_boundary: <preserved unchanged from the task's existing boundary>
+```
+
+Hand off the exact literal runtime/receipt artifact locator when one exists
+(for example an `ExecutionRecord`/durable-capture path, a deployment receipt,
+or an equivalent exact identifier), and make explicit which current `task_id`
+owns the unresolved incident, so a resuming Worker or Owner never has to
+reconstruct ownership from chat history.
+
+The Worker that observes this state MUST NOT:
+
+- mark the production deployment/cutover itself successful;
+- silently leave the state for an ownerless future session — it must be
+  persisted as `BLOCKED` per above before handoff;
+- automatically retry, roll back, or reconcile the production mutation;
+- invent a new recovery task or a new `next_authorized_task_packet_ref`
+  without Planner/Owner authority;
+- add a new lifecycle enum or checkpoint schema field for this state.
+
+A Judge verdict that the Worker's failure handling was itself correct (for
+example `VERIFIED` or `VERIFIED_WITH_CAVEATS` on the incident-handling
+behavior) does NOT convert an open production recovery incident into
+deployment success; `task_lifecycle_state` stays `BLOCKED` until the
+production acceptance the task actually intended is independently satisfied.
 
 ## Terminal closure and archiving
 

@@ -56,16 +56,38 @@ authorization never covers either one.
 
 ## 6. Authorization conversation boundary
 
-A Planner conversation records the Owner's standalone authorization, then
-hands a Worker Packet to a separate Worker conversation that only quotes the
-token. That quote is metadata, not evidence: the Worker has not observed the
-Owner say it, so it holds the high-risk step and asks the Owner to send the
-authorization directly into this conversation first. Once the Owner pastes
-that same standalone authorization as its own message here, then sends the
-Packet, the Worker checks the message against the exact action and target,
-treats it as valid evidence, and proceeds without asking a third time. Had
-Owner and Worker shared one conversation from the start, that same direct
-message would already have been sufficient — no separate handoff needed. In
-every case, an action outside the authorized envelope — an unlisted remote
+A Planner conversation records the Owner's authorization, then hands a Worker
+Packet to a separate Worker conversation that only quotes the token. That
+quote is metadata, not evidence: the Worker has not observed the Owner say it,
+so it holds the high-risk step with `OWNER_ACTION_AUTHORIZATION_REQUIRED`. The
+Owner then sends one direct message here carrying the Packet together with the
+exact action and target — no authorization-only message first. The Worker
+checks that message against the exact action and target, treats it as valid
+evidence, and proceeds without asking again. Had Owner and Worker shared one
+conversation from the start, a still-applicable prior direct authorization
+there would already have been sufficient. In every case, an action outside the authorized envelope — an unlisted remote
 deletion, say — stays `PENDING` regardless of how the original authorization
 arrived.
+
+## Compact flow without a Packet
+
+1. Classify the ask: plan-first beats task; a mixed “why and fix” is a task;
+   a pure question changes nothing. Ask one pointed question only when
+   evidence cannot resolve materially different deliverables.
+2. Define done as an observable result and name its verification. Check
+   assumptions instead of assuming them.
+3. Orient by enumerating safe sources, read primary sources, parallelize
+   independent expensive reads, time-box lookups, surface surprises, and make
+   one evidence-backed recommendation.
+
+The triviality gate requires one file, under about ten changed lines, no new
+behavior, and no searching. Otherwise use the full loop. For implementation,
+continue with intent → smallest coherent change → acceptance → surrounding
+verification → handoff/report.
+
+State checkable assumptions and load the applicable domain adapter before
+Step 2. The Fit gate routes reachable-source questions through the loop,
+researchable unknown techniques through bounded research first, pure inference
+to an explicitly low-confidence answer or one pointed question, and recurring
+specialized procedures to the installed skill-creator Skill. Name each such
+detour; never silently skip the loop.

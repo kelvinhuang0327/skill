@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "command": [
+    "/bin/bash",
+    "-c",
+    "source \"$1\"; compute_live_bundle_sha256 \"$2\" \"$3\"",
+    "_",
+    "/Users/kelvin/VibeCoding-WorkSpace/.worktrees/skill/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/fable-method/scripts/activate-live.sh",
+    "/Users/kelvin/VibeCoding-WorkSpace/.worktrees/skill/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/fable-method/platforms/claude/fable-method",
+    "claude"
+  ],
+  "stdout": "7413ee8ccd6b19bed8816a9585c5abd50ba47c9b5b37825c3db3fc54c47df7b7\n",
+  "stderr": "",
+  "exit_status": 0,
+  "started_at": "2026-09-24T12:28:09Z",
+  "ended_at": "2026-09-24T12:28:12Z"
+}

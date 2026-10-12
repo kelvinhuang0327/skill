@@ -5,7 +5,13 @@
 - [Compact Worker report](#compact-worker-report)
 - [Evidence labels](#evidence-labels)
 - [Platform consumer evidence view](#platform-consumer-evidence-view)
+- [Runtime transition provenance](#runtime-transition-provenance)
+- [Destructive action provenance](#destructive-action-provenance)
+- [Ownership and quiescence blocker evidence](#ownership-and-quiescence-blocker-evidence)
 - [Lifecycle closure](#lifecycle-closure)
+- [Context and continuity](#context-and-continuity)
+- [Filesystem accounting](#filesystem-accounting)
+- [Final artifact gate](#final-artifact-gate)
 
 Use the compact form for ordinary `FAST`/`STANDARD` work. Use the full
 evidence handoff for Judge-gated work, a blocked result, or a Packet that names
@@ -24,6 +30,9 @@ RISKS: <remaining unknowns or caveats>
 
 Every `VERIFIED` claim must trace to an observed command or runtime result.
 Never replace evidence with “should work”, “looks correct”, or “likely passes”.
+Command execution alone is not `PASS`. A load-bearing `PASS` requires the
+exact observed result to satisfy acceptance. A non-zero `git diff --check`
+cannot be reported `PASS`.
 If a prescribed follow-up was deliberately not taken, name it as:
 
 ```text
@@ -44,6 +53,18 @@ OVERALL_TASK_CONTRACT_RESULT:
 
 Earlier failures, aborts, timeouts, and terminations remain in the attempt and
 filesystem ledgers.
+
+Label verification provenance as `RUN_THIS_TASK` for checks actually executed
+this task/current phase, or `REUSED_EXACT_TREE_EVIDENCE` when valid evidence is
+reused for an identical command, environment, HEAD, and tree. Never call reused
+evidence a rerun. Reuse does not require rerunning a check solely to obtain a
+fresh label; keep `NOT RUN` distinct from `PASS`.
+
+`VERIFY_WORLD_NOT_SELF_REPORT`: prefer an external observation of changed
+behavior when practical — call the endpoint, exercise the affected UI,
+re-read/diff the mutated file, or run a read-only query when database state is
+load-bearing. A Worker saying it works is not verification, and this rule does
+not add an automatic browser, database, full-suite, or Judge requirement.
 
 ## Platform consumer evidence view
 
@@ -141,6 +162,130 @@ task's acceptance requires current materialization, Discovery, or Execution
 evidence remains task-specific, decided by that task's own acceptance
 criteria — not a universal consequence of using this view.
 
+## Runtime transition provenance
+
+When a Worker actually changes an installed/runtime HEAD, tree, executable
+binding, working-directory binding, plist binding, or equivalent production
+runtime identity, the terminal handoff must explicitly report the transition
+provenance.
+
+Capture that information in the same terminal handoff instead of forcing a
+future Agent to reconstruct it from reflog. Do not infer or fabricate
+transition ownership from later reflog/history.
+
+This is reporting provenance only. It must NOT:
+- authorize runtime mutation;
+- authorize launchctl actions;
+- weaken standalone Owner authorization;
+- create automatic rollback;
+- create a new runtime registry;
+- require permanent evidence files;
+- require extra commands when the transition information is already naturally
+  known to the Worker that performed the action;
+- make ordinary non-runtime tasks emit irrelevant transition fields.
+
+For a task that itself performs a runtime identity transition, terminal handoff
+must report:
+
+```text
+RUNTIME_TRANSITION_OCCURRED: YES
+RUNTIME_HEAD_BEFORE: <exact | NOT_APPLICABLE>
+RUNTIME_TREE_BEFORE: <exact | NOT_APPLICABLE>
+RUNTIME_HEAD_AFTER: <exact | NOT_APPLICABLE>
+RUNTIME_TREE_AFTER: <exact | NOT_APPLICABLE>
+RUNTIME_TRANSITION_AT: <timestamp>
+RUNTIME_TRANSITION_ACTION: <exact action>
+RUNTIME_TRANSITION_TASK_OR_RUN_ID: <exact current task/run identity if available>
+RUNTIME_BINDING_BEFORE: <exact executable/worktree/plist/service binding | NOT_APPLICABLE>
+RUNTIME_BINDING_AFTER: <exact executable/worktree/plist/service binding | NOT_APPLICABLE>
+ROLLBACK_TARGET: <exact pre-transition identity | NOT_APPLICABLE>
+```
+
+If the current task did not perform a runtime identity transition:
+
+```text
+RUNTIME_TRANSITION_OCCURRED: NO
+```
+
+Ordinary tasks with `RUNTIME_TRANSITION_OCCURRED: NO` remain backward compatible
+and do not emit the transition-specific fields above.
+
+## Destructive action provenance
+
+When a Worker actually performs a destructive filesystem / durable-resource
+removal authorized by its Packet, terminal handoff must report the destructive
+action provenance. This is reporting provenance only; it never authorizes a
+destructive action, and authorization remains governed by
+[operational gates](operational-gates.md) and the existing authorization
+evidence vocabulary.
+
+For an action this Worker actually performed, report:
+
+```text
+DESTRUCTIVE_ACTION_OCCURRED: YES
+DESTRUCTIVE_TARGET: <exact target or compact exact target set>
+DESTRUCTIVE_TARGET_PRESTATE: <exact observed state>
+DESTRUCTIVE_ACTION: <exact primitive/action>
+DESTRUCTIVE_ACTION_AT: <timestamp>
+DESTRUCTIVE_ACTION_AUTHORIZATION_SOURCE: <existing authorization evidence vocabulary>
+DESTRUCTIVE_ACTION_TASK_OR_RUN_ID: <exact current task/run identity if naturally available>
+DESTRUCTIVE_TARGET_POSTSTATE: <exact observed state>
+```
+
+`DESTRUCTIVE_ACTION_AUTHORIZATION_SOURCE` reuses the existing authorization
+evidence vocabulary; it does not define a second authority model. If the
+current Worker performs no destructive action:
+
+```text
+DESTRUCTIVE_ACTION_OCCURRED: NO
+```
+
+Do not require the detailed YES-only fields for ordinary non-destructive tasks.
+
+A target observed as `ALREADY_ABSENT` means the current Worker did not need to
+perform deletion; it must not be reported as evidence that this Worker
+executed a destructive action. A later observer may report current absence,
+but must not infer who deleted the target without provenance evidence.
+
+This contract does not require a new persistent receipt/evidence framework,
+registry, evidence database, receipt file, ledger service, or runtime storage.
+Do not require an extra command solely for reporting when the Worker naturally
+knows the information from the action it just performed.
+
+## Ownership and quiescence blocker evidence
+
+When a task-relevant runtime ownership or quiescence gate — [scope-qualified
+writer and quiescence checks](task-checkpoint.md#scope-qualified-writer-and-quiescence-checks),
+[worktrees and mutation evidence](operational-gates.md#worktrees-and-mutation-evidence),
+or an equivalent load-bearing observation — blocks execution, the terminal or
+blocked handoff must report the exact evidence naturally available from that
+observation, for every load-bearing matched owner:
+
+```text
+OWNER_PID:
+OWNER_PPID:
+OWNER_EXECUTABLE:
+OWNER_ARGV:
+OWNER_CWD:
+OWNER_MATCHED_EVIDENCE:
+OWNER_ROLE_MARKERS:
+OWNER_SOURCE_OR_RUNTIME_MATCH:
+OWNER_LOCK_STATES:
+OWNERSHIP_OBSERVED_AT:
+```
+
+Report `UNKNOWN` for a field that is genuinely unavailable rather than
+inventing a value. This is diagnostic reporting only: it must NOT define a
+second ownership classifier, exempt a process from an existing scoped
+ownership rule, alter role semantics, perform a workspace-wide process scan
+beyond what the blocking check already inspected, or weaken any existing
+scope-qualified ownership or quiescence rule. The purpose is that a later RCA
+can distinguish, for example, a real scheduler owner from a caller-chain
+observer, a wrapper, or a lock holder without reconstructing the failed
+process snapshot from chat history. Do not require an extra command solely
+for this report when the blocking check already naturally observed these
+fields.
+
 ## Lifecycle closure
 
 `FULL_PR_LIFECYCLE_CLOSED: YES` requires every applicable lifecycle surface —
@@ -178,3 +323,144 @@ FULL_PR_LIFECYCLE_CLOSED: NO
 
 Do not prewrite a Judge verdict, claim publication, or call local completion a
 closed PR lifecycle.
+
+## Context and continuity
+
+Never infer model identity, context capacity, current usage, or billing policy
+from the product name or maximum window. Resolve each independently and mark
+unavailable values `UNKNOWN`; do not make a cost-multiplier claim unless the
+active model, plan/policy, and threshold are current and authoritative.
+
+When exact usage metadata is unavailable, report
+`CURRENT_CONTEXT_PERCENT: UNKNOWN`,
+`CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC`, and a qualitative pressure level.
+At a stable milestone or before a large phase/handoff, preserve only observed
+state: exact repository/branch/HEAD/tree/status, active processes and pending
+mutations, completed files/commits, verification and `NOT RUN`, failed
+attempts, blocker, next action/milestone, and stop conditions. Do not write a
+checkpoint unless the Packet supplies both
+`HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE` and an exact `HANDOFF_OUTPUT_PATH`;
+default to `TRANSCRIPT_ONLY`.
+
+After compaction or resume, report `CONTEXT_REHYDRATION_STATUS: PASS` only when
+project, task, authority, repository, sandbox, modified-path ledger, observable
+history, milestone, blocker, next action, next milestone, and stop conditions
+are all resolved. Otherwise report `CONTEXT_HANDOFF_INCOMPLETE` and do only
+read-only state resolution. Resume never clears a blocker, extends
+authorization, hides a failed attempt, or reopens a stopped mutation.
+
+## Filesystem accounting
+
+Keep these lifecycle axes distinct:
+
+```text
+IMPLEMENTATION_LIFECYCLE_STATUS: NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED | NOT_APPLICABLE
+PR_PUBLICATION_STATUS: NOT_APPLICABLE | NOT_CREATED | DRAFT_OPEN | READY_OPEN | MERGED | BLOCKED
+POSTMERGE_LIFECYCLE_STATUS: NOT_APPLICABLE | NOT_STARTED | IN_PROGRESS | COMPLETE | BLOCKED
+BRANCH_CLEANUP_STATUS: NOT_APPLICABLE | RETAINED_WHILE_PR_OPEN | DELETED | ALREADY_ABSENT | BLOCKED
+FULL_PR_LIFECYCLE_CLOSED: YES | NO
+```
+
+Terminal absence proves current state only. `ALREADY_ABSENT` does not by
+itself prove `DELETED_BY_THIS_TASK`. A handoff claim that this task deleted,
+removed, changed, or otherwise caused a destructive mutation must be supported
+by an exact entry in the existing task command or filesystem ledger recording
+the action and its actual observed result or exit status, not by terminal-state
+evidence alone.
+
+`FULL_PR_LIFECYCLE_CLOSED: YES` requires verified merge containment,
+post-merge checks, cleanup, and a clean/restored workspace. Local completion
+without publication is not a publication failure. Keep unauthorized actions
+under `NOT RUN`; use `BLOCKED` for authorized or required work a gate stopped.
+
+Every load-bearing `BLOCKED` gate in a terminal handoff includes exactly one
+compact inline blocker record — `BLOCKER_CODE:`, `BLOCKER_DETAIL:`, and
+`SMALLEST_NEXT_ACTION:` (or a named-gate prefix, such as
+`A2_BLOCKER_CODE:`) — so a downstream Agent can select the next action without
+local filesystem access to the originating Agent. The inline record is a
+transfer summary, not a second authority: a durable artifact or exact locator
+remains canonical for full evidence, but must never be the sole carrier of the
+fact needed to decide what happens next. It does not replace artifact paths,
+hashes, full evidence, runtime receipts, or exact authority locators.
+
+```text
+BLOCKER_CODE:
+BLOCKER_DETAIL:
+SMALLEST_NEXT_ACTION:
+```
+
+`BLOCKER_DETAIL` states the actual missing or invalid fact when known — for
+example, a missing strategy, draw, config, seed, unsupported capability, or
+unresolved authority — never a vague `see artifact`, `blocked`, or `needs
+investigation` once the exact blocking fact was observed. When genuinely
+unknown, state `UNKNOWN` and name the smallest bounded resolution action.
+`SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap. Each
+independently blocked gate carries its own record rather than one blocker
+duplicated under aliases. A `COMPLETE` handoff needs no blocker record.
+
+For judged, publication-bound, or Tier-2 runtime work, report the complete
+ledger with `NONE` only when a partition is truly empty:
+
+```text
+FILES_WRITTEN_DURING_TASK:
+FILES_RETAINED_AT_END:
+FILES_DELETED_BEFORE_END:
+TASK_CREATED_FILES_RETAINED:
+TASK_CREATED_FILES_DELETED:
+PRE_EXISTING_FILES_RETAINED_UNCHANGED:
+PRE_EXISTING_FILES_MODIFIED_AND_RATIFIED:
+FILES_MODIFIED_DURING_TASK:
+REPOSITORY_FILES_MODIFIED:
+TOOLCHAIN_RUNTIME_OUTPUTS_CREATED:
+TOOLCHAIN_RUNTIME_OUTPUTS_MODIFIED:
+PRE_EXISTING_RUNTIME_OUTPUTS_RETAINED_UNCHANGED:
+WORKTREE_MATERIALIZATION_CREATED:
+WORKTREE_MATERIALIZATION_UPDATED:
+WORKTREE_MATERIALIZATION_REMOVED:
+GIT_NETWORK_METADATA_WRITES:
+GIT_WORKTREE_METADATA_WRITES:
+HARNESS_GIT_METADATA_WRITES:
+```
+
+Keep `TASK_COMMIT`, `TASK_TREE`, `FINAL_HEAD`, `FINAL_TREE`,
+`CANONICAL_FINAL_HEAD`, `CANONICAL_FINAL_TREE`, and `COMMIT_LINK` distinct.
+Local-only commits use `COMMIT_LINK: NOT_APPLICABLE`.
+
+## Final artifact gate
+
+Before a behavior-changing edit, include this exact intent line in the final
+report:
+
+```text
+INTENT: code does <X>; the check/task expects <Y>; the opened spec says <Z>
+```
+
+Hostile-review the final report against the Packet and actual diff/status.
+Every changed path must be authorized; every `PASS` needs an observed command,
+observation, or valid same-tree evidence. Do not return terminal success while
+a mandatory criterion is `NOT RUN`, unresolved, or contradicted. Add the
+required `AUTH:`, `PENDING:`, or `TWINS:` line when its condition applies. Lead
+with what happened; distinguish `NOT RUN`, `BLOCKED`, and `UNKNOWN`. Never
+claim deployment, publication, runtime success, equality, or cleanup without
+observing it. `FULL_PR_LIFECYCLE_CLOSED: YES` also requires a verified merge
+commit, target containment, required post-merge checks, cleanup, and a
+clean/restored workspace.
+
+When a task changes runtime identity, report `RUNTIME_TRANSITION_OCCURRED: YES`
+with before and after HEAD/tree/bindings, action, timestamp, task/run ID, and
+rollback target. Otherwise report `RUNTIME_TRANSITION_OCCURRED: NO`.
+
+For judged or publication-bound work, also include:
+
+```text
+LOCAL_FULL_SUITE_RUNS:
+FOCUSED_TEST_RUNS:
+INITIAL_JUDGE_RUNS:
+DELTA_REJUDGE_RUNS:
+FULL_JUDGE_RUNS:
+EXACT_HEAD_CI_RUNS:
+REUSED_EVIDENCE:
+INVALIDATED_EVIDENCE:
+```
+
+Leave no task-created scratch debris.

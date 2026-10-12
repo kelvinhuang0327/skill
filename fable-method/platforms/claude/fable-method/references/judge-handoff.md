@@ -4,8 +4,13 @@
 
 - [When the Judge gate fires](#when-the-judge-gate-fires)
 - [Depth and evidence reuse](#depth-and-evidence-reuse)
+  - [Verification temp isolation](#verification-temp-isolation)
+- [Depth reconciliation](#depth-reconciliation)
 - [Remediation limit](#remediation-limit)
+- [Fresh Judge session lineage](#fresh-judge-session-lineage)
+- [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
+  - [Non-Git artifact route](#non-git-artifact-route)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -16,14 +21,28 @@ verdict.
 
 The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
 category and material consequence together. Do not restate or widen that list
-here. A single acceptance failure is not a trigger; a second retry whose cause
-is still unattributed is. `LOOP_JUDGED` is judged by route definition, not by
-category.
+here. `LOOP_JUDGED` is judged by route definition, not by category.
 
-`READ_ONLY_COMPLETION_REVIEW` goes directly to `fable-judge` and has no Worker
-route. A Worker with no fresh-context capability may self-check only, must mark
-`JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim independent `VERIFIED` for a
-Judge-gated task.
+The routing fields have separate jobs: `JUDGE_TRIGGER` answers whether an
+independent Judge is required at all. `JUDGE_MODE` answers how that handoff
+occurs, or is `NOT_APPLICABLE` when no Judge applies. `JUDGE_DEPTH` is
+`BOUNDED`, `FULL`, or `DELTA` only after a Judge actually applies. When no
+named mandatory Judge trigger applies and `JUDGE_MODE: NOT_APPLICABLE`, set
+`JUDGE_DISPATCH: SUPPRESSED`; the Worker terminal state remains the final task
+state. Do not create, schedule, invoke, fall back to, or automatically escalate
+into any Judge. When a named mandatory Judge trigger applies,
+`JUDGE_MODE: NOT_APPLICABLE` is a contract conflict:
+`STOP: JUDGE_MODE_CONTRACT_CONFLICT`. Do not suppress the mandatory Judge or
+silently override the Packet. Check this boundary after `JUDGE_TRIGGER`
+resolution and before any Judge handoff or depth evaluation. `FRESH_CONTEXT`
+and `SELF_CHECK_ONLY` retain their existing routing semantics.
+
+`READ_ONLY_COMPLETION_REVIEW` is a task class, not an unconditional Judge
+trigger. Resolve the Judge trigger and mode before dispatch. A named mandatory
+Judge trigger with `JUDGE_MODE: FRESH_CONTEXT` still requires an independent
+`fable-judge` handoff. A Worker with no fresh-context capability may
+self-check only, must mark `JUDGE_MODE: SELF_CHECK_ONLY`, and must not claim
+independent `VERIFIED` for a Judge-gated task.
 
 ## Depth and evidence reuse
 
@@ -83,6 +102,23 @@ suite after the Judge or permitted remediation. A load-bearing edit after a
 full suite invalidates it. `FULL` does not mean rerunning an already-valid
 same-final-tree full suite a second time.
 
+### Verification temp isolation
+
+Before a Judge-authoritative full suite or otherwise one-shot expensive
+verification:
+
+1. freeze the judged source HEAD/tree;
+2. resolve the verification temp/scratch root;
+3. if in-tree temp state could affect judged tree/evidence identity:
+   require temp root outside the judged source worktree;
+4. classify that temp resource:
+   TEMPORARY_DELETE;
+5. only then consume the expensive verification run.
+
+Do not require external temp roots for every ordinary focused test. A preflight
+failure on temp placement stops execution before running the expensive suite,
+leaving the verification run unconsumed and the source tree uncontaminated.
+
 Before handoff, state:
 
 ```text
@@ -94,6 +130,80 @@ JUDGE_DEPTH_REASON:
 state. "High quality", "complex task", "important", "many files", "safer", and
 "thorough" are adjectives, not triggers.
 
+## Depth reconciliation
+
+A Packet may declare its own expected Judge depth; this section states how
+that declared depth reconciles with the canonical required depth above, so an
+under-specified Packet escalates exactly once instead of repeating an
+unexplained `STOP`. Both depths, and the reconciliation between them, are
+derived fresh from the current Packet, its acceptance criteria, and the
+exact-tree evidence already gathered — never from a separate registry, and
+never persisted past the current task's evidence state.
+
+Before the first Judge handoff attempt, state:
+
+```text
+PACKET_JUDGE_DEPTH: NOT_APPLICABLE | BOUNDED | FULL | DELTA
+CANONICAL_REQUIRED_JUDGE_DEPTH: NOT_APPLICABLE | BOUNDED | FULL | DELTA
+JUDGE_DEPTH_RECONCILIATION: MATCH | ESCALATION_REQUIRED
+MISSING_JUDGE_EVIDENCE: <exact evidence list | NONE>
+IMPLEMENTATION_MUTATION_REQUIRED: YES | NO
+```
+
+`PACKET_JUDGE_DEPTH` is `NOT_APPLICABLE` only when the Packet names no depth.
+`CANONICAL_REQUIRED_JUDGE_DEPTH` is computed from [Depth and evidence
+reuse](#depth-and-evidence-reuse) exactly as written there; this section adds
+no second trigger list. Compare the two on the single ordering
+`BOUNDED < FULL`. `DELTA` never enters that ordering on either side: it is the
+[Remediation limit](#remediation-limit) re-Judge state and reconciles by that
+section's own rule, not this one; a `NOT_APPLICABLE` canonical depth means no
+Judge applies at all, so nothing here can fire.
+
+`JUDGE_DEPTH_RECONCILIATION: MATCH` when the Packet's depth is
+`NOT_APPLICABLE` or already at or above the canonical required depth on that
+ordering; proceed normally. `JUDGE_DEPTH_RECONCILIATION: ESCALATION_REQUIRED`
+when the canonical required depth is strictly deeper than the Packet's
+declared depth. A depth mismatch by itself is never evidence that the
+implementation is wrong, that source remediation is needed, or that a new
+worktree or sibling task is required — it states only that a deeper Judge,
+and the evidence a deeper Judge needs, must still be produced.
+
+Name the missing evidence precisely, e.g. `MISSING_JUDGE_EVIDENCE:
+FULL_SUITE` for a `BOUNDED → FULL` escalation. `MISSING_JUDGE_EVIDENCE: NONE`
+whenever valid same-exact-tree evidence for the required depth already exists
+under the [reuse rule above](#depth-and-evidence-reuse) — identical command,
+environment, HEAD, and tree, not invalidated — regardless of whether that
+evidence predates this reconciliation or was supplied afterward; proceed
+directly to that depth's Judge. Reuse, never replay. A tree change after that
+evidence was captured invalidates it under the same reuse rule, so a later
+reconciliation against the changed tree must treat the evidence as missing
+again, never as still satisfying the escalation.
+
+`IMPLEMENTATION_MUTATION_REQUIRED: NO` whenever the escalation is a pure
+depth or evidence gap — the ordinary case, since the trigger that raised the
+required depth describes what the change touches or what the acceptance
+criteria demand, not a defect in what was built. Reserve
+`IMPLEMENTATION_MUTATION_REQUIRED: YES` for the narrow case where the deeper
+depth's evidence cannot be produced against the current tree at all because a
+capability the acceptance criteria demand is genuinely absent, not merely not
+yet run; treat that as a Planner Delta or Owner decision, never a silent
+Worker guess.
+
+When `IMPLEMENTATION_MUTATION_REQUIRED: NO`, request exactly one Continuation
+Delta limited to `MISSING_JUDGE_EVIDENCE` and stop there: keep the same
+branch, the same worktree, the same implementation tree, and every existing
+exact-tree evidence artifact already gathered. Do not re-implement, reset, or
+search for a different answer.
+
+A later continuation against the same implementation tree, the same required
+depth, and the same missing evidence must restate this exact escalation
+block — `JUDGE_DEPTH_RECONCILIATION`, `CANONICAL_REQUIRED_JUDGE_DEPTH`,
+`MISSING_JUDGE_EVIDENCE`, and `IMPLEMENTATION_MUTATION_REQUIRED` — rather than
+an unexplained repeated `STOP`/`BLOCKED`. Once the named evidence is actually
+supplied at the same exact tree, `MISSING_JUDGE_EVIDENCE` becomes `NONE` and
+the task proceeds straight to the required depth's Judge without a second
+escalation.
+
 ## Remediation limit
 
 Allow at most one bounded remediation after a `REFUTED` Judge finding. Rerun
@@ -102,12 +212,67 @@ complete local suite once on the remediated tree. Then hand off a `DELTA`
 re-Judge. If the same finding is refuted again, stop with
 `BLOCKED_AFTER_JUDGE_REFUTATION`; do not start another cycle.
 
+## Fresh Judge session lineage
+
+Session naming is orchestration metadata only and never means context reuse: a
+Fresh Context Judge always has independent context. Request `<parent>-judge`
+for the first fresh Judge and `<parent>-judge-rN` for the nth fresh re-Judge
+after remediation, with `N` starting at 2. Resolve the parent name from the
+actual parent session; when it is unavailable, report
+`PARENT_SESSION_NAME: UNKNOWN` and do not invent a name. Report requested and
+actual names separately in every handoff:
+
+```text
+PARENT_SESSION_NAME: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>
+JUDGE_SESSION_RELATION: FRESH_CONTEXT_CHILD | FRESH_CONTEXT_REJUDGE
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_CAPABILITY: SUPPORTED | REQUEST_METADATA_ONLY | UNSUPPORTED | UNKNOWN
+JUDGE_SESSION_LINEAGE_RULE: first fresh Judge <parent>-judge; nth fresh re-Judge after remediation <parent>-judge-rN (N starts at 2)
+HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME: YES | NO | UNKNOWN
+```
+
+When the harness supports explicit child-session naming, use the requested
+name. When it supports request metadata only, emit the requested name but do
+not claim the actual session was renamed. When naming is unsupported, report
+`UNSUPPORTED` and continue the independent Fresh Context Judge.
+
+## Durable terminal capture
+
+When a Judge-owned long-running command has a load-bearing terminal result,
+persist it with `DurableCommandCapture`
+(`fable-method/scripts/task_checkpoint.rb`) to
+`.fable/checkpoints/<task_id>/captures/<capture_id>.json` before that result
+is relied upon for the final verdict: exact argv, exact stdout, exact stderr,
+underlying process exit status, and start/end timestamps. The durable file,
+not UI or subagent streaming, is the sole authority for that result.
+
+`DurableCommandCapture#verdict` returns `PASS` only when the record is
+complete and the exit status is exactly `0`; a non-zero exit status is always
+`FAIL`, never `PASS`. Missing, unreadable, or incomplete evidence is always
+`UNKNOWN_UNVERIFIABLE` rather than an inferred `PASS` or a guessed failure
+class. Losing one command's evidence does not invalidate a sibling capture
+file; rerun only the specific unresolved load-bearing command.
+
+`DurableCommandCapture` never reads or persists the parent environment: it
+captures exactly the argv it was given and exactly the stdout/stderr the
+command produced, reusing this repository's existing lack of a broader
+redaction system rather than inventing a new one.
+
 ## Handoff payload
 
 Provide the original Packet and forbidden actions; repository, branch, HEAD,
 tree, worktree and status; actual diff; exact authorized scope; acceptance
-criteria; route and Judge mode/depth; commands, exit statuses, and raw
-summaries; runtime evidence; all unknowns and failed attempts; and the complete
+criteria; route, Judge mode/depth, and implementation depth (with
+`ENHANCED_EVIDENCE` per [implementation depth](implementation-depth.md) when
+applicable). The implementation-depth evidence in this payload must include
+`DEPTH_SOURCE` alongside `IMPLEMENTATION_DEPTH`, using the exact two-value enum
+defined by `implementation-depth.md`. The Judge independently derives its own
+Judge trigger/depth and must not treat `DEPTH_SOURCE` as authority for Judge
+depth. Include commands, exit statuses, and raw summaries (durable per
+[Durable terminal capture](#durable-terminal-capture) when load-bearing);
+runtime evidence; all unknowns and failed attempts; and the complete
 filesystem write/retained/deleted ledger.
 
 The Judge re-derives its verdict from the Packet, diff, and evidence. Do not
@@ -117,6 +282,83 @@ Final-tree identity is Worker-owned: the Planner supplies Judge mode/depth but
 must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
+
+### Non-Git artifact route
+
+When the judged output is a generated artifact under a non-Git source root (see
+[operational gates](operational-gates.md) on non-Git source roots), the handoff
+replaces the repository, branch, HEAD, and tree fields with a manifest-based
+snapshot identity. The Worker supplies:
+
+- `ARTIFACT_ROOT`: the exact absolute canonical artifact root, repeated
+  unchanged in both snapshots. Each manifest records `ROOT_EXISTS` from a
+  no-follow check, `ROOT_ENTRY_TYPE`, `ROOT_MODE` when present, and
+  `ROOT_CHILDREN_ENUMERATED`. An absent root has `ROOT_EXISTS: false`, no entry
+  type or mode, and no entries; an existing empty directory has
+  `ROOT_EXISTS: true`, `ROOT_ENTRY_TYPE: DIRECTORY`, its directory mode, and an
+  empty entry list. Only `ENOENT` establishes an absent root; any other root
+  inspection error rejects the scan. Do not treat these states as equal.
+- `BASELINE_MANIFEST` and `FINAL_MANIFEST`: each is a deterministic UTF-8
+  manifest captured before the first write and after the last. Each records
+  `MANIFEST_SCHEMA_VERSION: 1` and `MANIFEST_STATUS: COMPLETE` only when the
+  root and every descendant have been completely inventoried. `ENTRIES`
+  contains every descendant directory and regular file, including empty
+  directories. Each entry has a normalized root-relative `RELATIVE_PATH`, an
+  `ENTRY_TYPE` of `DIRECTORY` or `REGULAR_FILE`, and POSIX permission and
+  special-bit `MODE` (`st_mode & 07777`) in fixed-width octal. Directory entries
+  also say `CHILDREN_ENUMERATED: true`; each regular-file entry has
+  `SIZE_BYTES` and `SHA256`. No entry may be omitted because it is empty,
+  irrelevant, unreadable, or inconvenient.
+- `BASELINE_MANIFEST_SHA256` and `FINAL_MANIFEST_SHA256`: SHA-256 hashes of the
+  exact saved canonical manifest bytes, excluding these detached hash fields.
+- `ARTIFACT_SHA256`: the path and SHA-256 of each relevant artifact, taken from
+  the final manifest;
+- `MANIFEST_DELTA`: the added, changed, and removed paths between the two
+  manifests, computed by comparing the complete entry sets and all entry
+  fields (including type, mode, size, and file hash), plus exact root path,
+  root existence, type, mode, and child-enumeration status. Sort `ENTRIES` by
+  normalized relative-path UTF-8 bytes and serialize as canonical UTF-8 JSON
+  with a fixed schema, field order, and no insignificant whitespace before
+  hashing. The Judge compares the complete baseline and final manifests;
+  comparing only relevant artifacts is insufficient.
+- `WRITE_LEDGER`: this operation's write, retained, and deletion ledger,
+  including any artifact created and later deleted;
+- `ACCEPTANCE_CRITERIA`: the specific checks the Judge applies to each relevant
+  artifact, each with its command or inspection method.
+
+For path identity, encode each root-relative component as valid UTF-8 in
+Unicode NFC and join components with `/`. Reject absolute paths, empty, `.` or
+`..` components, backslashes, invalid encodings, paths that escape the root,
+and any duplicate normalized path. A normalization collision is a rejected
+manifest, even when the original names differ. Use `lstat` or
+`fstatat(..., AT_SYMLINK_NOFOLLOW)` on every entry; open and enumerate each
+directory without following links, and open regular files with no-follow
+semantics (`openat(..., O_NOFOLLOW)` or an equivalent), then verify the opened
+object with `fstat` before reading it. The root itself must be checked without
+following it and must be a real directory when present.
+
+Fail closed on a root or descendant symbolic link; nested Git repository,
+`.git` directory or pointer, or submodule; FIFO, socket, device, or any other
+special file; normalization collision or invalid path; and every enumeration,
+metadata, or read error that prevents a complete inventory. Detect nested Git
+metadata from entry names and no-follow types before descending into it or
+opening its contents; reject bare-repository markers as well. For a rejected
+scan, record `MANIFEST_STATUS: REJECTED` and each unsafe candidate path (raw
+path if it cannot be normalized), observed type/mode when available, and
+rejection reason in a diagnostic. Do not publish a complete manifest, a
+manifest hash, or snapshot identity for that scan. Never follow a link or read
+the linked target, a `.git` pointer, or other rejected content. Any uncertainty
+about completeness is rejection, not a silently omitted entry.
+
+A complete manifest proves identity only for the filesystem snapshot observed
+by that scan. It is not Git provenance and does not prove that no other
+activity occurred during execution or between the baseline and final scans.
+Do not write a commit or tree value for a non-Git root, and do not derive one
+from a manifest hash. If the artifact cannot be reproduced, or a required
+manifest, hash, or ledger entry is missing, state `UNVERIFIABLE` or `UNKNOWN`
+with the exact missing item rather than filling the gap. This route does not
+change Judge launch authority, depth selection, or verdict standards; the Judge
+still derives its own trigger and depth from the Packet and evidence.
 
 ## Verdict and lifecycle boundaries
 

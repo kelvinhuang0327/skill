@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "command": [
+    "/bin/bash",
+    "/Users/kelvin/VibeCoding-WorkSpace/.worktrees/skill/FABLE_CODEX_CLAUDE_REVIEWED_LOCAL_DRIFT_REPLACEMENT_R1/fable-method/scripts/activate-live.sh",
+    "--activate",
+    "--platform",
+    "codex",
+    "--skill",
+    "fable-method",
+    "--replace-reviewed-local-drift",
+    "--expected-live-sha256",
+    "be2e880e4ec640fc45e93558baa326fd8ebb89e275657f33741109379cde24fc",
+    "--expected-canonical-head",
+    "51a543997739249933e36d9acce23c212f7d5053",
+    "--expected-canonical-tree",
+    "f21e5ec9e3c9f32137a56e083ecba818fbca0678",
+    "--expected-materialization-tree",
+    "f67d6268e9337dcdda18ad482c7ac55b8f7b3bb4"
+  ],
+  "stdout": "PLATFORM: codex\nACTIVATION_MODE: REPLACE_REVIEWED_LOCAL_DRIFT\nEXPECTED_LIVE_SHA256: be2e880e4ec640fc45e93558baa326fd8ebb89e275657f33741109379cde24fc\nEXPECTED_CANONICAL_HEAD: 51a543997739249933e36d9acce23c212f7d5053\nEXPECTED_CANONICAL_TREE: f21e5ec9e3c9f32137a56e083ecba818fbca0678\nEXPECTED_MATERIALIZATION_TREE: f67d6268e9337dcdda18ad482c7ac55b8f7b3bb4\nACTIVATION_RESULT: ACTIVATED\nFINAL_STATE: EXACT_CURRENT_MATERIALIZATION\nCANONICAL_HEAD: 51a543997739249933e36d9acce23c212f7d5053\nCANONICAL_MASTER_HEAD: 51a543997739249933e36d9acce23c212f7d5053\nLIVE_TARGET: /Users/kelvin/.codex/skills/fable-method\n",
+  "stderr": "",
+  "exit_status": 0,
+  "started_at": "2026-09-24T12:26:45Z",
+  "ended_at": "2026-09-24T12:27:02Z"
+}

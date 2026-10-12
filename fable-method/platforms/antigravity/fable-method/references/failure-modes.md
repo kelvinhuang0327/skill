@@ -17,12 +17,54 @@ needs diagnosis.
 | 10 | Option dump | No recommendation was made | One recommendation rule |
 | 11 | Scope creep | Drive-by refactors appeared | Exact scope/smallest change |
 | 12 | Silent step dropping | A required item quietly never happened | Written checklist and audit |
-| 13 | Retry thrash | Same fix was tried indefinitely | Three-attempt bound |
+| 13 | Retry thrash | Blind or speculative retries continued without reducing uncertainty | Falsifiable-hypothesis and exhaustion gates |
 | 14 | Verification theater | “Should work” replaced a run | Observed target + surrounding check |
 | 15 | Unauthorized action | Push/deploy/send followed documentation alone | Quoted authorization |
 | 16 | Dropped follow-up | Required deploy/restart was omitted from report | `PENDING` caveat |
 | 17 | Missed twins | One defect site was fixed without a sweep | `TWINS` search |
 | 18 | Costume rigor | Thorough-looking claims had no evidence | Fit gate and runnable checks |
+| 19 | Non-authoritative signal | A stale, cached, or wrong-scope source was trusted as current/ground truth | Authority-source check |
 
 Skipped steps create the corresponding risk. A claimed-but-unobserved step is
 verification theater, not a pass.
+
+## Acceptance failures, retries, and stop tokens
+
+On acceptance failure, attribute in order: harness/fixture/command, then the
+deployment or execution chain, then the product invariant. Each continuation
+must test a falsifiable hypothesis and materially reduce uncertainty. When a
+correction is applied, rerun the real check and retain its actual output. Keep
+an `ATTEMPT_LEDGER` for failures, retries, timeouts, terminations, overwritten
+or deleted artifacts, and superseded evidence.
+
+When one candidate has CI results from more than one event (for example `push`
+and `pull_request`, or a pre-merge PR and post-merge `main`), keep each event's
+result separate and attribute each failure in the order above. For every run,
+record the event, source HEAD, actual checkout HEAD, checkout role, and Git
+tree. Matching trees show equivalent content; they do not make the events
+identical. A PASS from one event never hides a FAIL or timeout from another, and
+each required pre-merge and post-merge result stays as its own evidence.
+Exact-head verification still follows its own contract; a matching tree never
+substitutes for an exact-head run.
+
+Identical blind retries and speculative patches are not evidence progress.
+Evidence-progressing RCA has no arbitrary numeric ceiling, but stop when scope,
+safety, authority, capability, proportionality, or discriminating evidence is
+exhausted. External credentials, permissions, missing runtimes, and unresolved
+authority remain blockers.
+
+A stop token is final for the current task authority: no mutation, equivalent
+command substitution, metadata workaround, upstream rewrite, or retry under a
+different action class until a new authoritative Owner instruction or valid
+Continuation Delta. `DO_NOT_POLL`: report the stop and end the turn; do not
+sleep, poll, schedule a wakeup, or re-check while waiting, except for the
+deferred queue's single required recheck.
+
+When a fixed defect came from a construct that could plausibly recur elsewhere,
+search the safe project for it and report:
+
+```text
+TWINS: searched <pattern> - found <N> other sites: <files or none>
+```
+
+Skip that search for a one-off or locally scoped defect.
