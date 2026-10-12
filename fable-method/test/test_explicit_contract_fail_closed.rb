@@ -17,6 +17,12 @@ class ExplicitContractFailClosedTest < Minitest::Test
     paths.each_value { |path| assert File.file?(path), path }
   end
 
+  def test_declared_direct_consumer_requires_its_focused_smoke
+    contract = Parser.skill.gsub(/\s+/, ' ')
+    assert_includes contract,
+                    "When the declared acceptance surface includes the directly bound consumer of a changed runtime component, run the consumer's focused smoke alongside the focused check for that component; checking component identity alone does not verify its consumer API."
+  end
+
   def test_result_binding_nonzero_git_diff_check_cannot_be_pass
     refute Parser.load_bearing_pass?(
       command: 'git diff --check',

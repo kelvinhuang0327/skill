@@ -122,6 +122,8 @@ A failed acceptance is attributed and retried only through a falsifiable hypothe
 
 Verify by observation; source inspection or command execution alone is not a passing result. `NOT RUN` is never `PASS`. Run the named acceptance and only directly relevant surrounding checks. Stop after acceptance and required checks pass. For Judge triggers, evidence reuse, depth, Fresh Context handoff, and the one-remediation limit, use [Judge handoff](references/judge-handoff.md).
 
+When the declared acceptance surface includes the directly bound consumer of a changed runtime component, run the consumer's focused smoke alongside the focused check for that component; checking component identity alone does not verify its consumer API.
+
 For a resolved FAST task, prefer one bounded verification action containing already-required checks when they are independent and safe to group: for example, focused tests, formatter/linter checks, `git diff --check`, changed-path verification, and final tracked-status checks when applicable. Keep dependent checks serial under the preflight grouping rule above, and observe every required result; a grouped invocation alone is not PASS. Once acceptance is falsifiably covered and every required check passes, stop verification and reuse that evidence for handoff. Do not add a broad inspection, full suite, Judge, evidence pass, or separate identity/reporting verification pass unless explicitly required by the task, an applicable existing gate, or a new live contradiction. Specifically authorized commit/publication and their required identity/status observations still follow the existing lifecycle gates.
 
 ## Lifecycle and filesystem accounting
