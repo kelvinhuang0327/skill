@@ -2007,6 +2007,10 @@ class TaskCheckpointRunTest < Minitest::Test
     @worktree = File.join(@tmpdir, 'upstream-cwd')
     @caller = File.join(@tmpdir, 'caller-cwd')
     [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
+    _git_stdout, git_stderr, git_status = Open3.capture3('git', '-C', @repo, 'init', '--quiet')
+    assert git_status.success?, git_stderr
+    StableLockAnchor.initialize_repository_generation!(@repo, confirm_legacy_workers_quiescent: true)
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) { |_lock| }
     @launches = File.join(@tmpdir, 'launches')
     @release = File.join(@tmpdir, 'release')
     @application_state = File.join(@tmpdir, 'application-checkpoint.bin')
@@ -2460,8 +2464,10 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE, ExecutionRecord.load(record_path(identity)).classify
     assert_equal 1, launch_records.size
     refute File.exist?(capture_path(identity))
-    assert_equal [ExecutionRecord.task_lock_path(@repo, TASK_ID), record_path(identity)].sort,
-                 Dir.glob(File.join(@repo, '**', '*'), File::FNM_DOTMATCH).select { |path| File.file?(path) }.sort
+    assert File.file?(ExecutionRecord.task_lock_path(@repo, TASK_ID))
+    worktree_files = Dir.glob(File.join(@repo, '.fable', '**', '*'), File::FNM_DOTMATCH)
+                        .select { |path| File.file?(path) }.sort
+    assert_equal [record_path(identity)], worktree_files
   end
 
   def test_recover_run_stale_dead_execution_preserves_history_and_checkpoint_before_child
@@ -3281,7 +3287,9 @@ class TaskCheckpointRunTest < Minitest::Test
       assert_equal '', result[0]
     end
     assert_empty launch_records
-    [@repo, @worktree, @caller].each { |path| assert_empty Dir.children(path) }
+    assert_equal ['.git'], Dir.children(@repo).sort
+    assert_empty Dir.children(@worktree)
+    assert_empty Dir.children(@caller)
   end
 
   def nested_leaf(label)
@@ -3343,7 +3351,8 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal outer_record.pid, Integer(parent_line.split(':').last), 'the parent is the outer launcher child'
     assert_equal inner_record.pid, Integer(leaf_line.split(':').last), 'the leaf is the nested launcher child'
     lineage = JSON.parse(File.read(ExecutionRecord.task_lock_path(@repo, TASK_ID)))
-    assert_equal({ 'schema_version' => ExecutionRecord::SCHEMA_VERSION, 'task_id' => TASK_ID,
+    assert_equal({ 'schema_version' => ExecutionRecord::SCHEMA_VERSION,
+                   'lock_generation' => StableLockAnchor::GENERATION, 'task_id' => TASK_ID,
                    'record_root' => File.realpath(@repo), 'execution_id' => 'nested_outer' },
                  lineage.reject { |key, _| key == 'capability_sha256' })
     assert_match(/\A[0-9a-f]{64}\z/, lineage.fetch('capability_sha256'))
@@ -3449,6 +3458,9 @@ class TaskCheckpointRunTest < Minitest::Test
     free_task = 'CLI_TASK_FREE'
     other_root = File.join(@tmpdir, 'other-record-root')
     FileUtils.mkdir_p(other_root)
+    _git_out, git_err, git_status = Open3.capture3('git', '-C', other_root, 'init', '--quiet')
+    assert git_status.success?, git_err
+    StableLockAnchor.initialize_repository_generation!(other_root, confirm_legacy_workers_quiescent: true)
     other_release = File.join(@tmpdir, 'other-release')
     other_command = [RbConfig.ruby, '-e', UPSTREAM, @launches, other_release, '0']
     other_owners = [[@repo, other_task, 'other_task_owner'], [other_root, TASK_ID, 'other_root_owner']].map do |repo, task, id|
@@ -3636,7 +3648,12 @@ class TaskCheckpointRunTest < Minitest::Test
     rotated = run_cli(cli_args('rotated_after_dead_lineage'))
     assert_equal 1, rotated[2].exitstatus
     assert_includes rotated[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
-    assert_equal 0, File.size(lock_path), 'a conforming acquisition clears the dead lineage'
+    rotated_lineage = JSON.parse(File.binread(lock_path))
+    assert_equal StableLockAnchor::GENERATION, rotated_lineage.fetch('lock_generation')
+    assert_equal TASK_ID, rotated_lineage.fetch('task_id')
+    assert_equal File.realpath(@repo), rotated_lineage.fetch('record_root')
+    refute rotated_lineage.key?('execution_id'), 'a conforming acquisition clears the dead execution owner'
+    refute rotated_lineage.key?('capability_sha256'), 'a conforming acquisition clears the dead lineage secret'
     replayed = forge.call('forged_harvested_secret', harvested)
     assert_equal 1, replayed[2].exitstatus, replayed[1]
     assert_includes replayed[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
@@ -3940,5 +3957,361 @@ class NestedRecoveryLineageContractTest < Minitest::Test
     assert_match(/deterministic successor takes the lock and establishes its own lineage from the successor execution ID/, text)
     assert_match(/retry of the same transition reuses that successor identity and therefore the same semantics/, text)
     assert_match(/Independent writers remain refused/, text)
+  end
+end
+
+# Focused integration coverage for the generation-2 task anchor and the
+# previously verified machine-wide heavy-scientific lease.
+class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
+  def setup
+    @tmpdir = Dir.mktmpdir('gen2_heavy_lease_compat_')
+    @main_repo = File.join(@tmpdir, 'common-repository')
+    @repo = File.join(@tmpdir, 'linked-worktree')
+    @worktree = File.join(@tmpdir, 'upstream-cwd')
+    make_git_repo(@main_repo)
+    git!(@main_repo, 'worktree', 'add', '--quiet', '--detach', @repo, 'HEAD')
+    StableLockAnchor.initialize_repository_generation!(@main_repo, confirm_legacy_workers_quiescent: true)
+    FileUtils.mkdir_p(@worktree)
+
+    @source_path = ENV.fetch('FABLE_HEAVY_TEST_SOURCE', File.expand_path('../scripts/task_checkpoint.rb', __dir__))
+    @test_launcher_path = File.join(@tmpdir, 'task_checkpoint_test_launcher.rb')
+    launcher_source = File.read(@source_path, encoding: 'UTF-8')
+    default_lock_definition = <<~'SOURCE'
+      DEFAULT_LOCK_PATH = File.join('/tmp', "fable-heavy-scientific-slot-#{Process.uid}.lock").freeze
+    SOURCE
+    raise 'test lease path seam did not match exactly once' unless launcher_source.scan(Regexp.new(Regexp.escape(default_lock_definition))).length == 1
+
+    launcher_source.sub!(default_lock_definition,
+                         "  DEFAULT_LOCK_PATH = ENV.fetch('FABLE_TEST_HEAVY_LEASE_LOCK').freeze\n")
+    # Keep ambient workstation processes outside this isolated lease fixture.
+    legacy_writer_default = [
+      '  def self.acquire!(**kwargs)',
+      '    new(**kwargs).tap(&:acquire!)',
+      '  end'
+    ].join("\n") + "\n"
+    isolated_acquire = [
+      '  def self.acquire!(**kwargs)',
+      '    kwargs[:legacy_writer_checker] ||= -> { [] }',
+      '    new(**kwargs).tap(&:acquire!)',
+      '  end'
+    ].join("\n") + "\n"
+    raise 'test legacy-writer seam did not match exactly once' unless
+      launcher_source.scan(Regexp.new(Regexp.escape(legacy_writer_default))).length == 1
+    launcher_source.sub!(legacy_writer_default, isolated_acquire)
+    File.write(@test_launcher_path, launcher_source)
+    @lease_path = File.join(@tmpdir, 'machine-heavy-scientific-slot.lock')
+    @children = []
+    @release_files = []
+  end
+
+  def teardown
+    Array(@release_files).each { |path| File.write(path, 'release') }
+    Array(@children).each do |pid|
+      begin
+        Timeout.timeout(12) { Process.wait(pid) }
+      rescue Errno::ECHILD
+        nil
+      rescue Timeout::Error
+        flunk "test-owned fake protected launcher did not exit: #{pid}"
+      end
+    end
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def test_gen2_marker_and_legacy_lock_guards_fail_closed
+    unmarked_repo = File.join(@tmpdir, 'unmarked-repository')
+    unmarked_worktree = File.join(@tmpdir, 'unmarked-cwd')
+    make_git_repo(unmarked_repo)
+    FileUtils.mkdir_p(unmarked_worktree)
+    unmarked_marker = repository_generation_path(unmarked_repo)
+    refute File.exist?(unmarked_marker)
+
+    task_id = 'UNMARKED_TASK'
+    child_marker = File.join(@tmpdir, 'unmarked-child-started')
+    output = run_cli(protected_args(
+      task_id: task_id, execution_id: 'unmarked-run',
+      command: quick_fake_command(child_marker), repo: unmarked_repo,
+      worktree: unmarked_worktree, run_root: make_run_root('unmarked-run')
+    ))
+    refute output[2].success?
+    assert_match(/generation-2 lock marker/, output[0] + output[1])
+    refute File.exist?(unmarked_marker), 'protected --run must not initialize repository authority'
+    refute File.exist?(child_marker), 'missing generation authority must stop before child launch'
+    refute File.exist?(ExecutionRecord.default_path(unmarked_repo, task_id, 'unmarked-run'))
+    refute File.exist?(ExecutionRecord.task_lock_path(unmarked_repo, task_id))
+    refute File.exist?(@lease_path)
+
+    legacy_task = 'LEGACY_TASK'
+    legacy_lock = ExecutionRecord.legacy_task_lock_path(@repo, legacy_task)
+    FileUtils.mkdir_p(File.dirname(legacy_lock))
+    File.binwrite(legacy_lock, "pre-existing legacy lock\n")
+    original_legacy_bytes = File.binread(legacy_lock)
+    legacy_child = File.join(@tmpdir, 'legacy-child-started')
+    legacy_output = run_cli(protected_args(
+      task_id: legacy_task, execution_id: 'legacy-blocked',
+      command: quick_fake_command(legacy_child), run_root: make_run_root('legacy-run')
+    ))
+    refute legacy_output[2].success?
+    assert_match(/legacy.*migration gate required/i, legacy_output[0] + legacy_output[1])
+    assert_equal original_legacy_bytes, File.binread(legacy_lock)
+    refute File.exist?(legacy_child), 'an unresolved legacy lock must stop before child launch'
+    refute File.exist?(ExecutionRecord.default_path(@repo, legacy_task, 'legacy-blocked'))
+    refute File.exist?(@lease_path)
+  end
+
+  def test_task_and_checkpoint_lock_paths_use_git_common_directory
+    common = common_directory(@repo)
+    assert_equal File.realpath(File.join(@main_repo, '.git')), common
+    assert File.file?(File.join(@repo, '.git')), 'fixture must be a linked worktree with a .git pointer'
+
+    task_lock = ExecutionRecord.task_lock_path(@repo, 'ANCHOR_TASK')
+    assert task_lock.start_with?("#{common}/fable-locks/task-execution/")
+
+    checkpoint_path = TaskCheckpoint.default_path(@repo, 'ANCHOR_CHECKPOINT')
+    checkpoint = TaskCheckpoint.new(
+      task_id: 'ANCHOR_CHECKPOINT',
+      repository: @repo,
+      worktree: @repo,
+      authoritative_packet_ref: 'README.md',
+      branch: 'compat-test',
+      current_head: 'synthetic-head',
+      current_tree: 'synthetic-tree',
+      task_lifecycle_state: 'IN_PROGRESS',
+      next_action: 'verify generation-2 checkpoint lock',
+      authorization_boundary: 'NONE',
+      updated_at: Time.now.utc.iso8601,
+      revision: 1
+    )
+    assert checkpoint.save(checkpoint_path)
+
+    checkpoint_lock = TaskCheckpoint.lock_path_for(checkpoint_path)
+    assert checkpoint_lock.start_with?("#{common}/fable-locks/checkpoint-sidecar/")
+    assert File.file?(checkpoint_lock)
+    refute File.exist?("#{checkpoint_path}.lock"), 'Git worktrees use the common-directory checkpoint anchor'
+    marker = repository_generation_path(@repo)
+    assert File.file?(marker)
+  end
+
+  def test_heavy_protected_run_excludes_competing_tasks_until_child_exits
+    release = File.join(@tmpdir, 'release-heavy-owner')
+    @release_files << release
+    owner_marker = File.join(@tmpdir, 'owner-child-started')
+    holding_child = <<~'RUBY'
+      marker, release = ARGV
+      File.write(marker, Process.pid.to_s)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 15
+      until File.file?(release)
+        abort 'fake heavy child release timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+      STDOUT.write("FAKE_HEAVY_CHILD_DONE\n")
+    RUBY
+    owner_task = 'HEAVY_TASK_A'
+    owner_root = make_run_root('heavy-owner')
+    owner_pid = start_cli(protected_args(
+      task_id: owner_task, execution_id: 'heavy-owner',
+      command: [RbConfig.ruby, '-e', holding_child, owner_marker, release],
+      run_root: owner_root
+    ), 'heavy-owner')
+    wait_for_file(owner_marker)
+
+    common = common_directory(@repo)
+    task_lock_path = ExecutionRecord.task_lock_path(@repo, owner_task)
+    assert task_lock_path.start_with?("#{common}/fable-locks/task-execution/")
+    lineage = JSON.parse(File.binread(task_lock_path))
+    assert_equal StableLockAnchor::GENERATION, lineage.fetch('lock_generation')
+    task_probe = StableLockAnchor.open_existing_lock(
+      @repo, 'task-execution', owner_task, filename: 'execution.lock'
+    )
+    begin
+      refute task_probe.flock(File::LOCK_EX | File::LOCK_NB),
+             'the common-directory task lock remains held while the child runs'
+    ensure
+      task_probe.close unless task_probe.closed?
+    end
+
+    same_task_marker = File.join(@tmpdir, 'same-task-child-started')
+    same_task_attempt = run_cli(protected_args(
+      task_id: owner_task, execution_id: 'same-task-contender',
+      command: quick_fake_command(same_task_marker), run_root: owner_root
+    ))
+    refute same_task_attempt[2].success?
+    refute File.exist?(same_task_marker), 'the task anchor excludes a second execution ID'
+
+    other_task_marker = File.join(@tmpdir, 'other-task-child-started')
+    other_task_attempt = run_cli(protected_args(
+      task_id: 'HEAVY_TASK_B', execution_id: 'heavy-contender',
+      command: quick_fake_command(other_task_marker),
+      run_root: make_run_root('heavy-contender')
+    ))
+    assert_equal 3, other_task_attempt[2].exitstatus, other_task_attempt[0] + other_task_attempt[1]
+    assert_includes other_task_attempt[0] + other_task_attempt[1], 'STOPPED_HEAVY_SLOT_OWNED'
+    refute File.exist?(other_task_marker), 'the machine-wide lease blocks a different task before launch'
+    blocked_capture = completed_capture('HEAVY_TASK_B', 'heavy-contender')
+    assert_equal 3, blocked_capture.exit_status
+
+    lease_probe = File.open(@lease_path, File::RDWR)
+    begin
+      refute lease_probe.flock(File::LOCK_EX | File::LOCK_NB),
+             'the machine-wide heavy lease remains held while the protected child runs'
+    ensure
+      lease_probe.close unless lease_probe.closed?
+    end
+
+    File.write(release, 'release')
+    owner_status = wait_cli(owner_pid)
+    assert_equal 0, owner_status.exitstatus
+    owner_capture = completed_capture(owner_task, 'heavy-owner')
+    assert_equal 0, owner_capture.exit_status
+    assert_includes owner_capture.stdout, 'FAKE_HEAVY_CHILD_DONE'
+
+    available_probe = File.open(@lease_path, File::RDWR)
+    begin
+      assert available_probe.flock(File::LOCK_EX | File::LOCK_NB),
+             'natural child termination releases the machine-wide lease'
+      available_probe.flock(File::LOCK_UN)
+    ensure
+      available_probe.close unless available_probe.closed?
+    end
+
+    fresh_marker = File.join(@tmpdir, 'fresh-child-started')
+    fresh_run = run_cli(protected_args(
+      task_id: 'HEAVY_TASK_C', execution_id: 'after-release',
+      command: quick_fake_command(fresh_marker), run_root: make_run_root('after-release')
+    ))
+    assert_equal 0, fresh_run[2].exitstatus, fresh_run[0] + fresh_run[1]
+    assert File.file?(fresh_marker)
+    assert_equal 0, completed_capture('HEAVY_TASK_C', 'after-release').exit_status
+  ensure
+    File.write(release, 'release') if release
+  end
+
+  def test_nested_heavy_protected_run_reuses_both_lock_authorities
+    task_id = 'NESTED_HEAVY_TASK'
+    nested_marker = File.join(@tmpdir, 'nested-leaf-started')
+    run_root = make_run_root('nested-heavy-run')
+    nested_driver = <<~'RUBY'
+      require 'open3'
+      require 'rbconfig'
+      launcher, repo, worktree, task_id, run_root, marker = ARGV
+      leaf = [RbConfig.ruby, '-e',
+              'File.write(ARGV.fetch(0), "nested\\n"); puts "NESTED_LEAF_OK"', marker]
+      nested_args = ['--run', '--heavy-scientific', '--repo', repo, '--worktree', worktree,
+                     '--task-id', task_id, '--execution-id', 'nested-inner',
+                     '--run-root', run_root, '--', *leaf]
+      command = [RbConfig.ruby, launcher, *nested_args]
+      stdout, stderr, status = Open3.capture3(*command, { 10 => 10, 11 => 11 })
+      STDERR.write(stderr)
+      STDOUT.write(stdout)
+      exit(status.exitstatus || 1)
+    RUBY
+    outer = run_cli(protected_args(
+      task_id: task_id, execution_id: 'nested-outer',
+      command: [RbConfig.ruby, '-e', nested_driver, @test_launcher_path,
+                @repo, @worktree, task_id, run_root, nested_marker],
+      run_root: run_root
+    ))
+
+    assert_equal 0, outer[2].exitstatus, outer[0] + outer[1]
+    assert File.file?(nested_marker)
+    assert_includes outer[0], 'NESTED_LEAF_OK'
+    assert_equal 1, outer[1].scan('LEASE_ACQUIRED / WOULD_LAUNCH').length,
+                 'the nested run reuses the inherited machine-wide lease'
+    outer_capture = completed_capture(task_id, 'nested-outer')
+    nested_capture = completed_capture(task_id, 'nested-inner')
+    assert_equal 0, outer_capture.exit_status
+    assert_equal 0, nested_capture.exit_status
+    assert_includes nested_capture.stdout, 'NESTED_LEAF_OK'
+    assert_equal 'nested-outer', ExecutionRecord.load(
+      ExecutionRecord.default_path(@repo, task_id, 'nested-inner')
+    ).parent_execution_id
+    lineage = JSON.parse(File.binread(ExecutionRecord.task_lock_path(@repo, task_id)))
+    assert_equal StableLockAnchor::GENERATION, lineage.fetch('lock_generation')
+  end
+
+  private
+
+  def make_git_repo(path)
+    FileUtils.mkdir_p(path)
+    git!(path, 'init', '--quiet')
+    git!(path, 'config', 'user.name', 'Fable Compatibility Test')
+    git!(path, 'config', 'user.email', 'fable-compatibility@example.invalid')
+    File.write(File.join(path, 'README.md'), "isolated lock fixture\n")
+    git!(path, 'add', '-f', 'README.md')
+    git!(path, 'commit', '--quiet', '-m', 'isolated lock fixture')
+  end
+
+  def git!(path, *args)
+    stdout, stderr, status = Open3.capture3('git', '-C', path, *args)
+    assert status.success?, "git #{args.join(' ')} failed: #{stdout}#{stderr}"
+    stdout
+  end
+
+  def common_directory(path)
+    output, stderr, status = Open3.capture3('git', '-C', path, 'rev-parse', '--git-common-dir')
+    assert status.success?, stderr
+    File.realpath(File.expand_path(output.strip, path))
+  end
+
+  def repository_generation_path(path)
+    File.join(common_directory(path), 'fable-locks', StableLockAnchor::REPOSITORY_GENERATION_FILENAME)
+  end
+
+  def make_run_root(name)
+    path = File.join(@tmpdir, 'run-roots', name)
+    FileUtils.mkdir_p(path)
+    path
+  end
+
+  def quick_fake_command(marker)
+    [RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "FAKE_CHILD_STARTED"); puts "FAKE_CHILD_DONE"', marker]
+  end
+
+  def protected_args(task_id:, execution_id:, command:, repo: @repo, worktree: @worktree, run_root:)
+    ['--run', '--heavy-scientific', '--repo', repo, '--worktree', worktree,
+     '--task-id', task_id, '--execution-id', execution_id,
+     '--run-root', run_root, '--', *command]
+  end
+
+  def cli_argv(args)
+    [RbConfig.ruby, @test_launcher_path, *args]
+  end
+
+  def run_cli(args)
+    Open3.capture3({ 'FABLE_TEST_HEAVY_LEASE_LOCK' => @lease_path }, *cli_argv(args))
+  end
+
+  def start_cli(args, label)
+    stdout = File.join(@tmpdir, "#{label}.stdout")
+    stderr = File.join(@tmpdir, "#{label}.stderr")
+    pid = Process.spawn(
+      { 'FABLE_TEST_HEAVY_LEASE_LOCK' => @lease_path },
+      *cli_argv(args),
+      out: stdout,
+      err: stderr,
+      pgroup: true
+    )
+    @children << pid
+    pid
+  end
+
+  def wait_cli(pid)
+    _, status = Process.wait2(pid)
+    @children.delete(pid)
+    status
+  end
+
+  def wait_for_file(path)
+    Timeout.timeout(5) { sleep 0.01 until File.file?(path) }
+  rescue Timeout::Error
+    flunk "fake protected child did not reach its marker: #{path}"
+  end
+
+  def completed_capture(task_id, execution_id)
+    record = ExecutionRecord.load(ExecutionRecord.default_path(@repo, task_id, execution_id))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
+    capture = DurableCommandCapture.load(record.durable_capture_path)
+    assert capture.complete?
+    capture
   end
 end
