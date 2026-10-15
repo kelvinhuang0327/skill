@@ -4115,6 +4115,10 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
     ), 'heavy-owner')
     wait_for_file(owner_marker)
 
+    owner_record = ExecutionRecord.load(ExecutionRecord.default_path(@repo, owner_task, 'heavy-owner'))
+    assert_equal true, owner_record.heavy_scientific
+    assert_equal owner_root, owner_record.heavy_run_root
+
     common = common_directory(@repo)
     task_lock_path = ExecutionRecord.task_lock_path(@repo, owner_task)
     assert task_lock_path.start_with?("#{common}/fable-locks/task-execution/")
@@ -4225,8 +4229,190 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
     assert_equal 'nested-outer', ExecutionRecord.load(
       ExecutionRecord.default_path(@repo, task_id, 'nested-inner')
     ).parent_execution_id
+    assert_equal true, ExecutionRecord.load(
+      ExecutionRecord.default_path(@repo, task_id, 'nested-outer')
+    ).heavy_scientific
+    assert_equal true, ExecutionRecord.load(
+      ExecutionRecord.default_path(@repo, task_id, 'nested-inner')
+    ).heavy_scientific
     lineage = JSON.parse(File.binread(ExecutionRecord.task_lock_path(@repo, task_id)))
     assert_equal StableLockAnchor::GENERATION, lineage.fetch('lock_generation')
+  end
+
+  def test_heavy_recovery_holds_slot_excludes_contenders_and_replays_completion
+    task_id = 'EXPLICIT_HEAVY_RECOVERY'
+    old_id = 'stale-heavy-run'
+    application_state = seed_stale_execution(task_id: task_id, execution_id: old_id, heavy_scientific: true)
+    release = File.join(@tmpdir, 'release-heavy-recovery')
+    @release_files << release
+    child_marker = File.join(@tmpdir, 'heavy-recovery-child-started')
+    launch_log = File.join(@tmpdir, 'heavy-recovery-launches')
+    command = [RbConfig.ruby, '-e', <<~'RUBY', child_marker, release, launch_log]
+      marker, release, launches = ARGV
+      File.write(marker, Process.pid.to_s)
+      File.open(launches, 'a') { |file| file.puts(Process.pid) }
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 12
+      until File.file?(release)
+        abort 'fake recovery child release timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+      puts 'FAKE_RECOVERY_CHILD_DONE'
+    RUBY
+    args = recovery_args(task_id: task_id, old_execution_id: old_id,
+                         application_state: application_state, command: command)
+    recovery_pid = start_cli(args, 'heavy-recovery-owner')
+    wait_for_file(child_marker)
+
+    successor_id = ExecutionRecoveryTransition.successor_id_for(task_id, old_id)
+    successor = ExecutionRecord.load(ExecutionRecord.default_path(@repo, task_id, successor_id))
+    assert_equal true, successor.heavy_scientific
+    assert_equal File.realpath(@worktree), successor.heavy_run_root
+    lease_metadata = JSON.parse(File.binread("#{@lease_path}.owner.json"))
+    assert_equal task_id, lease_metadata.fetch('TASK_ID')
+    assert_equal successor_id, lease_metadata.fetch('EXECUTION_ID')
+    assert_equal File.realpath(@worktree), lease_metadata.fetch('RUN_ROOT')
+
+    lease_probe = File.open(@lease_path, File::RDWR)
+    begin
+      refute lease_probe.flock(File::LOCK_EX | File::LOCK_NB),
+             'recovery holds the machine-wide lease while its child is alive'
+    ensure
+      lease_probe.close unless lease_probe.closed?
+    end
+
+    same_run_attempt = run_cli(args)
+    assert_equal 1, same_run_attempt[2].exitstatus
+    assert_includes same_run_attempt[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, File.readlines(launch_log).length,
+                 'only one recovery process may resume the same logical run'
+
+    other_child = File.join(@tmpdir, 'other-heavy-run-during-recovery')
+    other_run = run_cli(protected_args(
+      task_id: 'HEAVY_TASK_DURING_RECOVERY', execution_id: 'competing-heavy-run',
+      command: quick_fake_command(other_child), run_root: make_run_root('competing-heavy-run')
+    ))
+    assert_equal 3, other_run[2].exitstatus, other_run[0] + other_run[1]
+    assert_includes other_run[0] + other_run[1], 'STOPPED_HEAVY_SLOT_OWNED'
+    refute File.exist?(other_child), 'a competing heavy task is stopped before its child starts'
+
+    File.write(release, 'release')
+    recovery_status = wait_cli(recovery_pid)
+    assert_equal 0, recovery_status.exitstatus
+    completed = completed_capture(task_id, successor_id)
+    assert_equal 0, completed.exit_status
+    assert_includes completed.stdout, 'FAKE_RECOVERY_CHILD_DONE'
+
+    available_probe = File.open(@lease_path, File::RDWR)
+    begin
+      assert available_probe.flock(File::LOCK_EX | File::LOCK_NB),
+             'natural recovery-child completion releases the machine-wide lease'
+      available_probe.flock(File::LOCK_UN)
+    ensure
+      available_probe.close unless available_probe.closed?
+    end
+
+    replay = run_cli(args)
+    assert_equal 0, replay[2].exitstatus, replay[0] + replay[1]
+    assert_equal 1, File.readlines(launch_log).length,
+                 'a completed recovery capture is replayed without restarting its child'
+  ensure
+    File.write(release, 'release') if release
+  end
+
+  def test_legacy_scientific_recovery_is_blocked_by_another_heavy_owner
+    release = File.join(@tmpdir, 'release-first-run-owner')
+    @release_files << release
+    owner_marker = File.join(@tmpdir, 'first-run-owner-started')
+    holding_child = <<~'RUBY'
+      marker, release = ARGV
+      File.write(marker, Process.pid.to_s)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 12
+      until File.file?(release)
+        abort 'fake heavy child release timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+      puts 'FAKE_HEAVY_OWNER_DONE'
+    RUBY
+    owner_pid = start_cli(protected_args(
+      task_id: 'HEAVY_SLOT_OWNER', execution_id: 'slot-owner',
+      command: [RbConfig.ruby, '-e', holding_child, owner_marker, release],
+      run_root: make_run_root('slot-owner')
+    ), 'first-run-owner')
+    wait_for_file(owner_marker)
+
+    recovery_task = 'B649_LEGACY_RECOVERY'
+    old_id = 'legacy-stale-run'
+    application_state = seed_stale_execution(task_id: recovery_task, execution_id: old_id)
+    recovery_child = File.join(@tmpdir, 'legacy-recovery-child-started')
+    result = run_cli(recovery_args(
+      task_id: recovery_task, old_execution_id: old_id,
+      application_state: application_state,
+      command: quick_fake_command(recovery_child), heavy_flag: false
+    ))
+
+    assert_equal 3, result[2].exitstatus, result[0] + result[1]
+    assert_includes result[0] + result[1], 'STOPPED_HEAVY_SLOT_OWNED'
+    refute File.exist?(recovery_child), 'legacy task identity classifies recovery before child launch'
+    successor_id = ExecutionRecoveryTransition.successor_id_for(recovery_task, old_id)
+    assert_equal 3, completed_capture(recovery_task, successor_id).exit_status
+    successor = ExecutionRecord.load(ExecutionRecord.default_path(@repo, recovery_task, successor_id))
+    assert_equal true, successor.heavy_scientific
+
+    File.write(release, 'release')
+    assert_equal 0, wait_cli(owner_pid).exitstatus
+  ensure
+    File.write(release, 'release') if release
+  end
+
+  def test_heavy_recovery_flag_alone_cannot_designate_an_ordinary_stale_execution
+    task_id = 'ORDINARY_RECOVERY_TASK'
+    old_id = 'ordinary-stale-run'
+    application_state = seed_stale_execution(task_id: task_id, execution_id: old_id)
+    child_marker = File.join(@tmpdir, 'ordinary-recovery-child-started')
+
+    result = run_cli(recovery_args(
+      task_id: task_id, old_execution_id: old_id, application_state: application_state,
+      command: quick_fake_command(child_marker), heavy_flag: true
+    ))
+
+    refute result[2].success?
+    assert_includes result[0] + result[1], 'heavy authority from the existing execution or task command'
+    refute File.exist?(child_marker)
+    refute File.exist?(ExecutionRecoveryTransition.default_path(@repo, task_id, old_id)),
+           'the assertion is checked before reserving a recovery transition'
+    refute File.exist?(@lease_path), 'the assertion alone must not acquire a Heavy Slot'
+  end
+
+  def test_heavy_retry_recovery_keeps_the_original_slot_authority
+    task_id = 'HEAVY_RETRY_RECOVERY'
+    old_id = 'stale-heavy-retry-source'
+    application_state = seed_stale_execution(task_id: task_id, execution_id: old_id, heavy_scientific: true)
+    failed_command = [RbConfig.ruby, '-e', "puts 'FAKE_RECOVERY_FAILURE'; exit 7"]
+
+    first = run_cli(recovery_args(
+      task_id: task_id, old_execution_id: old_id, application_state: application_state,
+      command: failed_command
+    ))
+    assert_equal 7, first[2].exitstatus
+    first_successor_id = ExecutionRecoveryTransition.successor_id_for(task_id, old_id)
+    assert_equal 7, completed_capture(task_id, first_successor_id).exit_status
+
+    retry_child = File.join(@tmpdir, 'heavy-retry-child-started')
+    retry_successor_id = ExecutionRecoveryTransition.successor_id_for(task_id, first_successor_id)
+    retry_args = ['--retry-recover-run', '--heavy-scientific', '--repo', @repo,
+                  '--worktree', @worktree, '--task-id', task_id,
+                  '--execution-id', first_successor_id, '--application-state', application_state,
+                  '--', *quick_fake_command(retry_child)]
+    retried = run_cli(retry_args)
+
+    assert_equal 0, retried[2].exitstatus, retried[0] + retried[1]
+    assert_includes retried[1], 'LEASE_ACQUIRED / WOULD_LAUNCH'
+    assert File.file?(retry_child)
+    retry_record = ExecutionRecord.load(ExecutionRecord.default_path(@repo, task_id, retry_successor_id))
+    assert_equal true, retry_record.heavy_scientific
+    assert_equal File.realpath(@worktree), retry_record.heavy_run_root
+    assert_equal 0, completed_capture(task_id, retry_successor_id).exit_status
+    refute File.exist?("#{@lease_path}.owner.json"), 'natural retry completion clears lease ownership metadata'
   end
 
   private
@@ -4271,6 +4457,30 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
     ['--run', '--heavy-scientific', '--repo', repo, '--worktree', worktree,
      '--task-id', task_id, '--execution-id', execution_id,
      '--run-root', run_root, '--', *command]
+  end
+
+  def recovery_args(task_id:, old_execution_id:, application_state:, command:, heavy_flag: true,
+                    repo: @repo, worktree: @worktree)
+    args = ['--recover-run']
+    args << '--heavy-scientific' if heavy_flag
+    args.concat(['--repo', repo, '--worktree', worktree,
+                 '--task-id', task_id, '--execution-id', old_execution_id,
+                 '--application-state', application_state, '--', *command])
+  end
+
+  def seed_stale_execution(task_id:, execution_id:, heavy_scientific: nil)
+    application_state = File.join(@tmpdir, "#{task_id}-application-state.bin")
+    File.binwrite(application_state, "fake scientific checkpoint for #{task_id}\n")
+    ExecutionRecord.with_task_lock(@repo, task_id) { |_lock| }
+    pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
+    Process.wait(pid)
+    attrs = { task_id: task_id, execution_id: execution_id, pid: pid }
+    if heavy_scientific
+      attrs[:heavy_scientific] = true
+      attrs[:heavy_run_root] = File.realpath(@worktree)
+    end
+    ExecutionRecord.start!(ExecutionRecord.default_path(@repo, task_id, execution_id), **attrs)
+    application_state
   end
 
   def cli_argv(args)
