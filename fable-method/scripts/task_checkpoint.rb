@@ -2461,7 +2461,8 @@ class ExecutionRecord
 
   attr_accessor :schema_version, :task_id, :execution_id, :pid, :status,
                 :durable_capture_path, :started_at, :ended_at, :parent_execution_id,
-                :recovery_old_execution_id, :recovery_parent_execution_id
+                :recovery_old_execution_id, :recovery_parent_execution_id,
+                :heavy_scientific, :heavy_run_root
 
   def initialize(attrs = {})
     @schema_version = attrs[:schema_version] || attrs['schema_version'] || SCHEMA_VERSION
@@ -2475,6 +2476,16 @@ class ExecutionRecord
     @parent_execution_id = (attrs[:parent_execution_id] || attrs['parent_execution_id'])&.to_s
     @recovery_old_execution_id = (attrs[:recovery_old_execution_id] || attrs['recovery_old_execution_id'])&.to_s
     @recovery_parent_execution_id = (attrs[:recovery_parent_execution_id] || attrs['recovery_parent_execution_id'])&.to_s
+    @heavy_scientific = if attrs.key?(:heavy_scientific)
+                          attrs[:heavy_scientific]
+                        else
+                          attrs['heavy_scientific']
+                        end
+    @heavy_run_root = if attrs.key?(:heavy_run_root)
+                        attrs[:heavy_run_root]&.to_s
+                      else
+                        attrs['heavy_run_root']&.to_s
+                      end
   end
 
   def to_h
@@ -2488,10 +2499,12 @@ class ExecutionRecord
       'started_at' => @started_at,
       'ended_at' => @ended_at
     }
-    # Only nested records carry lineage, so top-level record bytes are unchanged.
+    # Optional identity fields preserve the original bytes for ordinary records.
     data['parent_execution_id'] = @parent_execution_id unless @parent_execution_id.nil?
     data['recovery_old_execution_id'] = @recovery_old_execution_id unless @recovery_old_execution_id.nil?
     data['recovery_parent_execution_id'] = @recovery_parent_execution_id unless @recovery_parent_execution_id.nil?
+    data['heavy_scientific'] = @heavy_scientific unless @heavy_scientific.nil?
+    data['heavy_run_root'] = @heavy_run_root unless @heavy_run_root.nil?
     data
   end
 
@@ -2551,6 +2564,23 @@ class ExecutionRecord
 
   def self.default_path(repo_root, task_id, execution_id)
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'executions', "#{execution_id}.json")
+  end
+
+  def self.verify_heavy_authority_metadata!(record)
+    unless record.heavy_scientific.nil? || record.heavy_scientific == true
+      raise UnresolvedExecutionStateError, 'execution heavy-scientific authority is malformed'
+    end
+    if record.heavy_scientific
+      root = record.heavy_run_root
+      unless root && Pathname.new(root).absolute? && !root.include?("\0") && File.expand_path(root) == root
+        raise UnresolvedExecutionStateError, 'execution heavy-scientific run root is missing or ambiguous'
+      end
+    elsif record.heavy_run_root
+      raise UnresolvedExecutionStateError, 'execution heavy-scientific run root has no protected authority'
+    end
+    true
+  rescue ArgumentError, TypeError
+    raise UnresolvedExecutionStateError, 'execution heavy-scientific run root is malformed'
   end
 
   def self.task_lock_path(repo_root, task_id)
@@ -2730,12 +2760,13 @@ class ExecutionRecord
     raise UnresolvedExecutionStateError, "stale recovery successor chain is unreadable: #{e.message}"
   end
 
-  def self.acquire_task_owned!(repo_root, task_id, execution_id, pid:)
+  def self.acquire_task_owned!(repo_root, task_id, execution_id, pid:, heavy_scientific: nil, heavy_run_root: nil)
     with_task_lock(repo_root, task_id) do
       verify_no_active_owner!(repo_root, task_id, except_execution_ids: [execution_id.to_s],
                               reject_unrecovered_stale: true)
       acquire!(default_path(repo_root, task_id, execution_id),
-               task_id: task_id, execution_id: execution_id, pid: pid)
+               task_id: task_id, execution_id: execution_id, pid: pid,
+               heavy_scientific: heavy_scientific, heavy_run_root: heavy_run_root)
     end
   end
 
@@ -2913,26 +2944,30 @@ class ExecutionRecord
   # Nested acquisition takes no second task-lock ownership: the caller has
   # already proved it holds the lineage lock. It records its own identity and
   # parent after the normal owner check, excluding only verified ancestors.
-  def self.acquire_nested_owned!(repo_root, task_id, execution_id, capability, pid:)
+  def self.acquire_nested_owned!(repo_root, task_id, execution_id, capability, pid:,
+                                 heavy_scientific: nil, heavy_run_root: nil)
     verify_no_active_owner!(repo_root, task_id,
                             except_execution_ids: [execution_id.to_s, *capability.ancestor_execution_ids],
                             reject_unrecovered_stale: true,
                             nested_lineage_execution_ids: capability.ancestor_execution_ids)
     acquire!(default_path(repo_root, task_id, execution_id), task_id: task_id, execution_id: execution_id,
-             pid: pid, parent_execution_id: capability.parent_execution_id)
+             pid: pid, parent_execution_id: capability.parent_execution_id,
+             heavy_scientific: heavy_scientific, heavy_run_root: heavy_run_root)
   end
 
   def self.stable_component?(value)
     value.is_a?(String) && !value.strip.empty? && !%w[. ..].include?(value) && !value.match?(/[\/\\\x00]/)
   end
 
-  def self.start!(file_path, task_id:, execution_id:, pid:)
+  def self.start!(file_path, task_id:, execution_id:, pid:, heavy_scientific: nil, heavy_run_root: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
       pid: pid,
       status: STATUS_STARTED,
-      started_at: Time.now.utc.iso8601
+      started_at: Time.now.utc.iso8601,
+      heavy_scientific: heavy_scientific,
+      heavy_run_root: heavy_run_root
     )
     record.save(file_path)
     record
@@ -3052,7 +3087,8 @@ class ExecutionRecord
   # caller must not proceed, under the exact same rules
   # recover_before_execution already applies to that existing record.
   def self.acquire!(file_path, task_id:, execution_id:, pid:, pid_alive: method(:pid_alive?),
-                    parent_execution_id: nil, recovery_old_execution_id: nil, recovery_parent_execution_id: nil)
+                    parent_execution_id: nil, recovery_old_execution_id: nil, recovery_parent_execution_id: nil,
+                    heavy_scientific: nil, heavy_run_root: nil)
     record = new(
       task_id: task_id,
       execution_id: execution_id,
@@ -3061,7 +3097,9 @@ class ExecutionRecord
       started_at: Time.now.utc.iso8601,
       parent_execution_id: parent_execution_id,
       recovery_old_execution_id: recovery_old_execution_id,
-      recovery_parent_execution_id: recovery_parent_execution_id
+      recovery_parent_execution_id: recovery_parent_execution_id,
+      heavy_scientific: heavy_scientific,
+      heavy_run_root: heavy_run_root
     )
 
     begin
@@ -3162,6 +3200,7 @@ class ExecutionRecoveryTransition
 
     bytes = File.binread(path)
     record = ExecutionRecord.from_json(bytes)
+    ExecutionRecord.verify_heavy_authority_metadata!(record)
     unless record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
            record.task_id == task_id.to_s && record.execution_id == old_execution_id.to_s
       raise ExecutionRecord::UnresolvedExecutionStateError, 'stale execution identity or schema is ambiguous'
@@ -3200,6 +3239,7 @@ class ExecutionRecoveryTransition
     end
     record_bytes = File.binread(record_path)
     record = ExecutionRecord.from_json(record_bytes)
+    ExecutionRecord.verify_heavy_authority_metadata!(record)
     root_id = record.recovery_old_execution_id.to_s
     if record.schema_version != ExecutionRecord::SCHEMA_VERSION || record.task_id != task_id.to_s ||
        record.execution_id != id || root_id.empty? || %w[. ..].include?(root_id) ||
@@ -3469,15 +3509,17 @@ class ExecutionRecoveryTransition
   def self.acquire_successor!(repo_root:, task_id:, old_execution_id:, application_state_path:,
                               worktree_path:, command:, pid:, retry_attempt: false)
     ExecutionRecord.with_task_lock(repo_root, task_id) do
-      if retry_attempt
+      authority_record = if retry_attempt
         prior, = verify_failed_successor!(repo_root: repo_root, task_id: task_id,
                                           execution_id: old_execution_id)
         root_id = prior.recovery_old_execution_id
+        prior
       else
-        _old_record, _old_bytes, = verify_stale_execution!(
+        old_record, _old_bytes, = verify_stale_execution!(
           repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
         )
         root_id = old_execution_id
+        old_record
       end
       ExecutionRecord.verify_no_active_owner!(repo_root, task_id,
                                               except_execution_ids: retry_attempt ? [] : [old_execution_id.to_s])
@@ -3494,6 +3536,12 @@ class ExecutionRecoveryTransition
                    end
       transition_path = default_path(repo_root, task_id, old_execution_id)
       transition.verify_readback!(transition_path)
+      heavy_scientific = authority_record.heavy_scientific == true ||
+                         HeavyScientificLease.heavy_command?(transition.task_id, command)
+      heavy_run_root = if heavy_scientific
+                         authority_record.heavy_scientific == true ? authority_record.heavy_run_root :
+                           HeavyScientificLease.run_root_from_command(command, worktree_path)
+                       end
 
       successor_id = transition.successor_execution_id
       successor_path = ExecutionRecord.default_path(repo_root, task_id, successor_id)
@@ -3504,6 +3552,7 @@ class ExecutionRecoveryTransition
         end
         record_bytes = File.binread(successor_path)
         record = ExecutionRecord.from_json(record_bytes)
+        ExecutionRecord.verify_heavy_authority_metadata!(record)
         unless record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
                record.task_id == task_id.to_s && record.execution_id == successor_id &&
                (!retry_attempt || (record.recovery_old_execution_id == root_id &&
@@ -3527,6 +3576,11 @@ class ExecutionRecoveryTransition
                                         execution_record: record, durable_capture: capture,
                                         recovery_transition: transition)
         elsif record.status == ExecutionRecord::STATUS_STARTED
+          if record.heavy_scientific == true &&
+             (!heavy_scientific || record.heavy_run_root != heavy_run_root)
+            raise ExecutionRecord::UnresolvedExecutionStateError,
+                  'recovery successor heavy authority does not match its validated transition'
+          end
           unless record.pid.is_a?(Integer) && record.pid.positive? && record.started_at &&
                  !record.started_at.empty? && record.durable_capture_path.to_s.empty? && record.ended_at.nil?
             raise ExecutionRecord::UnresolvedExecutionStateError,
@@ -3547,7 +3601,9 @@ class ExecutionRecoveryTransition
                                         status: ExecutionRecord::STATUS_STARTED,
                                         started_at: Time.now.utc.iso8601,
                                         recovery_old_execution_id: root_id,
-                                        recovery_parent_execution_id: retry_attempt ? old_execution_id : nil)
+                                        recovery_parent_execution_id: retry_attempt ? old_execution_id : nil,
+                                        heavy_scientific: heavy_scientific ? true : nil,
+                                        heavy_run_root: heavy_scientific ? heavy_run_root : nil)
           resumed.save(successor_path)
           verified = ExecutionRecord.load(successor_path)
           unless verified.schema_version == ExecutionRecord::SCHEMA_VERSION &&
@@ -3566,7 +3622,9 @@ class ExecutionRecoveryTransition
         recovery = ExecutionRecord.acquire!(successor_path, task_id: task_id,
                                              execution_id: successor_id, pid: pid,
                                              recovery_parent_execution_id: retry_attempt ? old_execution_id : nil,
-                                             recovery_old_execution_id: root_id)
+                                             recovery_old_execution_id: root_id,
+                                             heavy_scientific: heavy_scientific ? true : nil,
+                                             heavy_run_root: heavy_scientific ? heavy_run_root : nil)
         unless recovery.classification.nil? && recovery.execution_record &&
                recovery.execution_record.task_id == task_id.to_s &&
                recovery.execution_record.execution_id == successor_id &&
@@ -3658,7 +3716,7 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
     opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
     opts.on('--run', 'Acquire, capture, and complete a task-owned execution, or reuse its result') { selected_modes << (mode = :run) }
-    opts.on('--heavy-scientific', 'Acquire the machine-wide heavy-scientific slot for this protected --run') do
+    opts.on('--heavy-scientific', 'Require the machine-wide heavy-scientific slot for protected runs and recoveries') do
       options[:heavy_scientific] = true
     end
     opts.on('--recover-run', 'Explicitly resume one stale execution through a durable successor transition') { selected_modes << (mode = :recover_run) }
@@ -3696,8 +3754,9 @@ if __FILE__ == $PROGRAM_NAME
     if selected_modes.include?(:retry_recover_run) && selected_modes != [:retry_recover_run]
       raise OptionParser::InvalidArgument, '--retry-recover-run cannot be combined with another mode'
     end
-    if options[:heavy_scientific] && mode != :run
-      raise OptionParser::InvalidArgument, '--heavy-scientific is only valid with --run'
+    if options[:heavy_scientific] && !%i[run recover_run retry_recover_run].include?(mode)
+      raise OptionParser::InvalidArgument,
+            '--heavy-scientific is only valid with protected run and recovery operations'
     end
     if options[:run_root] && mode != :run
       raise OptionParser::InvalidArgument, '--run-root is only valid with --run'
@@ -3741,13 +3800,32 @@ if __FILE__ == $PROGRAM_NAME
   heavy_scientific = mode == :run &&
                      (options[:heavy_scientific] || HeavyScientificLease.heavy_command?(options[:task_id], upstream_argv))
   heavy_run_root = if heavy_scientific
-                     options[:run_root] || HeavyScientificLease.run_root_from_command(upstream_argv, options[:worktree])
+                     File.expand_path(options[:run_root] ||
+                       HeavyScientificLease.run_root_from_command(upstream_argv, options[:worktree]))
                    end
 
   if %i[run recover_run retry_recover_run].include?(mode)
     begin
       nested_request = nil
       ExecutionRecord.assert_task_lock_generation!(options[:repository], options[:task_id])
+      if options[:heavy_scientific] && %i[recover_run retry_recover_run].include?(mode)
+        authority_record = if mode == :recover_run
+                            ExecutionRecoveryTransition.verify_stale_execution!(
+                              repo_root: options[:repository], task_id: options[:task_id],
+                              old_execution_id: options[:execution_id]
+                            ).first
+                          else
+                            ExecutionRecoveryTransition.verify_failed_successor!(
+                              repo_root: options[:repository], task_id: options[:task_id],
+                              execution_id: options[:execution_id]
+                            ).first
+                          end
+        unless authority_record.heavy_scientific == true ||
+               HeavyScientificLease.heavy_command?(authority_record.task_id, upstream_argv)
+          raise ExecutionRecord::UnresolvedExecutionStateError,
+                '--heavy-scientific recovery requires heavy authority from the existing execution or task command'
+        end
+      end
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
       if %i[recover_run retry_recover_run].include?(mode)
         recovery = ExecutionRecoveryTransition.acquire_successor!(
@@ -3767,10 +3845,14 @@ if __FILE__ == $PROGRAM_NAME
                        options[:repository], options[:task_id], options[:execution_id], nested_request
                      )
                      ExecutionRecord.acquire_nested_owned!(options[:repository], options[:task_id],
-                                                          options[:execution_id], nested, pid: Process.pid)
+                                                          options[:execution_id], nested, pid: Process.pid,
+                                                          heavy_scientific: heavy_scientific ? true : nil,
+                                                          heavy_run_root: heavy_scientific ? heavy_run_root : nil)
                    else
                      ExecutionRecord.acquire_task_owned!(
-                       options[:repository], options[:task_id], options[:execution_id], pid: Process.pid
+                       options[:repository], options[:task_id], options[:execution_id], pid: Process.pid,
+                       heavy_scientific: heavy_scientific ? true : nil,
+                       heavy_run_root: heavy_scientific ? heavy_run_root : nil
                      )
                    end
       end
@@ -3780,6 +3862,19 @@ if __FILE__ == $PROGRAM_NAME
              (mode == :run ? record.execution_id == options[:execution_id] :
                record.execution_id == recovery.recovery_transition.successor_execution_id)
         raise ExecutionRecord::UnresolvedExecutionStateError, 'execution record identity or schema is malformed'
+      end
+      unless mode == :run
+        ExecutionRecord.verify_heavy_authority_metadata!(record)
+        heavy_scientific = record.heavy_scientific == true ||
+                           HeavyScientificLease.heavy_command?(record.task_id, upstream_argv)
+        if options[:heavy_scientific] && !heavy_scientific && recovery.classification.nil?
+          raise ExecutionRecord::UnresolvedExecutionStateError,
+                '--heavy-scientific recovery requires heavy authority from the execution record or validated task command'
+        end
+        heavy_run_root = if heavy_scientific
+                           record.heavy_scientific == true ? record.heavy_run_root :
+                             HeavyScientificLease.run_root_from_command(upstream_argv, options[:worktree])
+                         end
       end
       capture_path = DurableCommandCapture.default_path(
         options[:repository], options[:task_id], record.execution_id
