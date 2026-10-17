@@ -1638,6 +1638,7 @@ class ExecutionRecord
                      NESTED_LOCK_IDENTITY_ENV, NESTED_PARENT_ENV, NESTED_SECRET_ENV].freeze
   NESTED_MAX_DEPTH = 16
   TASK_LINEAGE_MAX_BYTES = 4096
+  GEN2_MARKER_RELATIVE_PATH = File.join('fable-locks', 'repository-generation.json').freeze
 
   NestedCapability = Struct.new(:lock, :parent_execution_id, :ancestor_execution_ids, :secret,
                                 keyword_init: true)
@@ -1747,10 +1748,193 @@ class ExecutionRecord
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'execution.lock')
   end
 
+  # Resolves Git's authoritative common directory via `git rev-parse --git-common-dir`,
+  # properly handling normal repositories and linked worktrees without guessing
+  # or assuming a worktree-local .git directory. Returns nil only when Git
+  # positively reports a non-repository and no Git metadata or discovery override
+  # indicates that the repository identity may be unresolved.
+  def self.git_common_dir(repo_root)
+    if repo_root.nil? || repo_root.to_s.strip.empty?
+      raise LegacyAdmissionError, 'legacy protected execution rejected: repository root is unresolved'
+    end
+
+    resolved_root = File.realpath(repo_root)
+    unless File.directory?(resolved_root)
+      raise LegacyAdmissionError, "legacy protected execution rejected: repository root '#{resolved_root}' is not a directory"
+    end
+
+    stdout, stderr, status = Open3.capture3('git', 'rev-parse', '--git-common-dir', chdir: resolved_root)
+    unless status.success?
+      return nil if confirmed_non_git_repository?(resolved_root, stderr)
+
+      reason = stderr.to_s.strip
+      reason = "git exited with status #{status.exitstatus}" if reason.empty?
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: Git common-dir resolution failed: #{reason}"
+    end
+
+    raw_dir = stdout.to_s.strip
+    if raw_dir.empty?
+      raise LegacyAdmissionError,
+            'legacy protected execution rejected: Git returned an empty common-dir'
+    end
+
+    expanded = File.expand_path(raw_dir, resolved_root)
+    common_dir = File.realpath(expanded)
+    unless File.directory?(common_dir)
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: Git common-dir '#{common_dir}' is not a directory"
+    end
+    common_dir
+  rescue LegacyAdmissionError
+    raise
+  rescue StandardError => e
+    raise LegacyAdmissionError,
+          "legacy protected execution rejected: Git common-dir resolution failed: #{e.class}: #{e.message}"
+  end
+
+  def self.confirmed_non_git_repository?(resolved_root, stderr)
+    return false unless stderr.to_s.match?(/not a git repository/i)
+    return false if git_discovery_context_overridden?
+    return false if git_repository_metadata_present?(resolved_root)
+
+    true
+  rescue StandardError
+    false
+  end
+
+  def self.git_discovery_context_overridden?
+    %w[GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM]
+      .any? { |name| ENV.key?(name) }
+  end
+
+  def self.git_repository_metadata_present?(resolved_root)
+    current = resolved_root
+    loop do
+      git_entry = File.join(current, '.git')
+      begin
+        File.lstat(git_entry)
+        return true
+      rescue Errno::ENOENT
+        # No worktree metadata at this level; check ancestors and bare-repo layout.
+      rescue SystemCallError
+        return true
+      end
+
+      return true if git_bare_repository_metadata_present?(current)
+
+      parent = File.dirname(current)
+      break if parent == current
+
+      current = parent
+    end
+    false
+  rescue StandardError
+    true
+  end
+
+  def self.git_bare_repository_metadata_present?(directory)
+    expected = {
+      'HEAD' => :file,
+      'config' => :file,
+      'objects' => :directory,
+      'refs' => :directory
+    }
+    stats = expected.map do |name, kind|
+      stat = File.lstat(File.join(directory, name))
+      kind == :file ? stat.file? : stat.directory?
+    rescue Errno::ENOENT
+      return false
+    rescue SystemCallError
+      return true
+    end
+    stats.all?
+  rescue StandardError
+    true
+  end
+
+  private_class_method :confirmed_non_git_repository?, :git_discovery_context_overridden?,
+                       :git_repository_metadata_present?, :git_bare_repository_metadata_present?
+
+  # Returns the absolute path of the Generation-2 marker under Git's common directory,
+  # or nil if repo_root is not in a Git repository.
+  def self.generation2_marker_path(repo_root)
+    common_dir = git_common_dir(repo_root)
+    return nil unless common_dir
+
+    File.join(common_dir, GEN2_MARKER_RELATIVE_PATH)
+  end
+
+  # Bounded Generation-2 legacy admission guard candidate.
+  #
+  # When Generation-2 Marker (<git-common-dir>/fable-locks/repository-generation.json)
+  # is present in any form (valid, malformed, empty, symlink, unreadable, or non-regular),
+  # legacy protected execution must fail closed and refuse admission before creating
+  # any task execution lock, execution record, or launching an upstream child.
+  #
+  # EXPLICIT LIMITATION NOTES:
+  # - A18 (Unpatched scripts): This guard protects only executions that invoke this
+  #   updated launcher. Legacy or external scripts that have not received this candidate
+  #   patch will NOT be restrained by this guard.
+  # - A19 (TOCTOU race): This check is performed at pre-admission entry. A single
+  #   marker existence check does not eliminate all time-of-check to time-of-use
+  #   (TOCTOU) races if repository migration or marker creation occurs concurrently
+  #   after admission. Full fencing requires Generation-2 descriptor-held lock validation.
+  # - A20 (Candidate boundary): This candidate is strictly a marker-aware admission guard,
+  #   NOT a complete StableLockAnchor implementation or repository-wide migration fence.
+  def self.assert_legacy_admission_permitted!(repo_root)
+    marker_path = generation2_marker_path(repo_root)
+    return true unless marker_path
+
+    locks_dir = File.dirname(marker_path)
+    begin
+      locks_stat = File.lstat(locks_dir)
+      if locks_stat.symlink?
+        raise LegacyAdmissionError,
+              "legacy protected execution rejected: generation-2 locks directory '#{locks_dir}' is a symlink"
+      end
+    rescue Errno::ENOENT
+      return true
+    rescue SystemCallError => e
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: generation-2 locks directory '#{locks_dir}' state is unresolved: #{e.message}"
+    end
+
+    begin
+      marker_stat = File.lstat(marker_path)
+    rescue Errno::ENOENT
+      return true
+    rescue SystemCallError => e
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: generation-2 marker '#{marker_path}' state is unresolved: #{e.message}"
+    end
+
+    if marker_stat.symlink?
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: generation-2 marker '#{marker_path}' is a symlink"
+    end
+
+    unless marker_stat.file?
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: generation-2 marker '#{marker_path}' is not a regular file"
+    end
+
+    begin
+      File.open(marker_path, File::RDONLY) { |f| }
+    rescue SystemCallError => e
+      raise LegacyAdmissionError,
+            "legacy protected execution rejected: generation-2 marker '#{marker_path}' is unreadable: #{e.message}"
+    end
+
+    raise LegacyAdmissionError,
+          "legacy protected execution rejected: repository is marked for generation-2 (#{marker_path})"
+  end
+
   # Serializes task-scoped ownership checks and acquisition across distinct
   # execution IDs. Protected launches also pass this open descriptor to the
   # application child, so the OS lock remains held if the wrapper is killed.
   def self.with_task_lock(repo_root, task_id)
+    assert_legacy_admission_permitted!(repo_root)
     lock_path = task_lock_path(repo_root, task_id)
     FileUtils.mkdir_p(File.dirname(lock_path))
     if File.symlink?(lock_path)
@@ -1902,6 +2086,7 @@ class ExecutionRecord
   end
 
   def self.acquire_task_owned!(repo_root, task_id, execution_id, pid:)
+    assert_legacy_admission_permitted!(repo_root)
     with_task_lock(repo_root, task_id) do
       verify_no_active_owner!(repo_root, task_id, except_execution_ids: [execution_id.to_s],
                               reject_unrecovered_stale: true)
@@ -2081,6 +2266,7 @@ class ExecutionRecord
   # already proved it holds the lineage lock. It records its own identity and
   # parent after the normal owner check, excluding only verified ancestors.
   def self.acquire_nested_owned!(repo_root, task_id, execution_id, capability, pid:)
+    assert_legacy_admission_permitted!(repo_root)
     verify_no_active_owner!(repo_root, task_id,
                             except_execution_ids: [execution_id.to_s, *capability.ancestor_execution_ids],
                             reject_unrecovered_stale: true,
@@ -2254,6 +2440,7 @@ class ExecutionRecord
   class LoadError < StandardError; end
   class DuplicateExecutionError < StandardError; end
   class UnresolvedExecutionStateError < StandardError; end
+  class LegacyAdmissionError < UnresolvedExecutionStateError; end
 end
 
 # One immutable stale-execution disposition and old->successor link per
@@ -2361,6 +2548,7 @@ class ExecutionRecoveryTransition
   end
 
   def self.reserve!(repo_root:, task_id:, old_execution_id:, application_state_path:, worktree_path:, command:)
+    ExecutionRecord.assert_legacy_admission_permitted!(repo_root)
     old_record, old_bytes, old_sha256 = verify_stale_execution!(
       repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
     )
@@ -2506,6 +2694,7 @@ class ExecutionRecoveryTransition
 
   def self.acquire_successor!(repo_root:, task_id:, old_execution_id:, application_state_path:,
                               worktree_path:, command:, pid:)
+    ExecutionRecord.assert_legacy_admission_permitted!(repo_root)
     ExecutionRecord.with_task_lock(repo_root, task_id) do
       _old_record, _old_bytes, = verify_stale_execution!(
         repo_root: repo_root, task_id: task_id, old_execution_id: old_execution_id
@@ -2734,6 +2923,7 @@ if __FILE__ == $PROGRAM_NAME
 
   if %i[run recover_run].include?(mode)
     begin
+      ExecutionRecord.assert_legacy_admission_permitted!(options[:repository])
       nested_request = nil
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
       if mode == :recover_run
