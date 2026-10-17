@@ -428,6 +428,145 @@ find_symlink_component() {
   return 1
 }
 
+# Runtime Helper Preservation Guard.
+# Ensures that before any destructive sync (rsync --delete) is executed against
+# a live skill destination, any Ruby helpers present in the live destination
+# are also present in the source materialization and byte-identical.
+# Fails closed on symlinks, missing files, or unverifiable paths.
+guard_runtime_helper_preservation() {
+  local canonical_abs="$1" live="$2" platform="$3"
+
+  # Helper preservation contract applies to platforms managing Ruby helpers (codex)
+  [[ "$platform" == codex ]] || return 0
+  [[ -d "$live" ]] || return 0
+
+  if [[ -L "$live" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live target is a symlink: ${live}"
+  fi
+  if [[ -L "$canonical_abs" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source target is a symlink: ${canonical_abs}"
+  fi
+
+  if [[ -L "$live/scripts" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live scripts path is a symlink: ${live}/scripts"
+  fi
+  if [[ -L "$canonical_abs/scripts" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source scripts path is a symlink: ${canonical_abs}/scripts"
+  fi
+
+  local -a candidates=('')
+  if [[ -d "$live/scripts" && ! -L "$live/scripts" ]]; then
+    local extra
+    while IFS= read -r extra; do
+      [[ -n "$extra" ]] || continue
+      local rel="scripts/${extra}"
+      local known=0 c
+      for c in "${candidates[@]}"; do
+        [[ -n "$c" ]] || continue
+        if [[ "$c" == "$rel" ]]; then
+          known=1
+          break
+        fi
+      done
+      if [[ "$known" -eq 0 ]]; then
+        candidates+=("$rel")
+      fi
+    done < <(find "$live/scripts" -maxdepth 1 -name '*.rb' -exec basename {} \; 2>/dev/null | LC_ALL=C sort)
+  fi
+
+  if [[ -d "$canonical_abs/scripts" && ! -L "$canonical_abs/scripts" ]]; then
+    local src_extra
+    while IFS= read -r src_extra; do
+      [[ -n "$src_extra" ]] || continue
+      local rel="scripts/${src_extra}"
+      local known=0 c
+      for c in "${candidates[@]}"; do
+        [[ -n "$c" ]] || continue
+        if [[ "$c" == "$rel" ]]; then
+          known=1
+          break
+        fi
+      done
+      if [[ "$known" -eq 0 ]]; then
+        candidates+=("$rel")
+      fi
+    done < <(find "$canonical_abs/scripts" -maxdepth 1 -name '*.rb' -exec basename {} \; 2>/dev/null | LC_ALL=C sort)
+  fi
+
+  local -a missing_helpers=()
+  local -a mismatched_helpers=()
+
+  local rel
+  for rel in "${candidates[@]}"; do
+    [[ -n "$rel" ]] || continue
+    local live_path="${live}/${rel}"
+    local src_path="${canonical_abs}/${rel}"
+
+    if [[ -L "$live_path" ]]; then
+      die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live helper is a symlink: ${rel}"
+    fi
+    if [[ -L "$src_path" ]]; then
+      die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source helper is a symlink: ${rel}"
+    fi
+
+    if [[ -e "$live_path" ]]; then
+      if [[ ! -f "$live_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: live helper is not a regular file: ${rel}"
+      fi
+      if [[ ! -r "$live_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: live helper is not readable: ${rel}"
+      fi
+
+      if [[ ! -e "$src_path" ]]; then
+        missing_helpers+=("$rel")
+        continue
+      fi
+
+      if [[ ! -f "$src_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper is not a regular file: ${rel}"
+      fi
+      if [[ ! -r "$src_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper is not readable: ${rel}"
+      fi
+      if [[ "$rel" == scripts/task_*.rb && ! -x "$src_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source launcher is not executable: ${rel}"
+      fi
+
+      if ! cmp -s "$live_path" "$src_path"; then
+        mismatched_helpers+=("$rel")
+      fi
+    else
+      if [[ -e "$src_path" ]]; then
+        if [[ ! -f "$src_path" || ! -r "$src_path" ]]; then
+          die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper cannot be verified: ${rel}"
+        fi
+        if [[ "$rel" == scripts/task_*.rb && ! -x "$src_path" ]]; then
+          die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source launcher is not executable: ${rel}"
+        fi
+      fi
+    fi
+  done
+
+  if (( ${#missing_helpers[@]} > 0 )); then
+    printf 'ACTIVATION_RUNTIME_HELPER_LOSS_PREVENTED: source is missing live runtime helper(s):\n' >&2
+    for rel in "${missing_helpers[@]}"; do
+      printf '  missing: %s\n' "$rel" >&2
+    done
+    exit 2
+  fi
+
+  if (( ${#mismatched_helpers[@]} > 0 )); then
+    printf 'ACTIVATION_RUNTIME_HELPER_MISMATCH: helper content differs between source and live:\n' >&2
+    for rel in "${mismatched_helpers[@]}"; do
+      local live_sha src_sha
+      live_sha="$(shasum -a 256 "${live}/${rel}" | awk '{print $1}')"
+      src_sha="$(shasum -a 256 "${canonical_abs}/${rel}" | awk '{print $1}')"
+      printf '  mismatched: %s (source: %s, live: %s)\n' "$rel" "$src_sha" "$live_sha" >&2
+    done
+    exit 2
+  fi
+}
+
 # Metadata-only inventory of the pinned HEAD history, including directories.
 # NUL delimiters preserve raw path bytes. Failures propagate through pipefail;
 # no historical blob content is read to establish which live paths are known.
@@ -741,6 +880,13 @@ do_activate() {
   require_canonical_repository_state_for_activation
   require_rsync
 
+  local live canonical_abs result
+  live="$(platform_live_path "$platform")"
+  canonical_abs="$(repo_path "$(platform_materialized_rel "$platform")")"
+  [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] || die 'canonical materialization is missing or is a symlink'
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
+
   local preflight_head preflight_tree
   preflight_head="$(activation_source_head)"
   preflight_tree="$(git_identity -C "$REPOSITORY_ROOT" rev-parse HEAD^{tree})"
@@ -763,11 +909,6 @@ do_activate() {
     exit 2
   fi
 
-  local live canonical_abs result
-  live="$(platform_live_path "$platform")"
-  canonical_abs="$(repo_path "$(platform_materialized_rel "$platform")")"
-  [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] || die 'canonical materialization is missing or is a symlink'
-
   verify_manifest_paths
   require_canonical_source_gate
   require_canonical_repository_state_for_activation
@@ -776,6 +917,8 @@ do_activate() {
   classify_platform "$platform"
   [[ "$CLASSIFY_STATE" == "$prev_state" && "$CLASSIFY_MATCHED_COMMIT" == "$prev_matched" ]] \
     || die 'LIVE_TARGET_CHANGED_BEFORE_WRITE'
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
 
   case "$prev_state" in
     ABSENT)
@@ -808,6 +951,8 @@ do_activate() {
     printf '  post_write_state: %s\n' "$CLASSIFY_STATE" >&2
     exit 2
   fi
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
 
   printf 'PLATFORM: %s\n' "$platform"
   printf 'PREVIOUS_STATE: %s\n' "$prev_state"
@@ -854,6 +999,8 @@ do_activate_replace_reviewed_local_drift() {
   [[ -d "$live" && ! -L "$live" ]] \
     || die 'REVIEWED_REPLACEMENT_LIVE_TARGET_NOT_READY: live target is not an existing plain directory'
 
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
+
   require_reviewed_replacement_canonical_identity "$platform" "$expected_h" "$expected_t" "$expected_m"
   local observed_l
   observed_l="$(compute_live_bundle_sha256 "$live" "$platform")" \
@@ -875,6 +1022,8 @@ do_activate_replace_reviewed_local_drift() {
   [[ "$prewrite_l" == "$expected_l" ]] \
     || die "REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH: expected ${expected_l}, observed ${prewrite_l}"
 
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
+
   rsync -a --checksum --delete "$canonical_abs"/ "$live"/ \
     || die 'REVIEWED_REPLACEMENT_WRITE_FAILED: rsync failed'
 
@@ -885,6 +1034,8 @@ do_activate_replace_reviewed_local_drift() {
     printf '  post_write_state: %s\n' "$CLASSIFY_STATE" >&2
     exit 2
   fi
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
 
   # Classification uses Git file modes; serialization additionally binds all modes.
   # Check the full serialization as well so exact success also binds all
