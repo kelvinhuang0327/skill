@@ -144,3 +144,14 @@ When acceptance concerns serialization or artifact byte determinism, reuse the s
 ## Final artifact gate
 
 Every changed path must be authorized and every `PASS` tied to observed evidence. Do not report terminal success while a mandatory criterion is `NOT RUN`, unresolved, or contradicted. Distinguish `NOT RUN`, `BLOCKED`, and `UNKNOWN`; never claim publication, runtime success, or cleanup without observing it. See [outcome-first reporting](references/reporting.md#final-artifact-gate) and [Judge handoff](references/judge-handoff.md).
+
+## Codex Runtime Materialization
+
+- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d` from commit `a41bf2e0f96b6ea5138486a6837f250f80b308f2`.
+- **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
+
+- **Retained Legacy Companion:** `scripts/paused_run_continuation.rb` is preserved from commit `afd2403b261440c8b770ca0444ddec125456efd8` at Git blob `fbb9b686c927ce53db89f050bb28a5741b51b474` for compatibility with the existing installed asset. It is not a dependency of the versioned launcher.
+- **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
+- **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
+
+A Codex bundle is Runtime Distribution Ready only when every manifest-declared asset matches its pinned bytes and mode; the platform generator's `--check` verifies that state. A documentation-only bundle is not Runtime Distribution Ready.
