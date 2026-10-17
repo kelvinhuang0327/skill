@@ -3159,13 +3159,19 @@ class TaskCheckpointRunTest < Minitest::Test
     recovered = run_cli(recovery_cli_args(old_id))
     successor_id = successor_execution_id(old_id)
 
-    replay = run_cli(cli_args(successor_id))
+    # Replay with matching command succeeds
+    replay = run_cli(cli_args(successor_id, recovery_upstream(old_id)))
 
     assert_equal 0, recovered[2].exitstatus
     assert_equal recovered[0], replay[0]
     assert_equal recovered[1], replay[1]
     assert_equal 0, replay[2].exitstatus
     assert_equal 1, launch_records.size, 'normal replay must reuse the completed explicit recovery successor'
+
+    # Replay with mismatched command must be rejected
+    mismatch_replay = run_cli(cli_args(successor_id))
+    assert_equal 1, mismatch_replay[2].exitstatus
+    assert_includes mismatch_replay[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
   end
 
   def test_duplicate_recovery_replays_one_terminal_successor
@@ -4122,7 +4128,7 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
     record.complete!(record_path(identity), durable_capture_path: custom_capture)
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal "original_out\n", result[0]
     assert_equal "original_err\n", result[1]
     assert_equal 0, result[2].exitstatus
@@ -4138,7 +4144,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "fallback_err\n",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
@@ -4147,7 +4161,7 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     record.complete!(record_path(identity), durable_capture_path: stale_path)
     before_record = File.binread(record_path(identity))
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal "fallback_out\n", result[0]
     assert_equal "fallback_err\n", result[1]
     assert_equal 0, result[2].exitstatus
@@ -4210,7 +4224,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
@@ -4218,9 +4240,16 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
     record.complete!(record_path(identity), durable_capture_path: stale_path)
 
+    # Direct recover_before_execution check
     assert_raises(ExecutionRecord::UnresolvedExecutionStateError) do
       ExecutionRecord.recover_before_execution(record_path(identity), command: ['ruby', '-e', 'puts 999'])
     end
+
+    # CLI check: command mismatch must fail closed with exit 1 and not execute upstream
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 999']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute on command mismatch'
   end
 
   # G. Capture Symlink / 路徑跳脫 (Symlink and path traversal rejected)
@@ -4233,7 +4262,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(real_capture)
 
@@ -4245,7 +4282,7 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
     record.complete!(record_path(identity), durable_capture_path: stale_path)
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal 1, result[2].exitstatus
     assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
     refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
@@ -4266,7 +4303,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "exit_0_err\n",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
@@ -4274,7 +4319,7 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
     record.complete!(record_path(identity), durable_capture_path: stale_path)
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal 0, result[2].exitstatus
     assert_equal "exit_0_out\n", result[0]
     assert_equal "exit_0_err\n", result[1]
@@ -4290,7 +4335,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "exit_23_err\n",
       exit_status: 23,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
@@ -4298,7 +4351,7 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
     record.complete!(record_path(identity), durable_capture_path: stale_path)
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal 23, result[2].exitstatus, 'non-zero exit status must be preserved and not converted to 0'
     assert_equal "exit_23_out\n", result[0]
     assert_equal "exit_23_err\n", result[1]
@@ -4318,14 +4371,22 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
     # Record is STARTED, not COMPLETED
     record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: dead_pid)
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal 1, result[2].exitstatus
     assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
     refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
@@ -4370,7 +4431,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
@@ -4378,27 +4447,41 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
     record.complete!(record_path(identity), durable_capture_path: stale_path)
 
-    # Replay twice to ensure idempotency and no upstream execution
+    # 1. 原 R1 錯誤成功案例（CLI 傳入與 capture 不同的 command）必須變成拒絕
+    mismatch_result = run_cli(cli_args(identity)) # passes sentinel_upstream
+    assert_equal 1, mismatch_result[2].exitstatus
+    assert_includes mismatch_result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must NEVER execute on command mismatch'
+
+    # 2. 正確相同命令可重播，且不執行 upstream
     2.times do
-      result = run_cli(cli_args(identity))
+      result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
       assert_equal 0, result[2].exitstatus
       assert_equal "sentinel_check_out\n", result[0]
       refute File.exist?(@sentinel_marker), 'upstream sentinel must NEVER be executed'
     end
   end
 
-  # 13. 保留 stdout、stderr、exit status 的原始語義 (Binary parity)
+  # 13. 保留 stdout、stderr、exit status 的原始語義 (Binary parity 包括非 UTF-8 bytes)
   def test_13_stdout_stderr_binary_parity
     identity = 'case_13'
-    binary_out = "Binary\0Null\n\xE2\x9C\x93 UTF-8 Checkmark\n"
-    binary_err = "Err\0Binary\n\xE2\x9C\x97 Cross\n"
+    binary_out = "Binary\0Null\n\xFF\xFE\x00\x80 Non-UTF8\n\xE2\x9C\x93 UTF-8 Checkmark\n".b
+    binary_err = "Err\0Binary\n\x80\xFD Non-UTF8\n\xE2\x9C\x97 Cross\n".b
     capture = DurableCommandCapture.new(
       command: ['ruby', '-e', 'puts 1'],
       stdout: binary_out,
       stderr: binary_err,
       exit_status: 12,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(capture_path(identity))
 
@@ -4406,10 +4489,238 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
     record.complete!(record_path(identity), durable_capture_path: stale_path)
 
-    result = run_cli(cli_args(identity))
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
     assert_equal 12, result[2].exitstatus
-    assert_equal binary_out, result[0]
-    assert_equal binary_err, result[1]
+    assert_equal binary_out.bytes, result[0].b.bytes
+    assert_equal binary_err.bytes, result[1].b.bytes
     refute File.exist?(@sentinel_marker)
+  end
+
+  # 14. 缺少 schema_version 必須拒絕 (AC09, MISSING_SCHEMA_NEGATIVE)
+  def test_14_missing_schema_version_rejected
+    identity = 'case_14_missing_schema'
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    # Valid capture JSON but completely missing schema_version
+    json = JSON.generate(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity
+    )
+    File.write(capture_path(identity), json)
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    # Loading capture directly must raise ValidationError
+    assert_raises(DurableCommandCapture::ValidationError) do
+      DurableCommandCapture.load(capture_path(identity))
+    end
+
+    # CLI replay must fail closed with exit status 1
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # 15. 不受支援的 schema_version 必須拒絕 (AC10)
+  def test_15_unsupported_schema_version_rejected
+    identity = 'case_15_unsupported_schema'
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    [2, 0, '1', 99].each do |bad_ver|
+      json = JSON.generate(
+        schema_version: bad_ver,
+        command: ['ruby', '-e', 'puts 1'],
+        stdout: "out\n",
+        stderr: "",
+        exit_status: 0,
+        started_at: Time.now.utc.iso8601,
+        ended_at: Time.now.utc.iso8601,
+        task_id: TASK_ID,
+        execution_id: identity
+      )
+      File.write(capture_path(identity), json)
+
+      assert_raises(DurableCommandCapture::ValidationError) do
+        DurableCommandCapture.load(capture_path(identity))
+      end
+    end
+  end
+
+  # 16. 將另一個 Task 的 Capture 放入預期位置，不得被接受 (AC05, WRONG_TASK_CAPTURE_REJECTION)
+  def test_16_wrong_task_capture_rejected
+    identity = 'case_16_wrong_task'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "spoofed_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: 'OTHER_TASK_ATTACK',
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => 'OTHER_TASK_ATTACK',
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute when task_id mismatches'
+  end
+
+  # 17. 將另一個 Execution 的 Capture 放入預期位置，不得被接受 (AC06, WRONG_EXECUTION_CAPTURE_REJECTION)
+  def test_17_wrong_execution_capture_rejected
+    identity = 'case_17_wrong_exec'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "spoofed_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: 'OTHER_EXECUTION_ATTACK',
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => 'OTHER_EXECUTION_ATTACK'
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute when execution_id mismatches'
+  end
+
+  # 18. Legacy Capture 若 execution_identity=nil，缺乏可信證據時 Fallback fail closed (AC07, LEGACY_NIL_NEGATIVE)
+  def test_18_legacy_fallback_with_nil_identity_fails_closed
+    identity = 'case_18_legacy_nil'
+    # Legacy capture without execution_identity and without explicit task_id/execution_id
+    legacy_capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "legacy_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601
+    )
+    assert_nil legacy_capture.execution_identity
+    legacy_capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent_legacy', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    # Fallback to canonical location with nil execution_identity must FAIL CLOSED
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute on legacy nil fallback'
+  end
+
+  # 19. 祖先目錄含 Symlink 必須拒絕 (AC11, ANCESTOR_SYMLINK_NEGATIVE)
+  def test_19_ancestor_symlink_rejected
+    identity = 'case_19_ancestor_symlink'
+    outside_captures_dir = File.join(@tmpdir, 'outside_captures')
+    FileUtils.mkdir_p(outside_captures_dir)
+
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "ancestor_symlink_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(File.join(outside_captures_dir, "#{identity}.json"))
+
+    # Test symlink at captures dir ancestor level
+    captures_target = File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'captures')
+    FileUtils.rm_rf(captures_target) if File.exist?(captures_target) || File.symlink?(captures_target)
+    FileUtils.mkdir_p(File.dirname(captures_target))
+    File.symlink(outside_captures_dir, captures_target)
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute when ancestor is symlink'
+
+    # Cleanup the symlinked captures directory
+    FileUtils.rm_rf(captures_target)
+  end
+
+  # 20. Nested CLI acquisition 也比較 command，不相符時拒絕 (AC03, AC04, AC18)
+  def test_20_nested_cli_command_mismatch_rejected
+    identity = 'case_20_nested'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "nested_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    # Set up mock nested capability in ENV
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) do |lock|
+      secret = ExecutionRecord.write_task_lineage!(lock, @repo, TASK_ID, 'parent_id')
+      nested_env = ExecutionRecord.nested_capability_env(@repo, TASK_ID, lock, 'parent_id', secret)
+
+      # In nested environment, acquire_nested_owned! must reject command mismatch
+      assert_raises(ExecutionRecord::UnresolvedExecutionStateError) do
+        nested = ExecutionRecord.verify_nested_capability!(
+          @repo, TASK_ID, identity,
+          ExecutionRecord.nested_capability_request(nested_env, @repo, TASK_ID)
+        )
+        ExecutionRecord.acquire_nested_owned!(
+          @repo, TASK_ID, identity, nested,
+          pid: Process.pid, command: ['ruby', '-e', 'puts 999']
+        )
+      end
+    end
   end
 end
