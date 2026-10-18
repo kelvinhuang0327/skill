@@ -3254,7 +3254,14 @@ class TaskCheckpointRunTest < Minitest::Test
   def test_run_malformed_completed_result_is_not_replayed_or_rerun
     identity = 'malformed_result'
     capture = DurableCommandCapture.new(command: ['test'], stdout: 'must not replay', exit_status: 'bogus',
-                                        started_at: Time.now.utc.iso8601, ended_at: Time.now.utc.iso8601)
+                                        started_at: Time.now.utc.iso8601, ended_at: Time.now.utc.iso8601,
+                                        task_id: TASK_ID, execution_id: identity,
+                                        execution_identity: {
+                                          'repository_path' => @repo,
+                                          'worktree_path' => @worktree,
+                                          'task_id' => TASK_ID,
+                                          'execution_id' => identity
+                                        })
     capture.save(capture_path(identity))
     record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
     record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
@@ -3838,7 +3845,15 @@ class ExecutionRecoveryTest < Minitest::Test
     capture_file = File.join(@tmpdir, 'captures', 'completed_capture.json')
 
     bump = ['ruby', '-e', "n = File.read(#{counter_path.inspect}).to_i; File.write(#{counter_path.inspect}, (n + 1).to_s)"]
-    DurableCommandCapture.run_and_capture(bump, file_path: capture_file)
+    DurableCommandCapture.run_and_capture(
+      bump, file_path: capture_file, task_id: 'T_B', execution_id: 'completed',
+      execution_identity: {
+        'repository_path' => @tmpdir,
+        'worktree_path' => @tmpdir,
+        'task_id' => 'T_B',
+        'execution_id' => 'completed'
+      }
+    )
     assert_equal '1', File.read(counter_path)
 
     record = ExecutionRecord.start!(path, task_id: 'T_B', execution_id: 'completed', pid: Process.pid)
@@ -4622,8 +4637,8 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
     DurableCommandCapture.default_path(@repo, TASK_ID, identity)
   end
 
-  # A. 舊絕對路徑仍有效 (Original absolute path valid)
-  def test_11a_original_path_valid_preserves_existing_behavior
+  # A. 新 Capture 的 explicit path 可重播 (New Capture replays from explicit path)
+  def test_11a_new_capture_explicit_path_replays
     identity = 'case_11a'
     custom_capture = File.join(@tmpdir, 'custom_captures', "#{identity}.json")
     capture = DurableCommandCapture.new(
@@ -4632,7 +4647,15 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
       stderr: "original_err\n",
       exit_status: 0,
       started_at: Time.now.utc.iso8601,
-      ended_at: Time.now.utc.iso8601
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
     )
     capture.save(custom_capture)
 
@@ -5231,6 +5254,75 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
           @repo, TASK_ID, identity, nested,
           pid: Process.pid, command: ['ruby', '-e', 'puts 999']
         )
+      end
+    end
+  end
+
+  # 21. Explicit path and canonical fallback enforce the same Capture identity and command rules.
+  def test_21_explicit_and_fallback_capture_identity_parity
+    cases = {
+      correct_new_capture: { accepted: true },
+      legacy_nil_identity: { accepted: false },
+      wrong_task_id: { accepted: false, task_id: 'OTHER_TASK_ATTACK' },
+      wrong_execution_id: { accepted: false, execution_id: 'OTHER_EXECUTION_ATTACK' },
+      wrong_command: { accepted: false, command: [RbConfig.ruby, '-e', 'print "different command"'] }
+    }
+
+    %i[explicit fallback].each do |location|
+      cases.each do |case_name, scenario|
+        identity = "case_21_#{location}_#{case_name}"
+        capture_task_id = scenario.fetch(:task_id, TASK_ID)
+        capture_execution_id = scenario.fetch(:execution_id, identity)
+        capture_command = scenario.fetch(:command, sentinel_upstream)
+        capture_stdout = "replayed_#{location}_#{case_name}\n"
+        capture_attrs = {
+          command: capture_command,
+          stdout: capture_stdout,
+          stderr: "capture_stderr\n",
+          exit_status: 0,
+          started_at: Time.now.utc.iso8601,
+          ended_at: Time.now.utc.iso8601
+        }
+        unless case_name == :legacy_nil_identity
+          capture_attrs[:task_id] = capture_task_id
+          capture_attrs[:execution_id] = capture_execution_id
+          capture_attrs[:execution_identity] = {
+            'repository_path' => @repo,
+            'worktree_path' => @worktree,
+            'task_id' => capture_task_id,
+            'execution_id' => capture_execution_id
+          }
+        end
+        capture = DurableCommandCapture.new(capture_attrs)
+        explicit_path = File.join(@tmpdir, 'explicit_captures', "#{identity}.json")
+        capture.save(explicit_path) if location == :explicit
+        capture.save(capture_path(identity)) if location == :fallback
+
+        record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
+                                        execution_id: identity, pid: Process.pid)
+        durable_path = if location == :explicit
+                         explicit_path
+                       else
+                         File.join(@tmpdir, 'missing_original_capture', "#{identity}.json")
+                       end
+        record.complete!(record_path(identity), durable_capture_path: durable_path)
+
+        result = run_cli(cli_args(identity))
+        refute File.exist?(@sentinel_marker), "upstream sentinel executed for #{location} #{case_name}"
+
+        if scenario[:accepted]
+          assert_equal 0, result[2].exitstatus, "#{location} #{case_name} should replay"
+          assert_equal capture_stdout, result[0]
+          assert_equal "capture_stderr\n", result[1]
+        else
+          assert_equal 1, result[2].exitstatus, "#{location} #{case_name} should fail closed"
+          expected_classification = if case_name == :wrong_command
+                                      ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+                                    else
+                                      ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+                                    end
+          assert_includes result[1], expected_classification
+        end
       end
     end
   end

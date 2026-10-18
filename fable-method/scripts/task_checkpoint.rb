@@ -2016,7 +2016,10 @@ class DurableCommandCapture
       return EVIDENCE_UNKNOWN_UNVERIFIABLE
     end
 
-    if is_fallback
+    # An explicit durable_capture_path is not weaker identity evidence than
+    # the canonical fallback. When the owning record supplies both expected
+    # IDs, require the same binding and execution identity for either path.
+    if is_fallback || (expected_task_id && expected_execution_id)
       return EVIDENCE_UNKNOWN_UNVERIFIABLE if capture.execution_identity.nil?
       return EVIDENCE_UNKNOWN_UNVERIFIABLE if capture.task_id.nil? || capture.execution_id.nil?
       return EVIDENCE_UNKNOWN_UNVERIFIABLE unless capture.task_id == expected_task_id.to_s &&
@@ -3310,7 +3313,7 @@ class ExecutionRecord
     end
 
     capture = if record && classification == CLASSIFICATION_COMPLETED
-                capture_path, is_fallback = record.resolve_durable_capture_path_info(record_path: file_path, repo_root: repo_root)
+                capture_path, _is_fallback = record.resolve_durable_capture_path_info(record_path: file_path, repo_root: repo_root)
                 if capture_path && !File.symlink?(capture_path) && File.file?(capture_path)
                   begin
                     DurableCommandCapture.load(capture_path)
@@ -3336,16 +3339,13 @@ class ExecutionRecord
               "prior execution capture execution_id '#{capture.execution_id}' does not match expected execution_id '#{record.execution_id}'"
       end
 
-      if is_fallback
-        if capture.execution_identity.nil?
-          raise UnresolvedExecutionStateError,
-                "legacy capture with nil execution_identity lacks credible identity proof on fallback"
-        end
-        if capture.task_id.nil? || capture.execution_id.nil? ||
-           capture.task_id != record.task_id || capture.execution_id != record.execution_id
-          raise UnresolvedExecutionStateError,
-                "capture at fallback location lacks required task_id and execution_id binding"
-        end
+      if capture.execution_identity.nil?
+        raise UnresolvedExecutionStateError,
+              'prior execution capture has no credible execution identity'
+      end
+      if capture.task_id.nil? || capture.execution_id.nil?
+        raise UnresolvedExecutionStateError,
+              'prior execution capture lacks required task_id and execution_id binding'
       end
 
       if command
