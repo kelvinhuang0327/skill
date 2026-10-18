@@ -9,6 +9,47 @@ require 'rbconfig'
 require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
+module TaskCheckpointTestScratch
+  ROOT = File.expand_path('../../.task-disposable-scratch', __dir__).freeze
+
+  requested_root = ENV.fetch('FABLE_TEST_SCRATCH_ROOT') do
+    raise 'FABLE_TEST_SCRATCH_ROOT must name this worktree disposable root'
+  end
+  unless File.expand_path(requested_root) == ROOT && File.directory?(ROOT) && File.realpath(ROOT) == ROOT
+    raise 'test scratch root is not the canonical worktree disposable root'
+  end
+  ENV['TMPDIR'] = ROOT
+  ENV['GIT_CEILING_DIRECTORIES'] = ROOT
+
+  BOUNDARY_SHIM = File.join(ROOT, 'git-discovery-boundary.rb').freeze
+  File.write(BOUNDARY_SHIM, <<~'RUBY')
+    class StableLockAnchor
+      module DisposableScratchBoundary
+        def git_marker_in_ancestors?(path)
+          boundary = File.realpath(ENV.fetch('FABLE_TEST_SCRATCH_ROOT'))
+          current = File.expand_path(path.to_s)
+          loop do
+            return false if current == boundary
+            marker = File.join(current, '.git')
+            return true if File.exist?(marker) || File.symlink?(marker)
+            parent = File.dirname(current)
+            return false if parent == current
+            current = parent
+          end
+        end
+      end
+      singleton_class.prepend(DisposableScratchBoundary)
+    end
+  RUBY
+  require BOUNDARY_SHIM
+  ENV['RUBYOPT'] = [ENV['RUBYOPT'].to_s, "-r#{BOUNDARY_SHIM}"].reject(&:empty?).join(' ')
+  Minitest.after_run { FileUtils.rm_f(BOUNDARY_SHIM) }
+
+  def self.mktmpdir(prefix)
+    Dir.mktmpdir(prefix, ROOT)
+  end
+end
+
 module SyntheticGitRepo
   def initialize_synthetic_git_repo(path, lock_generation: true)
     FileUtils.mkdir_p(path)
@@ -31,7 +72,7 @@ end
 
 class TaskCheckpointTest < Minitest::Test
   def setup
-    @tmpdir = Dir.mktmpdir('task_checkpoint_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('task_checkpoint_test_')
     @repo_dir = File.join(@tmpdir, 'repo')
     @worktree_dir = File.join(@tmpdir, 'worktree')
     FileUtils.mkdir_p(@repo_dir)
@@ -218,7 +259,9 @@ class TaskCheckpointTest < Minitest::Test
     )
 
     assert_equal 2, status.exitstatus, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
-    assert_match(/executing repository root is not a Git repository/, stderr)
+    # The contained fixture lives below the task worktree, so trusted Git may
+    # resolve the outer worktree and reject the copy as a non-top-level root.
+    assert_match(/executing repository root is not (?:a Git repository|its Git top-level)/, stderr)
     refute_match(/NO_DRIFT/, stdout)
   end
 
@@ -1749,7 +1792,7 @@ end
 
 class DurableCommandCaptureTest < Minitest::Test
   def setup
-    @tmpdir = Dir.mktmpdir('durable_capture_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('durable_capture_test_')
   end
 
   def teardown
@@ -2022,7 +2065,7 @@ class TaskCheckpointRunTest < Minitest::Test
   RUBY
 
   def setup
-    @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('task_checkpoint_run_test_')
     @repo = File.join(@tmpdir, 'stable-record-root')
     @worktree = File.join(@tmpdir, 'upstream-cwd')
     @caller = File.join(@tmpdir, 'caller-cwd')
@@ -3805,7 +3848,7 @@ class ExecutionRecoveryTest < Minitest::Test
   RUBY
 
   def setup
-    @tmpdir = Dir.mktmpdir('execution_recovery_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('execution_recovery_test_')
   end
 
   def teardown
@@ -3991,7 +4034,7 @@ end
 # previously verified machine-wide heavy-scientific lease.
 class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   def setup
-    @tmpdir = Dir.mktmpdir('gen2_heavy_lease_compat_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('gen2_heavy_lease_compat_')
     @main_repo = File.join(@tmpdir, 'common-repository')
     @repo = File.join(@tmpdir, 'linked-worktree')
     @worktree = File.join(@tmpdir, 'upstream-cwd')
@@ -4561,7 +4604,7 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
   TASK_ID = 'GEN2_COMPAT_TASK'
 
   def setup
-    @tmpdir = Dir.mktmpdir('gen2_compat_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('gen2_compat_test_')
     @repo = File.join(@tmpdir, 'repo')
     @worktree = File.join(@tmpdir, 'worktree')
     @caller = File.join(@tmpdir, 'caller')
@@ -5246,7 +5289,7 @@ class DualRootLockRootCliTest < Minitest::Test
   OMIT_LOCK_ROOT = Object.new.freeze
 
   def setup
-    @tmpdir = File.realpath(Dir.mktmpdir('dual_root_lock_root_test_'))
+    @tmpdir = File.realpath(TaskCheckpointTestScratch.mktmpdir('dual_root_lock_root_test_'))
     @lock_root = File.join(@tmpdir, 'git-root')
     initialize_synthetic_git_repo(@lock_root)
     @storage_root = File.join(@lock_root, '.task-data', 'task-a')
