@@ -3446,6 +3446,7 @@ class TaskCheckpointRunTest < Minitest::Test
     forged = {
       ExecutionRecord::NESTED_TASK_ID_ENV => TASK_ID,
       ExecutionRecord::NESTED_RECORD_ROOT_ENV => File.realpath(@repo),
+      ExecutionRecord::NESTED_LOCK_ROOT_ENV => nil,
       ExecutionRecord::NESTED_LOCK_FD_ENV => '200',
       ExecutionRecord::NESTED_LOCK_IDENTITY_ENV => "#{stat.dev}:#{stat.ino}",
       ExecutionRecord::NESTED_PARENT_ENV => 'forgery_owner',
@@ -5233,5 +5234,316 @@ class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
         )
       end
     end
+  end
+end
+
+# Disposable integration coverage for separating execution-history storage
+# from the Git worktree whose common directory owns the generation-2 lock.
+class DualRootLockRootCliTest < Minitest::Test
+  include SyntheticGitRepo
+
+  CLI = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+  OMIT_LOCK_ROOT = Object.new.freeze
+
+  def setup
+    @tmpdir = File.realpath(Dir.mktmpdir('dual_root_lock_root_test_'))
+    @lock_root = File.join(@tmpdir, 'git-root')
+    initialize_synthetic_git_repo(@lock_root)
+    @storage_root = File.join(@lock_root, '.task-data', 'task-a')
+    FileUtils.mkdir_p(@storage_root)
+    @worktree = @lock_root
+    @outside_root = File.join(@tmpdir, 'outside-storage')
+    FileUtils.mkdir_p(@outside_root)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def test_nested_storage_root_keeps_history_and_capture_and_binds_lock_identity
+    task_id = 'TASK_A_DUAL_ROOT'
+    execution_id = 'nested-storage-run'
+    marker = File.join(@tmpdir, 'nested-storage-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @storage_root, lock_root: @lock_root,
+      task_id: task_id, execution_id: execution_id, command: success_command(marker)
+    ))
+
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(marker)
+    record_path = ExecutionRecord.default_path(@storage_root, task_id, execution_id)
+    capture_path = DurableCommandCapture.default_path(@storage_root, task_id, execution_id)
+    assert File.file?(record_path)
+    assert File.file?(capture_path)
+    assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path).status
+    capture_identity = DurableCommandCapture.load(capture_path).execution_identity
+    assert_equal @storage_root, capture_identity.fetch('storage_root')
+    assert_equal @lock_root, capture_identity.fetch('lock_root')
+
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    common = common_directory(@lock_root)
+    assert lock_path.start_with?(File.join(common, 'fable-locks', 'task-execution'))
+    anchor = JSON.parse(File.read(File.join(File.dirname(lock_path), 'authority.json')))
+    assert_equal @lock_root, anchor.fetch('repository')
+    assert_equal @lock_root, anchor.fetch('lock_root')
+    assert_equal @storage_root, anchor.fetch('storage_root')
+    assert_equal task_id, anchor.fetch('key')
+
+    marker_path = File.join(common, 'fable-locks', StableLockAnchor::REPOSITORY_GENERATION_FILENAME)
+    assert File.file?(marker_path)
+    refute File.exist?(File.join(@storage_root, 'fable-locks', StableLockAnchor::REPOSITORY_GENERATION_FILENAME))
+    lineage = JSON.parse(File.binread(lock_path))
+    assert_equal @storage_root, lineage.fetch('record_root')
+    assert_equal @lock_root, lineage.fetch('lock_root')
+
+    second_storage = File.join(@lock_root, '.task-data', 'task-a-second')
+    FileUtils.mkdir_p(second_storage)
+    refute_equal lock_path,
+                 ExecutionRecord.task_lock_path(second_storage, task_id, lock_root: @lock_root)
+    refute_equal lock_path,
+                 ExecutionRecord.task_lock_path(@storage_root, 'TASK_A_OTHER', lock_root: @lock_root)
+  end
+
+  def test_same_root_explicit_and_legacy_calls_keep_the_existing_lock_identity
+    task_id = 'TASK_B_SAME_ROOT'
+    legacy_path = ExecutionRecord.task_lock_path(@lock_root, task_id)
+    explicit_path = ExecutionRecord.task_lock_path(@lock_root, task_id, lock_root: @lock_root)
+    assert_equal legacy_path, explicit_path
+
+    marker = File.join(@tmpdir, 'same-root-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @lock_root, lock_root: @lock_root,
+      task_id: task_id, execution_id: 'same-root-run', command: success_command(marker)
+    ))
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(marker)
+    assert File.file?(ExecutionRecord.default_path(@lock_root, task_id, 'same-root-run'))
+    same_root_capture = DurableCommandCapture.load(
+      DurableCommandCapture.default_path(@lock_root, task_id, 'same-root-run')
+    )
+    assert_equal @lock_root, same_root_capture.execution_identity.fetch('repository_path')
+    refute same_root_capture.execution_identity.key?('storage_root')
+    refute same_root_capture.execution_identity.key?('lock_root')
+
+    anchor = JSON.parse(File.read(File.join(File.dirname(explicit_path), 'authority.json')))
+    assert_equal @lock_root, anchor.fetch('repository')
+    refute anchor.key?('storage_root'), 'same-root identity must retain the legacy digest shape'
+    refute anchor.key?('lock_root'), 'same-root identity must not add redundant root fields'
+  end
+
+  def test_same_root_nested_capability_clears_an_inherited_lock_root
+    task_id = 'TASK_B_INHERITED_LOCK_ROOT'
+    capability_env = nil
+    ExecutionRecord.with_task_lock(@lock_root, task_id) do |lock|
+      capability_env = ExecutionRecord.nested_capability_env(
+        @lock_root, task_id, lock, 'same-root-parent', 'test-secret', lock_root: @lock_root
+      )
+    end
+
+    lock_root_key = ExecutionRecord::NESTED_LOCK_ROOT_ENV
+    assert capability_env.key?(lock_root_key), 'same-root child must explicitly clear inherited lock-root state'
+    assert_nil capability_env.fetch(lock_root_key)
+
+    inherited = { lock_root_key => @outside_root }
+    child_env = inherited.merge(capability_env)
+    _, _, status = Open3.capture3(child_env, RbConfig.ruby, '-e',
+                                  "exit(ENV.key?(#{lock_root_key.dump}) ? 1 : 0)")
+    assert status.success?, 'nil nested environment values must remove inherited lock-root state'
+  end
+
+  def test_nested_storage_recovery_uses_the_same_lock_root_and_preserves_history
+    task_id = 'TASK_A_DUAL_ROOT_RECOVERY'
+    old_id = 'stale-before-recovery'
+    ExecutionRecord.with_task_lock(@storage_root, task_id, lock_root: @lock_root) { |_lock| }
+
+    pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
+    Process.wait(pid)
+    old_path = ExecutionRecord.default_path(@storage_root, task_id, old_id)
+    ExecutionRecord.start!(old_path, task_id: task_id, execution_id: old_id, pid: pid)
+    old_bytes = File.binread(old_path)
+    state_path = File.join(@storage_root, 'application-state.bin')
+    File.binwrite(state_path, "disposable state\0\n")
+    child_marker = File.join(@tmpdir, 'recovery-child-started')
+    command = success_command(child_marker)
+    stdout, stderr, status = run_cli(protected_args(
+      mode: '--recover-run', storage_root: @storage_root, lock_root: @lock_root,
+      task_id: task_id, execution_id: old_id, application_state: state_path, command: command
+    ))
+
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(child_marker)
+    assert_equal old_bytes, File.binread(old_path), 'recovery must retain the stale source record'
+
+    transition_path = ExecutionRecoveryTransition.default_path(@storage_root, task_id, old_id)
+    transition = ExecutionRecoveryTransition.load(transition_path)
+    assert_equal old_id, transition.old_execution_id
+    successor_id = transition.successor_execution_id
+    successor_path = ExecutionRecord.default_path(@storage_root, task_id, successor_id)
+    successor = ExecutionRecord.load(successor_path)
+    assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
+    assert_equal old_id, successor.recovery_old_execution_id
+    assert File.file?(successor.durable_capture_path)
+    recovery_identity = DurableCommandCapture.load(successor.durable_capture_path).execution_identity
+    assert_equal @storage_root, recovery_identity.fetch('storage_root')
+    assert_equal @lock_root, recovery_identity.fetch('lock_root')
+    assert transition_path.start_with?(@storage_root)
+    assert successor.durable_capture_path.start_with?(@storage_root)
+
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    lineage = JSON.parse(File.binread(lock_path))
+    assert_equal @storage_root, lineage.fetch('record_root')
+    assert_equal @lock_root, lineage.fetch('lock_root')
+    assert_equal successor_id, lineage.fetch('execution_id')
+    assert File.file?(File.join(common_directory(@lock_root), 'fable-locks',
+                               StableLockAnchor::REPOSITORY_GENERATION_FILENAME))
+  end
+
+  def test_nested_acquisition_inherits_the_dual_root_identity_and_lineage
+    task_id = 'TASK_A_DUAL_ROOT_NESTED'
+    parent_id = 'parent-run'
+    child_id = 'nested-child-run'
+    nested_storage_root = File.join(@lock_root, 'task-a-state')
+    FileUtils.mkdir_p(nested_storage_root)
+    child_marker = File.join(@tmpdir, 'nested-child-started')
+    nested_parent = <<~'RUBY'
+      require 'open3'
+      require 'rbconfig'
+      launcher, storage, lock_root, worktree, task_id, execution_id, marker = ARGV
+      fd = Integer(ENV.fetch('FABLE_PROTECTED_RUN_LOCK_FD'))
+      argv = [RbConfig.ruby, launcher, '--run', '--repo', storage, '--lock-root', lock_root,
+              '--worktree', worktree, '--task-id', task_id, '--execution-id', execution_id,
+              '--', RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "nested\n")', marker]
+      stdout, stderr, status = Open3.capture3(*argv, fd => fd)
+      STDOUT.write(stdout)
+      STDERR.write(stderr)
+      exit(status.exitstatus || 1)
+    RUBY
+    parent_command = [RbConfig.ruby, '-e', nested_parent, CLI, nested_storage_root, @lock_root,
+                      @worktree, task_id, child_id, child_marker]
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: nested_storage_root, lock_root: @lock_root, task_id: task_id,
+      execution_id: parent_id, command: parent_command
+    ))
+
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(child_marker)
+    parent = ExecutionRecord.load(ExecutionRecord.default_path(nested_storage_root, task_id, parent_id))
+    child = ExecutionRecord.load(ExecutionRecord.default_path(nested_storage_root, task_id, child_id))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, parent.status
+    assert_equal ExecutionRecord::STATUS_COMPLETED, child.status
+    assert_equal parent_id, child.parent_execution_id
+    assert File.file?(parent.durable_capture_path)
+    assert File.file?(child.durable_capture_path)
+
+    lock_path = ExecutionRecord.task_lock_path(nested_storage_root, task_id, lock_root: @lock_root)
+    lineage = JSON.parse(File.binread(lock_path))
+    assert_equal nested_storage_root, lineage.fetch('record_root')
+    assert_equal @lock_root, lineage.fetch('lock_root')
+    assert_equal parent_id, lineage.fetch('execution_id')
+  end
+
+  def test_invalid_roots_fail_closed_without_starting_the_child
+    other_root = File.join(@tmpdir, 'other-git-root')
+    initialize_synthetic_git_repo(other_root)
+    non_root = File.join(@lock_root, '.fable')
+    FileUtils.mkdir_p(non_root)
+    storage_symlink = File.join(@tmpdir, 'storage-symlink')
+    lock_symlink = File.join(@tmpdir, 'lock-symlink')
+    File.symlink(@storage_root, storage_symlink)
+    File.symlink(@lock_root, lock_symlink)
+    ambiguous_storage = File.join(@lock_root, '.task-data', '..', '.task-data', 'task-a')
+
+    cases = [
+      ['nested storage without explicit lock root', @storage_root, OMIT_LOCK_ROOT],
+      ['storage escapes lock root', @outside_root, @lock_root],
+      ['wrong Git worktree root', @storage_root, other_root],
+      ['non-top-level Git path', @storage_root, non_root],
+      ['non-Git lock root', @storage_root, @outside_root],
+      ['storage root symlink', storage_symlink, @lock_root],
+      ['lock root symlink', @storage_root, lock_symlink],
+      ['ambiguous storage path', ambiguous_storage, @lock_root]
+    ]
+
+    cases.each_with_index do |(label, storage, lock_root), index|
+      marker = File.join(@tmpdir, "invalid-root-child-#{index}")
+      args = protected_args(storage_root: storage, lock_root: lock_root,
+                            task_id: "INVALID_ROOT_#{index}", execution_id: 'must-not-start',
+                            command: success_command(marker))
+      stdout, stderr, status = run_cli(args)
+      refute status.success?, "#{label}: unexpectedly succeeded"
+      refute File.exist?(marker), "#{label}: upstream child ran"
+      refute File.exist?(ExecutionRecord.default_path(storage, "INVALID_ROOT_#{index}", 'must-not-start')),
+             "#{label}: execution history was written"
+      refute_empty(stdout + stderr, "#{label}: expected a diagnostic")
+    end
+  end
+
+  def test_legacy_execution_lock_remains_a_migration_required_stop
+    task_id = 'TASK_A_LEGACY_LOCK'
+    legacy_lock = ExecutionRecord.legacy_task_lock_path(@storage_root, task_id)
+    FileUtils.mkdir_p(File.dirname(legacy_lock))
+    legacy_bytes = "legacy lock fixture\0\n"
+    File.binwrite(legacy_lock, legacy_bytes)
+    marker = File.join(@tmpdir, 'legacy-lock-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @storage_root, lock_root: @lock_root, task_id: task_id,
+      execution_id: 'must-not-start', command: success_command(marker)
+    ))
+
+    refute status.success?
+    assert_match(/migration gate required/i, stdout + stderr)
+    assert_equal legacy_bytes, File.binread(legacy_lock)
+    refute File.exist?(marker)
+    refute File.exist?(ExecutionRecord.default_path(@storage_root, task_id, 'must-not-start'))
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    refute File.exist?(File.dirname(lock_path)), 'legacy state must not cause a replacement lock anchor'
+  end
+
+  def test_unanchored_legacy_task_history_is_not_skipped_or_migrated
+    task_id = 'TASK_A_LEGACY_HISTORY'
+    old_path = ExecutionRecord.default_path(@storage_root, task_id, 'old-history')
+    FileUtils.mkdir_p(File.dirname(old_path))
+    old_bytes = "legacy execution history fixture\0\n"
+    File.binwrite(old_path, old_bytes)
+    child_marker = File.join(@tmpdir, 'legacy-history-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @storage_root, lock_root: @lock_root, task_id: task_id,
+      execution_id: 'must-not-start', command: success_command(child_marker)
+    ))
+
+    refute status.success?
+    assert_match(/migration gate required/i, stdout + stderr)
+    assert_equal old_bytes, File.binread(old_path)
+    refute File.exist?(child_marker)
+    refute File.exist?(ExecutionRecord.default_path(@storage_root, task_id, 'must-not-start'))
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    refute File.exist?(File.dirname(lock_path)), 'legacy task history must not cause a new lock anchor'
+  end
+
+  private
+
+  def protected_args(storage_root:, lock_root: OMIT_LOCK_ROOT, task_id:, execution_id:, command:,
+                     mode: '--run', application_state: nil)
+    args = [mode, '--repo', storage_root]
+    args.concat(['--lock-root', lock_root]) unless lock_root.equal?(OMIT_LOCK_ROOT)
+    args.concat(['--worktree', @worktree, '--task-id', task_id, '--execution-id', execution_id])
+    args.concat(['--application-state', application_state]) if application_state
+    args.concat(['--', *command])
+    args
+  end
+
+  def success_command(marker)
+    [RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "child started\n"); puts "child done"', marker]
+  end
+
+  def run_cli(args)
+    Open3.capture3(RbConfig.ruby, CLI, *args)
+  end
+
+  def common_directory(path)
+    output, status = Open3.capture2('git', '-C', path, 'rev-parse', '--git-common-dir')
+    raise 'fixture Git common directory could not be read' unless status.success?
+
+    File.realpath(File.expand_path(output.strip, path))
   end
 end
