@@ -40,6 +40,42 @@ class StableLockAnchor
       raise Error, "Git worktree root could not be verified: #{e.message}"
     end
 
+    # Protected-run storage may live below the Git worktree that owns the
+    # generation-2 lock. Resolve both identities explicitly and reject path
+    # aliases before either history or lock state is touched.
+    def resolve_root_pair(storage_root, lock_root: nil)
+      # Keep the historical single-root caller path byte-for-byte compatible:
+      # repository_root already resolves its canonical Git root.
+      unless lock_root
+        root = repository_root(storage_root)
+        return [root, root]
+      end
+
+      storage = canonical_directory!(storage_root, 'storage root')
+      lock = canonical_directory!(lock_root, 'lock root')
+      git_root = begin
+        repository_root(lock)
+      rescue Error => e
+        raise Error, "--lock-root must name the exact Git worktree top-level: #{e.message}"
+      end
+      raise Error, "lock root '#{lock}' is not the exact Git worktree top-level" unless git_root == lock
+
+      output, status = Open3.capture2('git', '-C', storage, 'rev-parse', '--show-toplevel', err: File::NULL)
+      unless status.success?
+        raise Error, "storage root '#{storage}' is not inside lock root '#{lock}'"
+      end
+      storage_git_root = File.realpath(output.strip)
+      unless storage_git_root == lock && physical_subtree_or_same?(lock, storage)
+        raise Error, "storage root '#{storage}' does not belong to lock root '#{lock}'"
+      end
+
+      [storage, lock]
+    rescue Error
+      raise
+    rescue SystemCallError => e
+      raise Error, "storage and lock roots could not be verified: #{e.message}"
+    end
+
     def repository_root_for_path(file_path)
       absolute = File.expand_path(file_path.to_s)
       parent = File.realpath(File.dirname(absolute))
@@ -61,10 +97,10 @@ class StableLockAnchor
       raise Error, "checkpoint Git worktree could not be verified: #{e.message}"
     end
 
-    def lock_path(repo_root, namespace, key, filename: 'lock')
-      root = repository_root(repo_root)
+    def lock_path(repo_root, namespace, key, filename: 'lock', lock_root: nil)
+      storage, root = resolve_root_pair(repo_root, lock_root: lock_root)
       common = common_directory(root)
-      identity = lock_identity(root, namespace, key)
+      identity = lock_identity(root, namespace, key, storage_root: storage)
       digest = Digest::SHA256.hexdigest(JSON.generate(identity))
       File.join(common, 'fable-locks', namespace.to_s, digest, filename)
     end
@@ -114,11 +150,11 @@ class StableLockAnchor
       raise Error, "repository lock generation could not be initialized safely: #{e.message}"
     end
 
-    def open_lock(repo_root, namespace, key, filename: 'lock', legacy_paths: [])
-      root = repository_root(repo_root)
+    def open_lock(repo_root, namespace, key, filename: 'lock', legacy_paths: [], lock_root: nil)
+      storage, root = resolve_root_pair(repo_root, lock_root: lock_root)
       common = common_directory(root)
       validate_repository_generation!(common, repository_generation_path(common))
-      identity = lock_identity(root, namespace, key)
+      identity = lock_identity(root, namespace, key, storage_root: storage)
       reject_legacy_paths!(legacy_paths, namespace)
       common_root = File.join(common, 'fable-locks')
       namespace_root = File.join(common_root, namespace.to_s)
@@ -134,11 +170,11 @@ class StableLockAnchor
       raise Error, "stable #{namespace} lock authority could not be verified: #{e.message}"
     end
 
-    def open_existing_lock(repo_root, namespace, key, filename: 'lock', legacy_paths: [])
-      root = repository_root(repo_root)
+    def open_existing_lock(repo_root, namespace, key, filename: 'lock', legacy_paths: [], lock_root: nil)
+      storage, root = resolve_root_pair(repo_root, lock_root: lock_root)
       common = common_directory(root)
       validate_repository_generation!(common, repository_generation_path(common))
-      identity = lock_identity(root, namespace, key)
+      identity = lock_identity(root, namespace, key, storage_root: storage)
       reject_legacy_paths!(legacy_paths, namespace)
       common_root = File.join(common, 'fable-locks')
       namespace_root = File.join(common_root, namespace.to_s)
@@ -155,11 +191,11 @@ class StableLockAnchor
       raise Error, "stable #{namespace} lock authority could not be verified: #{e.message}"
     end
 
-    def assert_generation_available!(repo_root, namespace, key, legacy_paths: [], legacy_state_paths: [])
-      root = repository_root(repo_root)
+    def assert_generation_available!(repo_root, namespace, key, legacy_paths: [], legacy_state_paths: [], lock_root: nil)
+      storage, root = resolve_root_pair(repo_root, lock_root: lock_root)
       common = common_directory(root)
       validate_repository_generation!(common, repository_generation_path(common))
-      identity = lock_identity(root, namespace, key)
+      identity = lock_identity(root, namespace, key, storage_root: storage)
       reject_legacy_paths!(legacy_paths, namespace)
       digest = Digest::SHA256.hexdigest(JSON.generate(identity))
       anchor_dir = File.join(common, 'fable-locks', namespace.to_s, digest)
@@ -183,6 +219,20 @@ class StableLockAnchor
 
     def repository_generation_path(common)
       File.join(common, 'fable-locks', REPOSITORY_GENERATION_FILENAME)
+    end
+
+    def canonical_directory!(path, label)
+      value = path.to_s
+      unless !value.include?("\0") && Pathname.new(value).absolute? && File.expand_path(value) == value
+        raise Error, "#{label} '#{value}' is not an unambiguous absolute path"
+      end
+      stat = File.lstat(value)
+      unless stat.directory? && !stat.symlink? && File.realpath(value) == value
+        raise Error, "#{label} '#{value}' is a symlink, non-directory, or non-canonical path"
+      end
+      value
+    rescue SystemCallError => e
+      raise Error, "#{label} '#{value}' could not be verified: #{e.message}"
     end
 
     def validate_repository_generation!(common, marker_path)
@@ -210,14 +260,19 @@ class StableLockAnchor
             'confirm every legacy protected worker and inherited child is quiescent, then explicitly initialize offline'
     end
 
-    def lock_identity(root, namespace, key)
-      {
+    def lock_identity(root, namespace, key, storage_root: root)
+      identity = {
         'format_version' => FORMAT_VERSION,
         'generation' => GENERATION,
         'namespace' => namespace.to_s,
         'repository' => root,
         'key' => key.to_s
       }
+      unless storage_root == root
+        identity['storage_root'] = storage_root
+        identity['lock_root'] = root
+      end
+      identity
     end
 
     # File.realpath can preserve different case spellings for the same
@@ -1961,8 +2016,9 @@ class DurableCommandCapture
   # launcher/runtime that produced it. Git identity is recorded only when the
   # execution worktree itself is the Git root; non-Git execution roots remain
   # supported with explicit nil HEAD/tree values.
-  def self.capture_execution_identity(repository_path:, worktree_path:, task_id: nil, execution_id: nil)
-    repository = StableLockAnchor.repository_root(repository_path)
+  def self.capture_execution_identity(repository_path:, worktree_path:, task_id: nil, execution_id: nil,
+                                      lock_root: nil)
+    storage_root, lock_repository = StableLockAnchor.resolve_root_pair(repository_path, lock_root: lock_root)
     worktree = File.realpath(worktree_path)
     launcher = File.realpath(__FILE__)
     git_value = lambda do |*arguments|
@@ -1980,7 +2036,7 @@ class DurableCommandCapture
     bound_git = git_root == worktree
 
     identity = {
-      'repository_path' => repository,
+      'repository_path' => lock_repository,
       'worktree_path' => worktree,
       'head' => bound_git ? git_value.call('rev-parse', 'HEAD') : nil,
       'tree' => bound_git ? git_value.call('rev-parse', 'HEAD^{tree}') : nil,
@@ -1989,6 +2045,10 @@ class DurableCommandCapture
       'runtime_executable' => File.realpath(RbConfig.ruby),
       'runtime_version' => RUBY_DESCRIPTION
     }
+    unless storage_root == lock_repository
+      identity['storage_root'] = storage_root
+      identity['lock_root'] = lock_repository
+    end
     identity['task_id'] = task_id.to_s if task_id
     identity['execution_id'] = execution_id.to_s if execution_id
     identity
@@ -2568,11 +2628,12 @@ class ExecutionRecord
   # secret exists only in the lineage's environment, never on disk.
   NESTED_TASK_ID_ENV = 'FABLE_PROTECTED_RUN_TASK_ID'
   NESTED_RECORD_ROOT_ENV = 'FABLE_PROTECTED_RUN_RECORD_ROOT'
+  NESTED_LOCK_ROOT_ENV = 'FABLE_PROTECTED_RUN_LOCK_ROOT'
   NESTED_LOCK_FD_ENV = 'FABLE_PROTECTED_RUN_LOCK_FD'
   NESTED_LOCK_IDENTITY_ENV = 'FABLE_PROTECTED_RUN_LOCK_IDENTITY'
   NESTED_PARENT_ENV = 'FABLE_PROTECTED_RUN_PARENT_EXECUTION_ID'
   NESTED_SECRET_ENV = 'FABLE_PROTECTED_RUN_LINEAGE_SECRET'
-  NESTED_ENV_KEYS = [NESTED_TASK_ID_ENV, NESTED_RECORD_ROOT_ENV, NESTED_LOCK_FD_ENV,
+  NESTED_ENV_KEYS = [NESTED_TASK_ID_ENV, NESTED_RECORD_ROOT_ENV, NESTED_LOCK_ROOT_ENV, NESTED_LOCK_FD_ENV,
                      NESTED_LOCK_IDENTITY_ENV, NESTED_PARENT_ENV, NESTED_SECRET_ENV].freeze
   NESTED_MAX_DEPTH = 16
   TASK_LINEAGE_MAX_BYTES = 4096
@@ -2709,37 +2770,38 @@ class ExecutionRecord
     raise UnresolvedExecutionStateError, 'execution heavy-scientific run root is malformed'
   end
 
-  def self.task_lock_path(repo_root, task_id)
-    StableLockAnchor.lock_path(repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock')
+  def self.task_lock_path(repo_root, task_id, lock_root: nil)
+    StableLockAnchor.lock_path(repo_root, 'task-execution', task_id.to_s,
+                               filename: 'execution.lock', lock_root: lock_root)
   end
 
   def self.legacy_task_lock_path(repo_root, task_id)
     File.join(repo_root, '.fable', 'checkpoints', task_id.to_s, 'execution.lock')
   end
 
-  def self.assert_task_lock_generation!(repo_root, task_id)
+  def self.assert_task_lock_generation!(repo_root, task_id, lock_root: nil)
     legacy_state_dir = File.join(repo_root, '.fable', 'checkpoints', task_id.to_s)
     StableLockAnchor.assert_generation_available!(
       repo_root, 'task-execution', task_id.to_s,
       legacy_paths: [legacy_task_lock_path(repo_root, task_id)],
-      legacy_state_paths: [legacy_state_dir]
+      legacy_state_paths: [legacy_state_dir], lock_root: lock_root
     )
   end
 
   # Serializes task-scoped ownership checks and acquisition across distinct
   # execution IDs. Protected launches also pass this open descriptor to the
   # application child, so the OS lock remains held if the wrapper is killed.
-  def self.with_task_lock(repo_root, task_id)
-    assert_task_lock_generation!(repo_root, task_id)
+  def self.with_task_lock(repo_root, task_id, lock_root: nil)
+    assert_task_lock_generation!(repo_root, task_id, lock_root: lock_root)
     lock = StableLockAnchor.open_lock(
       repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock',
-      legacy_paths: [legacy_task_lock_path(repo_root, task_id)]
+      legacy_paths: [legacy_task_lock_path(repo_root, task_id)], lock_root: lock_root
     )
     begin
       unless lock.flock(File::LOCK_EX | File::LOCK_NB)
         raise DuplicateExecutionError, "task '#{task_id}' has another execution claim in progress"
       end
-      reset_task_lineage!(lock, repo_root, task_id)
+      reset_task_lineage!(lock, repo_root, task_id, lock_root: lock_root)
 
       yield lock
     ensure
@@ -2747,10 +2809,14 @@ class ExecutionRecord
     end
   end
 
-  def self.reset_task_lineage!(lock, repo_root, task_id)
+  def self.reset_task_lineage!(lock, repo_root, task_id, lock_root: nil)
     lock.truncate(0)
-    lock.pwrite(JSON.generate('schema_version' => SCHEMA_VERSION, 'lock_generation' => StableLockAnchor::GENERATION,
-                              'task_id' => task_id.to_s, 'record_root' => File.realpath(repo_root)), 0)
+    record_root = File.realpath(repo_root)
+    lineage = { 'schema_version' => SCHEMA_VERSION, 'lock_generation' => StableLockAnchor::GENERATION,
+                'task_id' => task_id.to_s, 'record_root' => record_root }
+    resolved_lock_root = File.realpath(lock_root || repo_root)
+    lineage['lock_root'] = resolved_lock_root unless resolved_lock_root == record_root
+    lock.pwrite(JSON.generate(lineage), 0)
     lock.fsync
     true
   end
@@ -2887,8 +2953,8 @@ class ExecutionRecord
   end
 
   def self.acquire_task_owned!(repo_root, task_id, execution_id, pid:, heavy_scientific: nil,
-                               heavy_run_root: nil, command: nil)
-    with_task_lock(repo_root, task_id) do
+                               heavy_run_root: nil, command: nil, lock_root: nil)
+    with_task_lock(repo_root, task_id, lock_root: lock_root) do
       verify_no_active_owner!(repo_root, task_id, except_execution_ids: [execution_id.to_s],
                               reject_unrecovered_stale: true)
       acquire!(default_path(repo_root, task_id, execution_id),
@@ -2901,33 +2967,41 @@ class ExecutionRecord
   # Records which top-level --run owns the held task lock and returns the new
   # lineage secret, whose SHA-256 alone is stored. Only the lock holder writes
   # it, just before launching its child; nil leaves the lineage empty.
-  def self.write_task_lineage!(lock, repo_root, task_id, execution_id)
+  def self.write_task_lineage!(lock, repo_root, task_id, execution_id, lock_root: nil)
     lock.truncate(0)
     secret = nil
     unless execution_id.nil?
       secret = SecureRandom.hex(32)
-      lock.pwrite(JSON.generate('schema_version' => SCHEMA_VERSION,
-                                'lock_generation' => StableLockAnchor::GENERATION, 'task_id' => task_id.to_s,
-                                'record_root' => File.realpath(repo_root),
-                                'execution_id' => execution_id.to_s,
-                                'capability_sha256' => Digest::SHA256.hexdigest(secret)), 0)
+      record_root = File.realpath(repo_root)
+      lineage = { 'schema_version' => SCHEMA_VERSION,
+                  'lock_generation' => StableLockAnchor::GENERATION, 'task_id' => task_id.to_s,
+                  'record_root' => record_root,
+                  'execution_id' => execution_id.to_s,
+                  'capability_sha256' => Digest::SHA256.hexdigest(secret) }
+      resolved_lock_root = File.realpath(lock_root || repo_root)
+      lineage['lock_root'] = resolved_lock_root unless resolved_lock_root == record_root
+      lock.pwrite(JSON.generate(lineage), 0)
     else
-      reset_task_lineage!(lock, repo_root, task_id)
+      reset_task_lineage!(lock, repo_root, task_id, lock_root: lock_root)
     end
     lock.fsync
     secret
   end
 
-  def self.nested_capability_env(repo_root, task_id, lock, parent_execution_id, secret)
+  def self.nested_capability_env(repo_root, task_id, lock, parent_execution_id, secret, lock_root: nil)
     stat = lock.stat
-    {
+    record_root = File.realpath(repo_root)
+    resolved_lock_root = File.realpath(lock_root || repo_root)
+    env = {
       NESTED_TASK_ID_ENV => task_id.to_s,
-      NESTED_RECORD_ROOT_ENV => File.realpath(repo_root),
+      NESTED_RECORD_ROOT_ENV => record_root,
       NESTED_LOCK_FD_ENV => DurableCommandCapture::INHERITED_TASK_LOCK_CHILD_FD.to_s,
       NESTED_LOCK_IDENTITY_ENV => "#{stat.dev}:#{stat.ino}",
       NESTED_PARENT_ENV => parent_execution_id.to_s,
       NESTED_SECRET_ENV => secret.to_s
     }
+    env[NESTED_LOCK_ROOT_ENV] = resolved_lock_root == record_root ? nil : resolved_lock_root
+    env
   end
 
   def self.without_nested_capability_env
@@ -2937,22 +3011,36 @@ class ExecutionRecord
   # Returns nil when env names no protected lineage for this exact task and
   # record root. A lineage scoped elsewhere grants nothing here, so the caller
   # keeps ordinary top-level acquisition; an unscoped capability fails closed.
-  def self.nested_capability_request(env, repo_root, task_id)
-    values = NESTED_ENV_KEYS.map { |key| env[key] }
-    return nil if values.all?(&:nil?)
+  def self.nested_capability_request(env, repo_root, task_id, lock_root: nil)
+    required_keys = NESTED_ENV_KEYS - [NESTED_LOCK_ROOT_ENV]
+    required_values = required_keys.map { |key| env[key] }
+    scope_lock_root = env[NESTED_LOCK_ROOT_ENV]
+    return nil if required_values.all?(&:nil?) && scope_lock_root.nil?
 
-    scope_task, scope_root = values.first(2)
+    unless required_values.all? { |value| value.is_a?(String) && !value.empty? } &&
+           (scope_lock_root.nil? || (scope_lock_root.is_a?(String) && !scope_lock_root.empty?))
+      raise UnresolvedExecutionStateError, 'nested protected-run capability is incomplete'
+    end
+    scope_task = env[NESTED_TASK_ID_ENV]
+    scope_root = env[NESTED_RECORD_ROOT_ENV]
     unless stable_component?(scope_task) && scope_root && Pathname.new(scope_root).absolute?
       raise UnresolvedExecutionStateError, 'nested protected-run capability does not name its task and record root'
     end
-    resolved_scope_root = begin
-                            File.realpath(scope_root)
-                          rescue SystemCallError
-                            nil
-                          end
-    return nil unless scope_task == task_id.to_s && resolved_scope_root == File.realpath(repo_root)
+    return nil unless scope_task == task_id.to_s && scope_root == File.realpath(repo_root)
 
-    NESTED_ENV_KEYS.zip(values).to_h
+    expected_lock_root = File.realpath(lock_root || repo_root)
+    if scope_lock_root
+      unless Pathname.new(scope_lock_root).absolute? && File.expand_path(scope_lock_root) == scope_lock_root &&
+             scope_lock_root == expected_lock_root
+        raise UnresolvedExecutionStateError, 'nested protected-run capability lock root does not match'
+      end
+    elsif expected_lock_root != File.realpath(repo_root)
+      raise UnresolvedExecutionStateError, 'nested protected-run capability does not name its lock root'
+    end
+
+    request = required_keys.zip(required_values).to_h
+    request[NESTED_LOCK_ROOT_ENV] = scope_lock_root if scope_lock_root
+    request
   end
 
   # Proves the caller already holds this task's lock through an inherited
@@ -2961,7 +3049,7 @@ class ExecutionRecord
   # exclusive lock. Because a process can also take a free lock itself, the
   # lineage secret must match the held lineage too. Environment values alone
   # never pass, and nothing here waits for or takes a second task-lock ownership.
-  def self.verify_nested_capability!(repo_root, task_id, execution_id, request)
+  def self.verify_nested_capability!(repo_root, task_id, execution_id, request, lock_root: nil)
     fd_text = request[NESTED_LOCK_FD_ENV].to_s
     identity = request[NESTED_LOCK_IDENTITY_ENV].to_s
     parent_id = request[NESTED_PARENT_ENV]
@@ -2971,7 +3059,7 @@ class ExecutionRecord
       raise UnresolvedExecutionStateError, 'nested protected-run capability is incomplete or malformed'
     end
 
-    assert_task_lock_generation!(repo_root, task_id)
+    assert_task_lock_generation!(repo_root, task_id, lock_root: lock_root)
     lock = begin
              File.for_fd(Integer(fd_text), autoclose: false)
            rescue Errno::EBADF
@@ -2980,7 +3068,7 @@ class ExecutionRecord
     lock_stat = lock.stat
     probe = StableLockAnchor.open_existing_lock(
       repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock',
-      legacy_paths: [legacy_task_lock_path(repo_root, task_id)]
+      legacy_paths: [legacy_task_lock_path(repo_root, task_id)], lock_root: lock_root
     )
     begin
       path_stat = probe.stat
@@ -2999,7 +3087,7 @@ class ExecutionRecord
       raise DuplicateExecutionError, "task '#{task_id}' execution lock is held outside this protected lineage"
     end
 
-    lineage_id, capability_sha256 = read_task_lineage!(lock, repo_root, task_id)
+    lineage_id, capability_sha256 = read_task_lineage!(lock, repo_root, task_id, lock_root: lock_root)
     unless Digest::SHA256.hexdigest(secret) == capability_sha256
       raise UnresolvedExecutionStateError, "nested protected-run capability does not match task '#{task_id}' lineage"
     end
@@ -3013,15 +3101,25 @@ class ExecutionRecord
     raise UnresolvedExecutionStateError, "nested protected-run capability could not be verified: #{e.message}"
   end
 
-  def self.read_task_lineage!(lock, repo_root, task_id)
+  def self.read_task_lineage!(lock, repo_root, task_id, lock_root: nil)
     size = lock.stat.size
     unless size.positive? && size <= TASK_LINEAGE_MAX_BYTES
       raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock names no nested-capable lineage"
     end
     lineage = JSON.parse(lock.pread(size, 0))
+    unless lineage.is_a?(Hash)
+      raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock lineage is ambiguous"
+    end
+    record_root = File.realpath(repo_root)
+    expected_lock_root = File.realpath(lock_root || repo_root)
+    lock_root_matches = if expected_lock_root == record_root
+                          lineage['lock_root'].nil? || lineage['lock_root'] == expected_lock_root
+                        else
+                          lineage['lock_root'] == expected_lock_root
+                        end
     unless lineage.is_a?(Hash) && lineage['schema_version'] == SCHEMA_VERSION &&
            lineage['lock_generation'] == StableLockAnchor::GENERATION &&
-           lineage['task_id'] == task_id.to_s && lineage['record_root'] == File.realpath(repo_root) &&
+           lineage['task_id'] == task_id.to_s && lineage['record_root'] == record_root && lock_root_matches &&
            stable_component?(lineage['execution_id']) && lineage['capability_sha256'].to_s.match?(/\A[0-9a-f]{64}\z/)
       raise UnresolvedExecutionStateError, "task '#{task_id}' execution lock lineage is ambiguous"
     end
@@ -3073,7 +3171,8 @@ class ExecutionRecord
   # already proved it holds the lineage lock. It records its own identity and
   # parent after the normal owner check, excluding only verified ancestors.
   def self.acquire_nested_owned!(repo_root, task_id, execution_id, capability, pid:,
-                                 heavy_scientific: nil, heavy_run_root: nil, command: nil)
+                                 heavy_scientific: nil, heavy_run_root: nil, command: nil, lock_root: nil)
+    StableLockAnchor.resolve_root_pair(repo_root, lock_root: lock_root)
     verify_no_active_owner!(repo_root, task_id,
                             except_execution_ids: [execution_id.to_s, *capability.ancestor_execution_ids],
                             reject_unrecovered_stale: true,
@@ -3799,8 +3898,8 @@ class ExecutionRecoveryTransition
   end
 
   def self.acquire_successor!(repo_root:, task_id:, old_execution_id:, application_state_path:,
-                              worktree_path:, command:, pid:, retry_attempt: false)
-    ExecutionRecord.with_task_lock(repo_root, task_id) do
+                              worktree_path:, command:, pid:, retry_attempt: false, lock_root: nil)
+    ExecutionRecord.with_task_lock(repo_root, task_id, lock_root: lock_root) do
       authority_record = if retry_attempt
         prior, = verify_failed_successor!(repo_root: repo_root, task_id: task_id,
                                           execution_id: old_execution_id)
@@ -4001,9 +4100,9 @@ if __FILE__ == $PROGRAM_NAME
   parser = OptionParser.new do |opts|
     opts.banner = 'Usage: task_checkpoint.rb [options] <checkpoint_file_or_task_id>'
 
-    opts.separator '   or: task_checkpoint.rb --run --repo PATH --worktree PATH --task-id ID --execution-id ID -- <argv...>'
-    opts.separator '   or: task_checkpoint.rb --recover-run --repo PATH --worktree PATH --task-id ID --execution-id OLD_ID --application-state PATH -- <argv...>'
-    opts.separator '   or: task_checkpoint.rb --retry-recover-run --repo PATH --worktree PATH --task-id ID --execution-id FAILED_SUCCESSOR_ID --application-state PATH -- <argv...>'
+    opts.separator '   or: task_checkpoint.rb --run --repo STORAGE_ROOT [--lock-root GIT_ROOT] --worktree PATH --task-id ID --execution-id ID -- <argv...>'
+    opts.separator '   or: task_checkpoint.rb --recover-run --repo STORAGE_ROOT [--lock-root GIT_ROOT] --worktree PATH --task-id ID --execution-id OLD_ID --application-state PATH -- <argv...>'
+    opts.separator '   or: task_checkpoint.rb --retry-recover-run --repo STORAGE_ROOT [--lock-root GIT_ROOT] --worktree PATH --task-id ID --execution-id FAILED_SUCCESSOR_ID --application-state PATH -- <argv...>'
     opts.on('--reconcile', 'Reconcile live state against checkpoint (default)') { selected_modes << (mode = :reconcile) }
     opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
     opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
@@ -4014,7 +4113,8 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--recover-run', 'Explicitly resume one stale execution through a durable successor transition') { selected_modes << (mode = :recover_run) }
     opts.on('--retry-recover-run', 'Explicitly retry one terminal failed recovery successor') { selected_modes << (mode = :retry_recover_run) }
 
-    opts.on('--repo PATH', 'Live repository path; --run requires the absolute stable record root') { |v| options[:repository] = v }
+    opts.on('--repo PATH', 'Absolute ExecutionRecord, capture, and recovery storage root') { |v| options[:repository] = v }
+    opts.on('--lock-root PATH', 'Exact Git worktree top-level that owns the generation-2 lock') { |v| options[:lock_root] = v }
     opts.on('--worktree PATH', 'Live worktree path; --run uses only this absolute upstream cwd') { |v| options[:worktree] = v }
     opts.on('--run-root PATH', 'Absolute run root recorded in the heavy-scientific lease') { |v| options[:run_root] = v }
     opts.on('--task-id ID', 'Caller-supplied stable task identity for --run') { |v| options[:task_id] = v }
@@ -4055,6 +4155,12 @@ if __FILE__ == $PROGRAM_NAME
     end
     if options[:run_root] && !Pathname.new(options[:run_root]).absolute?
       raise OptionParser::InvalidArgument, '--run-root must be an absolute path'
+    end
+    if options[:lock_root] && !%i[run recover_run retry_recover_run].include?(mode)
+      raise OptionParser::InvalidArgument, '--lock-root is only valid with protected run and recovery operations'
+    end
+    if options[:lock_root] && (!Pathname.new(options[:lock_root]).absolute? || !File.directory?(options[:lock_root]))
+      raise OptionParser::InvalidArgument, '--lock-root must explicitly name an existing absolute directory'
     end
     if %i[run recover_run retry_recover_run].include?(mode)
       mode_flag = { run: 'run', recover_run: 'recover-run', retry_recover_run: 'retry-recover-run' }.fetch(mode)
@@ -4098,8 +4204,16 @@ if __FILE__ == $PROGRAM_NAME
 
   if %i[run recover_run retry_recover_run].include?(mode)
     begin
+      storage_root, resolved_lock_root = StableLockAnchor.resolve_root_pair(
+        options[:repository], lock_root: options[:lock_root]
+      )
+      if options[:lock_root]
+        options[:repository] = storage_root
+        options[:lock_root] = resolved_lock_root
+      end
       nested_request = nil
-      ExecutionRecord.assert_task_lock_generation!(options[:repository], options[:task_id])
+      ExecutionRecord.assert_task_lock_generation!(options[:repository], options[:task_id],
+                                                   lock_root: options[:lock_root])
       if options[:heavy_scientific] && %i[recover_run retry_recover_run].include?(mode)
         authority_record = if mode == :recover_run
                             ExecutionRecoveryTransition.verify_stale_execution!(
@@ -4125,28 +4239,31 @@ if __FILE__ == $PROGRAM_NAME
           old_execution_id: options[:execution_id],
           application_state_path: options[:application_state],
           worktree_path: options[:worktree], command: upstream_argv, pid: Process.pid,
-          retry_attempt: mode == :retry_recover_run
+          retry_attempt: mode == :retry_recover_run, lock_root: options[:lock_root]
         )
         record_path = ExecutionRecord.default_path(
           options[:repository], options[:task_id], recovery.execution_record.execution_id
         )
       else
-        nested_request = ExecutionRecord.nested_capability_request(ENV, options[:repository], options[:task_id])
+        nested_request = ExecutionRecord.nested_capability_request(
+          ENV, options[:repository], options[:task_id], lock_root: options[:lock_root]
+        )
         recovery = if nested_request
                      nested = ExecutionRecord.verify_nested_capability!(
-                       options[:repository], options[:task_id], options[:execution_id], nested_request
+                       options[:repository], options[:task_id], options[:execution_id], nested_request,
+                       lock_root: options[:lock_root]
                      )
                      ExecutionRecord.acquire_nested_owned!(options[:repository], options[:task_id],
                                                           options[:execution_id], nested, pid: Process.pid,
                                                           heavy_scientific: heavy_scientific ? true : nil,
                                                           heavy_run_root: heavy_scientific ? heavy_run_root : nil,
-                                                          command: upstream_argv)
+                                                          command: upstream_argv, lock_root: options[:lock_root])
                    else
                      ExecutionRecord.acquire_task_owned!(
                        options[:repository], options[:task_id], options[:execution_id], pid: Process.pid,
                        heavy_scientific: heavy_scientific ? true : nil,
                        heavy_run_root: heavy_scientific ? heavy_run_root : nil,
-                       command: upstream_argv
+                       command: upstream_argv, lock_root: options[:lock_root]
                      )
                    end
       end
@@ -4289,7 +4406,8 @@ if __FILE__ == $PROGRAM_NAME
                                                       repository_path: options[:repository],
                                                       worktree_path: options[:worktree],
                                                       task_id: options[:task_id],
-                                                      execution_id: record.execution_id
+                                                      execution_id: record.execution_id,
+                                                      lock_root: options[:lock_root]
                                                     )
                                                   }) do |candidate|
               result, capture_signal = validate_capture.call(candidate)
@@ -4313,7 +4431,8 @@ if __FILE__ == $PROGRAM_NAME
                     # Re-prove the lineage after this record is durable, so of two
                     # concurrently claimed siblings at least one observes the other.
                     nested = ExecutionRecord.verify_nested_capability!(
-                      options[:repository], options[:task_id], record.execution_id, nested_request
+                      options[:repository], options[:task_id], record.execution_id, nested_request,
+                      lock_root: options[:lock_root]
                     )
                     ExecutionRecord.verify_no_active_owner!(
                       options[:repository], options[:task_id],
@@ -4322,10 +4441,12 @@ if __FILE__ == $PROGRAM_NAME
                       nested_lineage_execution_ids: nested.ancestor_execution_ids
                     )
                     capture_command.call(nested.lock, ExecutionRecord.nested_capability_env(
-                      options[:repository], options[:task_id], nested.lock, record.execution_id, nested.secret
+                      options[:repository], options[:task_id], nested.lock, record.execution_id, nested.secret,
+                      lock_root: options[:lock_root]
                     ), nested)
                   else
-                    ExecutionRecord.with_task_lock(options[:repository], options[:task_id]) do |task_lock|
+                    ExecutionRecord.with_task_lock(options[:repository], options[:task_id],
+                                                   lock_root: options[:lock_root]) do |task_lock|
                       ExecutionRecord.verify_no_active_owner!(options[:repository], options[:task_id],
                                                               except_execution_ids: [record.execution_id],
                                                               reject_unrecovered_stale: mode == :run)
@@ -4334,10 +4455,12 @@ if __FILE__ == $PROGRAM_NAME
                       # nested execution through its protected lineage.
                       lineage_owner = record.execution_id
                       lineage_secret = ExecutionRecord.write_task_lineage!(task_lock, options[:repository],
-                                                                           options[:task_id], lineage_owner)
+                                                                           options[:task_id], lineage_owner,
+                                                                           lock_root: options[:lock_root])
                       child_env = if lineage_owner
                                     ExecutionRecord.nested_capability_env(options[:repository], options[:task_id],
-                                                                          task_lock, lineage_owner, lineage_secret)
+                                                                          task_lock, lineage_owner, lineage_secret,
+                                                                          lock_root: options[:lock_root])
                                   else
                                     ExecutionRecord.without_nested_capability_env
                                   end
