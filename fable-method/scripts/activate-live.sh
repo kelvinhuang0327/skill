@@ -585,7 +585,7 @@ guard_runtime_helper_preservation() {
 
 # Approved identities for Reviewed Runtime Upgrade contract
 readonly APPROVED_OLD_CODEX_LAUNCHER_BLOB='00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
-readonly APPROVED_NEW_CODEX_LAUNCHER_BLOB='7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d'
+readonly APPROVED_NEW_CODEX_LAUNCHER_BLOB='e61ee4720539f53fd99c778b57b5369145409ab7'
 readonly APPROVED_CODEX_COMPANION_BLOB='fbb9b686c927ce53db89f050bb28a5741b51b474'
 
 # Computes Git blob SHA1 hash for a file.
@@ -791,7 +791,7 @@ upgrade_reviewed_runtime() {
 
   # Step 2: Staging preparation and verification
   local staging_dir
-  staging_dir="$(mktemp -d /tmp/fable_upgrade_staging.XXXXXX)"
+  staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/fable_upgrade_staging.XXXXXX")"
   [[ -d "$staging_dir" && ! -L "$staging_dir" ]] \
     || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: could not create staging directory'
 

@@ -453,7 +453,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
   def create_new_source_materialization(root, overrides: {})
     FileUtils.mkdir_p(File.join(root, 'references'))
-    new_pin = overrides[:skill_pin] || '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d'
+    new_pin = overrides[:skill_pin] || 'e61ee4720539f53fd99c778b57b5369145409ab7'
     File.write(File.join(root, 'SKILL.md'), "# Fable Method Source New\nLauncher pin: #{new_pin}\n")
     File.write(File.join(root, 'references/operational-gates.md'), "# Operational Gates\n")
 
@@ -509,7 +509,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     stdout, stderr, status = run_upgrade(
       src_dir, live_dir, 'codex',
       '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4',
-      '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d'
+      'e61ee4720539f53fd99c778b57b5369145409ab7'
     )
     assert_equal 0, status.exitstatus, "Expected upgrade to succeed. Stderr: #{stderr}"
 
@@ -519,7 +519,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     post_skill = File.join(live_dir, 'SKILL.md')
 
     assert File.file?(post_launcher)
-    assert_equal '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d',
+    assert_equal 'e61ee4720539f53fd99c778b57b5369145409ab7',
                  Digest::SHA1.hexdigest("blob #{File.binread(post_launcher).bytesize}\0#{File.binread(post_launcher)}")
     assert_equal 0755, File.stat(post_launcher).mode & 0777
 
@@ -528,7 +528,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
                  Digest::SHA1.hexdigest("blob #{File.binread(post_companion).bytesize}\0#{File.binread(post_companion)}")
     assert_equal 0644, File.stat(post_companion).mode & 0777
 
-    assert_includes File.read(post_skill), '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d'
+    assert_includes File.read(post_skill), 'e61ee4720539f53fd99c778b57b5369145409ab7'
 
     # Standard helper preservation guard must now PASS cleanly (full parity)
     stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
@@ -565,7 +565,28 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
     # Pass mismatched expected_old blob
     wrong_old = '1111111111111111111111111111111111111111'
-    stdout, stderr, status = run_upgrade(src_dir, live_dir, 'codex', wrong_old, '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d')
+    stdout, stderr, status = run_upgrade(src_dir, live_dir, 'codex', wrong_old, 'e61ee4720539f53fd99c778b57b5369145409ab7')
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'REVIEWED_RUNTIME_UPGRADE_REJECTED'
+
+    fingerprint_after = capture_tree_fingerprint(live_dir)
+    assert_equal fingerprint_before, fingerprint_after
+  end
+
+  def test_new_launcher_identity_mismatch_refuses_upgrade
+    live_dir = File.join(@scratch, 'live_old_codex')
+    src_dir = File.join(@scratch, 'source_new_codex')
+
+    create_old_live_skill(live_dir)
+    create_new_source_materialization(src_dir)
+
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    wrong_new = '2222222222222222222222222222222222222222'
+    stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex',
+      '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4', wrong_new
+    )
     assert_equal 2, status.exitstatus
     assert_includes stderr, 'REVIEWED_RUNTIME_UPGRADE_REJECTED'
 
@@ -692,8 +713,19 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
       ['tar', '-x', '-C', fixture_canonical]
     )
 
-    # Overlay our modified activate-live.sh
-    FileUtils.cp(ACTIVATE_SCRIPT, File.join(fixture_canonical, 'fable-method/scripts/activate-live.sh'))
+    # Overlay the candidate's reviewed activation inputs. The fixture starts
+    # from HEAD, while this test exercises the currently reviewed worktree.
+    %w[
+      fable-method/platforms.yaml
+      fable-method/platforms/codex/fable-method/SKILL.md
+      fable-method/platforms/codex/fable-method/scripts/task_checkpoint.rb
+      fable-method/scripts/activate-live.sh
+    ].each do |relative_path|
+      source = File.join(ROOT, relative_path)
+      destination = File.join(fixture_canonical, relative_path)
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.cp(source, destination)
+    end
 
     # Rewrite paths in fixture scripts
     replacements = {
@@ -746,7 +778,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
       '--activate', '--platform', 'codex',
       '--upgrade-reviewed-runtime',
       '--expected-old-launcher-blob', '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4',
-      '--expected-new-launcher-blob', '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d'
+      '--expected-new-launcher-blob', 'e61ee4720539f53fd99c778b57b5369145409ab7'
     )
     assert_equal 0, status.exitstatus, "Expected CLI upgrade to succeed. Stderr: #{stderr}"
     assert_includes stdout, 'ACTIVATION_MODE: UPGRADE_REVIEWED_RUNTIME'

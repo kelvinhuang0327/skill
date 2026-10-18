@@ -56,9 +56,9 @@ class PlatformManifestTest < Minitest::Test
 
   def test_codex_runtime_asset_pins_and_materialized_bytes
     launcher, companion = @model.pair('fable-method', 'codex').fetch('runtime_assets')
-    assert_equal 'a41bf2e0f96b6ea5138486a6837f250f80b308f2', launcher['source_commit']
-    assert_equal '7cb6d8245ecd8b92d66ed9264eff0d001cda2e7d', launcher['git_blob']
-    assert_equal '5c2b441120a39f01924cce6b9979c7b3a7b89291048580057eda15a97ccd7029', launcher['sha256']
+    assert_equal 'c2260164aaa8c254704a264b04e2e626a1562687', launcher['source_commit']
+    assert_equal 'e61ee4720539f53fd99c778b57b5369145409ab7', launcher['git_blob']
+    assert_equal 'bfc2bd1bb0597fc412d4b9016cf7431f2e963ef1f1d3d31ae563db7485d6eece', launcher['sha256']
     assert_equal 'afd2403b261440c8b770ca0444ddec125456efd8', companion['source_commit']
     assert_equal 'fbb9b686c927ce53db89f050bb28a5741b51b474', companion['git_blob']
     assert_equal 'c4f6d324dcbdbcffbdfe5bb6844756caf2f03bf883c073e787a9f5d66ee7a4b8', companion['sha256']
