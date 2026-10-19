@@ -64,7 +64,7 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   launcher_bytes = File.binread(launcher)
   companion_bytes = File.binread(companion)
   check.call(Digest::SHA1.hexdigest("blob #{launcher_bytes.bytesize}\0#{launcher_bytes}") == 'c201d6b683d084014add2631a5ef5d7fcd5c8f69' && (File.stat(launcher).mode & 0o777) == 0o755, 'Codex launcher bytes and executable mode match the source pin')
-  check.call(Digest::SHA256.hexdigest(companion_bytes) == 'c4f6d324dcbdbcffbdfe5bb6844756caf2f03bf883c073e787a9f5d66ee7a4b8' && (File.stat(companion).mode & 0o777) == 0o644, 'retained companion bytes and mode match its historical asset pin')
+  check.call(Digest::SHA256.hexdigest(companion_bytes) == 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0' && (File.stat(companion).mode & 0o777) == 0o644, 'companion bytes and mode match the versioned runtime asset pin')
   skill_pin = File.read(File.join(codex_dir, 'SKILL.md')).match(/is pinned to Git blob `([0-9a-f]{40})` from commit/)
   check.call(skill_pin && skill_pin[1] == 'c201d6b683d084014add2631a5ef5d7fcd5c8f69', 'generated Codex SKILL.md pin matches the launcher blob')
   check.call(run.call('--check', '--skill', 'fable-method')[0], 'complete Method materialization passes NO_DRIFT check')

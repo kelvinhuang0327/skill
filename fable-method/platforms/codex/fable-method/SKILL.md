@@ -154,7 +154,7 @@ Every changed path must be authorized and every `PASS` tied to observed evidence
 - **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `c201d6b683d084014add2631a5ef5d7fcd5c8f69` from commit `2b99ec0bbcc71b8be588ee71d4a322680669e55b`.
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
-- **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `fbb9b686c927ce53db89f050bb28a5741b51b474` from commit `afd2403b261440c8b770ca0444ddec125456efd8`.
+- **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

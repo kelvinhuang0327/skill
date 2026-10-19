@@ -586,7 +586,7 @@ guard_runtime_helper_preservation() {
 # Approved identities for Reviewed Runtime Upgrade contract
 readonly APPROVED_OLD_CODEX_LAUNCHER_BLOB='00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
 readonly APPROVED_NEW_CODEX_LAUNCHER_BLOB='c201d6b683d084014add2631a5ef5d7fcd5c8f69'
-readonly APPROVED_CODEX_COMPANION_BLOB='fbb9b686c927ce53db89f050bb28a5741b51b474'
+readonly APPROVED_CODEX_COMPANION_BLOB='91592132733be6b697bdbef667b97d9065c829c1'
 
 # Computes Git blob SHA1 hash for a file.
 # Uses git hash-object with trusted path, falling back to Ruby digest if needed.

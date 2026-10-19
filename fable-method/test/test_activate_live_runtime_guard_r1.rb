@@ -524,7 +524,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     assert_equal 0755, File.stat(post_launcher).mode & 0777
 
     assert File.file?(post_companion)
-    assert_equal 'fbb9b686c927ce53db89f050bb28a5741b51b474',
+    assert_equal '91592132733be6b697bdbef667b97d9065c829c1',
                  Digest::SHA1.hexdigest("blob #{File.binread(post_companion).bytesize}\0#{File.binread(post_companion)}")
     assert_equal 0644, File.stat(post_companion).mode & 0777
 

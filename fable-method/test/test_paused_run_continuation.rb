@@ -11,7 +11,7 @@ require_relative '../scripts/task_checkpoint'
 require_relative '../scripts/paused_run_continuation'
 
 class PausedRunContinuationTest < Minitest::Test
-  TASK_ID = 'SYNTHETIC_B649_TASK'
+  TASK_ID = 'SYNTHETIC_PAUSED_TASK'
   PREDECESSOR_IDS = %w[RUN1 RUN2].freeze
   NEXT_ATTEMPT = 4_844_449
   COMPLETED_ATTEMPTS = NEXT_ATTEMPT - 1

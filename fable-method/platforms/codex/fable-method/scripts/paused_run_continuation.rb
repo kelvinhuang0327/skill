@@ -541,14 +541,33 @@ class PausedRunContinuationTransition
     end
     _capture_path, capture_bytes, capture_sha256 = stable_input!(expected_capture_path, 'terminal capture')
     capture_data = parse_object!(capture_bytes, 'terminal capture', nil)
-    capture_keys = %w[schema_version command stdout stderr exit_status started_at ended_at]
-    unless capture_data.keys.sort == capture_keys.sort
+    capture_required_keys = %w[
+      schema_version command stdout stderr exit_status started_at ended_at
+      task_id execution_id execution_identity
+    ]
+    capture_optional_keys = %w[stdout_encoding stderr_encoding]
+    unless (capture_required_keys - capture_data.keys).empty? &&
+           (capture_data.keys - capture_required_keys - capture_optional_keys).empty?
       raise ExecutionRecord::UnresolvedExecutionStateError,
             "journal execution '#{execution_id}' has an unsupported capture schema"
     end
+    unless capture_optional_keys.all? { |key| !capture_data.key?(key) || capture_data[key] == 'base64' }
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            "journal execution '#{execution_id}' has an unsupported capture stream encoding"
+    end
     capture = DurableCommandCapture.new(capture_data)
-    unless capture.schema_version == DurableCommandCapture::SCHEMA_VERSION && capture.complete? &&
-           record.classify == ExecutionRecord::CLASSIFICATION_COMPLETED
+    unless capture.schema_version == DurableCommandCapture::SCHEMA_VERSION && capture.complete?
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            "journal execution '#{execution_id}' has no complete terminal capture"
+    end
+    identity = capture.execution_identity
+    unless capture.task_id == task_id.to_s && capture.execution_id == execution_id &&
+           identity.is_a?(Hash) && identity['task_id'] == task_id.to_s &&
+           identity['execution_id'] == execution_id
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            "journal execution '#{execution_id}' has a mismatched identity-bound terminal capture"
+    end
+    unless record.classify == ExecutionRecord::CLASSIFICATION_COMPLETED
       raise ExecutionRecord::UnresolvedExecutionStateError,
             "journal execution '#{execution_id}' has no complete terminal capture"
     end

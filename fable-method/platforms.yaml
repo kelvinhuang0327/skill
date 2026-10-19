@@ -51,9 +51,9 @@ skills:
       - id: paused_run_continuation
         role: required_companion
         source: fable-method/scripts/paused_run_continuation.rb
-        source_commit: afd2403b261440c8b770ca0444ddec125456efd8
-        git_blob: fbb9b686c927ce53db89f050bb28a5741b51b474
-        sha256: c4f6d324dcbdbcffbdfe5bb6844756caf2f03bf883c073e787a9f5d66ee7a4b8
+        source_commit: e6f8581cdabe21f3683b8a5d8effb6855d98a041
+        git_blob: 91592132733be6b697bdbef667b97d9065c829c1
+        sha256: f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0
         mode: "100644"
         destination: scripts/paused_run_continuation.rb
         purpose: required_only_for_continue_paused_run_transition
