@@ -8,6 +8,7 @@ require 'digest'
 require 'open3'
 require 'rbconfig'
 require_relative '../scripts/task_checkpoint'
+require_relative '../scripts/paused_run_continuation'
 
 class PausedRunContinuationTest < Minitest::Test
   TASK_ID = 'SYNTHETIC_B649_TASK'
@@ -183,9 +184,15 @@ class PausedRunContinuationTest < Minitest::Test
       status = execution_id == 'RUN2' ? exit_status : 0
       path = capture_path(execution_id)
       FileUtils.mkdir_p(File.dirname(path))
+      identity = DurableCommandCapture.capture_execution_identity(
+        repository_path: @repo, worktree_path: @worktree,
+        task_id: TASK_ID, execution_id: execution_id
+      )
       DurableCommandCapture.new(
-        command: ['synthetic-runner', execution_id], stdout: '', stderr: '', exit_status: status,
-        started_at: '2026-10-08T00:00:00Z', ended_at: '2026-10-08T00:01:00Z'
+        command: ['synthetic-runner', execution_id],
+        stdout: execution_id == 'RUN1' ? "prior\xFF".b : '', stderr: '', exit_status: status,
+        started_at: '2026-10-08T00:00:00Z', ended_at: '2026-10-08T00:01:00Z',
+        task_id: TASK_ID, execution_id: execution_id, execution_identity: identity
       ).save(path)
       ExecutionRecord.new(
         task_id: TASK_ID, execution_id: execution_id, pid: Process.pid,
@@ -193,6 +200,30 @@ class PausedRunContinuationTest < Minitest::Test
         started_at: '2026-10-08T00:00:00Z', ended_at: "2026-10-08T00:0#{index + 1}:00Z"
       ).save(record_path(execution_id))
     end
+  end
+
+  def test_launcher_written_identity_capture_matches_continuation_schema
+    path = capture_path('RUN1')
+    command = [RbConfig.ruby, '-e', 'STDOUT.binmode; STDOUT.write([255].pack("C"))']
+    capture = DurableCommandCapture.run_and_capture(
+      command, file_path: path, chdir: @worktree, task_id: TASK_ID, execution_id: 'RUN1',
+      execution_identity: lambda {
+        DurableCommandCapture.capture_execution_identity(
+          repository_path: @repo, worktree_path: @worktree,
+          task_id: TASK_ID, execution_id: 'RUN1'
+        )
+      }
+    )
+
+    assert_equal 0, capture.exit_status
+    data = JSON.parse(File.binread(path))
+    assert_equal %w[
+      command ended_at execution_id execution_identity exit_status schema_version
+      started_at stderr stdout stdout_encoding task_id
+    ], data.keys.sort
+    assert_equal "\xFF".b, capture.stdout.b
+    evidence = PausedRunContinuationTransition.completed_execution_evidence!(@repo, TASK_ID, 'RUN1')
+    assert_match(/\A[0-9a-f]{64}\z/, evidence.fetch('capture_sha256'))
   end
 
   def test_exact_owner_authorized_pause_runs_next_attempt_once_and_preserves_predecessor
@@ -204,6 +235,10 @@ class PausedRunContinuationTest < Minitest::Test
     assert status.success?, "continuation failed: #{stdout} #{stderr}"
     assert_equal '', stderr
     assert_equal NEXT_ATTEMPT.to_s, File.read(@attempt_marker)
+    launcher_capture = DurableCommandCapture.load(capture_path('RUN1'))
+    assert_equal "prior\xFF".b, launcher_capture.stdout
+    assert_equal TASK_ID, launcher_capture.task_id
+    assert_equal 'RUN1', launcher_capture.execution_identity.fetch('execution_id')
     record = ExecutionRecord.load(record_path('RUN3'))
     assert_equal 'RUN2', record.continuation_from_execution_id
     assert_equal Digest::SHA256.file(@checkpoint).hexdigest, record.continuation_checkpoint_sha256
@@ -297,6 +332,32 @@ class PausedRunContinuationTest < Minitest::Test
 
     refute status.success?
     assert_includes stderr, 'Owner authorization could not be verified'
+    refute File.exist?(record_path('RUN3'))
+  end
+
+  def test_legacy_predecessor_capture_without_identity_is_rejected
+    path = capture_path('RUN1')
+    capture = JSON.parse(File.binread(path))
+    %w[task_id execution_id execution_identity].each { |key| capture.delete(key) }
+    File.binwrite(path, JSON.generate(capture))
+
+    _stdout, stderr, status = run_cli(cli_args)
+
+    refute status.success?
+    assert_includes stderr, "journal execution 'RUN1' has an unsupported capture schema"
+    refute File.exist?(record_path('RUN3'))
+  end
+
+  def test_mismatched_predecessor_capture_identity_is_rejected
+    path = capture_path('RUN1')
+    capture = JSON.parse(File.binread(path))
+    capture.fetch('execution_identity')['execution_id'] = 'OTHER_RUN'
+    File.binwrite(path, JSON.generate(capture))
+
+    _stdout, stderr, status = run_cli(cli_args)
+
+    refute status.success?
+    assert_includes stderr, "journal execution 'RUN1' has a mismatched identity-bound terminal capture"
     refute File.exist?(record_path('RUN3'))
   end
 
@@ -408,7 +469,7 @@ class PausedRunContinuationTest < Minitest::Test
     _stdout, stderr, status = run_cli(args)
 
     refute status.success?
-    assert_includes stderr, '--application-state is only valid with --recover-run or --continue-paused-run'
+    assert_includes stderr, '--application-state is only valid with recovery or continuation operations'
     refute File.exist?(record_path('RUN3'))
   end
 end
