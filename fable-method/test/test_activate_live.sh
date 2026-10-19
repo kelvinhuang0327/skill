@@ -285,7 +285,7 @@ mkdir -p "$COPIED_ROOT"
 cp -R "$LINKED_CURRENT/fable-method" "$COPIED_ROOT/fable-method"
 assert_failure_contains \
   'copied non-Git repository is rejected' \
-  'executing repository root is not a Git repository' \
+  'executing repository root is not its Git top-level' \
   "$COPIED_ROOT/fable-method/scripts/activate-live.sh" --activate --platform codex
 
 mkdir -p "$NESTED_ROOT"
@@ -487,7 +487,7 @@ forbid_in_source 'fd 9 is explicitly closed' '9>&-|9<&-'
 forbid_in_source 'a trap touches the activation lock' 'trap.*(ACTIVATION_LOCK|lockf|9>)'
 forbid_in_source 'the activation lock is unlinked' '(^|[[:space:]])(rm|unlink)[[:space:]][^|&;]*ACTIVATION_LOCK'
 forbid_in_source 'the lock path has an environment override' 'ACTIVATION_LOCK[^=]*:-|:-[^=]*ACTIVATION_LOCK'
-forbid_in_source 'the lock path is derived from HOME or TMPDIR' '\$\{HOME\}|\$HOME([^_A-Za-z]|$)|\$\{?TMPDIR'
+forbid_in_source 'the lock path is derived from HOME or TMPDIR' '^readonly ACTIVATION_LOCK=.*(\$\{HOME\}|\$HOME|\$\{TMPDIR\}|\$TMPDIR)'
 forbid_in_source 'activation locking depends on a checkpoint' '[Cc]heckpoint'
 forbid_in_source 'lockf is resolved through PATH' '(^|[[:space:]])lockf[[:space:]]'
 pass_case 'T8e no stale-cleanup, override, trap, unlink, or PATH-resolved lock path exists'

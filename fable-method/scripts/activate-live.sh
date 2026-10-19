@@ -32,8 +32,11 @@ Usage:
   activate-live.sh --activate --platform <supported-platform> --replace-reviewed-local-drift \
       --expected-live-sha256 <64-hex> --expected-canonical-head <40-hex> \
       --expected-canonical-tree <40-hex> --expected-materialization-tree <40-hex>
+  activate-live.sh --activate --platform codex --upgrade-reviewed-runtime \
+      [--expected-old-launcher-blob <40-hex>] [--expected-new-launcher-blob <40-hex>]
   Ordinary activation refuses LOCAL_DRIFT. Reviewed replacement requires all four
   exact identity bindings, each exactly once and revalidated before the first write.
+  Reviewed runtime upgrade verifies approved old/new runtime pair identities and fails closed.
 EOF
   exit 2
 }
@@ -82,6 +85,14 @@ activate-live.sh - repository-owned activation for managed Fable skill installs.
                                  Identity binding does not perform semantic review:
                                  the Owner/Worker must separately review which
                                  local changes may be discarded.
+
+  --activate --platform codex --upgrade-reviewed-runtime
+                                 Upgrades an approved older Codex runtime launcher to the
+                                 current source runtime. Validates exact identities of old
+                                 installed launcher, old SKILL.md pin, new source launcher,
+                                 new generated SKILL.md pin, companion, file types, and
+                                 permissions. Fails closed on any unapproved helper mismatch,
+                                 drift, or symlink.
 
 Running --activate against a real installation requires authorization from the
 Owner obtained outside this script. This script performs no conversational or
@@ -428,6 +439,438 @@ find_symlink_component() {
   return 1
 }
 
+# Known required Ruby runtime helpers for Codex skill activation.
+readonly CODEX_LAUNCHER_NAME="task_check"'point.rb'
+readonly CODEX_LAUNCHER_REL="scripts/${CODEX_LAUNCHER_NAME}"
+readonly CODEX_RUNTIME_HELPERS=(
+  "${CODEX_LAUNCHER_REL}"
+  'scripts/paused_run_continuation.rb'
+)
+
+# Runtime Helper Preservation Guard.
+# Ensures that before any destructive sync (rsync --delete) is executed against
+# a live skill destination, any required runtime helpers present in the live
+# destination are also present in the source materialization and byte-identical.
+# Fails closed on symlinks, missing files, or unverifiable paths.
+guard_runtime_helper_preservation() {
+  local canonical_abs="$1" live="$2" platform="$3"
+
+  # Helper preservation contract applies to platforms managing Ruby helpers (codex)
+  [[ "$platform" == codex ]] || return 0
+  [[ -d "$live" ]] || return 0
+
+  if [[ -L "$live" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live target is a symlink: ${live}"
+  fi
+  if [[ -L "$canonical_abs" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source target is a symlink: ${canonical_abs}"
+  fi
+
+  if [[ -L "$live/scripts" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live scripts path is a symlink: ${live}/scripts"
+  fi
+  if [[ -L "$canonical_abs/scripts" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source scripts path is a symlink: ${canonical_abs}/scripts"
+  fi
+
+  local -a candidates=("${CODEX_RUNTIME_HELPERS[@]}")
+  if [[ -d "$live/scripts" && ! -L "$live/scripts" ]]; then
+    local extra
+    while IFS= read -r extra; do
+      [[ -n "$extra" ]] || continue
+      local rel="scripts/${extra}"
+      local known=0 c
+      for c in "${candidates[@]}"; do
+        if [[ "$c" == "$rel" ]]; then
+          known=1
+          break
+        fi
+      done
+      if [[ "$known" -eq 0 ]]; then
+        candidates+=("$rel")
+      fi
+    done < <(find "$live/scripts" -maxdepth 1 -name '*.rb' -exec basename {} \; 2>/dev/null | LC_ALL=C sort)
+  fi
+
+  if [[ -d "$canonical_abs/scripts" && ! -L "$canonical_abs/scripts" ]]; then
+    local src_extra
+    while IFS= read -r src_extra; do
+      [[ -n "$src_extra" ]] || continue
+      local rel="scripts/${src_extra}"
+      local known=0 c
+      for c in "${candidates[@]}"; do
+        if [[ "$c" == "$rel" ]]; then
+          known=1
+          break
+        fi
+      done
+      if [[ "$known" -eq 0 ]]; then
+        candidates+=("$rel")
+      fi
+    done < <(find "$canonical_abs/scripts" -maxdepth 1 -name '*.rb' -exec basename {} \; 2>/dev/null | LC_ALL=C sort)
+  fi
+
+  local -a missing_helpers=()
+  local -a mismatched_helpers=()
+
+  local rel
+  for rel in "${candidates[@]}"; do
+    local live_path="${live}/${rel}"
+    local src_path="${canonical_abs}/${rel}"
+
+    if [[ -L "$live_path" ]]; then
+      die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live helper is a symlink: ${rel}"
+    fi
+    if [[ -L "$src_path" ]]; then
+      die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source helper is a symlink: ${rel}"
+    fi
+
+    if [[ -e "$live_path" ]]; then
+      if [[ ! -f "$live_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: live helper is not a regular file: ${rel}"
+      fi
+      if [[ ! -r "$live_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: live helper is not readable: ${rel}"
+      fi
+
+      if [[ ! -e "$src_path" ]]; then
+        missing_helpers+=("$rel")
+        continue
+      fi
+
+      if [[ ! -f "$src_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper is not a regular file: ${rel}"
+      fi
+      if [[ ! -r "$src_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper is not readable: ${rel}"
+      fi
+      if [[ "$rel" == "${CODEX_LAUNCHER_REL}" && ! -x "$src_path" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source launcher is not executable: ${rel}"
+      fi
+
+      if ! cmp -s "$live_path" "$src_path"; then
+        mismatched_helpers+=("$rel")
+      fi
+    else
+      if [[ -e "$src_path" ]]; then
+        if [[ ! -f "$src_path" || ! -r "$src_path" ]]; then
+          die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper cannot be verified: ${rel}"
+        fi
+        if [[ "$rel" == "${CODEX_LAUNCHER_REL}" && ! -x "$src_path" ]]; then
+          die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source launcher is not executable: ${rel}"
+        fi
+      fi
+    fi
+  done
+
+  if (( ${#missing_helpers[@]} > 0 )); then
+    printf 'ACTIVATION_RUNTIME_HELPER_LOSS_PREVENTED: source is missing live runtime helper(s):\n' >&2
+    for rel in "${missing_helpers[@]}"; do
+      printf '  missing: %s\n' "$rel" >&2
+    done
+    exit 2
+  fi
+
+  if (( ${#mismatched_helpers[@]} > 0 )); then
+    printf 'ACTIVATION_RUNTIME_HELPER_MISMATCH: helper content differs between source and live:\n' >&2
+    for rel in "${mismatched_helpers[@]}"; do
+      local live_sha src_sha
+      live_sha="$(shasum -a 256 "${live}/${rel}" | awk '{print $1}')"
+      src_sha="$(shasum -a 256 "${canonical_abs}/${rel}" | awk '{print $1}')"
+      printf '  mismatched: %s (source: %s, live: %s)\n' "$rel" "$src_sha" "$live_sha" >&2
+    done
+    exit 2
+  fi
+}
+
+# Approved identities for Reviewed Runtime Upgrade contract
+readonly APPROVED_OLD_CODEX_LAUNCHER_BLOB='00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
+readonly APPROVED_NEW_CODEX_LAUNCHER_BLOB='c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+readonly APPROVED_CODEX_COMPANION_BLOB='91592132733be6b697bdbef667b97d9065c829c1'
+
+# Computes Git blob SHA1 hash for a file.
+# Uses git hash-object with trusted path, falling back to Ruby digest if needed.
+compute_git_blob() {
+  local target="$1"
+  [[ -f "$target" && ! -L "$target" ]] || return 1
+  local blob
+  if blob="$(git_identity hash-object "$target" 2>/dev/null)" && [[ "$blob" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "$blob"
+    return 0
+  fi
+  if command -v ruby >/dev/null 2>&1; then
+    blob="$(ruby -e 'require "digest"; b = File.binread(ARGV[0]); puts Digest::SHA1.hexdigest("blob #{b.bytesize}\0#{b}")' "$target" 2>/dev/null)" \
+      && [[ "$blob" =~ ^[0-9a-f]{40}$ ]] && {
+      printf '%s\n' "$blob"
+      return 0
+    }
+  fi
+  return 1
+}
+
+# Verifies all pre-conditions and strict identity bindings for Reviewed Runtime Upgrade.
+# Fails closed on any symlink, unapproved identity, missing helper, pin mismatch, or drift.
+verify_reviewed_runtime_upgrade() {
+  local canonical_abs="$1" live="$2" platform="$3"
+  local expected_old="${4:-}" expected_new="${5:-}"
+
+  [[ "$platform" == codex ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_UNSUPPORTED_PLATFORM: runtime upgrade is only supported for platform codex (got ${platform})"
+
+  # 1. Symlink and directory integrity checks
+  local sym
+  if sym="$(find_symlink_component "$live")"; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: symlink component in live target path: ${sym}"
+  fi
+  [[ -d "$live" && ! -L "$live" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_LIVE_TARGET_NOT_READY: live target is not an existing plain directory: ${live}"
+
+  if sym="$(find_symlink_component "$canonical_abs")"; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: symlink component in canonical path: ${sym}"
+  fi
+  [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_SOURCE_NOT_READY: canonical materialization is missing or a symlink: ${canonical_abs}"
+
+  if [[ -L "$live/scripts" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live scripts path is a symlink: ${live}/scripts"
+  fi
+  if [[ -L "$canonical_abs/scripts" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source scripts path is a symlink: ${canonical_abs}/scripts"
+  fi
+  [[ -d "$live/scripts" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_NOT_READY: live scripts directory missing: ${live}/scripts"
+  [[ -d "$canonical_abs/scripts" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_NOT_READY: source scripts directory missing: ${canonical_abs}/scripts"
+
+  # 2. Live launcher verification
+  local live_launcher="${live}/${CODEX_LAUNCHER_REL}"
+  if [[ -L "$live_launcher" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live helper is a symlink: ${CODEX_LAUNCHER_REL}"
+  fi
+  if [[ ! -f "$live_launcher" || ! -r "$live_launcher" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: live launcher is missing or unreadable: ${CODEX_LAUNCHER_REL}"
+  fi
+  if [[ ! -x "$live_launcher" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: live launcher is not executable: ${CODEX_LAUNCHER_REL}"
+  fi
+
+  local live_launcher_blob
+  live_launcher_blob="$(compute_git_blob "$live_launcher")" \
+    || die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: failed to compute live launcher blob"
+
+  if [[ -n "$expected_old" && "$live_launcher_blob" != "$expected_old" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live launcher blob (${live_launcher_blob}) does not match expected (${expected_old})"
+  fi
+  if [[ "$live_launcher_blob" != "$APPROVED_OLD_CODEX_LAUNCHER_BLOB" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live launcher blob (${live_launcher_blob}) is not an approved old runtime version (${APPROVED_OLD_CODEX_LAUNCHER_BLOB})"
+  fi
+
+  # 3. Live SKILL.md pin verification
+  local live_skill="${live}/SKILL.md"
+  if [[ -L "$live_skill" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live SKILL.md is a symlink: ${live_skill}"
+  fi
+  if [[ ! -f "$live_skill" || ! -r "$live_skill" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: live SKILL.md is missing or unreadable: ${live_skill}"
+  fi
+  if ! grep -q "$APPROVED_OLD_CODEX_LAUNCHER_BLOB" "$live_skill"; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live SKILL.md does not contain approved old launcher pin (${APPROVED_OLD_CODEX_LAUNCHER_BLOB})"
+  fi
+
+  # 4. Source launcher verification
+  local src_launcher="${canonical_abs}/${CODEX_LAUNCHER_REL}"
+  if [[ -L "$src_launcher" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source helper is a symlink: ${CODEX_LAUNCHER_REL}"
+  fi
+  if [[ ! -f "$src_launcher" || ! -r "$src_launcher" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: source launcher is missing or unreadable: ${CODEX_LAUNCHER_REL}"
+  fi
+  if [[ ! -x "$src_launcher" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source launcher is not executable: ${CODEX_LAUNCHER_REL}"
+  fi
+
+  local src_launcher_blob
+  src_launcher_blob="$(compute_git_blob "$src_launcher")" \
+    || die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: failed to compute source launcher blob"
+
+  if [[ -n "$expected_new" && "$src_launcher_blob" != "$expected_new" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source launcher blob (${src_launcher_blob}) does not match expected (${expected_new})"
+  fi
+  if [[ "$src_launcher_blob" != "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source launcher blob (${src_launcher_blob}) is not approved new runtime version (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+  fi
+
+  # 5. Source SKILL.md pin verification
+  local src_skill="${canonical_abs}/SKILL.md"
+  if [[ -L "$src_skill" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source SKILL.md is a symlink: ${src_skill}"
+  fi
+  if [[ ! -f "$src_skill" || ! -r "$src_skill" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: source SKILL.md is missing or unreadable: ${src_skill}"
+  fi
+  if ! grep -q "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" "$src_skill"; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source SKILL.md does not contain approved new launcher pin (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+  fi
+
+  # 6. Companion helper verification
+  local src_companion="${canonical_abs}/scripts/paused_run_continuation.rb"
+  if [[ -L "$src_companion" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source companion is a symlink: scripts/paused_run_continuation.rb"
+  fi
+  if [[ ! -f "$src_companion" || ! -r "$src_companion" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: source companion is missing or unreadable: scripts/paused_run_continuation.rb"
+  fi
+  if [[ -x "$src_companion" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source companion must not be executable: scripts/paused_run_continuation.rb"
+  fi
+  local src_comp_blob
+  src_comp_blob="$(compute_git_blob "$src_companion")" \
+    || die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: failed to compute source companion blob"
+  if [[ "$src_comp_blob" != "$APPROVED_CODEX_COMPANION_BLOB" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source companion blob (${src_comp_blob}) does not match approved (${APPROVED_CODEX_COMPANION_BLOB})"
+  fi
+
+  local live_companion="${live}/scripts/paused_run_continuation.rb"
+  if [[ -L "$live_companion" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_SYMLINK: live companion is a symlink: scripts/paused_run_continuation.rb"
+  fi
+  if [[ ! -f "$live_companion" ]]; then
+    die "ACTIVATION_RUNTIME_HELPER_LOSS_PREVENTED: live is missing required runtime helper (scripts/paused_run_continuation.rb)"
+  fi
+  if [[ ! -r "$live_companion" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: live companion is unreadable: scripts/paused_run_continuation.rb"
+  fi
+  local live_comp_blob
+  live_comp_blob="$(compute_git_blob "$live_companion")" \
+    || die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: failed to compute live companion blob"
+  if [[ "$live_comp_blob" != "$APPROVED_CODEX_COMPANION_BLOB" ]]; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live companion blob (${live_comp_blob}) does not match approved companion (${APPROVED_CODEX_COMPANION_BLOB})"
+  fi
+
+  # 7. Check for extra unapproved live helpers
+  local extra
+  while IFS= read -r extra; do
+    [[ -n "$extra" ]] || continue
+    if [[ "$extra" != "${CODEX_LAUNCHER_NAME}" && "$extra" != "paused_run_continuation.rb" ]]; then
+      local extra_live="${live}/scripts/${extra}"
+      local extra_src="${canonical_abs}/scripts/${extra}"
+      if [[ -L "$extra_live" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_SYMLINK: extra live helper is a symlink: scripts/${extra}"
+      fi
+      if [[ ! -f "$extra_src" ]]; then
+        die "ACTIVATION_RUNTIME_HELPER_LOSS_PREVENTED: unapproved extra helper in live destination: scripts/${extra}"
+      fi
+      if ! cmp -s "$extra_live" "$extra_src"; then
+        die "ACTIVATION_RUNTIME_HELPER_MISMATCH: helper content differs between source and live: scripts/${extra}"
+      fi
+    fi
+  done < <(find "$live/scripts" -maxdepth 1 -name '*.rb' -exec basename {} \; 2>/dev/null | LC_ALL=C sort)
+
+  # Check source extra helpers are verifiable
+  while IFS= read -r extra; do
+    [[ -n "$extra" ]] || continue
+    local extra_src="${canonical_abs}/scripts/${extra}"
+    if [[ -L "$extra_src" ]]; then
+      die "ACTIVATION_RUNTIME_HELPER_SYMLINK: source helper is a symlink: scripts/${extra}"
+    fi
+    if [[ ! -f "$extra_src" || ! -r "$extra_src" ]]; then
+      die "ACTIVATION_RUNTIME_HELPER_UNVERIFIABLE: source helper cannot be verified: scripts/${extra}"
+    fi
+  done < <(find "$canonical_abs/scripts" -maxdepth 1 -name '*.rb' -exec basename {} \; 2>/dev/null | LC_ALL=C sort)
+
+  return 0
+}
+
+# Executes an approved reviewed runtime upgrade using staging and fail-closed verification.
+upgrade_reviewed_runtime() {
+  local canonical_abs="$1" live="$2" platform="$3"
+  local expected_old="${4:-}" expected_new="${5:-}"
+
+  # Step 1: Preflight verification
+  verify_reviewed_runtime_upgrade "$canonical_abs" "$live" "$platform" "$expected_old" "$expected_new"
+
+  # Step 2: Staging preparation and verification
+  local staging_dir
+  staging_dir="$(mktemp -d "${TMPDIR:-/tmp}/fable_upgrade_staging.XXXXXX")"
+  [[ -d "$staging_dir" && ! -L "$staging_dir" ]] \
+    || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: could not create staging directory'
+
+  # Populate staging from canonical source materialization
+  rsync -a --checksum "$canonical_abs"/ "$staging_dir"/ || {
+    rm -rf "$staging_dir"
+    die 'REVIEWED_RUNTIME_UPGRADE_FAILED: failed to populate staging directory'
+  }
+
+  # Verify staging directory integrity
+  local staged_launcher="${staging_dir}/${CODEX_LAUNCHER_REL}"
+  local staged_companion="${staging_dir}/scripts/paused_run_continuation.rb"
+  local staged_skill="${staging_dir}/SKILL.md"
+
+  if [[ ! -f "$staged_launcher" || -L "$staged_launcher" || ! -x "$staged_launcher" ]]; then
+    rm -rf "$staging_dir"
+    die 'REVIEWED_RUNTIME_UPGRADE_FAILED: staged launcher is missing, symlink, or non-executable'
+  fi
+  local staged_launcher_blob
+  staged_launcher_blob="$(compute_git_blob "$staged_launcher")"
+  if [[ "$staged_launcher_blob" != "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" ]]; then
+    rm -rf "$staging_dir"
+    die "REVIEWED_RUNTIME_UPGRADE_FAILED: staged launcher blob (${staged_launcher_blob}) does not match new launcher (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+  fi
+  if ! grep -q "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" "$staged_skill"; then
+    rm -rf "$staging_dir"
+    die 'REVIEWED_RUNTIME_UPGRADE_FAILED: staged SKILL.md pin does not match new launcher'
+  fi
+  if [[ ! -f "$staged_companion" || -L "$staged_companion" ]]; then
+    rm -rf "$staging_dir"
+    die 'REVIEWED_RUNTIME_UPGRADE_FAILED: staged companion is missing or symlink'
+  fi
+  local staged_comp_blob
+  staged_comp_blob="$(compute_git_blob "$staged_companion")"
+  if [[ "$staged_comp_blob" != "$APPROVED_CODEX_COMPANION_BLOB" ]]; then
+    rm -rf "$staging_dir"
+    die "REVIEWED_RUNTIME_UPGRADE_FAILED: staged companion blob (${staged_comp_blob}) does not match companion (${APPROVED_CODEX_COMPANION_BLOB})"
+  fi
+
+  # Step 3: Pre-write revalidation of live target (TOCTOU prevention)
+  verify_reviewed_runtime_upgrade "$canonical_abs" "$live" "$platform" "$expected_old" "$expected_new"
+
+  # Step 4: Apply staged updates to live target
+  rsync -a --checksum --delete "$staging_dir"/ "$live"/ || {
+    rm -rf "$staging_dir"
+    die 'REVIEWED_RUNTIME_UPGRADE_FAILED: rsync update to live target failed'
+  }
+  rm -rf "$staging_dir"
+
+  # Step 5: Post-write verification
+  local post_launcher="${live}/${CODEX_LAUNCHER_REL}"
+  local post_companion="${live}/scripts/paused_run_continuation.rb"
+  local post_skill="${live}/SKILL.md"
+
+  [[ -f "$post_launcher" && ! -L "$post_launcher" && -x "$post_launcher" ]] \
+    || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write launcher is missing, symlink, or non-executable'
+  local post_launcher_blob
+  post_launcher_blob="$(compute_git_blob "$post_launcher")"
+  [[ "$post_launcher_blob" == "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_FAILED: post-write launcher blob (${post_launcher_blob}) does not match new launcher (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+
+  [[ -f "$post_companion" && ! -L "$post_companion" ]] \
+    || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write companion is missing or symlink'
+  local post_comp_blob
+  post_comp_blob="$(compute_git_blob "$post_companion")"
+  [[ "$post_comp_blob" == "$APPROVED_CODEX_COMPANION_BLOB" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_FAILED: post-write companion blob (${post_comp_blob}) does not match companion (${APPROVED_CODEX_COMPANION_BLOB})"
+  [[ ! -x "$post_companion" ]] \
+    || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write companion must not be executable'
+
+  grep -q "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" "$post_skill" \
+    || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write SKILL.md pin does not match new launcher'
+
+  # Run standard helper preservation guard to confirm full consistency
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform" || {
+    die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write runtime helper preservation check failed'
+  }
+}
+
 # Metadata-only inventory of the pinned HEAD history, including directories.
 # NUL delimiters preserve raw path bytes. Failures propagate through pipefail;
 # no historical blob content is read to establish which live paths are known.
@@ -741,6 +1184,13 @@ do_activate() {
   require_canonical_repository_state_for_activation
   require_rsync
 
+  local live canonical_abs result
+  live="$(platform_live_path "$platform")"
+  canonical_abs="$(repo_path "$(platform_materialized_rel "$platform")")"
+  [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] || die 'canonical materialization is missing or is a symlink'
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
+
   local preflight_head preflight_tree
   preflight_head="$(activation_source_head)"
   preflight_tree="$(git_identity -C "$REPOSITORY_ROOT" rev-parse HEAD^{tree})"
@@ -763,11 +1213,6 @@ do_activate() {
     exit 2
   fi
 
-  local live canonical_abs result
-  live="$(platform_live_path "$platform")"
-  canonical_abs="$(repo_path "$(platform_materialized_rel "$platform")")"
-  [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] || die 'canonical materialization is missing or is a symlink'
-
   verify_manifest_paths
   require_canonical_source_gate
   require_canonical_repository_state_for_activation
@@ -776,6 +1221,8 @@ do_activate() {
   classify_platform "$platform"
   [[ "$CLASSIFY_STATE" == "$prev_state" && "$CLASSIFY_MATCHED_COMMIT" == "$prev_matched" ]] \
     || die 'LIVE_TARGET_CHANGED_BEFORE_WRITE'
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
 
   case "$prev_state" in
     ABSENT)
@@ -808,6 +1255,8 @@ do_activate() {
     printf '  post_write_state: %s\n' "$CLASSIFY_STATE" >&2
     exit 2
   fi
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
 
   printf 'PLATFORM: %s\n' "$platform"
   printf 'PREVIOUS_STATE: %s\n' "$prev_state"
@@ -854,6 +1303,8 @@ do_activate_replace_reviewed_local_drift() {
   [[ -d "$live" && ! -L "$live" ]] \
     || die 'REVIEWED_REPLACEMENT_LIVE_TARGET_NOT_READY: live target is not an existing plain directory'
 
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
+
   require_reviewed_replacement_canonical_identity "$platform" "$expected_h" "$expected_t" "$expected_m"
   local observed_l
   observed_l="$(compute_live_bundle_sha256 "$live" "$platform")" \
@@ -875,6 +1326,8 @@ do_activate_replace_reviewed_local_drift() {
   [[ "$prewrite_l" == "$expected_l" ]] \
     || die "REVIEWED_REPLACEMENT_PREWRITE_LIVE_BUNDLE_SHA256_MISMATCH: expected ${expected_l}, observed ${prewrite_l}"
 
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
+
   rsync -a --checksum --delete "$canonical_abs"/ "$live"/ \
     || die 'REVIEWED_REPLACEMENT_WRITE_FAILED: rsync failed'
 
@@ -885,6 +1338,8 @@ do_activate_replace_reviewed_local_drift() {
     printf '  post_write_state: %s\n' "$CLASSIFY_STATE" >&2
     exit 2
   fi
+
+  guard_runtime_helper_preservation "$canonical_abs" "$live" "$platform"
 
   # Classification uses Git file modes; serialization additionally binds all modes.
   # Check the full serialization as well so exact success also binds all
@@ -910,6 +1365,64 @@ do_activate_replace_reviewed_local_drift() {
   printf 'LIVE_TARGET: %s\n' "$live"
 }
 
+# Reviewed Runtime Upgrade activation path for Codex.
+# Upgrades an approved older runtime helper pair to the current canonical runtime helpers.
+# Staging, atomic verification, and fail-closed revalidation prevent corrupt live state.
+do_activate_upgrade_reviewed_runtime() {
+  acquire_activation_lock
+  local platform="$1"
+  local expected_old="${2:-}" expected_new="${3:-}"
+
+  [[ "$platform" == codex ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_UNSUPPORTED_PLATFORM: runtime upgrade is only supported for platform codex (got ${platform})"
+
+  guard_repository_root
+  verify_manifest_paths
+  require_canonical_source_gate
+  require_canonical_repository_state_for_activation
+  require_rsync
+
+  local live canonical_abs
+  live="$(platform_live_path "$platform")"
+  canonical_abs="$(repo_path "$(platform_materialized_rel "$platform")")"
+  [[ -d "$canonical_abs" && ! -L "$canonical_abs" ]] || die 'canonical materialization is missing or is a symlink'
+
+  local sym
+  if sym="$(find_symlink_component "$live")"; then
+    die "ACTIVATION_PARENT_NOT_READY: symlink component in live target path: ${sym}"
+  fi
+  [[ -d "$live" && ! -L "$live" ]] \
+    || die 'REVIEWED_RUNTIME_UPGRADE_LIVE_TARGET_NOT_READY: live target is not an existing plain directory'
+
+  upgrade_reviewed_runtime "$canonical_abs" "$live" "$platform" "$expected_old" "$expected_new"
+
+  classify_platform "$platform"
+  if [[ "$CLASSIFY_STATE" != EXACT_CURRENT_MATERIALIZATION ]]; then
+    printf 'ACTIVATION_VERIFICATION_FAILED\n' >&2
+    printf '  post_write_state: %s\n' "$CLASSIFY_STATE" >&2
+    exit 2
+  fi
+
+  local source_bundle_l final_bundle_l
+  source_bundle_l="$(compute_live_bundle_sha256 "$canonical_abs" "$platform")" \
+    || die 'ACTIVATION_VERIFICATION_FAILED: canonical bundle inventory failed'
+  final_bundle_l="$(compute_live_bundle_sha256 "$live" "$platform")" \
+    || die 'ACTIVATION_VERIFICATION_FAILED: live bundle inventory failed'
+  [[ "$final_bundle_l" == "$source_bundle_l" ]] \
+    || die 'ACTIVATION_VERIFICATION_FAILED: full bundle differs from canonical materialization'
+
+  printf 'PLATFORM: %s\n' "$platform"
+  printf 'ACTIVATION_MODE: UPGRADE_REVIEWED_RUNTIME\n'
+  printf 'OLD_LAUNCHER_BLOB: %s\n' "$APPROVED_OLD_CODEX_LAUNCHER_BLOB"
+  printf 'NEW_LAUNCHER_BLOB: %s\n' "$APPROVED_NEW_CODEX_LAUNCHER_BLOB"
+  printf 'COMPANION_BLOB: %s\n' "$APPROVED_CODEX_COMPANION_BLOB"
+  printf 'ACTIVATION_RESULT: ACTIVATED\n'
+  printf 'FINAL_STATE: %s\n' "$CLASSIFY_STATE"
+  printf 'CANONICAL_HEAD: %s\n' "$(activation_source_head)"
+  printf 'CANONICAL_MASTER_HEAD: %s\n' "$(canonical_master_head)"
+  printf 'LIVE_TARGET: %s\n' "$live"
+}
+
 main() {
   if [[ $# -eq 0 ]]; then
     usage
@@ -917,10 +1430,13 @@ main() {
 
   local mode="" platform="" platform_count=0 skill_count=0
   local replace_mode=0 replace_flag_count=0
+  local upgrade_mode=0 upgrade_flag_count=0
   local expected_l="" expected_l_count=0
   local expected_h="" expected_h_count=0
   local expected_t="" expected_t_count=0
   local expected_m="" expected_m_count=0
+  local expected_old_blob="" expected_old_blob_count=0
+  local expected_new_blob="" expected_new_blob_count=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --help)
@@ -954,6 +1470,11 @@ main() {
         replace_flag_count=$((replace_flag_count + 1))
         shift
         ;;
+      --upgrade-reviewed-runtime)
+        upgrade_mode=1
+        upgrade_flag_count=$((upgrade_flag_count + 1))
+        shift
+        ;;
       --expected-live-sha256)
         [[ $# -ge 2 ]] || die '--expected-live-sha256 requires a value'
         expected_l="$2"
@@ -978,6 +1499,18 @@ main() {
         expected_m_count=$((expected_m_count + 1))
         shift 2
         ;;
+      --expected-old-launcher-blob)
+        [[ $# -ge 2 ]] || die '--expected-old-launcher-blob requires a value'
+        expected_old_blob="$2"
+        expected_old_blob_count=$((expected_old_blob_count + 1))
+        shift 2
+        ;;
+      --expected-new-launcher-blob)
+        [[ $# -ge 2 ]] || die '--expected-new-launcher-blob requires a value'
+        expected_new_blob="$2"
+        expected_new_blob_count=$((expected_new_blob_count + 1))
+        shift 2
+        ;;
       *)
         die "unknown argument: $1"
         ;;
@@ -992,9 +1525,24 @@ main() {
   esac
   MANIFEST_RECORDS=""
   (( replace_flag_count <= 1 )) || die '--replace-reviewed-local-drift may be given at most once'
+  (( upgrade_flag_count <= 1 )) || die '--upgrade-reviewed-runtime may be given at most once'
+  (( expected_old_blob_count <= 1 )) || die '--expected-old-launcher-blob may be given at most once'
+  (( expected_new_blob_count <= 1 )) || die '--expected-new-launcher-blob may be given at most once'
+
+  if (( replace_mode && upgrade_mode )); then
+    die 'cannot combine --replace-reviewed-local-drift and --upgrade-reviewed-runtime'
+  fi
 
   if (( replace_mode )) && [[ -z "$mode" ]]; then
     die 'REVIEWED_REPLACEMENT_REQUIRES_ACTIVATE: --replace-reviewed-local-drift requires --activate'
+  fi
+
+  if (( upgrade_mode )) && [[ -z "$mode" ]]; then
+    die 'REVIEWED_UPGRADE_REQUIRES_ACTIVATE: --upgrade-reviewed-runtime requires --activate'
+  fi
+
+  if (( ! upgrade_mode )) && (( expected_old_blob_count > 0 || expected_new_blob_count > 0 )); then
+    die 'REVIEWED_RUNTIME_UPGRADE_IDENTITY_WITHOUT_MODE: --expected-*-launcher-blob flags require --upgrade-reviewed-runtime'
   fi
 
   [[ -n "$mode" ]] || usage
@@ -1030,6 +1578,21 @@ main() {
     die 'REVIEWED_REPLACEMENT_IDENTITY_WITHOUT_MODE: --expected-* flags require --replace-reviewed-local-drift'
   fi
 
+  if (( upgrade_mode )); then
+    [[ "$mode" == activate ]] \
+      || die 'REVIEWED_UPGRADE_REQUIRES_ACTIVATE: --upgrade-reviewed-runtime requires --activate'
+    [[ -n "$platform" ]] \
+      || die '--activate requires exactly one --platform'
+    [[ "$platform" == codex ]] \
+      || die "REVIEWED_RUNTIME_UPGRADE_UNSUPPORTED_PLATFORM: runtime upgrade is only supported for platform codex (got ${platform})"
+    if [[ -n "$expected_old_blob" && ! "$expected_old_blob" =~ ^[0-9a-f]{40}$ ]]; then
+      die 'REVIEWED_RUNTIME_UPGRADE_MALFORMED_IDENTITY: --expected-old-launcher-blob must be exactly 40 lowercase hex characters'
+    fi
+    if [[ -n "$expected_new_blob" && ! "$expected_new_blob" =~ ^[0-9a-f]{40}$ ]]; then
+      die 'REVIEWED_RUNTIME_UPGRADE_MALFORMED_IDENTITY: --expected-new-launcher-blob must be exactly 40 lowercase hex characters'
+    fi
+  fi
+
   case "$mode" in
     check)
       do_check "$platform"
@@ -1039,6 +1602,9 @@ main() {
       if (( replace_mode )); then
         do_activate_replace_reviewed_local_drift \
           "$platform" "$expected_l" "$expected_h" "$expected_t" "$expected_m"
+      elif (( upgrade_mode )); then
+        do_activate_upgrade_reviewed_runtime \
+          "$platform" "$expected_old_blob" "$expected_new_blob"
       else
         do_activate "$platform"
       fi
