@@ -1,5 +1,5 @@
 ---
-schema_version: 2
+schema_version: 3
 repository_root: "/Users/kelvin/VibeCoding-WorkSpace/skill"
 materialized_root: fable-method/platforms
 skills:
@@ -38,6 +38,25 @@ skills:
       frontmatter_source: fable-method/shared/platforms/codex/frontmatter.md
       adapter_sources: []
       reference_overrides: []
+      runtime_assets:
+      - id: task_checkpoint
+        role: launcher
+        source: fable-method/scripts/task_checkpoint.rb
+        source_commit: 2b99ec0bbcc71b8be588ee71d4a322680669e55b
+        git_blob: c201d6b683d084014add2631a5ef5d7fcd5c8f69
+        sha256: 7f0d5a5b978525f771ad92dcd1b01444eb16fa0a7bc807a68a5ceb0ba0e98723
+        mode: "100755"
+        destination: scripts/task_checkpoint.rb
+        purpose: canonical_task_checkpoint_launcher
+      - id: paused_run_continuation
+        role: required_companion
+        source: fable-method/scripts/paused_run_continuation.rb
+        source_commit: afd2403b261440c8b770ca0444ddec125456efd8
+        git_blob: fbb9b686c927ce53db89f050bb28a5741b51b474
+        sha256: c4f6d324dcbdbcffbdfe5bb6844756caf2f03bf883c073e787a9f5d66ee7a4b8
+        mode: "100644"
+        destination: scripts/paused_run_continuation.rb
+        purpose: required_only_for_continue_paused_run_transition
       materialized_destination: fable-method/platforms/codex/fable-method
       live_installation_path: "/Users/kelvin/.codex/skills/fable-method"
       live_installation_role: deployment_metadata_only

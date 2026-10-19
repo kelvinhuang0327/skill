@@ -27,28 +27,71 @@ class PlatformManifestTest < Minitest::Test
     @data['skills']['fable-judge']['platforms'].first
   end
 
+  def method_codex_platform
+    @data['skills']['fable-method']['platforms'].first
+  end
+
   def rejects
     yield
     assert_raises(Model::Error) { Model.new(@data) }
   end
 
-  def test_v2_has_exactly_eight_pairs_and_defaults_can_select_method
-    assert_equal 2, @data['schema_version']
+  def test_v3_has_eight_pairs_and_codex_only_runtime_assets
+    assert_equal 3, @data['schema_version']
     assert_equal 4, @model.platforms('fable-method').length
     assert_equal 4, @model.platforms('fable-judge').length
     assert_equal '/Users/kelvin/.gemini/skills/fable-judge', @model.pair('fable-judge', 'gemini')['live_installation_path']
     assert_equal '/Users/kelvin/.gemini/config/skills/fable-judge', @model.pair('fable-judge', 'antigravity')['live_installation_path']
+    assert_equal %w[task_checkpoint paused_run_continuation], @model.pair('fable-method', 'codex').fetch('runtime_assets').map { |asset| asset['id'] }
+    @model.platforms('fable-method').reject { |platform| platform['name'] == 'codex' }.each do |platform|
+      refute platform.key?('runtime_assets')
+    end
     assert_raises(Model::Error) { @model.pair('fable-judge', 'unknown') }
     assert_raises(Model::Error) { @model.skill('all') }
   end
 
-  [1, 3, '2', nil].each do |version|
+  [1, 2, 4, '3', nil].each do |version|
     define_method("test_rejects_schema_#{version.inspect}") { rejects { @data['schema_version'] = version } }
+  end
+
+  def test_codex_runtime_asset_pins_and_materialized_bytes
+    launcher, companion = @model.pair('fable-method', 'codex').fetch('runtime_assets')
+    assert_equal '2b99ec0bbcc71b8be588ee71d4a322680669e55b', launcher['source_commit']
+    assert_equal 'c201d6b683d084014add2631a5ef5d7fcd5c8f69', launcher['git_blob']
+    assert_equal '7f0d5a5b978525f771ad92dcd1b01444eb16fa0a7bc807a68a5ceb0ba0e98723', launcher['sha256']
+    assert_equal 'afd2403b261440c8b770ca0444ddec125456efd8', companion['source_commit']
+    assert_equal 'fbb9b686c927ce53db89f050bb28a5741b51b474', companion['git_blob']
+    assert_equal 'c4f6d324dcbdbcffbdfe5bb6844756caf2f03bf883c073e787a9f5d66ee7a4b8', companion['sha256']
+
+    rendered = @model.render(ROOT, 'fable-method', 'codex')
+    launcher_bytes = File.binread(File.join(ROOT, launcher['source']))
+    companion_bytes = File.binread(File.join(ROOT, companion['source']))
+    assert_equal launcher_bytes, rendered.fetch(launcher['destination'])
+    assert_equal companion_bytes, rendered.fetch(companion['destination'])
+    assert_equal 0o755, File.stat(File.join(ROOT, launcher['source'])).mode & 0o777
+    assert_equal 0o644, File.stat(File.join(ROOT, companion['source'])).mode & 0o777
+    assert_match(/elsif mode == :continue_paused_run\s+require_relative ['"]paused_run_continuation['"]/, launcher_bytes)
+    assert_includes rendered.fetch('SKILL.md'), "Git blob `#{launcher['git_blob']}`"
+    assert_includes rendered.fetch('SKILL.md'), 'loaded only for `--continue-paused-run`'
+    assert_includes rendered.fetch('SKILL.md'), '**Installed Runtime:**'
+    assert_includes rendered.fetch('SKILL.md'), '**Live Activation:** NOT RUN'
+    assert_includes rendered.fetch('SKILL.md'), 'A documentation-only bundle is not Runtime Distribution Ready'
+
+    claude = @model.render(ROOT, 'fable-method', 'claude')
+    refute claude.key?('scripts/task_checkpoint.rb')
+    refute_includes claude.fetch('SKILL.md'), 'Codex Runtime Materialization'
+  end
+
+  def test_codex_runtime_asset_contract_is_closed
+    rejects { method_codex_platform['runtime_assets'].pop }
+    rejects { method_codex_platform['runtime_assets'].first['git_blob'] = 'bad' }
+    rejects { method_codex_platform['runtime_assets'].last['destination'] = '../outside.rb' }
+    rejects { method_codex_platform['runtime_assets'].first['mode'] = '100644' }
   end
 
   def test_duplicate_yaml_keys_at_any_level_and_multiple_documents_fail
     text = File.read(MANIFEST)
-    assert_raises(Model::Error) { Model.yaml(text.sub('schema_version: 2', "schema_version: 2\nschema_version: 2")) }
+    assert_raises(Model::Error) { Model.yaml(text.sub('schema_version: 3', "schema_version: 3\nschema_version: 3")) }
     assert_raises(Model::Error) { Model.yaml("skills:\n  fable-judge: {}\n  fable-judge: {}\n") }
     assert_raises(Model::Error) { Model.yaml("---\na: 1\n---\na: 2\n") }
   end
@@ -74,7 +117,8 @@ class PlatformManifestTest < Minitest::Test
   end
 
   def test_unknown_fields_are_closed_at_each_level
-    [@data, @data['skills']['fable-judge'], judge_shared, judge_platform, judge_shared['projections'].first].each do |record|
+    [@data, @data['skills']['fable-judge'], judge_shared, judge_platform, judge_shared['projections'].first,
+     method_codex_platform, method_codex_platform['runtime_assets'].first].each do |record|
       record['unknown'] = true
       assert_raises(Model::Error) { Model.new(@data) }
       record.delete('unknown')

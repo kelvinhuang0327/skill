@@ -16,6 +16,17 @@ end
 Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   tmp = File.realpath(tmp)
   %w[fable-method fable-judge].each { |skill| FileUtils.cp_r(File.join(root, skill), tmp) }
+  codex_dir = File.join(tmp, 'fable-method/platforms/codex/fable-method')
+  %w[scripts/task_checkpoint.rb scripts/paused_run_continuation.rb].each do |relative|
+    FileUtils.rm_f(File.join(codex_dir, relative))
+  end
+  scripts_dir = File.join(codex_dir, 'scripts')
+  Dir.rmdir(scripts_dir) if Dir.exist?(scripts_dir) && Dir.empty?(scripts_dir)
+  codex_skill = File.join(codex_dir, 'SKILL.md')
+  skill_bytes = File.read(codex_skill)
+  if skill_bytes.include?("\n## Codex Runtime Materialization\n")
+    File.write(codex_skill, skill_bytes.split("\n## Codex Runtime Materialization\n", 2).first + "\n")
+  end
   %w[fable-method/scripts/sync-platforms.sh fable-method/scripts/platform_manifest.rb fable-method/platforms.yaml].each do |rel|
     path = File.join(tmp, rel)
     File.write(path, File.read(path).gsub('/Users/kelvin/VibeCoding-WorkSpace/skill', tmp))
@@ -32,19 +43,51 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
       [f.delete_prefix(tmp), [Digest::SHA256.file(f).hexdigest, File.stat(f).mode]]
     end
   end
+  bundle_digest = lambda do |skill, platform|
+    Dir.glob(File.join(tmp, "fable-method/platforms/#{platform}/#{skill}/**/*"), File::FNM_DOTMATCH).select { |f| File.file?(f) }.sort.to_h do |f|
+      [f.delete_prefix(tmp), [Digest::SHA256.file(f).hexdigest, File.stat(f).mode]]
+    end
+  end
   method_before = digest.call('fable-method')
   judge_before = digest.call('fable-judge')
+  non_codex_before = %w[claude gemini antigravity].to_h do |platform|
+    [platform, bundle_digest.call('fable-method', platform)]
+  end
   implicit = run.call('--check')
   explicit = run.call('--check', '--skill', 'fable-method')
-  check.call(implicit[0] && implicit == explicit, 'legacy implicit and explicit Method CLI are identical')
+  check.call(!implicit[0] && implicit == explicit && implicit[1].include?('DRIFT: codex skill=fable-method'), 'docs-only Codex bundle is not Runtime Distribution Ready')
   check.call(run.call('--write')[0], 'Method write succeeds')
-  check.call(method_before == digest.call('fable-method'), 'four Method bundles stay byte invariant')
+  check.call(non_codex_before == %w[claude gemini antigravity].to_h { |platform| [platform, bundle_digest.call('fable-method', platform)] }, 'non-Codex Method bundles stay byte invariant')
+  codex_dir = File.join(tmp, 'fable-method/platforms/codex/fable-method')
+  launcher = File.join(codex_dir, 'scripts/task_checkpoint.rb')
+  companion = File.join(codex_dir, 'scripts/paused_run_continuation.rb')
+  launcher_bytes = File.binread(launcher)
+  companion_bytes = File.binread(companion)
+  check.call(Digest::SHA1.hexdigest("blob #{launcher_bytes.bytesize}\0#{launcher_bytes}") == 'c201d6b683d084014add2631a5ef5d7fcd5c8f69' && (File.stat(launcher).mode & 0o777) == 0o755, 'Codex launcher bytes and executable mode match the source pin')
+  check.call(Digest::SHA256.hexdigest(companion_bytes) == 'c4f6d324dcbdbcffbdfe5bb6844756caf2f03bf883c073e787a9f5d66ee7a4b8' && (File.stat(companion).mode & 0o777) == 0o644, 'retained companion bytes and mode match its historical asset pin')
+  skill_pin = File.read(File.join(codex_dir, 'SKILL.md')).match(/is pinned to Git blob `([0-9a-f]{40})` from commit/)
+  check.call(skill_pin && skill_pin[1] == 'c201d6b683d084014add2631a5ef5d7fcd5c8f69', 'generated Codex SKILL.md pin matches the launcher blob')
+  check.call(run.call('--check', '--skill', 'fable-method')[0], 'complete Method materialization passes NO_DRIFT check')
+  method_after = digest.call('fable-method')
+  check.call(run.call('--write', '--skill', 'fable-method')[0] && method_after == digest.call('fable-method'), 'Codex runtime output is reproducible across writes')
+
+  helper_source = File.join(tmp, 'fable-method/scripts/paused_run_continuation.rb')
+  helper_bytes = File.binread(helper_source)
+  before_refusal = digest.call('fable-method')
+  File.unlink(helper_source)
+  result = run.call('--write', '--skill', 'fable-method')
+  check.call(!result[0] && result[1].include?('missing path') && before_refusal == digest.call('fable-method'), 'missing required companion fails closed before any platform write')
+  File.binwrite(helper_source, helper_bytes)
+  File.open(helper_source, 'ab') { |file| file.write("\nasset mismatch\n") }
+  result = run.call('--write', '--skill', 'fable-method')
+  check.call(!result[0] && result[1].include?('runtime asset Git blob mismatch') && before_refusal == digest.call('fable-method'), 'mismatched runtime asset fails closed before any platform write')
+  File.binwrite(helper_source, helper_bytes)
   2.times { check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge generation succeeds') }
   check.call(judge_before == digest.call('fable-judge'), 'four Judge bundles deterministic after second write')
   check.call(run.call('--check', '--skill', 'fable-judge')[0], 'Judge second-generation NO_DRIFT')
   File.open(File.join(tmp, 'fable-judge/shared/SKILL.md'), 'a') { |f| f.write("\nJudge fixture change.\n") }
   check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge-only source change generates')
-  check.call(method_before == digest.call('fable-method'), 'Judge-only operation leaves Method unchanged')
+  check.call(method_after == digest.call('fable-method'), 'Judge-only operation leaves Method unchanged')
   judge_changed = digest.call('fable-judge')
   method_source = File.join(tmp, 'fable-method/shared/SKILL.md')
   method_source_before = File.binread(method_source)
@@ -52,7 +95,7 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   raise 'Method fixture mutation did not change source bytes' if method_source_after == method_source_before
   File.binwrite(method_source, method_source_after)
   check.call(run.call('--write', '--skill', 'fable-method')[0], 'Method-only source change generates')
-  check.call(judge_changed == digest.call('fable-judge'), 'Method-only change leaves Judge body unchanged')
+  check.call(judge_changed == digest.call('fable-judge') && method_after != digest.call('fable-method'), 'Method-only change leaves Judge bundle unchanged')
   projection = File.join(tmp, 'fable-method/shared/references/judge-handoff.md')
   File.write(projection, File.read(projection).sub("## Depth and evidence reuse\n", "## Depth and evidence reuse\n\nDeclared projection change.\n"))
   check.call(run.call('--write', '--skill', 'fable-judge')[0] && digest.call('fable-judge') != judge_changed, 'declared shared projection change affects Judge')
