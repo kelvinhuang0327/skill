@@ -3,6 +3,7 @@
 ## Contents
 
 - [Compact Worker report](#compact-worker-report)
+- [Optional improvement feedback](#optional-improvement-feedback)
 - [Evidence labels](#evidence-labels)
 - [Platform consumer evidence view](#platform-consumer-evidence-view)
 - [Runtime transition provenance](#runtime-transition-provenance)
@@ -33,11 +34,31 @@ Never replace evidence with “should work”, “looks correct”, or “likely
 Command execution alone is not `PASS`. A load-bearing `PASS` requires the
 exact observed result to satisfy acceptance. A non-zero `git diff --check`
 cannot be reported `PASS`.
+For skill or workflow changes, keep candidate delivery, independent acceptance,
+actual runtime loading, and measured task outcomes distinct. A local control or
+accepted supporting artifact establishes only its own criterion; it does not
+establish general completion-rate, correctness, time, or token improvement.
 If a prescribed follow-up was deliberately not taken, name it as:
 
 ```text
 PENDING: <action> - awaiting your authorization
 ```
+
+## Optional improvement feedback
+
+When normal task execution exposes a concrete issue affecting correctness,
+completion, or avoidable time, append one short `FABLE_FEEDBACK` note: observed
+symptom and evidence; whether the cause is a contract gap, execution deviation,
+environment, or unknown; the smallest proposed correction; and observed impact
+(`UNKNOWN` when unmeasured). Omit this note when no such issue occurred.
+
+Finish the authorized task first. Do not add checks, reports, or investigations
+merely to find feedback. Feedback alone authorizes neither shared-skill edits,
+new mandatory gates, nor weaker acceptance. Keep task-local repairs within their
+existing scope; route reusable contract corrections to one responsible
+maintainer under applicable user authorization. Preserve the distinction
+between a proposed change, an applied change, actual loading, and measured
+benefit.
 
 ## Evidence labels
 
@@ -397,6 +418,13 @@ unknown, state `UNKNOWN` and name the smallest bounded resolution action.
 `SMALLEST_NEXT_ACTION` is one bounded progress action, not a roadmap. Each
 independently blocked gate carries its own record rather than one blocker
 duplicated under aliases. A `COMPLETE` handoff needs no blocker record.
+
+Keep historical accounting gaps attached to their original attempts. A new
+candidate may receive a separate forward evaluation using its declared root,
+saved baseline/final identity, and recorded writes; this cannot reconstruct or
+clear missing history. A historical gap blocks the new verdict only when that
+history is load-bearing for the current Packet's acceptance, source identity,
+authorization, safety, or required accounting. Name the affected criterion.
 
 For judged, publication-bound, or Tier-2 runtime work, report the complete
 ledger with `NONE` only when a partition is truly empty:

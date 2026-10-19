@@ -67,6 +67,15 @@ results; runtime evidence; and the complete filesystem write ledger.
 8. Adjudicate every criterion separately. Neither valid evidence for another
    criterion nor a bare PASS claim closes an uncovered criterion.
 
+Bind accounting to the Packet's declared artifact root and review period;
+do not silently substitute its parent output directory as the artifact root.
+Keep historical attempts and their verdicts intact. A forward candidate review
+can use its own saved baseline/final identity and write accounting, but cannot
+clear a historical gap. An earlier gap blocks this verdict when it is
+load-bearing for a current criterion, source identity, authorization, safety,
+or required accounting; name that dependency. All writes made during this
+review remain subject to the existing ledger requirement.
+
 Before searching content across committed objects, freeze exact refs/trees
 and inventory path metadata. Read only an exact allowlist of safe regular
 text blobs. Protected, unknown, symlink, submodule, or special-mode content

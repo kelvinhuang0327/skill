@@ -17,6 +17,8 @@ Report observable facts, decisions, commands, results, `[Confirmed]`, `[Inferred
 
 The Planner owns the Goal, scope, acceptance, constraints, and forbidden actions. The Worker verifies the Packet, implements, verifies, and reports. The Judge is an independent read-only verifier and never implements. Task-specific or domain-specific skills own implementation procedures; Fable owns authority, routing, authorization, verification, and closure.
 
+Keep the user's original outcome and the current Packet's acceptance as the closure boundary. A diagnostic, fixture, report, or product change is a supporting deliverable unless it is itself the requested outcome. Report its completion at that scope; do not inherit adjacent product work as the next task or count it as progress toward the original outcome. After accepted work, identify only the smallest remaining action that directly serves that outcome. When normal task evidence exposes a reusable workflow issue, use the optional [improvement feedback](references/reporting.md#optional-improvement-feedback) at handoff.
+
 Fable is a cross-agent contract for Claude, Codex, Grok, Gemini, and compatible runtimes; it does not select the Worker. `SINGLE_WRITER_PER_TASK: YES`: one Worker owns writes to a worktree/task state. Concurrent runtimes use intentionally isolated worktrees/branches with explicit ownership.
 
 ## Project profile
