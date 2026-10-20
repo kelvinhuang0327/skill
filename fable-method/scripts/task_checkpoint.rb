@@ -3704,6 +3704,23 @@ class ExecutionRecoveryTransition
     unless capture.schema_version == DurableCommandCapture::SCHEMA_VERSION && capture.complete?
       raise ExecutionRecord::UnresolvedExecutionStateError, 'prior recovery capture is not durably terminal'
     end
+    capture_data = JSON.parse(capture_bytes)
+    outer_task_id = capture_data['task_id']
+    outer_execution_id = capture_data['execution_id']
+    nested_identity = capture_data['execution_identity']
+    identity_component_valid = lambda do |value|
+      value.is_a?(String) && !value.empty? && !%w[. ..].include?(value) &&
+        !value.match?(/[\/\\\x00]/)
+    end
+    unless identity_component_valid.call(outer_task_id) && identity_component_valid.call(outer_execution_id) &&
+           nested_identity.is_a?(Hash) &&
+           identity_component_valid.call(nested_identity['task_id']) &&
+           identity_component_valid.call(nested_identity['execution_id']) &&
+           outer_task_id == task_id.to_s && outer_execution_id == id &&
+           nested_identity['task_id'] == outer_task_id && nested_identity['execution_id'] == outer_execution_id
+      raise ExecutionRecord::UnresolvedExecutionStateError,
+            'prior recovery capture identity is missing, malformed, or inconsistent'
+    end
     raise ExecutionRecord::UnresolvedExecutionStateError, 'RECOVERY_SUCCESSOR_ALREADY_SUCCEEDED' if capture.exit_status == 0
 
     signaled = capture.exit_status.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(capture.exit_status)

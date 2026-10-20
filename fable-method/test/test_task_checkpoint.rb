@@ -2366,6 +2366,45 @@ class TaskCheckpointRunTest < Minitest::Test
      '--application-state', @application_state, '--', *command]
   end
 
+  def assert_retry_rejects_capture_mutation!(label)
+    old_id = "retry_capture_identity_#{label}"
+    seed_stale_execution(old_id)
+    initial = run_cli(recovery_cli_args(old_id, upstream(result: '7')))
+    assert_equal 7, initial[2].exitstatus, "#{label}: source recovery must fail before retry setup"
+
+    prior_id = successor_execution_id(old_id)
+    capture_pathname = capture_path(prior_id)
+    capture_data = JSON.parse(File.binread(capture_pathname))
+    assert_equal TASK_ID, capture_data.fetch('task_id')
+    assert_equal prior_id, capture_data.fetch('execution_id')
+    assert_equal TASK_ID, capture_data.fetch('execution_identity').fetch('task_id')
+    assert_equal prior_id, capture_data.fetch('execution_identity').fetch('execution_id')
+    yield capture_data
+    File.binwrite(capture_pathname, JSON.pretty_generate(capture_data))
+
+    old_record_bytes = File.binread(record_path(old_id))
+    prior_record_bytes = File.binread(record_path(prior_id))
+    prior_capture_bytes = File.binread(capture_pathname)
+    old_transition_bytes = File.binread(recovery_transition_path(old_id))
+    state_bytes = File.binread(@application_state)
+    launches_before = launch_records.size
+    retry_id = successor_execution_id(prior_id)
+    result = run_cli(retry_recovery_cli_args(prior_id, upstream))
+
+    assert_equal 1, result[2].exitstatus, "#{label}: invalid source capture must fail closed"
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(recovery_transition_path(prior_id)), "#{label}: retry transition must not be reserved"
+    refute File.exist?(record_path(retry_id)), "#{label}: successor record must not be created"
+    refute File.exist?(capture_path(retry_id)), "#{label}: successor capture must not be created"
+    assert_equal launches_before, launch_records.size, "#{label}: upstream must not launch"
+    assert_equal old_record_bytes, File.binread(record_path(old_id)), "#{label}: stale record bytes changed"
+    assert_equal prior_record_bytes, File.binread(record_path(prior_id)), "#{label}: prior record bytes changed"
+    assert_equal prior_capture_bytes, File.binread(capture_pathname), "#{label}: prior capture bytes changed"
+    assert_equal old_transition_bytes, File.binread(recovery_transition_path(old_id)),
+                 "#{label}: original transition bytes changed"
+    assert_equal state_bytes, File.binread(@application_state), "#{label}: application checkpoint changed"
+  end
+
   def cli_args(identity, command = upstream)
     ['--run', '--repo', @repo, '--worktree', @worktree,
      '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
@@ -3349,6 +3388,11 @@ class TaskCheckpointRunTest < Minitest::Test
     first = run_cli(recovery_cli_args(old_id, upstream(result: '7')))
     assert_equal 7, first[2].exitstatus
     prior_id = successor_execution_id(old_id)
+    prior_capture = JSON.parse(File.binread(capture_path(prior_id)))
+    assert_equal TASK_ID, prior_capture.fetch('task_id')
+    assert_equal prior_id, prior_capture.fetch('execution_id')
+    assert_equal TASK_ID, prior_capture.fetch('execution_identity').fetch('task_id')
+    assert_equal prior_id, prior_capture.fetch('execution_identity').fetch('execution_id')
     old_bytes = File.binread(record_path(old_id))
     prior_record_bytes = File.binread(record_path(prior_id))
     prior_capture_bytes = File.binread(capture_path(prior_id))
@@ -3388,6 +3432,78 @@ class TaskCheckpointRunTest < Minitest::Test
     replay = run_cli(retry_recovery_cli_args(prior_id, command))
     assert_equal 0, replay[2].exitstatus
     assert_equal 2, launch_records.size, 'same explicit edge replays its terminal capture'
+  end
+
+  def test_retry_rejects_invalid_source_capture_identity_before_reservation
+    cases = [
+      ['wrong_task_id', ->(data) { data['task_id'] = 'OTHER_TASK' }],
+      ['wrong_execution_id', ->(data) { data['execution_id'] = 'OTHER_EXECUTION' }],
+      ['nil_execution_identity', ->(data) { data['execution_identity'] = nil }],
+      ['missing_outer_bindings', lambda { |data|
+        data.delete('task_id')
+        data.delete('execution_id')
+      }],
+      ['missing_nested_bindings', lambda { |data|
+        data.fetch('execution_identity').delete('task_id')
+        data.fetch('execution_identity').delete('execution_id')
+      }],
+      ['nested_task_conflict', ->(data) { data.fetch('execution_identity')['task_id'] = 'OTHER_TASK' }],
+      ['nested_execution_conflict', ->(data) { data.fetch('execution_identity')['execution_id'] = 'OTHER_EXECUTION' }],
+      ['invalid_identity_shape', ->(data) { data['execution_identity'] = 'not-an-object' }],
+      ['invalid_nested_id_type', ->(data) { data.fetch('execution_identity')['task_id'] = 42 }]
+    ]
+
+    cases.each do |label, mutate|
+      assert_retry_rejects_capture_mutation!(label, &mutate)
+    end
+  end
+
+  def test_retry_preserves_command_binding_before_reservation
+    assert_retry_rejects_capture_mutation!('command_mismatch') do |data|
+      data['command'] = [RbConfig.ruby, '-e', 'exit 99']
+    end
+  end
+
+  def test_retry_rejects_identity_mismatch_in_intermediate_capture_before_reservation
+    old_id = 'retry_identity_middle_capture'
+    seed_stale_execution(old_id)
+    assert_equal 7, run_cli(recovery_cli_args(old_id, upstream(result: '7')))[2].exitstatus
+    first_id = successor_execution_id(old_id)
+    assert_equal 8, run_cli(retry_recovery_cli_args(first_id, upstream(result: '8')))[2].exitstatus
+    second_id = successor_execution_id(first_id)
+
+    first_capture_path = capture_path(first_id)
+    first_capture_data = JSON.parse(File.binread(first_capture_path))
+    first_capture_data.fetch('execution_identity')['execution_id'] = 'OTHER_EXECUTION'
+    File.binwrite(first_capture_path, JSON.pretty_generate(first_capture_data))
+
+    record_bytes = [old_id, first_id, second_id].to_h do |identity|
+      [identity, File.binread(record_path(identity))]
+    end
+    capture_bytes = [first_id, second_id].to_h do |identity|
+      [identity, File.binread(capture_path(identity))]
+    end
+    transition_bytes = [old_id, first_id].to_h do |identity|
+      [identity, File.binread(recovery_transition_path(identity))]
+    end
+    state_bytes = File.binread(@application_state)
+    launches_before = launch_records.size
+    third_id = successor_execution_id(second_id)
+
+    result = run_cli(retry_recovery_cli_args(second_id, upstream))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(recovery_transition_path(second_id)), 'third retry transition must not be reserved'
+    refute File.exist?(record_path(third_id)), 'third successor record must not be created'
+    refute File.exist?(capture_path(third_id)), 'third successor capture must not be created'
+    assert_equal launches_before, launch_records.size, 'upstream must not launch for a bad intermediate capture'
+    record_bytes.each { |identity, bytes| assert_equal bytes, File.binread(record_path(identity)) }
+    capture_bytes.each { |identity, bytes| assert_equal bytes, File.binread(capture_path(identity)) }
+    transition_bytes.each do |identity, bytes|
+      assert_equal bytes, File.binread(recovery_transition_path(identity))
+    end
+    assert_equal state_bytes, File.binread(@application_state)
   end
 
   def test_retry_accepts_changed_synthetic_interpreter_path

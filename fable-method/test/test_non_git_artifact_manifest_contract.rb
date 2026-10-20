@@ -208,6 +208,6 @@ class NonGitArtifactManifestContractTest < Minitest::Test
   end
 
   def scratch_dir(prefix, &block)
-    Dir.mktmpdir(prefix, File.expand_path('../..', __dir__), &block)
+    Dir.mktmpdir(prefix, File.expand_path('../../.task-disposable-scratch', __dir__), &block)
   end
 end
