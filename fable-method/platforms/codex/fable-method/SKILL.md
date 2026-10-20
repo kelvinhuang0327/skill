@@ -151,7 +151,7 @@ Every changed path must be authorized and every `PASS` tied to observed evidence
 
 ## Codex Runtime Materialization
 
-- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `c201d6b683d084014add2631a5ef5d7fcd5c8f69` from commit `2b99ec0bbcc71b8be588ee71d4a322680669e55b`.
+- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `d78271a115adb27a179bb41da3d737209f072bd1` from commit `99ee8a5d68a2f1971d2c4ec9a82ed3ec2144ccae`.
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.

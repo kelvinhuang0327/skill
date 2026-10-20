@@ -453,7 +453,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
   def create_new_source_materialization(root, overrides: {})
     FileUtils.mkdir_p(File.join(root, 'references'))
-    new_pin = overrides[:skill_pin] || 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+    new_pin = overrides[:skill_pin] || 'd78271a115adb27a179bb41da3d737209f072bd1'
     File.write(File.join(root, 'SKILL.md'), "# Fable Method Source New\nLauncher pin: #{new_pin}\n")
     File.write(File.join(root, 'references/operational-gates.md'), "# Operational Gates\n")
 
@@ -509,7 +509,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     stdout, stderr, status = run_upgrade(
       src_dir, live_dir, 'codex',
       '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4',
-      'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+      'd78271a115adb27a179bb41da3d737209f072bd1'
     )
     assert_equal 0, status.exitstatus, "Expected upgrade to succeed. Stderr: #{stderr}"
 
@@ -519,7 +519,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     post_skill = File.join(live_dir, 'SKILL.md')
 
     assert File.file?(post_launcher)
-    assert_equal 'c201d6b683d084014add2631a5ef5d7fcd5c8f69',
+    assert_equal 'd78271a115adb27a179bb41da3d737209f072bd1',
                  Digest::SHA1.hexdigest("blob #{File.binread(post_launcher).bytesize}\0#{File.binread(post_launcher)}")
     assert_equal 0755, File.stat(post_launcher).mode & 0777
 
@@ -528,7 +528,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
                  Digest::SHA1.hexdigest("blob #{File.binread(post_companion).bytesize}\0#{File.binread(post_companion)}")
     assert_equal 0644, File.stat(post_companion).mode & 0777
 
-    assert_includes File.read(post_skill), 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+    assert_includes File.read(post_skill), 'd78271a115adb27a179bb41da3d737209f072bd1'
 
     # Standard helper preservation guard must now PASS cleanly (full parity)
     stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
@@ -565,7 +565,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
     # Pass mismatched expected_old blob
     wrong_old = '1111111111111111111111111111111111111111'
-    stdout, stderr, status = run_upgrade(src_dir, live_dir, 'codex', wrong_old, 'c201d6b683d084014add2631a5ef5d7fcd5c8f69')
+    stdout, stderr, status = run_upgrade(src_dir, live_dir, 'codex', wrong_old, 'd78271a115adb27a179bb41da3d737209f072bd1')
     assert_equal 2, status.exitstatus
     assert_includes stderr, 'REVIEWED_RUNTIME_UPGRADE_REJECTED'
 
@@ -780,7 +780,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
       '--activate', '--platform', 'codex',
       '--upgrade-reviewed-runtime',
       '--expected-old-launcher-blob', '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4',
-      '--expected-new-launcher-blob', 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+      '--expected-new-launcher-blob', 'd78271a115adb27a179bb41da3d737209f072bd1'
     )
     assert_equal 0, status.exitstatus, "Expected CLI upgrade to succeed. Stderr: #{stderr}"
     assert_includes stdout, 'ACTIVATION_MODE: UPGRADE_REVIEWED_RUNTIME'
