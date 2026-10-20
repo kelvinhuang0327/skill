@@ -9,9 +9,72 @@ require 'rbconfig'
 require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
+module TaskCheckpointTestScratch
+  ROOT = File.expand_path('../../.task-disposable-scratch', __dir__).freeze
+
+  requested_root = ENV.fetch('FABLE_TEST_SCRATCH_ROOT') do
+    raise 'FABLE_TEST_SCRATCH_ROOT must name this worktree disposable root'
+  end
+  unless File.expand_path(requested_root) == ROOT && File.directory?(ROOT) && File.realpath(ROOT) == ROOT
+    raise 'test scratch root is not the canonical worktree disposable root'
+  end
+  ENV['TMPDIR'] = ROOT
+  ENV['GIT_CEILING_DIRECTORIES'] = ROOT
+
+  BOUNDARY_SHIM = File.join(ROOT, 'git-discovery-boundary.rb').freeze
+  File.write(BOUNDARY_SHIM, <<~'RUBY')
+    class StableLockAnchor
+      module DisposableScratchBoundary
+        def git_marker_in_ancestors?(path)
+          boundary = File.realpath(ENV.fetch('FABLE_TEST_SCRATCH_ROOT'))
+          current = File.expand_path(path.to_s)
+          loop do
+            return false if current == boundary
+            marker = File.join(current, '.git')
+            return true if File.exist?(marker) || File.symlink?(marker)
+            parent = File.dirname(current)
+            return false if parent == current
+            current = parent
+          end
+        end
+      end
+      singleton_class.prepend(DisposableScratchBoundary)
+    end
+  RUBY
+  require BOUNDARY_SHIM
+  ENV['RUBYOPT'] = [ENV['RUBYOPT'].to_s, "-r#{BOUNDARY_SHIM}"].reject(&:empty?).join(' ')
+  Minitest.after_run { FileUtils.rm_f(BOUNDARY_SHIM) }
+
+  def self.mktmpdir(prefix)
+    Dir.mktmpdir(prefix, ROOT)
+  end
+end
+
+module SyntheticGitRepo
+  def initialize_synthetic_git_repo(path, lock_generation: true)
+    FileUtils.mkdir_p(path)
+    git = lambda do |*args|
+      _stdout, stderr, status = Open3.capture3('git', '-C', path, *args)
+      raise "synthetic git command failed: git #{args.join(' ')}: #{stderr}" unless status.success?
+    end
+
+    git.call('init', '--quiet')
+    git.call('config', 'user.name', 'Fable Test')
+    git.call('config', 'user.email', 'fable-test@example.invalid')
+    File.write(File.join(path, '.synthetic-test-fixture'), "synthetic\n")
+    git.call('add', '.synthetic-test-fixture')
+    git.call('commit', '--quiet', '-m', 'synthetic base')
+    if lock_generation
+      StableLockAnchor.initialize_repository_generation!(path, confirm_legacy_workers_quiescent: true)
+    end
+  end
+end
+
 class TaskCheckpointTest < Minitest::Test
+  include SyntheticGitRepo
+
   def setup
-    @tmpdir = Dir.mktmpdir('task_checkpoint_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('task_checkpoint_test_')
     @repo_dir = File.join(@tmpdir, 'repo')
     @worktree_dir = File.join(@tmpdir, 'worktree')
     FileUtils.mkdir_p(@repo_dir)
@@ -198,7 +261,9 @@ class TaskCheckpointTest < Minitest::Test
     )
 
     assert_equal 2, status.exitstatus, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
-    assert_match(/executing repository root is not a Git repository/, stderr)
+    # The contained fixture lives below the task worktree, so trusted Git may
+    # resolve the outer worktree and reject the copy as a non-top-level root.
+    assert_match(/executing repository root is not (?:a Git repository|its Git top-level)/, stderr)
     refute_match(/NO_DRIFT/, stdout)
   end
 
@@ -212,6 +277,14 @@ class TaskCheckpointTest < Minitest::Test
     assert cp.validate!
   end
 
+  def test_checkpoint_requires_absolute_repository_and_worktree_locators
+    %i[repository worktree].each do |field|
+      cp = TaskCheckpoint.new(@valid_attrs.merge(field => "relative/#{field}"))
+      error = assert_raises(TaskCheckpoint::ValidationError) { cp.validate! }
+      assert_match(/#{field} must be an absolute locator/, error.message)
+    end
+  end
+
   def test_checkpoint_fails_validation_when_required_fields_missing
     required = %i[task_id repository worktree authoritative_packet_ref current_head current_tree next_action]
     required.each do |field|
@@ -220,6 +293,14 @@ class TaskCheckpointTest < Minitest::Test
       cp = TaskCheckpoint.new(attrs)
       refute cp.valid?, "Expected checkpoint to be invalid without #{field}"
       assert_raises(TaskCheckpoint::ValidationError) { cp.validate! }
+    end
+  end
+
+  def test_checkpoint_requires_absolute_repository_and_worktree_locators
+    %i[repository worktree].each do |field|
+      cp = TaskCheckpoint.new(@valid_attrs.merge(field => "relative/#{field}"))
+      error = assert_raises(TaskCheckpoint::ValidationError) { cp.validate! }
+      assert_match(/#{field} must be an absolute locator/, error.message)
     end
   end
 
@@ -304,7 +385,7 @@ class TaskCheckpointTest < Minitest::Test
 
     File.prepend(Module.new do
       define_method(:flock) do |operation|
-        if self.path == "#{path}.lock" && operation == File::LOCK_EX
+        if self.path == TaskCheckpoint.lock_path_for(path) && operation == File::LOCK_EX
           return false if mode == 'lock_false'
           raise IOError, 'injected flock failure' if mode == 'lock_raise'
           # Report actual contention, not merely that a writer was started.
@@ -403,7 +484,7 @@ class TaskCheckpointTest < Minitest::Test
   end
 
   def assert_save_lock_available(path)
-    File.open("#{path}.lock", File::RDWR) do |lock|
+    File.open(TaskCheckpoint.lock_path_for(path), File::RDWR) do |lock|
       assert_equal 0, lock.flock(File::LOCK_EX | File::LOCK_NB)
     end
   end
@@ -449,6 +530,66 @@ class TaskCheckpointTest < Minitest::Test
 
   def test_atomic_save_two_processes_reject_one_stale_writer
     run_save_race('race')
+  end
+
+  def test_git_checkpoint_sidecar_survives_stash_replacement_and_serializes_writers
+    repository = File.join(@tmpdir, 'sidecar-lock-repo')
+    initialize_synthetic_git_repo(repository)
+    path = File.join(repository, '.fable', 'checkpoints', 'sidecar_task.json')
+    TaskCheckpoint.new(@valid_attrs).save(path)
+    lock_path = TaskCheckpoint.lock_path_for(path)
+    refute_equal "#{path}.lock", lock_path
+    lock_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    first = start_save_process(path, 0, 'race')
+    assert_equal [0, 'ready', 1], save_event
+    release_save(first)
+    assert_equal [0, 'prepared'], save_event.take(2)
+
+    _stash_out, stash_err, stash_status = Open3.capture3(
+      'git', '-C', repository, 'stash', 'push', '--include-untracked', '--message', 'sidecar replacement regression'
+    )
+    assert stash_status.success?, stash_err
+    refute File.exist?(path), 'git stash -u removes the untracked checkpoint from the worktree'
+    assert_equal lock_identity, [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    _pop_out, pop_err, pop_status = Open3.capture3('git', '-C', repository, 'stash', 'pop')
+    assert pop_status.success?, pop_err
+    assert_equal 1, TaskCheckpoint.load(path).revision
+    assert_equal lock_identity, [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    second = start_save_process(path, 1, 'race')
+    assert_equal [1, 'ready', 1], save_event
+    release_save(second)
+    assert_equal [1, 'contended'], save_event.take(2)
+
+    release_save(first)
+    first_success = save_event
+    assert_equal [0, 'success'], first_success.take(2)
+    assert_equal 2, first_success[2].fetch('revision')
+    finish_save(first)
+    second_outcome = save_event
+    assert_equal [1, 'concurrency_error'], second_outcome.take(2), second_outcome.inspect
+    finish_save(second)
+    saved = TaskCheckpoint.load(path)
+    assert_equal 2, saved.revision
+    assert_equal 'writer_0', saved.next_action
+    assert_equal lock_identity, [File.stat(lock_path).dev, File.stat(lock_path).ino]
+
+    legacy_sidecar = "#{path}.lock"
+    File.write(legacy_sidecar, 'legacy checkpoint lock')
+    error = assert_raises(StableLockAnchor::MigrationRequired) do
+      TaskCheckpoint.new(@valid_attrs).save(path)
+    end
+    assert_includes error.message, 'migration gate required'
+    FileUtils.rm_f(legacy_sidecar)
+
+    replacement_target = File.join(@tmpdir, 'sidecar-lock-target')
+    File.write(replacement_target, 'untouched')
+    File.unlink(lock_path)
+    File.symlink(replacement_target, lock_path)
+    assert_raises(StableLockAnchor::Error) { TaskCheckpoint.new(@valid_attrs).save(path) }
+    assert_equal 'untouched', File.read(replacement_target)
   end
 
   def test_atomic_save_without_expected_revision_serializes_both_updates
@@ -875,6 +1016,32 @@ class TaskCheckpointTest < Minitest::Test
     assert_equal 'CONTINUE', result.verdict
   end
 
+  def test_requested_worktree_must_resolve_to_the_checkpoint_worktree
+    other_worktree = File.join(@tmpdir, 'other-worktree')
+    FileUtils.mkdir_p(other_worktree)
+    checkpoint = TaskCheckpoint.new(@valid_attrs)
+
+    result = TaskReconciler.new(checkpoint, live_reconciliation_options(worktree: other_worktree)).reconcile
+
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Exact worktree locator mismatch/, result.reason)
+    assert_includes result.reason, @worktree_dir
+    assert_includes result.reason, other_worktree
+  end
+
+  def test_worktree_symlink_to_a_different_checkout_fails_closed
+    other_worktree = File.join(@tmpdir, 'other-worktree')
+    alias_worktree = File.join(@tmpdir, 'worktree-alias')
+    FileUtils.mkdir_p(other_worktree)
+    File.symlink(other_worktree, alias_worktree)
+    checkpoint = TaskCheckpoint.new(@valid_attrs)
+
+    result = TaskReconciler.new(checkpoint, live_reconciliation_options(worktree: alias_worktree)).reconcile
+
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Exact worktree locator mismatch/, result.reason)
+  end
+
   # =========================================================================
   # 8. Dogfood Scenario 6: Interrupted debugging (RCA continuation)
   # =========================================================================
@@ -917,6 +1084,23 @@ class TaskCheckpointTest < Minitest::Test
     result = reconciler.reconcile
     assert_equal 'STOP_UNRESOLVED', result.verdict
     assert_match(/Repository identity mismatch/i, result.reason)
+  end
+
+  def test_requested_worktree_must_match_the_checkpoint_locator
+    cp = TaskCheckpoint.new(@valid_attrs)
+    other_worktree = File.join(@tmpdir, 'other-worktree')
+    FileUtils.mkdir_p(other_worktree)
+    reconciler = TaskReconciler.new(cp, {
+      repository: @repo_dir,
+      worktree: other_worktree
+    })
+
+    result = reconciler.reconcile
+
+    assert_equal 'STOP_UNRESOLVED', result.verdict
+    assert_match(/Exact worktree locator mismatch/, result.reason)
+    assert_includes result.reason, cp.worktree
+    assert_includes result.reason, other_worktree
   end
 
   def test_missing_worktree_fails_closed
@@ -1729,7 +1913,7 @@ end
 
 class DurableCommandCaptureTest < Minitest::Test
   def setup
-    @tmpdir = Dir.mktmpdir('durable_capture_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('durable_capture_test_')
   end
 
   def teardown
@@ -1755,6 +1939,45 @@ class DurableCommandCaptureTest < Minitest::Test
     refute_nil reloaded.ended_at
     assert_equal DurableCommandCapture::VERDICT_PASS, reloaded.verdict
     assert_equal run_result.exit_status, reloaded.exit_status
+  end
+
+  def test_protected_capture_binds_exact_execution_repository_worktree_launcher_and_runtime
+    repository = File.join(@tmpdir, 'execution-repository')
+    FileUtils.mkdir_p(repository)
+    run_git = lambda do |*arguments|
+      stdout, stderr, status = Open3.capture3('git', '-C', repository, *arguments)
+      assert status.success?, stderr
+      stdout.strip
+    end
+    run_git.call('init', '--quiet')
+    run_git.call('config', 'user.name', 'Fable capture test')
+    run_git.call('config', 'user.email', 'fable-capture@example.invalid')
+    File.write(File.join(repository, 'bound.txt'), "capture identity\n")
+    run_git.call('add', 'bound.txt')
+    run_git.call('commit', '--quiet', '-m', 'capture identity')
+    expected_head = run_git.call('rev-parse', 'HEAD')
+    expected_tree = run_git.call('rev-parse', 'HEAD^{tree}')
+    identity = DurableCommandCapture.capture_execution_identity(
+      repository_path: repository, worktree_path: repository
+    )
+    path = capture_path('execution_identity')
+
+    DurableCommandCapture.run_and_capture(
+      ['git', 'rev-parse', 'HEAD'], file_path: path, chdir: repository,
+      execution_identity: identity
+    )
+    captured = DurableCommandCapture.load(path)
+
+    assert_equal expected_head, captured.stdout.strip
+    assert_equal expected_head, captured.execution_identity['head']
+    assert_equal expected_tree, captured.execution_identity['tree']
+    assert_equal File.realpath(repository), captured.execution_identity['repository_path']
+    assert_equal File.realpath(repository), captured.execution_identity['worktree_path']
+    launcher = File.realpath(File.expand_path('../scripts/task_checkpoint.rb', __dir__))
+    assert_equal launcher, captured.execution_identity['launcher_path']
+    assert_equal Digest::SHA256.file(launcher).hexdigest, captured.execution_identity['launcher_sha256']
+    assert_equal File.realpath(RbConfig.ruby), captured.execution_identity['runtime_executable']
+    assert_equal RUBY_DESCRIPTION, captured.execution_identity['runtime_version']
   end
 
   # F. Durable Judge failure: non-zero exit preserved, verdict can never be PASS.
@@ -1855,7 +2078,10 @@ class DurableCommandCaptureTest < Minitest::Test
 end
 
 class TaskCheckpointRunTest < Minitest::Test
+  include SyntheticGitRepo
+
   CLI = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+  CLI_TIMEOUT_SECONDS = 15
   TASK_ID = 'CLI_TASK'
   UPSTREAM = <<~'RUBY'
     launches, release, result = ARGV
@@ -1865,7 +2091,7 @@ class TaskCheckpointRunTest < Minitest::Test
     STDOUT.flush
     STDERR.flush
     unless release == '-'
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 8
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 30
       until File.file?(release)
         abort 'upstream barrier timed out' if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
         sleep 0.01
@@ -2002,13 +2228,28 @@ class TaskCheckpointRunTest < Minitest::Test
   RUBY
 
   def setup
-    @tmpdir = Dir.mktmpdir('task_checkpoint_run_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('task_checkpoint_run_test_')
     @repo = File.join(@tmpdir, 'stable-record-root')
     @worktree = File.join(@tmpdir, 'upstream-cwd')
     @caller = File.join(@tmpdir, 'caller-cwd')
     [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
+<<<<<<< HEAD
     _git_stdout, git_stderr, git_status = Open3.capture3('git', '-C', @repo, 'init', '--quiet')
     assert git_status.success?, git_stderr
+=======
+    _init_out, init_err, init_status = Open3.capture3('git', '-C', @repo, 'init', '--quiet')
+    assert init_status.success?, init_err
+    _config_out, config_err, config_status = Open3.capture3('git', '-C', @repo, 'config', 'user.name', 'Fable Test')
+    assert config_status.success?, config_err
+    _email_out, email_err, email_status = Open3.capture3(
+      'git', '-C', @repo, 'config', 'user.email', 'fable-test@example.invalid'
+    )
+    assert email_status.success?, email_err
+    _commit_out, commit_err, commit_status = Open3.capture3(
+      'git', '-C', @repo, 'commit', '--allow-empty', '--quiet', '-m', 'synthetic base'
+    )
+    assert commit_status.success?, commit_err
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     StableLockAnchor.initialize_repository_generation!(@repo, confirm_legacy_workers_quiescent: true)
     ExecutionRecord.with_task_lock(@repo, TASK_ID) { |_lock| }
     @launches = File.join(@tmpdir, 'launches')
@@ -2148,7 +2389,7 @@ class TaskCheckpointRunTest < Minitest::Test
   end
 
   def finish_cli(child)
-    assert child[:wait].join(5), 'CLI timed out'
+    assert child[:wait].join(CLI_TIMEOUT_SECONDS), 'CLI timed out'
     child[:readers].each { |reader| assert reader.join(5), 'CLI output timed out' }
     [*child[:readers].map(&:value), child[:wait].value]
   end
@@ -2353,6 +2594,31 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, launch_records.size
   end
 
+  def test_run_cli_persists_candidate_identity_for_the_generation2_locked_worktree
+    identity = 'candidate_identity'
+    command = [RbConfig.ruby, '-e', 'puts Dir.pwd']
+    args = ['--run', '--repo', @repo, '--worktree', @repo,
+            '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
+
+    result = run_cli(args)
+
+    assert_equal 0, result[2].exitstatus, "stdout=#{result[0].inspect} stderr=#{result[1].inspect}"
+    capture = DurableCommandCapture.load(capture_path(identity))
+    candidate = capture.execution_identity
+    assert_equal File.realpath(@repo), candidate.fetch('repository_path')
+    assert_equal File.realpath(@repo), candidate.fetch('worktree_path')
+    assert_equal Open3.capture2('git', '-C', @repo, 'rev-parse', 'HEAD').first.strip,
+                 candidate.fetch('head')
+    assert_equal Open3.capture2('git', '-C', @repo, 'rev-parse', 'HEAD^{tree}').first.strip,
+                 candidate.fetch('tree')
+    launcher = File.realpath(CLI)
+    assert_equal launcher, candidate.fetch('launcher_path')
+    assert_equal Digest::SHA256.file(launcher).hexdigest, candidate.fetch('launcher_sha256')
+    assert_equal File.realpath(RbConfig.ruby), candidate.fetch('runtime_executable')
+    assert_equal RUBY_DESCRIPTION, candidate.fetch('runtime_version')
+    assert_equal File.realpath(@repo), result[0].strip
+  end
+
   def test_run_real_cli_two_contenders_and_completed_replay
     identity = 'concurrent'
     command = upstream(barrier: true)
@@ -2384,6 +2650,15 @@ class TaskCheckpointRunTest < Minitest::Test
     assert capture.complete?
     assert_equal command, capture.command
     assert_equal original[0, 2], [capture.stdout, capture.stderr]
+    assert_equal File.realpath(@repo), capture.execution_identity['repository_path']
+    assert_equal File.realpath(@worktree), capture.execution_identity['worktree_path']
+    assert_nil capture.execution_identity['head'], 'non-Git worktrees must remain explicitly unavailable'
+    assert_nil capture.execution_identity['tree'], 'non-Git worktrees must remain explicitly unavailable'
+    launcher = File.realpath(CLI)
+    assert_equal launcher, capture.execution_identity['launcher_path']
+    assert_equal Digest::SHA256.file(launcher).hexdigest, capture.execution_identity['launcher_sha256']
+    assert_equal File.realpath(RbConfig.ruby), capture.execution_identity['runtime_executable']
+    assert_equal RUBY_DESCRIPTION, capture.execution_identity['runtime_version']
     before = [File.binread(record_path(identity)), File.binread(capture_path(identity))]
     replay = run_cli(cli_args(identity, command), cwd: @worktree)
     assert_output(replay, 0)
@@ -2406,6 +2681,277 @@ class TaskCheckpointRunTest < Minitest::Test
     first_result = finish_cli(first)
     assert_output(first_result, 0)
     assert_equal 1, launch_records.size
+  end
+
+  def test_stash_u_lock_replacement_cannot_admit_a_second_task_writer
+    identity = 'stash_lock_owner'
+    owner = start_cli(cli_args(identity, upstream(barrier: true)))
+    wait_until('task-lock owner did not start') { !launch_records.empty? }
+    record_before = File.binread(record_path(identity))
+    stable_lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    stable_lock_identity = [File.stat(stable_lock_path).dev, File.stat(stable_lock_path).ino]
+
+    legacy_path = ExecutionRecord.legacy_task_lock_path(@repo, TASK_ID)
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    legacy_bytes = JSON.generate('schema_version' => ExecutionRecord::SCHEMA_VERSION,
+                                 'task_id' => TASK_ID, 'record_root' => File.realpath(@repo),
+                                 'execution_id' => 'legacy_fixture', 'capability_sha256' => 'a' * 64)
+    File.write(legacy_path, legacy_bytes)
+    legacy_descriptor = File.open(legacy_path, File::RDWR)
+    legacy_identity = [legacy_descriptor.stat.dev, legacy_descriptor.stat.ino]
+
+    _stash_out, stash_err, stash_status = Open3.capture3(
+      'git', '-C', @repo, 'stash', 'push', '--include-untracked', '--message', 'task lock replacement regression'
+    )
+    assert stash_status.success?, stash_err
+    refute File.exist?(record_path(identity))
+    refute File.exist?(legacy_path)
+    assert_equal stable_lock_identity, [File.stat(stable_lock_path).dev, File.stat(stable_lock_path).ino]
+
+    _pop_out, pop_err, pop_status = Open3.capture3('git', '-C', @repo, 'stash', 'pop')
+    assert pop_status.success?, pop_err
+    assert_equal legacy_bytes, File.binread(legacy_path)
+    refute_equal legacy_identity, [File.stat(legacy_path).dev, File.stat(legacy_path).ino]
+    assert_equal record_before, File.binread(record_path(identity))
+    assert_equal ExecutionRecord::CLASSIFICATION_ACTIVE, ExecutionRecord.load(record_path(identity)).classify
+    assert_equal stable_lock_identity, [File.stat(stable_lock_path).dev, File.stat(stable_lock_path).ino]
+    File.open(stable_lock_path, File::RDWR) do |probe|
+      refute probe.flock(File::LOCK_EX | File::LOCK_NB), 'Worker A still owns the stable lock inode'
+    end
+
+    legacy_overlap = run_cli(cli_args('legacy_generation_probe'))
+    assert_equal 1, legacy_overlap[2].exitstatus
+    assert_includes legacy_overlap[1], 'migration gate required'
+    assert_equal 1, launch_records.size
+    FileUtils.rm_f(legacy_path)
+    legacy_descriptor.close
+
+    second_while_active = run_cli(cli_args('writer_second'))
+    assert_equal 1, second_while_active[2].exitstatus
+    assert_includes second_while_active[1], 'another execution claim in progress'
+    assert_equal 1, launch_records.size
+
+    File.write(@release, 'go')
+    assert_output(finish_cli(owner), 0)
+    FileUtils.rm_f(@release)
+
+    successors = 2.times.map do |index|
+      start_cli(cli_args("successor_#{index}", upstream(barrier: true)))
+    end
+    wait_until('successor ownership was not resolved') do
+      launch_records.size >= 2 && successors.any? { |child| !child[:wait].alive? }
+    end
+    assert_equal 2, launch_records.size, 'normal release allows one task-scoped successor'
+    loser = successors.find { |child| !child[:wait].alive? }
+    winner = (successors - [loser]).first
+    loser_result = finish_cli(loser)
+    assert_equal 1, loser_result[2].exitstatus
+    assert(loser_result[1].include?('another execution claim in progress') ||
+           loser_result[1].include?(ExecutionRecord::CLASSIFICATION_ACTIVE), loser_result[1])
+    File.write(@release, 'go')
+    assert_output(finish_cli(winner), 0)
+    assert_equal 2, launch_records.size
+  end
+
+  def test_legacy_writer_hidden_by_stash_cannot_bootstrap_a_new_generation
+    legacy_repo = File.join(@tmpdir, 'uninitialized-generation-repo')
+    initialize_synthetic_git_repo(legacy_repo, lock_generation: false)
+    legacy_task_id = 'V1_STASH_TASK'
+    legacy_path = ExecutionRecord.legacy_task_lock_path(legacy_repo, legacy_task_id)
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(legacy_repo)
+    end
+
+    File.open(legacy_path, File::RDWR | File::CREAT, 0o600) do |legacy_owner|
+      assert legacy_owner.flock(File::LOCK_EX | File::LOCK_NB)
+      legacy_owner.write('live generation-1 owner')
+      legacy_owner.flush
+      legacy_inode = [legacy_owner.stat.dev, legacy_owner.stat.ino]
+
+      _stash_out, stash_err, stash_status = Open3.capture3(
+        'git', '-C', legacy_repo, 'stash', 'push', '--include-untracked', '--message', 'hide legacy lock regression'
+      )
+      assert stash_status.success?, stash_err
+      refute File.exist?(legacy_path)
+
+      args = cli_args('new_generation_overlap')
+      args[args.index('--repo') + 1] = legacy_repo
+      args[args.index('--task-id') + 1] = legacy_task_id
+      result = run_cli(args)
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], 'migration gate required'
+      assert_includes result[1], 'generation-2 lock marker'
+      refute File.exist?(ExecutionRecord.task_lock_path(legacy_repo, legacy_task_id))
+      refute File.exist?(ExecutionRecord.default_path(legacy_repo, legacy_task_id, 'new_generation_overlap'))
+      assert_empty launch_records
+
+      _pop_out, pop_err, pop_status = Open3.capture3('git', '-C', legacy_repo, 'stash', 'pop')
+      assert pop_status.success?, pop_err
+      assert File.exist?(legacy_path)
+      refute_equal legacy_inode, [File.stat(legacy_path).dev, File.stat(legacy_path).ino]
+      File.open(legacy_path, File::RDWR) do |replacement|
+        assert replacement.flock(File::LOCK_EX | File::LOCK_NB),
+               'the restored legacy path is an independent inode while the old owner still holds its descriptor'
+        replacement.flock(File::LOCK_UN)
+      end
+      assert_equal legacy_inode, [legacy_owner.stat.dev, legacy_owner.stat.ino]
+    end
+  end
+
+  def test_live_legacy_lock_generation_requires_migration_gate
+    legacy_task_id = 'LEGACY_TASK'
+    legacy_path = ExecutionRecord.legacy_task_lock_path(@repo, legacy_task_id)
+    FileUtils.mkdir_p(File.dirname(legacy_path))
+    File.open(legacy_path, File::RDWR | File::CREAT, 0o600) do |legacy_lock|
+      assert legacy_lock.flock(File::LOCK_EX | File::LOCK_NB)
+      legacy_lock.write('legacy generation')
+      legacy_lock.flush
+
+      args = cli_args('new_generation_overlap')
+      args[args.index('--task-id') + 1] = legacy_task_id
+      result = run_cli(args)
+      assert_equal 1, result[2].exitstatus
+      assert_includes result[1], 'migration gate required'
+      assert_empty launch_records
+      refute File.exist?(ExecutionRecord.task_lock_path(@repo, legacy_task_id))
+      refute File.exist?(ExecutionRecord.default_path(@repo, legacy_task_id, 'new_generation_overlap'))
+      File.open(legacy_path, File::RDWR) do |probe|
+        refute probe.flock(File::LOCK_EX | File::LOCK_NB), 'the legacy owner remains untouched'
+      end
+    end
+  end
+
+  def test_separate_git_metadata_inside_worktree_is_rejected_before_lock_initialization
+    repository = File.join(@tmpdir, 'separate-git-dir-repo')
+    metadata = File.join(repository, 'metadata')
+    FileUtils.mkdir_p(repository)
+    _stdout, stderr, status = Open3.capture3(
+      'git', 'init', '--quiet', '--separate-git-dir', metadata, repository
+    )
+    assert status.success?, stderr
+    git = lambda do |*args|
+      _out, error, result = Open3.capture3('git', '-C', repository, *args)
+      raise "separate-git-dir fixture command failed: #{error}" unless result.success?
+    end
+    git.call('config', 'user.name', 'Fable Test')
+    git.call('config', 'user.email', 'fable-test@example.invalid')
+    File.write(File.join(repository, 'tracked'), "base\n")
+    git.call('add', 'tracked')
+    git.call('commit', '--quiet', '-m', 'synthetic separate git directory base')
+
+    error = assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(repository, confirm_legacy_workers_quiescent: true)
+    end
+    assert_includes error.message, 'inside stash-managed worktree'
+    assert_includes error.message, 'move Git metadata outside the worktree'
+    refute File.exist?(File.join(metadata, 'fable-locks'))
+
+    execution_error = assert_raises(StableLockAnchor::MigrationRequired) do
+      ExecutionRecord.with_task_lock(repository, 'unsafe_metadata_task') do
+        flunk 'no task lock may be acquired under stash-managed common metadata'
+      end
+    end
+    assert_includes execution_error.message, 'inside stash-managed worktree'
+    refute File.exist?(File.join(repository, '.fable'))
+
+    root_metadata_repo = File.join(@tmpdir, 'git-dir-is-worktree-root')
+    FileUtils.mkdir_p(root_metadata_repo)
+    _root_out, root_err, root_status = Open3.capture3(
+      'git', 'init', '--quiet', '--separate-git-dir', root_metadata_repo, root_metadata_repo
+    )
+    assert root_status.success?, root_err
+    root_error = assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(root_metadata_repo,
+                                                          confirm_legacy_workers_quiescent: true)
+    end
+    assert_includes root_error.message, 'inside stash-managed worktree'
+    refute File.exist?(File.join(root_metadata_repo, 'fable-locks'))
+  end
+
+  def test_case_alias_cannot_bypass_physical_lock_anchor_containment
+    repository = File.join(@tmpdir, 'FJ001CaseAliasRepo')
+    repository_alias = File.join(@tmpdir, 'fj001casealiasrepo')
+    FileUtils.mkdir_p(repository)
+    skip 'case-insensitive filesystem is required for the FJ-001 alias regression' unless
+      File.directory?(repository_alias) && File.identical?(repository, repository_alias)
+
+    _stdout, stderr, status = Open3.capture3(
+      'git', 'init', '--quiet', '--separate-git-dir', repository, repository
+    )
+    assert status.success?, stderr
+    File.write(File.join(repository, '.git'), "gitdir: #{repository_alias}\n")
+
+    top_level, top_level_err, top_level_status = Open3.capture3(
+      'git', '-C', repository, 'rev-parse', '--show-toplevel'
+    )
+    assert top_level_status.success?, top_level_err
+    assert_equal File.realpath(repository), File.realpath(top_level.strip)
+    common_output, common_err, common_status = Open3.capture3(
+      'git', '-C', repository, 'rev-parse', '--git-common-dir'
+    )
+    assert common_status.success?, common_err
+    common_path = File.realpath(File.expand_path(common_output.strip, repository))
+    assert File.identical?(repository, common_path), 'Git common-dir alias must resolve to the worktree root'
+    skip 'filesystem canonicalized away the case alias before the lexical containment check' if
+      File.realpath(repository) == common_path
+
+    error = assert_raises(StableLockAnchor::MigrationRequired) do
+      StableLockAnchor.initialize_repository_generation!(repository, confirm_legacy_workers_quiescent: true)
+    end
+    assert_includes error.message, 'inside stash-managed worktree'
+    refute File.exist?(File.join(repository_alias, 'fable-locks'))
+  end
+
+  def test_task_lock_anchor_replacement_and_symlink_tampering_fail_closed
+    ExecutionRecord.with_task_lock(@repo, 'distinct_scope_a') do
+      ExecutionRecord.with_task_lock(@repo, 'distinct_scope_b') { assert true }
+    end
+
+    replacement_path = ExecutionRecord.task_lock_path(@repo, 'replace_anchor')
+    ExecutionRecord.with_task_lock(@repo, 'replace_anchor') { assert File.file?(replacement_path) }
+    File.unlink(replacement_path)
+    File.write(replacement_path, 'replacement')
+    error = assert_raises(StableLockAnchor::Error) do
+      ExecutionRecord.with_task_lock(@repo, 'replace_anchor') { flunk 'replacement inode must not be acquired' }
+    end
+    assert_includes error.message, 'inode changed'
+
+    symlink_path = ExecutionRecord.task_lock_path(@repo, 'symlink_anchor')
+    ExecutionRecord.with_task_lock(@repo, 'symlink_anchor') { assert File.file?(symlink_path) }
+    target = File.join(@tmpdir, 'symlink-lock-target')
+    File.write(target, 'untouched')
+    File.unlink(symlink_path)
+    File.symlink(target, symlink_path)
+    assert_raises(StableLockAnchor::Error) do
+      ExecutionRecord.with_task_lock(@repo, 'symlink_anchor') { flunk 'symlink must not be acquired' }
+    end
+    assert_equal 'untouched', File.read(target)
+
+    namespace_task = 'symlink_namespace'
+    namespace_lock_path = ExecutionRecord.task_lock_path(@repo, namespace_task)
+    ExecutionRecord.with_task_lock(@repo, namespace_task) { assert File.file?(namespace_lock_path) }
+    namespace_root = File.dirname(File.dirname(namespace_lock_path))
+    moved_namespace = "#{namespace_root}.moved"
+    File.rename(namespace_root, moved_namespace)
+    begin
+      File.symlink(moved_namespace, namespace_root)
+      opened = nil
+      begin
+        assert_raises(StableLockAnchor::Error) do
+          opened = StableLockAnchor.open_existing_lock(@repo, 'task-execution', namespace_task,
+                                                        filename: 'execution.lock')
+        end
+      ensure
+        opened&.close
+      end
+      assert_raises(StableLockAnchor::Error) do
+        ExecutionRecord.with_task_lock(@repo, namespace_task) { flunk 'symlinked namespace must not be trusted' }
+      end
+    ensure
+      File.unlink(namespace_root) if File.symlink?(namespace_root)
+      File.rename(moved_namespace, namespace_root) if File.directory?(moved_namespace)
+    end
   end
 
   def test_run_nonzero_result_replay_does_not_launch_again
@@ -2768,13 +3314,19 @@ class TaskCheckpointRunTest < Minitest::Test
     recovered = run_cli(recovery_cli_args(old_id))
     successor_id = successor_execution_id(old_id)
 
-    replay = run_cli(cli_args(successor_id))
+    # Replay with matching command succeeds
+    replay = run_cli(cli_args(successor_id, recovery_upstream(old_id)))
 
     assert_equal 0, recovered[2].exitstatus
     assert_equal recovered[0], replay[0]
     assert_equal recovered[1], replay[1]
     assert_equal 0, replay[2].exitstatus
     assert_equal 1, launch_records.size, 'normal replay must reuse the completed explicit recovery successor'
+
+    # Replay with mismatched command must be rejected
+    mismatch_replay = run_cli(cli_args(successor_id))
+    assert_equal 1, mismatch_replay[2].exitstatus
+    assert_includes mismatch_replay[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
   end
 
   def test_duplicate_recovery_replays_one_terminal_successor
@@ -3228,7 +3780,14 @@ class TaskCheckpointRunTest < Minitest::Test
   def test_run_malformed_completed_result_is_not_replayed_or_rerun
     identity = 'malformed_result'
     capture = DurableCommandCapture.new(command: ['test'], stdout: 'must not replay', exit_status: 'bogus',
-                                        started_at: Time.now.utc.iso8601, ended_at: Time.now.utc.iso8601)
+                                        started_at: Time.now.utc.iso8601, ended_at: Time.now.utc.iso8601,
+                                        task_id: TASK_ID, execution_id: identity,
+                                        execution_identity: {
+                                          'repository_path' => @repo,
+                                          'worktree_path' => @worktree,
+                                          'task_id' => TASK_ID,
+                                          'execution_id' => identity
+                                        })
     capture.save(capture_path(identity))
     record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
     record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
@@ -3420,6 +3979,7 @@ class TaskCheckpointRunTest < Minitest::Test
     forged = {
       ExecutionRecord::NESTED_TASK_ID_ENV => TASK_ID,
       ExecutionRecord::NESTED_RECORD_ROOT_ENV => File.realpath(@repo),
+      ExecutionRecord::NESTED_LOCK_ROOT_ENV => nil,
       ExecutionRecord::NESTED_LOCK_FD_ENV => '200',
       ExecutionRecord::NESTED_LOCK_IDENTITY_ENV => "#{stat.dev}:#{stat.ino}",
       ExecutionRecord::NESTED_PARENT_ENV => 'forgery_owner',
@@ -3654,6 +4214,13 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal File.realpath(@repo), rotated_lineage.fetch('record_root')
     refute rotated_lineage.key?('execution_id'), 'a conforming acquisition clears the dead execution owner'
     refute rotated_lineage.key?('capability_sha256'), 'a conforming acquisition clears the dead lineage secret'
+<<<<<<< HEAD
+=======
+    cleared_lineage = JSON.parse(File.read(lock_path))
+    assert_equal StableLockAnchor::GENERATION, cleared_lineage.fetch('lock_generation')
+    refute cleared_lineage.key?('execution_id'), 'a conforming acquisition clears nested lineage authority'
+    refute cleared_lineage.key?('capability_sha256')
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     replayed = forge.call('forged_harvested_secret', harvested)
     assert_equal 1, replayed[2].exitstatus, replayed[1]
     assert_includes replayed[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
@@ -3778,7 +4345,7 @@ class ExecutionRecoveryTest < Minitest::Test
   RUBY
 
   def setup
-    @tmpdir = Dir.mktmpdir('execution_recovery_test_')
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('execution_recovery_test_')
   end
 
   def teardown
@@ -3812,7 +4379,15 @@ class ExecutionRecoveryTest < Minitest::Test
     capture_file = File.join(@tmpdir, 'captures', 'completed_capture.json')
 
     bump = ['ruby', '-e', "n = File.read(#{counter_path.inspect}).to_i; File.write(#{counter_path.inspect}, (n + 1).to_s)"]
-    DurableCommandCapture.run_and_capture(bump, file_path: capture_file)
+    DurableCommandCapture.run_and_capture(
+      bump, file_path: capture_file, task_id: 'T_B', execution_id: 'completed',
+      execution_identity: {
+        'repository_path' => @tmpdir,
+        'worktree_path' => @tmpdir,
+        'task_id' => 'T_B',
+        'execution_id' => 'completed'
+      }
+    )
     assert_equal '1', File.read(counter_path)
 
     record = ExecutionRecord.start!(path, task_id: 'T_B', execution_id: 'completed', pid: Process.pid)
@@ -3964,7 +4539,11 @@ end
 # previously verified machine-wide heavy-scientific lease.
 class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   def setup
+<<<<<<< HEAD
     @tmpdir = Dir.mktmpdir('gen2_heavy_lease_compat_')
+=======
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('gen2_heavy_lease_compat_')
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     @main_repo = File.join(@tmpdir, 'common-repository')
     @repo = File.join(@tmpdir, 'linked-worktree')
     @worktree = File.join(@tmpdir, 'upstream-cwd')
@@ -4525,3 +5104,1078 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
     capture
   end
 end
+<<<<<<< HEAD
+=======
+
+class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
+  include SyntheticGitRepo
+
+  CLI = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+  CLI_TIMEOUT_SECONDS = 15
+  TASK_ID = 'GEN2_COMPAT_TASK'
+
+  def setup
+    @tmpdir = TaskCheckpointTestScratch.mktmpdir('gen2_compat_test_')
+    @repo = File.join(@tmpdir, 'repo')
+    @worktree = File.join(@tmpdir, 'worktree')
+    @caller = File.join(@tmpdir, 'caller')
+    [@repo, @worktree, @caller].each { |p| FileUtils.mkdir_p(p) }
+    initialize_synthetic_git_repo(@repo)
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) { assert true }
+
+    @launches = File.join(@tmpdir, 'launches')
+    @sentinel_marker = File.join(@tmpdir, 'upstream_sentinel.ran')
+    @application_state = File.join(@tmpdir, 'application-checkpoint.bin')
+    File.binwrite(@application_state, "synthetic-checkpoint\0v1\n")
+    @children = []
+  end
+
+  def teardown
+    @children.each do |child|
+      begin
+        Process.kill('TERM', -child[:wait].pid)
+      rescue Errno::ESRCH, Errno::EPERM
+      end
+    end
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def sentinel_upstream(result: 0)
+    [RbConfig.ruby, '-e', 'marker, res = ARGV; File.write(marker, "RUN"); exit(Integer(res))', @sentinel_marker, result.to_s]
+  end
+
+  def cli_args(identity, command = nil)
+    command ||= sentinel_upstream
+    ['--run', '--repo', @repo, '--worktree', @worktree,
+     '--task-id', TASK_ID, '--execution-id', identity, '--', *command]
+  end
+
+  def start_cli(args, cwd: @caller)
+    stdin, stdout, stderr, wait = Open3.popen3(RbConfig.ruby, CLI, *args, { chdir: cwd, pgroup: true })
+    stdin.close
+    readers = [stdout, stderr].map { |io| Thread.new { begin; io.read; ensure; io.close; end } }
+    child = { wait: wait, readers: readers }
+    @children << child
+    child
+  end
+
+  def finish_cli(child)
+    assert child[:wait].join(CLI_TIMEOUT_SECONDS), 'CLI timed out'
+    child[:readers].each { |reader| assert reader.join(5), 'CLI output timed out' }
+    [*child[:readers].map(&:value), child[:wait].value]
+  end
+
+  def run_cli(args, **options)
+    finish_cli(start_cli(args, **options))
+  end
+
+  def record_path(identity)
+    ExecutionRecord.default_path(@repo, TASK_ID, identity)
+  end
+
+  def capture_path(identity)
+    DurableCommandCapture.default_path(@repo, TASK_ID, identity)
+  end
+
+  # A. 新 Capture 的 explicit path 可重播 (New Capture replays from explicit path)
+  def test_11a_new_capture_explicit_path_replays
+    identity = 'case_11a'
+    custom_capture = File.join(@tmpdir, 'custom_captures', "#{identity}.json")
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "original_out\n",
+      stderr: "original_err\n",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(custom_capture)
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: custom_capture)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal "original_out\n", result[0]
+    assert_equal "original_err\n", result[1]
+    assert_equal 0, result[2].exitstatus
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # B. 舊路徑失效但合法 Capture 已就位 (Original path invalid, canonical capture in place)
+  def test_11b_original_path_invalid_falls_back_to_canonical_capture
+    identity = 'case_11b'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "fallback_out\n",
+      stderr: "fallback_err\n",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent_old_machine', 'captures', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+    before_record = File.binread(record_path(identity))
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal "fallback_out\n", result[0]
+    assert_equal "fallback_err\n", result[1]
+    assert_equal 0, result[2].exitstatus
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+    assert_equal before_record, File.binread(record_path(identity)), 'ExecutionRecord on disk must NOT be modified'
+  end
+
+  # C. Capture 不存在 (Capture missing)
+  def test_11c_capture_does_not_exist_fails_closed
+    identity = 'case_11c'
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # D. Capture 損毀 (Capture corrupt JSON)
+  def test_11d_capture_corrupt_fails_closed
+    identity = 'case_11d'
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    File.write(capture_path(identity), '{ invalid json syntax !!!')
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # E. Capture 不完整 (Capture incomplete)
+  def test_11e_capture_incomplete_fails_closed
+    identity = 'case_11e'
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    incomplete_json = JSON.generate(schema_version: 1, command: ['ruby', '-e', '1'], started_at: Time.now.utc.iso8601, ended_at: Time.now.utc.iso8601)
+    File.write(capture_path(identity), incomplete_json)
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # F. Capture command 不相符 (Capture command mismatch)
+  def test_11f_capture_command_mismatch_rejected
+    identity = 'case_11f'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    # Direct recover_before_execution check
+    assert_raises(ExecutionRecord::UnresolvedExecutionStateError) do
+      ExecutionRecord.recover_before_execution(record_path(identity), command: ['ruby', '-e', 'puts 999'])
+    end
+
+    # CLI check: command mismatch must fail closed with exit 1 and not execute upstream
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 999']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute on command mismatch'
+  end
+
+  # G. Capture Symlink / 路徑跳脫 (Symlink and path traversal rejected)
+  def test_11g_capture_symlink_and_traversal_rejected
+    identity = 'case_11g'
+    real_capture = File.join(@tmpdir, 'outside_capture.json')
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "symlink_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(real_capture)
+
+    # G1: File is a symlink
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    File.symlink(real_capture, capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+
+    # G2: Directory traversal in execution_id / task_id is rejected by stable_component?
+    refute ExecutionRecord.stable_component?('../escape')
+    refute ExecutionRecord.stable_component?('sub/dir')
+    refute ExecutionRecord.stable_component?('')
+    refute ExecutionRecord.stable_component?('.')
+  end
+
+  # H. COMPLETED 原始 exit status = 0
+  def test_11h_completed_exit_0_replayed
+    identity = 'case_11h'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "exit_0_out\n",
+      stderr: "exit_0_err\n",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 0, result[2].exitstatus
+    assert_equal "exit_0_out\n", result[0]
+    assert_equal "exit_0_err\n", result[1]
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # I. COMPLETED 原始 exit status 非 0
+  def test_11i_completed_exit_nonzero_preserved_not_converted_to_zero
+    identity = 'case_11i'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "exit_23_out\n",
+      stderr: "exit_23_err\n",
+      exit_status: 23,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 23, result[2].exitstatus, 'non-zero exit status must be preserved and not converted to 0'
+    assert_equal "exit_23_out\n", result[0]
+    assert_equal "exit_23_err\n", result[1]
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # J. STARTED 不得自動重跑 (STARTED does not auto-rerun)
+  def test_11j_started_record_does_not_auto_rerun
+    identity = 'case_11j'
+    dead_pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
+    Process.wait(dead_pid)
+
+    # Place a valid capture at the canonical path
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "should_not_replay\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    # Record is STARTED, not COMPLETED
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: dead_pid)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+
+    # Verify status remains STARTED
+    loaded = ExecutionRecord.load(record_path(identity))
+    assert_equal ExecutionRecord::STATUS_STARTED, loaded.status
+  end
+
+  # K. --recover-run 原防護不得退化
+  def test_11k_recover_run_original_protection_preserved
+    identity = 'case_11k'
+    dead_pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
+    Process.wait(dead_pid)
+    ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: dead_pid)
+
+    # Reserve transition with sentinel_upstream command
+    ExecutionRecoveryTransition.reserve!(
+      repo_root: @repo, task_id: TASK_ID, old_execution_id: identity,
+      application_state_path: @application_state,
+      worktree_path: @worktree,
+      command: sentinel_upstream
+    )
+
+    # Attempt --recover-run with mismatched command
+    args = ['--recover-run', '--repo', @repo, '--worktree', @worktree,
+            '--task-id', TASK_ID, '--execution-id', identity,
+            '--application-state', @application_state, '--', RbConfig.ruby, '-e', 'exit 99']
+    result = run_cli(args)
+    # Must fail closed with exit status 1
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute on failed recover-run'
+  end
+
+  # 12. 隔離 Runtime 重播 Capture，不執行 upstream sentinel
+  def test_12_isolated_runtime_no_upstream_sentinel_executed
+    identity = 'case_12'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "sentinel_check_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    # 1. 原 R1 錯誤成功案例（CLI 傳入與 capture 不同的 command）必須變成拒絕
+    mismatch_result = run_cli(cli_args(identity)) # passes sentinel_upstream
+    assert_equal 1, mismatch_result[2].exitstatus
+    assert_includes mismatch_result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must NEVER execute on command mismatch'
+
+    # 2. 正確相同命令可重播，且不執行 upstream
+    2.times do
+      result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+      assert_equal 0, result[2].exitstatus
+      assert_equal "sentinel_check_out\n", result[0]
+      refute File.exist?(@sentinel_marker), 'upstream sentinel must NEVER be executed'
+    end
+  end
+
+  # 13. 保留 stdout、stderr、exit status 的原始語義 (Binary parity 包括非 UTF-8 bytes)
+  def test_13_stdout_stderr_binary_parity
+    identity = 'case_13'
+    binary_out = "Binary\0Null\n\xFF\xFE\x00\x80 Non-UTF8\n\xE2\x9C\x93 UTF-8 Checkmark\n".b
+    binary_err = "Err\0Binary\n\x80\xFD Non-UTF8\n\xE2\x9C\x97 Cross\n".b
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: binary_out,
+      stderr: binary_err,
+      exit_status: 12,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 12, result[2].exitstatus
+    assert_equal binary_out.bytes, result[0].b.bytes
+    assert_equal binary_err.bytes, result[1].b.bytes
+    refute File.exist?(@sentinel_marker)
+  end
+
+  # 14. 缺少 schema_version 必須拒絕 (AC09, MISSING_SCHEMA_NEGATIVE)
+  def test_14_missing_schema_version_rejected
+    identity = 'case_14_missing_schema'
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    # Valid capture JSON but completely missing schema_version
+    json = JSON.generate(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity
+    )
+    File.write(capture_path(identity), json)
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    # Loading capture directly must raise ValidationError
+    assert_raises(DurableCommandCapture::ValidationError) do
+      DurableCommandCapture.load(capture_path(identity))
+    end
+
+    # CLI replay must fail closed with exit status 1
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute'
+  end
+
+  # 15. 不受支援的 schema_version 必須拒絕 (AC10)
+  def test_15_unsupported_schema_version_rejected
+    identity = 'case_15_unsupported_schema'
+    FileUtils.mkdir_p(File.dirname(capture_path(identity)))
+    [2, 0, '1', 99].each do |bad_ver|
+      json = JSON.generate(
+        schema_version: bad_ver,
+        command: ['ruby', '-e', 'puts 1'],
+        stdout: "out\n",
+        stderr: "",
+        exit_status: 0,
+        started_at: Time.now.utc.iso8601,
+        ended_at: Time.now.utc.iso8601,
+        task_id: TASK_ID,
+        execution_id: identity
+      )
+      File.write(capture_path(identity), json)
+
+      assert_raises(DurableCommandCapture::ValidationError) do
+        DurableCommandCapture.load(capture_path(identity))
+      end
+    end
+  end
+
+  # 16. 將另一個 Task 的 Capture 放入預期位置，不得被接受 (AC05, WRONG_TASK_CAPTURE_REJECTION)
+  def test_16_wrong_task_capture_rejected
+    identity = 'case_16_wrong_task'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "spoofed_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: 'OTHER_TASK_ATTACK',
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => 'OTHER_TASK_ATTACK',
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute when task_id mismatches'
+  end
+
+  # 17. 將另一個 Execution 的 Capture 放入預期位置，不得被接受 (AC06, WRONG_EXECUTION_CAPTURE_REJECTION)
+  def test_17_wrong_execution_capture_rejected
+    identity = 'case_17_wrong_exec'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "spoofed_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: 'OTHER_EXECUTION_ATTACK',
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => 'OTHER_EXECUTION_ATTACK'
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute when execution_id mismatches'
+  end
+
+  # 18. Legacy Capture 若 execution_identity=nil，缺乏可信證據時 Fallback fail closed (AC07, LEGACY_NIL_NEGATIVE)
+  def test_18_legacy_fallback_with_nil_identity_fails_closed
+    identity = 'case_18_legacy_nil'
+    # Legacy capture without execution_identity and without explicit task_id/execution_id
+    legacy_capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "legacy_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601
+    )
+    assert_nil legacy_capture.execution_identity
+    legacy_capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent_legacy', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    # Fallback to canonical location with nil execution_identity must FAIL CLOSED
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute on legacy nil fallback'
+  end
+
+  # 19. 祖先目錄含 Symlink 必須拒絕 (AC11, ANCESTOR_SYMLINK_NEGATIVE)
+  def test_19_ancestor_symlink_rejected
+    identity = 'case_19_ancestor_symlink'
+    outside_captures_dir = File.join(@tmpdir, 'outside_captures')
+    FileUtils.mkdir_p(outside_captures_dir)
+
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "ancestor_symlink_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(File.join(outside_captures_dir, "#{identity}.json"))
+
+    # Test symlink at captures dir ancestor level
+    captures_target = File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'captures')
+    FileUtils.rm_rf(captures_target) if File.exist?(captures_target) || File.symlink?(captures_target)
+    FileUtils.mkdir_p(File.dirname(captures_target))
+    File.symlink(outside_captures_dir, captures_target)
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    stale_path = File.join(@tmpdir, 'nonexistent', "#{identity}.json")
+    record.complete!(record_path(identity), durable_capture_path: stale_path)
+
+    result = run_cli(cli_args(identity, ['ruby', '-e', 'puts 1']))
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+    refute File.exist?(@sentinel_marker), 'upstream sentinel must not execute when ancestor is symlink'
+
+    # Cleanup the symlinked captures directory
+    FileUtils.rm_rf(captures_target)
+  end
+
+  # 20. Nested CLI acquisition 也比較 command，不相符時拒絕 (AC03, AC04, AC18)
+  def test_20_nested_cli_command_mismatch_rejected
+    identity = 'case_20_nested'
+    capture = DurableCommandCapture.new(
+      command: ['ruby', '-e', 'puts 1'],
+      stdout: "nested_out\n",
+      stderr: "",
+      exit_status: 0,
+      started_at: Time.now.utc.iso8601,
+      ended_at: Time.now.utc.iso8601,
+      task_id: TASK_ID,
+      execution_id: identity,
+      execution_identity: {
+        'repository_path' => @repo,
+        'worktree_path' => @worktree,
+        'task_id' => TASK_ID,
+        'execution_id' => identity
+      }
+    )
+    capture.save(capture_path(identity))
+
+    record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID, execution_id: identity, pid: Process.pid)
+    record.complete!(record_path(identity), durable_capture_path: capture_path(identity))
+
+    # Set up mock nested capability in ENV
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) do |lock|
+      secret = ExecutionRecord.write_task_lineage!(lock, @repo, TASK_ID, 'parent_id')
+      nested_env = ExecutionRecord.nested_capability_env(@repo, TASK_ID, lock, 'parent_id', secret)
+
+      # In nested environment, acquire_nested_owned! must reject command mismatch
+      assert_raises(ExecutionRecord::UnresolvedExecutionStateError) do
+        nested = ExecutionRecord.verify_nested_capability!(
+          @repo, TASK_ID, identity,
+          ExecutionRecord.nested_capability_request(nested_env, @repo, TASK_ID)
+        )
+        ExecutionRecord.acquire_nested_owned!(
+          @repo, TASK_ID, identity, nested,
+          pid: Process.pid, command: ['ruby', '-e', 'puts 999']
+        )
+      end
+    end
+  end
+
+  # 21. Explicit path and canonical fallback enforce the same Capture identity and command rules.
+  def test_21_explicit_and_fallback_capture_identity_parity
+    cases = {
+      correct_new_capture: { accepted: true },
+      legacy_nil_identity: { accepted: false },
+      wrong_task_id: { accepted: false, task_id: 'OTHER_TASK_ATTACK' },
+      wrong_execution_id: { accepted: false, execution_id: 'OTHER_EXECUTION_ATTACK' },
+      wrong_command: { accepted: false, command: [RbConfig.ruby, '-e', 'print "different command"'] }
+    }
+
+    %i[explicit fallback].each do |location|
+      cases.each do |case_name, scenario|
+        identity = "case_21_#{location}_#{case_name}"
+        capture_task_id = scenario.fetch(:task_id, TASK_ID)
+        capture_execution_id = scenario.fetch(:execution_id, identity)
+        capture_command = scenario.fetch(:command, sentinel_upstream)
+        capture_stdout = "replayed_#{location}_#{case_name}\n"
+        capture_attrs = {
+          command: capture_command,
+          stdout: capture_stdout,
+          stderr: "capture_stderr\n",
+          exit_status: 0,
+          started_at: Time.now.utc.iso8601,
+          ended_at: Time.now.utc.iso8601
+        }
+        unless case_name == :legacy_nil_identity
+          capture_attrs[:task_id] = capture_task_id
+          capture_attrs[:execution_id] = capture_execution_id
+          capture_attrs[:execution_identity] = {
+            'repository_path' => @repo,
+            'worktree_path' => @worktree,
+            'task_id' => capture_task_id,
+            'execution_id' => capture_execution_id
+          }
+        end
+        capture = DurableCommandCapture.new(capture_attrs)
+        explicit_path = File.join(@tmpdir, 'explicit_captures', "#{identity}.json")
+        capture.save(explicit_path) if location == :explicit
+        capture.save(capture_path(identity)) if location == :fallback
+
+        record = ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
+                                        execution_id: identity, pid: Process.pid)
+        durable_path = if location == :explicit
+                         explicit_path
+                       else
+                         File.join(@tmpdir, 'missing_original_capture', "#{identity}.json")
+                       end
+        record.complete!(record_path(identity), durable_capture_path: durable_path)
+
+        result = run_cli(cli_args(identity))
+        refute File.exist?(@sentinel_marker), "upstream sentinel executed for #{location} #{case_name}"
+
+        if scenario[:accepted]
+          assert_equal 0, result[2].exitstatus, "#{location} #{case_name} should replay"
+          assert_equal capture_stdout, result[0]
+          assert_equal "capture_stderr\n", result[1]
+        else
+          assert_equal 1, result[2].exitstatus, "#{location} #{case_name} should fail closed"
+          expected_classification = if case_name == :wrong_command
+                                      ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+                                    else
+                                      ExecutionRecord::CLASSIFICATION_TERMINATED_INCOMPLETE
+                                    end
+          assert_includes result[1], expected_classification
+        end
+      end
+    end
+  end
+end
+
+# Disposable integration coverage for separating execution-history storage
+# from the Git worktree whose common directory owns the generation-2 lock.
+class DualRootLockRootCliTest < Minitest::Test
+  include SyntheticGitRepo
+
+  CLI = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+  OMIT_LOCK_ROOT = Object.new.freeze
+
+  def setup
+    @tmpdir = File.realpath(TaskCheckpointTestScratch.mktmpdir('dual_root_lock_root_test_'))
+    @lock_root = File.join(@tmpdir, 'git-root')
+    initialize_synthetic_git_repo(@lock_root)
+    @storage_root = File.join(@lock_root, '.task-data', 'task-a')
+    FileUtils.mkdir_p(@storage_root)
+    @worktree = @lock_root
+    @outside_root = File.join(@tmpdir, 'outside-storage')
+    FileUtils.mkdir_p(@outside_root)
+  end
+
+  def teardown
+    FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def test_nested_storage_root_keeps_history_and_capture_and_binds_lock_identity
+    task_id = 'TASK_A_DUAL_ROOT'
+    execution_id = 'nested-storage-run'
+    marker = File.join(@tmpdir, 'nested-storage-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @storage_root, lock_root: @lock_root,
+      task_id: task_id, execution_id: execution_id, command: success_command(marker)
+    ))
+
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(marker)
+    record_path = ExecutionRecord.default_path(@storage_root, task_id, execution_id)
+    capture_path = DurableCommandCapture.default_path(@storage_root, task_id, execution_id)
+    assert File.file?(record_path)
+    assert File.file?(capture_path)
+    assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path).status
+    capture_identity = DurableCommandCapture.load(capture_path).execution_identity
+    assert_equal @storage_root, capture_identity.fetch('storage_root')
+    assert_equal @lock_root, capture_identity.fetch('lock_root')
+
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    common = common_directory(@lock_root)
+    assert lock_path.start_with?(File.join(common, 'fable-locks', 'task-execution'))
+    anchor = JSON.parse(File.read(File.join(File.dirname(lock_path), 'authority.json')))
+    assert_equal @lock_root, anchor.fetch('repository')
+    assert_equal @lock_root, anchor.fetch('lock_root')
+    assert_equal @storage_root, anchor.fetch('storage_root')
+    assert_equal task_id, anchor.fetch('key')
+
+    marker_path = File.join(common, 'fable-locks', StableLockAnchor::REPOSITORY_GENERATION_FILENAME)
+    assert File.file?(marker_path)
+    refute File.exist?(File.join(@storage_root, 'fable-locks', StableLockAnchor::REPOSITORY_GENERATION_FILENAME))
+    lineage = JSON.parse(File.binread(lock_path))
+    assert_equal @storage_root, lineage.fetch('record_root')
+    assert_equal @lock_root, lineage.fetch('lock_root')
+
+    second_storage = File.join(@lock_root, '.task-data', 'task-a-second')
+    FileUtils.mkdir_p(second_storage)
+    refute_equal lock_path,
+                 ExecutionRecord.task_lock_path(second_storage, task_id, lock_root: @lock_root)
+    refute_equal lock_path,
+                 ExecutionRecord.task_lock_path(@storage_root, 'TASK_A_OTHER', lock_root: @lock_root)
+  end
+
+  def test_same_root_explicit_and_legacy_calls_keep_the_existing_lock_identity
+    task_id = 'TASK_B_SAME_ROOT'
+    legacy_path = ExecutionRecord.task_lock_path(@lock_root, task_id)
+    explicit_path = ExecutionRecord.task_lock_path(@lock_root, task_id, lock_root: @lock_root)
+    assert_equal legacy_path, explicit_path
+
+    marker = File.join(@tmpdir, 'same-root-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @lock_root, lock_root: @lock_root,
+      task_id: task_id, execution_id: 'same-root-run', command: success_command(marker)
+    ))
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(marker)
+    assert File.file?(ExecutionRecord.default_path(@lock_root, task_id, 'same-root-run'))
+    same_root_capture = DurableCommandCapture.load(
+      DurableCommandCapture.default_path(@lock_root, task_id, 'same-root-run')
+    )
+    assert_equal @lock_root, same_root_capture.execution_identity.fetch('repository_path')
+    refute same_root_capture.execution_identity.key?('storage_root')
+    refute same_root_capture.execution_identity.key?('lock_root')
+
+    anchor = JSON.parse(File.read(File.join(File.dirname(explicit_path), 'authority.json')))
+    assert_equal @lock_root, anchor.fetch('repository')
+    refute anchor.key?('storage_root'), 'same-root identity must retain the legacy digest shape'
+    refute anchor.key?('lock_root'), 'same-root identity must not add redundant root fields'
+  end
+
+  def test_same_root_nested_capability_clears_an_inherited_lock_root
+    task_id = 'TASK_B_INHERITED_LOCK_ROOT'
+    capability_env = nil
+    ExecutionRecord.with_task_lock(@lock_root, task_id) do |lock|
+      capability_env = ExecutionRecord.nested_capability_env(
+        @lock_root, task_id, lock, 'same-root-parent', 'test-secret', lock_root: @lock_root
+      )
+    end
+
+    lock_root_key = ExecutionRecord::NESTED_LOCK_ROOT_ENV
+    assert capability_env.key?(lock_root_key), 'same-root child must explicitly clear inherited lock-root state'
+    assert_nil capability_env.fetch(lock_root_key)
+
+    inherited = { lock_root_key => @outside_root }
+    child_env = inherited.merge(capability_env)
+    _, _, status = Open3.capture3(child_env, RbConfig.ruby, '-e',
+                                  "exit(ENV.key?(#{lock_root_key.dump}) ? 1 : 0)")
+    assert status.success?, 'nil nested environment values must remove inherited lock-root state'
+  end
+
+  def test_nested_storage_recovery_uses_the_same_lock_root_and_preserves_history
+    task_id = 'TASK_A_DUAL_ROOT_RECOVERY'
+    old_id = 'stale-before-recovery'
+    ExecutionRecord.with_task_lock(@storage_root, task_id, lock_root: @lock_root) { |_lock| }
+
+    pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
+    Process.wait(pid)
+    old_path = ExecutionRecord.default_path(@storage_root, task_id, old_id)
+    ExecutionRecord.start!(old_path, task_id: task_id, execution_id: old_id, pid: pid)
+    old_bytes = File.binread(old_path)
+    state_path = File.join(@storage_root, 'application-state.bin')
+    File.binwrite(state_path, "disposable state\0\n")
+    child_marker = File.join(@tmpdir, 'recovery-child-started')
+    command = success_command(child_marker)
+    stdout, stderr, status = run_cli(protected_args(
+      mode: '--recover-run', storage_root: @storage_root, lock_root: @lock_root,
+      task_id: task_id, execution_id: old_id, application_state: state_path, command: command
+    ))
+
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(child_marker)
+    assert_equal old_bytes, File.binread(old_path), 'recovery must retain the stale source record'
+
+    transition_path = ExecutionRecoveryTransition.default_path(@storage_root, task_id, old_id)
+    transition = ExecutionRecoveryTransition.load(transition_path)
+    assert_equal old_id, transition.old_execution_id
+    successor_id = transition.successor_execution_id
+    successor_path = ExecutionRecord.default_path(@storage_root, task_id, successor_id)
+    successor = ExecutionRecord.load(successor_path)
+    assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
+    assert_equal old_id, successor.recovery_old_execution_id
+    assert File.file?(successor.durable_capture_path)
+    recovery_identity = DurableCommandCapture.load(successor.durable_capture_path).execution_identity
+    assert_equal @storage_root, recovery_identity.fetch('storage_root')
+    assert_equal @lock_root, recovery_identity.fetch('lock_root')
+    assert transition_path.start_with?(@storage_root)
+    assert successor.durable_capture_path.start_with?(@storage_root)
+
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    lineage = JSON.parse(File.binread(lock_path))
+    assert_equal @storage_root, lineage.fetch('record_root')
+    assert_equal @lock_root, lineage.fetch('lock_root')
+    assert_equal successor_id, lineage.fetch('execution_id')
+    assert File.file?(File.join(common_directory(@lock_root), 'fable-locks',
+                               StableLockAnchor::REPOSITORY_GENERATION_FILENAME))
+  end
+
+  def test_nested_acquisition_inherits_the_dual_root_identity_and_lineage
+    task_id = 'TASK_A_DUAL_ROOT_NESTED'
+    parent_id = 'parent-run'
+    child_id = 'nested-child-run'
+    nested_storage_root = File.join(@lock_root, 'task-a-state')
+    FileUtils.mkdir_p(nested_storage_root)
+    child_marker = File.join(@tmpdir, 'nested-child-started')
+    nested_parent = <<~'RUBY'
+      require 'open3'
+      require 'rbconfig'
+      launcher, storage, lock_root, worktree, task_id, execution_id, marker = ARGV
+      fd = Integer(ENV.fetch('FABLE_PROTECTED_RUN_LOCK_FD'))
+      argv = [RbConfig.ruby, launcher, '--run', '--repo', storage, '--lock-root', lock_root,
+              '--worktree', worktree, '--task-id', task_id, '--execution-id', execution_id,
+              '--', RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "nested\n")', marker]
+      stdout, stderr, status = Open3.capture3(*argv, fd => fd)
+      STDOUT.write(stdout)
+      STDERR.write(stderr)
+      exit(status.exitstatus || 1)
+    RUBY
+    parent_command = [RbConfig.ruby, '-e', nested_parent, CLI, nested_storage_root, @lock_root,
+                      @worktree, task_id, child_id, child_marker]
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: nested_storage_root, lock_root: @lock_root, task_id: task_id,
+      execution_id: parent_id, command: parent_command
+    ))
+
+    assert status.success?, "stdout=#{stdout.inspect} stderr=#{stderr.inspect}"
+    assert File.file?(child_marker)
+    parent = ExecutionRecord.load(ExecutionRecord.default_path(nested_storage_root, task_id, parent_id))
+    child = ExecutionRecord.load(ExecutionRecord.default_path(nested_storage_root, task_id, child_id))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, parent.status
+    assert_equal ExecutionRecord::STATUS_COMPLETED, child.status
+    assert_equal parent_id, child.parent_execution_id
+    assert File.file?(parent.durable_capture_path)
+    assert File.file?(child.durable_capture_path)
+
+    lock_path = ExecutionRecord.task_lock_path(nested_storage_root, task_id, lock_root: @lock_root)
+    lineage = JSON.parse(File.binread(lock_path))
+    assert_equal nested_storage_root, lineage.fetch('record_root')
+    assert_equal @lock_root, lineage.fetch('lock_root')
+    assert_equal parent_id, lineage.fetch('execution_id')
+  end
+
+  def test_invalid_roots_fail_closed_without_starting_the_child
+    other_root = File.join(@tmpdir, 'other-git-root')
+    initialize_synthetic_git_repo(other_root)
+    non_root = File.join(@lock_root, '.fable')
+    FileUtils.mkdir_p(non_root)
+    storage_symlink = File.join(@tmpdir, 'storage-symlink')
+    lock_symlink = File.join(@tmpdir, 'lock-symlink')
+    File.symlink(@storage_root, storage_symlink)
+    File.symlink(@lock_root, lock_symlink)
+    ambiguous_storage = File.join(@lock_root, '.task-data', '..', '.task-data', 'task-a')
+
+    cases = [
+      ['nested storage without explicit lock root', @storage_root, OMIT_LOCK_ROOT],
+      ['storage escapes lock root', @outside_root, @lock_root],
+      ['wrong Git worktree root', @storage_root, other_root],
+      ['non-top-level Git path', @storage_root, non_root],
+      ['non-Git lock root', @storage_root, @outside_root],
+      ['storage root symlink', storage_symlink, @lock_root],
+      ['lock root symlink', @storage_root, lock_symlink],
+      ['ambiguous storage path', ambiguous_storage, @lock_root]
+    ]
+
+    cases.each_with_index do |(label, storage, lock_root), index|
+      marker = File.join(@tmpdir, "invalid-root-child-#{index}")
+      args = protected_args(storage_root: storage, lock_root: lock_root,
+                            task_id: "INVALID_ROOT_#{index}", execution_id: 'must-not-start',
+                            command: success_command(marker))
+      stdout, stderr, status = run_cli(args)
+      refute status.success?, "#{label}: unexpectedly succeeded"
+      refute File.exist?(marker), "#{label}: upstream child ran"
+      refute File.exist?(ExecutionRecord.default_path(storage, "INVALID_ROOT_#{index}", 'must-not-start')),
+             "#{label}: execution history was written"
+      refute_empty(stdout + stderr, "#{label}: expected a diagnostic")
+    end
+  end
+
+  def test_legacy_execution_lock_remains_a_migration_required_stop
+    task_id = 'TASK_A_LEGACY_LOCK'
+    legacy_lock = ExecutionRecord.legacy_task_lock_path(@storage_root, task_id)
+    FileUtils.mkdir_p(File.dirname(legacy_lock))
+    legacy_bytes = "legacy lock fixture\0\n"
+    File.binwrite(legacy_lock, legacy_bytes)
+    marker = File.join(@tmpdir, 'legacy-lock-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @storage_root, lock_root: @lock_root, task_id: task_id,
+      execution_id: 'must-not-start', command: success_command(marker)
+    ))
+
+    refute status.success?
+    assert_match(/migration gate required/i, stdout + stderr)
+    assert_equal legacy_bytes, File.binread(legacy_lock)
+    refute File.exist?(marker)
+    refute File.exist?(ExecutionRecord.default_path(@storage_root, task_id, 'must-not-start'))
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    refute File.exist?(File.dirname(lock_path)), 'legacy state must not cause a replacement lock anchor'
+  end
+
+  def test_unanchored_legacy_task_history_is_not_skipped_or_migrated
+    task_id = 'TASK_A_LEGACY_HISTORY'
+    old_path = ExecutionRecord.default_path(@storage_root, task_id, 'old-history')
+    FileUtils.mkdir_p(File.dirname(old_path))
+    old_bytes = "legacy execution history fixture\0\n"
+    File.binwrite(old_path, old_bytes)
+    child_marker = File.join(@tmpdir, 'legacy-history-child-started')
+    stdout, stderr, status = run_cli(protected_args(
+      storage_root: @storage_root, lock_root: @lock_root, task_id: task_id,
+      execution_id: 'must-not-start', command: success_command(child_marker)
+    ))
+
+    refute status.success?
+    assert_match(/migration gate required/i, stdout + stderr)
+    assert_equal old_bytes, File.binread(old_path)
+    refute File.exist?(child_marker)
+    refute File.exist?(ExecutionRecord.default_path(@storage_root, task_id, 'must-not-start'))
+    lock_path = ExecutionRecord.task_lock_path(@storage_root, task_id, lock_root: @lock_root)
+    refute File.exist?(File.dirname(lock_path)), 'legacy task history must not cause a new lock anchor'
+  end
+
+  private
+
+  def protected_args(storage_root:, lock_root: OMIT_LOCK_ROOT, task_id:, execution_id:, command:,
+                     mode: '--run', application_state: nil)
+    args = [mode, '--repo', storage_root]
+    args.concat(['--lock-root', lock_root]) unless lock_root.equal?(OMIT_LOCK_ROOT)
+    args.concat(['--worktree', @worktree, '--task-id', task_id, '--execution-id', execution_id])
+    args.concat(['--application-state', application_state]) if application_state
+    args.concat(['--', *command])
+    args
+  end
+
+  def success_command(marker)
+    [RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "child started\n"); puts "child done"', marker]
+  end
+
+  def run_cli(args)
+    Open3.capture3(RbConfig.ruby, CLI, *args)
+  end
+
+  def common_directory(path)
+    output, status = Open3.capture2('git', '-C', path, 'rev-parse', '--git-common-dir')
+    raise 'fixture Git common directory could not be read' unless status.success?
+
+    File.realpath(File.expand_path(output.strip, path))
+  end
+end
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7

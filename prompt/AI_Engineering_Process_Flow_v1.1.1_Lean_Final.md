@@ -19,7 +19,7 @@
 | 文件 | 主要角色 | 何時使用 | 何時省略 | 不得做 |
 |---|---|---|---|---|
 | Conversation Handoff v3.1 | 壓縮對話事實與授權／執行鏈 | 換對話、換模型、Worker STOP／BLOCKED、長對話需交接 | 同一對話短續作、極小 continuation | 不做 repo audit、不做架構裁決、不把 report 當獨立驗證 |
-| Planner v5.4 | 產生下一個單一、可執行 Worker Packet | 幾乎所有下一輪實作、CI、PR、merge、continuation | 已有 exact Packet 只需直接執行 | 不實作、不代替 Owner 做產品決策、不預設加重型 gate |
+| Planner v5.5 | 產生下一個可執行 Worker Packet；有獨立卡時才並行 | 下一輪實作、CI、PR、merge、continuation 與正式結案 | 已有 exact Packet 只需直接執行；沒有後續工作則結案 | 不自行授權、不預設加重型 gate、不湊新任務 |
 | CTO v2.1 | 收斂技術邊界與 fix boundary | 不知道改哪一層、data flow 不明、語意衝突、scope 持續擴張 | 已知 bug、已知 CI 修正、已驗證 merge、單一路徑 delta | 不重做 Planner、不全面 audit、不把治理文件排 P0 |
 | CEO v2.1 | 產品方向與階段裁決 | 多個合理方向、是否進下一 phase、產品價值或風險政策未決 | 單純 bug、CI、merge、routine cleanup、小型 continuation | 不重做 CTO、不設計低階實作、不自動授權高風險動作 |
 
@@ -106,13 +106,13 @@ Worker / Handoff
 
 # 4. Authority 與授權
 
-> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.4 的 Authority／Authorization 規則為準。
+> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.5 的身份／授權規則為準。
 
 1. Live state 優先於舊 handoff。
 2. current working directory 不得自動成為 authority。
 3. Handoff 只保存事實與來源，不自動延伸上一輪授權。
 4. 一般低風險任務可用 single-prompt authorization。
-5. 高風險任務必須 direct Owner authorization。 exact action/target 與 provenance 依 canonical Planner §4.3；授權與 executable Packet 可由 Owner 在同一則 direct user message 送出，仍適用的 prior authorization 可重用，不要求額外 auth-only message。
+5. 高風險任務必須 direct Owner authorization。 exact action/target 與 provenance 依 Planner v5.5 §3 及適用的 Fable contract；授權與 executable Packet 可由 Owner 在同一則 direct user message 送出，仍適用的 prior authorization 可重用，不要求額外 auth-only message。
 6. 平台／harness permission 與 Owner authorization 分開處理。
 7. Dirty ownership 不明時不得接管。
 8. 外部 mutation 結果不明時，先 bounded read-after-write，再決定是否重試。
@@ -121,7 +121,7 @@ Worker / Handoff
 
 # 5. Gate 啟用原則
 
-> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.4 的 Gate／Runtime／Judge 規則及 CTO v2.1 的技術審查規則為準。
+> 以下內容僅為人類導覽摘要；若與角色文件衝突，以 Planner v5.5 的驗收／證據重用／Judge 規則及 CTO v2.1 的技術審查規則為準。
 
 ## 預設關閉
 
@@ -173,11 +173,13 @@ YES → Planner Minimal Continuation Delta
 日常 default：
 
 - `Personal_Web_Conversation_Handoff_Prompt_v3.1_Lean_Final.md`
-- `Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md`
+- `Personal_Planner_Handoff_Prompt_v5.5_Lean_Final.md`
 - `CTO_Technical_Review_Prompt_v2.1_Lean_Final.md`
 - `CEO_Decision_Review_Prompt_v2.1_Lean_Final.md`
 
-舊版：
+這是本地人類導覽的選用版本，不表示各平台 skill 或專案已同步採用。新 Agent 的必要專案規則仍須由 Packet 指定並實際讀取。
+
+舊版（含 v5.4，原檔保留）：
 
 - 停止作為 default；
 - 僅保留 archive／high-risk reference；

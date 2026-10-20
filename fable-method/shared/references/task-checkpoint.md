@@ -9,6 +9,7 @@
 - [Deferred blocked-task queue](#deferred-blocked-task-queue)
 - [Scope-qualified writer and quiescence checks](#scope-qualified-writer-and-quiescence-checks)
 - [Long-running execution recovery](#long-running-execution-recovery)
+- [Owner-authorized paused execution continuation](#owner-authorized-paused-execution-continuation)
 - [Bounded launcher fallback](#bounded-launcher-fallback)
 - [Publication live-state classifier](#publication-live-state-classifier)
 - [Bounded reconciliation algorithm](#bounded-reconciliation-algorithm)
@@ -137,11 +138,14 @@ not add a lifecycle state. `SCHEMA_VERSION` remains `1`.
   - task completed or blocked.
 - Do **not** write a checkpoint on every command or shell execution.
 - Do **not** store command transcripts inside the checkpoint.
-- Every `TaskCheckpoint#save` opens the fixed `#{file_path}.lock` sidecar without
-  truncation and acquires `File#flock(File::LOCK_EX)` after creating the parent
-  directory, before any checkpoint existence/read/revision decision. Failure to
-  acquire raises; there is no unlocked fallback. The sidecar is never deleted
-  by save, so conforming processes continue to lock the same pathname/inode.
+- Every `TaskCheckpoint#save` acquires `File#flock(File::LOCK_EX)` after creating
+  the parent directory, before any checkpoint existence/read/revision decision.
+  Failure to acquire raises; there is no unlocked fallback. A checkpoint inside a
+  Git worktree locks the generation-2 `checkpoint.lock` in a stable anchor under
+  Git's common metadata directory. A checkpoint outside Git keeps the adjacent
+  `#{file_path}.lock` sidecar, opened without truncation. Neither lock is deleted
+  by save, so conforming processes continue to lock the same inode. See
+  [Lock generation and migration](#lock-generation-and-migration).
 - The lock covers existence, read, parse, expected-revision comparison, revision
   calculation, and the complete same-directory temporary write, close, and
   atomic rename. Successful rename is the commit point. No subprocess is
@@ -239,6 +243,7 @@ evidence permits progress; unexplained scoped mutation stops the write and
 requires ownership reconciliation.
 
 `TaskCheckpoint.scope_qualified_active_writer?` is an optional convenience in
+<<<<<<< HEAD
 the source helper (`fable-method/scripts/task_checkpoint.rb`), which the
 canonical platform build intentionally excludes. The observable snapshots are
 authoritative, and helper absence is never a blocker. The complete fallback is
@@ -250,6 +255,20 @@ process only when directly observed target paths overlap the exact worktree or
 owned surface; a process name alone is insufficient. Unresolved writer
 ownership remains fail-closed. The default observation is about five seconds,
 but callers may choose another bounded interval when the task requires it.
+=======
+the source helper (`fable-method/scripts/task_checkpoint.rb`). Installed
+builds intentionally exclude executable helpers, so helper absence is never a
+blocker. The explicit bounded before/after snapshots are authoritative. If the
+helper is unavailable, capture the exact designated worktree and task-owned
+paths, branch, HEAD, tree, full status (including staged, unstaged, and
+untracked paths), and each owned path's identity/content metadata; repeat the
+same capture after a bounded interval. Any difference is active mutation.
+With stable snapshots, count a process only when directly observed target
+paths overlap the exact worktree or owned surface; a process name alone is
+insufficient. Unresolved writer ownership remains fail-closed. The default
+observation is about five seconds, but callers may choose another bounded
+interval when the task requires it.
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 ## Long-running execution recovery
 
@@ -349,9 +368,11 @@ process-target comparison described above. It does not claim inherited-lock
 crash protection. If another writer or owner cannot be ruled out, fail closed
 for unresolved ownership.
 
-The protected CLI also serializes task-scoped ownership checks with
-`.fable/checkpoints/<task_id>/execution.lock`. While holding this lock it
-checks the other execution records for a live or unresolved owner, then
+The protected CLI also serializes task-scoped ownership checks with the
+generation-2 `execution.lock` in the task's stable anchor under Git's common
+metadata directory, not a worktree-local file under `.fable/checkpoints/<task_id>/`.
+While holding this lock it checks the other execution records for a live or
+unresolved owner, then
 acquires the requested identity atomically. Before launching an upstream
 child, it reacquires the lock and passes the open lock descriptor to that
 child. The OS lock therefore stays held if the wrapper dies while the
@@ -360,6 +381,7 @@ exits. The lock file is retained; the OS releases the lock when the last
 inherited descriptor closes. This protects one task writer across distinct
 execution IDs and wrapper crashes.
 
+<<<<<<< HEAD
 ### Optional protected run entrypoint
 
 This CLI is an optional convenience; executable helpers are intentionally not
@@ -370,6 +392,29 @@ it is unavailable before execution, use the complete bounded fallback below:
 exact Packet-owned worktree and argv, local-only/no-high-risk effects, exact
 record/PID inspection where applicable, and before/after snapshots. Do not
 claim inherited-lock crash protection for a direct launch.
+=======
+### Lock generation and migration
+
+Generation-2 protected locks are anchored in Git's common metadata directory
+(`git rev-parse --git-common-dir`), under `fable-locks/<namespace>/<digest>/`,
+not in the worktree. Each anchor's `authority.json` binds the generation,
+namespace, repository, and key to the lock file's device and inode. A
+same-name replacement, a symlink, or an inode change fails closed. The
+repository marker `fable-locks/repository-generation.json` must exist before any
+protected lock opens.
+
+Legacy worktree-local lock files (`.fable/checkpoints/<task_id>/execution.lock`
+and `<checkpoint>.lock`), and legacy task state without an anchor, are never
+treated as absent. They stop lock acquisition with a migration-required error.
+Migration is an explicit offline step, taken only under separate authorization
+after every legacy protected worker and inherited child is confirmed quiescent.
+Initializing the marker is `StableLockAnchor.initialize_repository_generation!`
+with `confirm_legacy_workers_quiescent: true`, and it is never inferred from an
+absent anchor. Workers must not clear the block by deleting, renaming, or
+recreating legacy lock files.
+
+### Protected run entrypoint
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 Select the launcher checkout under SKILL.md's launcher-selection rule, then
 invoke:
@@ -596,6 +641,7 @@ with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
 
+<<<<<<< HEAD
 A terminal failed recovery successor requires separate explicit authorization:
 use `--retry-recover-run` with its failed successor execution ID, the same
 checkpoint/worktree locators, and the complete newly authorized argv after
@@ -606,6 +652,77 @@ or ambiguous sources are refused. Recovery predecessor IDs are historical
 provenance (`recovery_parent_execution_id`), while `parent_execution_id` names
 only active protected descendants; the retry owns a fresh inherited-lock
 lineage. Existing records without verifiable recovery provenance fail closed.
+=======
+## Owner-authorized paused execution continuation
+
+`--recover-run` remains limited to one dead, incomplete `STARTED` execution.
+It continues to reject every terminal predecessor, including a `COMPLETED`
+execution with a complete capture. A checkpoint-safe scientific pause uses a
+separate `--continue-paused-run` mode: it creates a new protected execution
+record and leaves the completed predecessor record and terminal capture byte
+for byte unchanged.
+
+The continuation accepts only an exact `PAUSED_RESUMABLE` application
+checkpoint with a positive completed-attempt cursor, `next_expected_attempt`
+equal to `completed_attempts + 1`, and `completed_attempts < total_attempts`.
+Its newline-terminated journal prefix must have the declared record count and
+SHA-256, contiguous sequence numbers and attempt ranges starting at attempt 1,
+and matching source/baseline SHA-256 values on every record. The ordered
+execution IDs in that prefix must resolve to completed protected execution
+records with complete terminal captures; the named predecessor must own the
+last journal record and have captured exit status `1`. The source and baseline
+files are hashed again from their current regular, owned files.
+
+Before a successor can start, the task lock and execution records must show no
+active or unresolved scientific writer. The continuation requires a direct
+Owner authorization token from the current conversation, supplied as the
+plain-text `--owner-authorization` file. It uses the existing conversation
+authorization validator and requires the exact action `CONTINUE_PAUSED_RUN`
+and a target containing all of these values in order, joined by `|`:
+
+```text
+task_id=<task-id>|predecessor_execution_id=<old-id>|successor_execution_id=<new-id>|checkpoint_sha256=<checkpoint-sha256>|journal_prefix_sha256=<journal-sha256>|source_sha256=<source-sha256>|baseline_sha256=<baseline-sha256>|next_attempt=<attempt>|worktree_path=<resolved-worktree>|successor_command_sha256=<argv-sha256>
+```
+
+The authorization text is hashed into the transition. Do not manufacture a
+token or reuse a quoted, Planner, or assistant authorization. A changed
+checkpoint, source, baseline, journal, command, worktree, Owner token, or
+successor identity fails closed.
+
+Use the distinct protected entrypoint:
+
+```text
+ruby task_checkpoint.rb \
+  --continue-paused-run \
+  --repo <original-stable-record-root> \
+  --worktree <upstream-command-cwd> \
+  --task-id <stable-task-id> \
+  --previous-execution-id <completed-paused-execution-id> \
+  --execution-id <new-successor-id> \
+  --application-state <absolute-scientific-checkpoint-file> \
+  --owner-authorization <current-owner-message-token-file> \
+  -- <original argv...>
+```
+
+The immutable transition is stored at
+`.fable/checkpoints/<task_id>/continuations/<checkpoint-sha256>.json`. It binds
+the new execution identity to the predecessor record and capture hashes, the
+checkpoint and validated journal prefix, source/baseline hashes, exact
+authorization, resolved worktree, exact argv, and next attempt. A second
+successor for the same checkpoint is refused. Once the successor `STARTED`
+record is durable, an interrupted launch is never started again; a completed
+successor follows ordinary durable-capture replay. The child receives
+`FABLE_PAUSED_CONTINUATION_PREDECESSOR_EXECUTION_ID`,
+`FABLE_PAUSED_CONTINUATION_CHECKPOINT_SHA256`, and
+`FABLE_PAUSED_CONTINUATION_NEXT_ATTEMPT` to resume from the exact expected
+attempt.
+
+Generic `--run` and stale `--recover-run` records do not carry paused
+continuation authority. Neither a generic failed execution nor a
+scientific-terminal checkpoint is eligible through this mode. Historical
+execution outcomes are not reinterpreted; only a new authorized continuation
+can claim a `PAUSED_RESUMABLE` checkpoint.
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 ## Publication live-state classifier
 

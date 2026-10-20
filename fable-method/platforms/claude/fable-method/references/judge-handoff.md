@@ -7,9 +7,14 @@
   - [Verification temp isolation](#verification-temp-isolation)
 - [Depth reconciliation](#depth-reconciliation)
 - [Remediation limit](#remediation-limit)
+- [Fresh Judge session lineage](#fresh-judge-session-lineage)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
+<<<<<<< HEAD
 - [Containment and memory evaluation](#containment-and-memory-evaluation)
+=======
+  - [Non-Git artifact route](#non-git-artifact-route)
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -211,6 +216,32 @@ complete local suite once on the remediated tree. Then hand off a `DELTA`
 re-Judge. If the same finding is refuted again, stop with
 `BLOCKED_AFTER_JUDGE_REFUTATION`; do not start another cycle.
 
+## Fresh Judge session lineage
+
+Session naming is orchestration metadata only and never means context reuse: a
+Fresh Context Judge always has independent context. Request `<parent>-judge`
+for the first fresh Judge and `<parent>-judge-rN` for the nth fresh re-Judge
+after remediation, with `N` starting at 2. Resolve the parent name from the
+actual parent session; when it is unavailable, report
+`PARENT_SESSION_NAME: UNKNOWN` and do not invent a name. Report requested and
+actual names separately in every handoff:
+
+```text
+PARENT_SESSION_NAME: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>
+JUDGE_SESSION_RELATION: FRESH_CONTEXT_CHILD | FRESH_CONTEXT_REJUDGE
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_CAPABILITY: SUPPORTED | REQUEST_METADATA_ONLY | UNSUPPORTED | UNKNOWN
+JUDGE_SESSION_LINEAGE_RULE: first fresh Judge <parent>-judge; nth fresh re-Judge after remediation <parent>-judge-rN (N starts at 2)
+HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME: YES | NO | UNKNOWN
+```
+
+When the harness supports explicit child-session naming, use the requested
+name. When it supports request metadata only, emit the requested name but do
+not claim the actual session was renamed. When naming is unsupported, report
+`UNSUPPORTED` and continue the independent Fresh Context Judge.
+
 ## Durable terminal capture
 
 When a Judge-owned long-running command has a load-bearing terminal result,
@@ -255,6 +286,7 @@ must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
 
+<<<<<<< HEAD
 ## Containment and memory evaluation
 
 When containment or memory writes are load-bearing for the Packet, evaluate
@@ -268,6 +300,84 @@ exact path and purpose authorization. Do not broaden this into an automatic
 workspace or memory audit. The Judge reports observed violations; it does not
 create, remove, or repair them. Remediation stays Worker-owned under the normal
 one-remediation limit. This check adds no Judge trigger or authorization.
+=======
+### Non-Git artifact route
+
+When the judged output is a generated artifact under a non-Git source root (see
+[operational gates](operational-gates.md) on non-Git source roots), the handoff
+replaces the repository, branch, HEAD, and tree fields with a manifest-based
+snapshot identity. The Worker supplies:
+
+- `ARTIFACT_ROOT`: the exact absolute canonical artifact root, repeated
+  unchanged in both snapshots. Each manifest records `ROOT_EXISTS` from a
+  no-follow check, `ROOT_ENTRY_TYPE`, `ROOT_MODE` when present, and
+  `ROOT_CHILDREN_ENUMERATED`. An absent root has `ROOT_EXISTS: false`, no entry
+  type or mode, and no entries; an existing empty directory has
+  `ROOT_EXISTS: true`, `ROOT_ENTRY_TYPE: DIRECTORY`, its directory mode, and an
+  empty entry list. Only `ENOENT` establishes an absent root; any other root
+  inspection error rejects the scan. Do not treat these states as equal.
+- `BASELINE_MANIFEST` and `FINAL_MANIFEST`: each is a deterministic UTF-8
+  manifest captured before the first write and after the last. Each records
+  `MANIFEST_SCHEMA_VERSION: 1` and `MANIFEST_STATUS: COMPLETE` only when the
+  root and every descendant have been completely inventoried. `ENTRIES`
+  contains every descendant directory and regular file, including empty
+  directories. Each entry has a normalized root-relative `RELATIVE_PATH`, an
+  `ENTRY_TYPE` of `DIRECTORY` or `REGULAR_FILE`, and POSIX permission and
+  special-bit `MODE` (`st_mode & 07777`) in fixed-width octal. Directory entries
+  also say `CHILDREN_ENUMERATED: true`; each regular-file entry has
+  `SIZE_BYTES` and `SHA256`. No entry may be omitted because it is empty,
+  irrelevant, unreadable, or inconvenient.
+- `BASELINE_MANIFEST_SHA256` and `FINAL_MANIFEST_SHA256`: SHA-256 hashes of the
+  exact saved canonical manifest bytes, excluding these detached hash fields.
+- `ARTIFACT_SHA256`: the path and SHA-256 of each relevant artifact, taken from
+  the final manifest;
+- `MANIFEST_DELTA`: the added, changed, and removed paths between the two
+  manifests, computed by comparing the complete entry sets and all entry
+  fields (including type, mode, size, and file hash), plus exact root path,
+  root existence, type, mode, and child-enumeration status. Sort `ENTRIES` by
+  normalized relative-path UTF-8 bytes and serialize as canonical UTF-8 JSON
+  with a fixed schema, field order, and no insignificant whitespace before
+  hashing. The Judge compares the complete baseline and final manifests;
+  comparing only relevant artifacts is insufficient.
+- `WRITE_LEDGER`: this operation's write, retained, and deletion ledger,
+  including any artifact created and later deleted;
+- `ACCEPTANCE_CRITERIA`: the specific checks the Judge applies to each relevant
+  artifact, each with its command or inspection method.
+
+For path identity, encode each root-relative component as valid UTF-8 in
+Unicode NFC and join components with `/`. Reject absolute paths, empty, `.` or
+`..` components, backslashes, invalid encodings, paths that escape the root,
+and any duplicate normalized path. A normalization collision is a rejected
+manifest, even when the original names differ. Use `lstat` or
+`fstatat(..., AT_SYMLINK_NOFOLLOW)` on every entry; open and enumerate each
+directory without following links, and open regular files with no-follow
+semantics (`openat(..., O_NOFOLLOW)` or an equivalent), then verify the opened
+object with `fstat` before reading it. The root itself must be checked without
+following it and must be a real directory when present.
+
+Fail closed on a root or descendant symbolic link; nested Git repository,
+`.git` directory or pointer, or submodule; FIFO, socket, device, or any other
+special file; normalization collision or invalid path; and every enumeration,
+metadata, or read error that prevents a complete inventory. Detect nested Git
+metadata from entry names and no-follow types before descending into it or
+opening its contents; reject bare-repository markers as well. For a rejected
+scan, record `MANIFEST_STATUS: REJECTED` and each unsafe candidate path (raw
+path if it cannot be normalized), observed type/mode when available, and
+rejection reason in a diagnostic. Do not publish a complete manifest, a
+manifest hash, or snapshot identity for that scan. Never follow a link or read
+the linked target, a `.git` pointer, or other rejected content. Any uncertainty
+about completeness is rejection, not a silently omitted entry.
+
+A complete manifest proves identity only for the filesystem snapshot observed
+by that scan. It is not Git provenance and does not prove that no other
+activity occurred during execution or between the baseline and final scans.
+Do not write a commit or tree value for a non-Git root, and do not derive one
+from a manifest hash. If the artifact cannot be reproduced, or a required
+manifest, hash, or ledger entry is missing, state `UNVERIFIABLE` or `UNKNOWN`
+with the exact missing item rather than filling the gap. This route does not
+change Judge launch authority, depth selection, or verdict standards; the Judge
+still derives its own trigger and depth from the Packet and evidence.
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 ## Verdict and lifecycle boundaries
 

@@ -9,9 +9,56 @@ require 'tmpdir'
 require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
+<<<<<<< HEAD
 class HeavyScientificLeaseTest < Minitest::Test
   def setup
     @tmpdir = Dir.mktmpdir('heavy_scientific_lease_test_')
+=======
+module HeavyScientificLeaseTestScratch
+  ROOT = File.expand_path('../../.task-disposable-scratch', __dir__).freeze
+
+  requested_root = ENV.fetch('FABLE_TEST_SCRATCH_ROOT') do
+    raise 'FABLE_TEST_SCRATCH_ROOT must name this worktree disposable root'
+  end
+  unless File.expand_path(requested_root) == ROOT && File.directory?(ROOT) && File.realpath(ROOT) == ROOT
+    raise 'test scratch root is not the canonical worktree disposable root'
+  end
+  ENV['TMPDIR'] = ROOT
+  ENV['GIT_CEILING_DIRECTORIES'] = ROOT
+
+  BOUNDARY_SHIM = File.join(ROOT, 'git-discovery-boundary.rb').freeze
+  File.write(BOUNDARY_SHIM, <<~'RUBY')
+    class StableLockAnchor
+      module DisposableScratchBoundary
+        def git_marker_in_ancestors?(path)
+          boundary = File.realpath(ENV.fetch('FABLE_TEST_SCRATCH_ROOT'))
+          current = File.expand_path(path.to_s)
+          loop do
+            return false if current == boundary
+            marker = File.join(current, '.git')
+            return true if File.exist?(marker) || File.symlink?(marker)
+            parent = File.dirname(current)
+            return false if parent == current
+            current = parent
+          end
+        end
+      end
+      singleton_class.prepend(DisposableScratchBoundary)
+    end
+  RUBY
+  require BOUNDARY_SHIM
+  ENV['RUBYOPT'] = [ENV['RUBYOPT'].to_s, "-r#{BOUNDARY_SHIM}"].reject(&:empty?).join(' ')
+  Minitest.after_run { FileUtils.rm_f(BOUNDARY_SHIM) }
+
+  def self.mktmpdir(prefix)
+    Dir.mktmpdir(prefix, ROOT)
+  end
+end
+
+class HeavyScientificLeaseTest < Minitest::Test
+  def setup
+    @tmpdir = HeavyScientificLeaseTestScratch.mktmpdir('heavy_scientific_lease_test_')
+>>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     @repo = File.join(@tmpdir, 'repo')
     @worktree = File.join(@tmpdir, 'worktree')
     FileUtils.mkdir_p([@repo, @worktree])
