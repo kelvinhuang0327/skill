@@ -139,6 +139,7 @@ readonly LINKED_TRACKED_DIRTY="${SCRATCH}/linked-tracked-dirty"
 readonly LINKED_BRANCH_CURRENT="${SCRATCH}/linked-branch-current"
 readonly INDEPENDENT_CLONE="${SCRATCH}/independent/skill"
 readonly COPIED_ROOT="${SCRATCH}/copied"
+readonly COPIED_NESTED_ROOT="${COPIED_ROOT}/nested"
 readonly NESTED_OUTER="${SCRATCH}/nested-outer"
 readonly NESTED_ROOT="${NESTED_OUTER}/nested"
 readonly FAKE_BIN="${SCRATCH}/fake-bin"
@@ -283,10 +284,28 @@ assert_failure_contains \
 
 mkdir -p "$COPIED_ROOT"
 cp -R "$LINKED_CURRENT/fable-method" "$COPIED_ROOT/fable-method"
+# A copy without its own Git metadata may still inherit a repository from
+# TMPDIR's ancestors. Assert the exact rejection for the fixture's Git state.
+copied_expected='executing repository root is not a Git repository'
+if /usr/bin/env -i PATH="$SYSTEM_PATH" GIT_OPTIONAL_LOCKS=0 \
+    git -C "$COPIED_ROOT" rev-parse --show-toplevel >/dev/null 2>&1; then
+  copied_expected='executing repository root is not its Git top-level'
+fi
 assert_failure_contains \
   'copied non-Git repository is rejected' \
-  'executing repository root is not its Git top-level' \
+  "$copied_expected" \
   "$COPIED_ROOT/fable-method/scripts/activate-live.sh" --activate --platform codex
+[[ ! -e "$SCRATCH_LIVE" ]] || fail 'copied non-Git source wrote the scratch live target'
+
+# Exercise the inherited-parent rejection even when TMPDIR is outside Git.
+git -C "$COPIED_ROOT" init -q -b copied-parent
+mkdir -p "$COPIED_NESTED_ROOT"
+cp -R "$LINKED_CURRENT/fable-method" "$COPIED_NESTED_ROOT/fable-method"
+assert_failure_contains \
+  'copied directory inheriting a Git parent is rejected' \
+  'executing repository root is not its Git top-level' \
+  "$COPIED_NESTED_ROOT/fable-method/scripts/activate-live.sh" --activate --platform codex
+[[ ! -e "$SCRATCH_LIVE" ]] || fail 'inherited Git source wrote the scratch live target'
 
 mkdir -p "$NESTED_ROOT"
 git -C "$NESTED_OUTER" init -q -b outer
