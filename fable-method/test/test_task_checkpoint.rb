@@ -2233,10 +2233,6 @@ class TaskCheckpointRunTest < Minitest::Test
     @worktree = File.join(@tmpdir, 'upstream-cwd')
     @caller = File.join(@tmpdir, 'caller-cwd')
     [@repo, @worktree, @caller].each { |path| FileUtils.mkdir_p(path) }
-<<<<<<< HEAD
-    _git_stdout, git_stderr, git_status = Open3.capture3('git', '-C', @repo, 'init', '--quiet')
-    assert git_status.success?, git_stderr
-=======
     _init_out, init_err, init_status = Open3.capture3('git', '-C', @repo, 'init', '--quiet')
     assert init_status.success?, init_err
     _config_out, config_err, config_status = Open3.capture3('git', '-C', @repo, 'config', 'user.name', 'Fable Test')
@@ -2249,7 +2245,6 @@ class TaskCheckpointRunTest < Minitest::Test
       'git', '-C', @repo, 'commit', '--allow-empty', '--quiet', '-m', 'synthetic base'
     )
     assert commit_status.success?, commit_err
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     StableLockAnchor.initialize_repository_generation!(@repo, confirm_legacy_workers_quiescent: true)
     ExecutionRecord.with_task_lock(@repo, TASK_ID) { |_lock| }
     @launches = File.join(@tmpdir, 'launches')
@@ -4214,13 +4209,10 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal File.realpath(@repo), rotated_lineage.fetch('record_root')
     refute rotated_lineage.key?('execution_id'), 'a conforming acquisition clears the dead execution owner'
     refute rotated_lineage.key?('capability_sha256'), 'a conforming acquisition clears the dead lineage secret'
-<<<<<<< HEAD
-=======
     cleared_lineage = JSON.parse(File.read(lock_path))
     assert_equal StableLockAnchor::GENERATION, cleared_lineage.fetch('lock_generation')
     refute cleared_lineage.key?('execution_id'), 'a conforming acquisition clears nested lineage authority'
     refute cleared_lineage.key?('capability_sha256')
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     replayed = forge.call('forged_harvested_secret', harvested)
     assert_equal 1, replayed[2].exitstatus, replayed[1]
     assert_includes replayed[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
@@ -4539,11 +4531,7 @@ end
 # previously verified machine-wide heavy-scientific lease.
 class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   def setup
-<<<<<<< HEAD
-    @tmpdir = Dir.mktmpdir('gen2_heavy_lease_compat_')
-=======
     @tmpdir = TaskCheckpointTestScratch.mktmpdir('gen2_heavy_lease_compat_')
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     @main_repo = File.join(@tmpdir, 'common-repository')
     @repo = File.join(@tmpdir, 'linked-worktree')
     @worktree = File.join(@tmpdir, 'upstream-cwd')
@@ -5104,8 +5092,6 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
     capture
   end
 end
-<<<<<<< HEAD
-=======
 
 class Gen2CompletedCaptureReplayCompatTest < Minitest::Test
   include SyntheticGitRepo
@@ -6178,4 +6164,3 @@ class DualRootLockRootCliTest < Minitest::Test
     File.realpath(File.expand_path(output.strip, path))
   end
 end
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7

@@ -17,7 +17,7 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   tmp = File.realpath(tmp)
   %w[fable-method fable-judge].each { |skill| FileUtils.cp_r(File.join(root, skill), tmp) }
   codex_dir = File.join(tmp, 'fable-method/platforms/codex/fable-method')
-  %w[scripts/task_checkpoint.rb scripts/paused_run_continuation.rb].each do |relative|
+  %w[scripts/task_checkpoint.rb scripts/paused_run_continuation.rb scripts/fable_artifact_controls.py].each do |relative|
     FileUtils.rm_f(File.join(codex_dir, relative))
   end
   scripts_dir = File.join(codex_dir, 'scripts')
@@ -63,10 +63,14 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   companion = File.join(codex_dir, 'scripts/paused_run_continuation.rb')
   launcher_bytes = File.binread(launcher)
   companion_bytes = File.binread(companion)
+  artifact_controls = File.join(codex_dir, 'scripts/fable_artifact_controls.py')
+  artifact_controls_bytes = File.binread(artifact_controls)
   check.call(Digest::SHA1.hexdigest("blob #{launcher_bytes.bytesize}\0#{launcher_bytes}") == 'c201d6b683d084014add2631a5ef5d7fcd5c8f69' && (File.stat(launcher).mode & 0o777) == 0o755, 'Codex launcher bytes and executable mode match the source pin')
   check.call(Digest::SHA256.hexdigest(companion_bytes) == 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0' && (File.stat(companion).mode & 0o777) == 0o644, 'companion bytes and mode match the versioned runtime asset pin')
+  check.call(Digest::SHA256.hexdigest(artifact_controls_bytes) == '075fb89a1d93f2db964abd60cc2d72238298b7d916068df9e10ea3b31d8169dc' && (File.stat(artifact_controls).mode & 0o777) == 0o644, 'artifact controls bytes and mode match the declared helper asset')
   skill_pin = File.read(File.join(codex_dir, 'SKILL.md')).match(/is pinned to Git blob `([0-9a-f]{40})` from commit/)
   check.call(skill_pin && skill_pin[1] == 'c201d6b683d084014add2631a5ef5d7fcd5c8f69', 'generated Codex SKILL.md pin matches the launcher blob')
+  check.call(File.read(File.join(codex_dir, 'SKILL.md')).include?('artifact_controls.py') && File.read(File.join(codex_dir, 'SKILL.md')).include?('Artifact budgets and worktree lifecycle'), 'generated Codex skill includes the lifecycle instructions and helper')
   check.call(run.call('--check', '--skill', 'fable-method')[0], 'complete Method materialization passes NO_DRIFT check')
   method_after = digest.call('fable-method')
   check.call(run.call('--write', '--skill', 'fable-method')[0] && method_after == digest.call('fable-method'), 'Codex runtime output is reproducible across writes')
@@ -82,6 +86,12 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   result = run.call('--write', '--skill', 'fable-method')
   check.call(!result[0] && result[1].include?('runtime asset Git blob mismatch') && before_refusal == digest.call('fable-method'), 'mismatched runtime asset fails closed before any platform write')
   File.binwrite(helper_source, helper_bytes)
+  artifact_controls_source = File.join(tmp, 'fable-method/scripts/fable_artifact_controls.py')
+  artifact_controls_bytes = File.binread(artifact_controls_source)
+  File.open(artifact_controls_source, 'ab') { |file| file.write("\nasset mismatch\n") }
+  result = run.call('--write', '--skill', 'fable-method')
+  check.call(!result[0] && result[1].include?('runtime asset SHA-256 mismatch') && before_refusal == digest.call('fable-method'), 'mismatched artifact controls fail closed before any platform write')
+  File.binwrite(artifact_controls_source, artifact_controls_bytes)
   2.times { check.call(run.call('--write', '--skill', 'fable-judge')[0], 'Judge generation succeeds') }
   check.call(judge_before == digest.call('fable-judge'), 'four Judge bundles deterministic after second write')
   check.call(run.call('--check', '--skill', 'fable-judge')[0], 'Judge second-generation NO_DRIFT')

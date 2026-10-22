@@ -42,7 +42,7 @@ class PlatformManifestTest < Minitest::Test
     assert_equal 4, @model.platforms('fable-judge').length
     assert_equal '/Users/kelvin/.gemini/skills/fable-judge', @model.pair('fable-judge', 'gemini')['live_installation_path']
     assert_equal '/Users/kelvin/.gemini/config/skills/fable-judge', @model.pair('fable-judge', 'antigravity')['live_installation_path']
-    assert_equal %w[task_checkpoint paused_run_continuation], @model.pair('fable-method', 'codex').fetch('runtime_assets').map { |asset| asset['id'] }
+    assert_equal %w[task_checkpoint paused_run_continuation artifact_controls], @model.pair('fable-method', 'codex').fetch('runtime_assets').map { |asset| asset['id'] }
     @model.platforms('fable-method').reject { |platform| platform['name'] == 'codex' }.each do |platform|
       refute platform.key?('runtime_assets')
     end
@@ -54,38 +54,46 @@ class PlatformManifestTest < Minitest::Test
     define_method("test_rejects_schema_#{version.inspect}") { rejects { @data['schema_version'] = version } }
   end
 
-  def test_codex_runtime_asset_pins_and_materialized_bytes
-    launcher, companion = @model.pair('fable-method', 'codex').fetch('runtime_assets')
+  def test_codex_runtime_assets_and_materialized_bytes
+    launcher, companion, artifact_controls = @model.pair('fable-method', 'codex').fetch('runtime_assets')
     assert_equal '2b99ec0bbcc71b8be588ee71d4a322680669e55b', launcher['source_commit']
     assert_equal 'c201d6b683d084014add2631a5ef5d7fcd5c8f69', launcher['git_blob']
     assert_equal '7f0d5a5b978525f771ad92dcd1b01444eb16fa0a7bc807a68a5ceb0ba0e98723', launcher['sha256']
     assert_equal 'e6f8581cdabe21f3683b8a5d8effb6855d98a041', companion['source_commit']
     assert_equal '91592132733be6b697bdbef667b97d9065c829c1', companion['git_blob']
     assert_equal 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0', companion['sha256']
+    assert_equal '075fb89a1d93f2db964abd60cc2d72238298b7d916068df9e10ea3b31d8169dc', artifact_controls['sha256']
 
     rendered = @model.render(ROOT, 'fable-method', 'codex')
     launcher_bytes = File.binread(File.join(ROOT, launcher['source']))
     companion_bytes = File.binread(File.join(ROOT, companion['source']))
+    artifact_controls_bytes = File.binread(File.join(ROOT, artifact_controls['source']))
     assert_equal launcher_bytes, rendered.fetch(launcher['destination'])
     assert_equal companion_bytes, rendered.fetch(companion['destination'])
+    assert_equal artifact_controls_bytes, rendered.fetch(artifact_controls['destination'])
     assert_equal 0o755, File.stat(File.join(ROOT, launcher['source'])).mode & 0o777
     assert_equal 0o644, File.stat(File.join(ROOT, companion['source'])).mode & 0o777
+    assert_equal 0o644, File.stat(File.join(ROOT, artifact_controls['source'])).mode & 0o777
     assert_match(/elsif mode == :continue_paused_run\s+require_relative ['"]paused_run_continuation['"]/, launcher_bytes)
     assert_includes rendered.fetch('SKILL.md'), "Git blob `#{launcher['git_blob']}`"
     assert_includes rendered.fetch('SKILL.md'), 'loaded only for `--continue-paused-run`'
     assert_includes rendered.fetch('SKILL.md'), '**Installed Runtime:**'
     assert_includes rendered.fetch('SKILL.md'), '**Live Activation:** NOT RUN'
     assert_includes rendered.fetch('SKILL.md'), 'A documentation-only bundle is not Runtime Distribution Ready'
+    assert_includes rendered.fetch('SKILL.md'), "SHA-256 `#{artifact_controls['sha256']}`"
+    assert_includes rendered.fetch('SKILL.md'), 'Artifact budgets and worktree lifecycle'
 
     claude = @model.render(ROOT, 'fable-method', 'claude')
     refute claude.key?('scripts/task_checkpoint.rb')
+    refute claude.key?('scripts/fable_artifact_controls.py')
+    refute_includes claude.fetch('SKILL.md'), 'Artifact budgets and worktree lifecycle'
     refute_includes claude.fetch('SKILL.md'), 'Codex Runtime Materialization'
   end
 
   def test_codex_runtime_asset_contract_is_closed
     rejects { method_codex_platform['runtime_assets'].pop }
     rejects { method_codex_platform['runtime_assets'].first['git_blob'] = 'bad' }
-    rejects { method_codex_platform['runtime_assets'].last['destination'] = '../outside.rb' }
+    rejects { method_codex_platform['runtime_assets'].last['destination'] = '../outside.py' }
     rejects { method_codex_platform['runtime_assets'].first['mode'] = '100644' }
   end
 

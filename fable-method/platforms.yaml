@@ -36,7 +36,8 @@ skills:
     platforms:
     - name: codex
       frontmatter_source: fable-method/shared/platforms/codex/frontmatter.md
-      adapter_sources: []
+      adapter_sources:
+      - fable-method/shared/platforms/codex/adapter.md
       reference_overrides: []
       runtime_assets:
       - id: task_checkpoint
@@ -57,6 +58,13 @@ skills:
         mode: "100644"
         destination: scripts/paused_run_continuation.rb
         purpose: required_only_for_continue_paused_run_transition
+      - id: artifact_controls
+        role: supporting_helper
+        source: fable-method/scripts/fable_artifact_controls.py
+        sha256: 075fb89a1d93f2db964abd60cc2d72238298b7d916068df9e10ea3b31d8169dc
+        mode: "100644"
+        destination: scripts/fable_artifact_controls.py
+        purpose: local_codex_artifact_logs_and_worktree_lifecycle
       materialized_destination: fable-method/platforms/codex/fable-method
       live_installation_path: "/Users/kelvin/.codex/skills/fable-method"
       live_installation_role: deployment_metadata_only

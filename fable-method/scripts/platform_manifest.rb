@@ -21,7 +21,11 @@ module Fable
     DEPTH_SOURCE = 'fable-method/shared/references/judge-handoff.md'
     DEPTH_DESTINATION = 'references/judge-depth-contract.md'
     DEPTH_SECTIONS = ['Depth and evidence reuse', 'Depth reconciliation', 'Remediation limit'].freeze
-    RUNTIME_ASSET_FIELDS = %w[id role source source_commit git_blob sha256 mode destination purpose].freeze
+    RUNTIME_ASSET_FIELDS = {
+      'task_checkpoint' => %w[id role source source_commit git_blob sha256 mode destination purpose],
+      'paused_run_continuation' => %w[id role source source_commit git_blob sha256 mode destination purpose],
+      'artifact_controls' => %w[id role source sha256 mode destination purpose]
+    }.freeze
     CODEX_RUNTIME_ASSETS = {
       'task_checkpoint' => {
         'role' => 'launcher',
@@ -36,6 +40,14 @@ module Fable
         'mode' => '100644',
         'destination' => 'scripts/paused_run_continuation.rb',
         'purpose' => 'required_only_for_continue_paused_run_transition'
+      },
+      'artifact_controls' => {
+        'role' => 'supporting_helper',
+        'source' => 'fable-method/scripts/fable_artifact_controls.py',
+        'sha256' => '075fb89a1d93f2db964abd60cc2d72238298b7d916068df9e10ea3b31d8169dc',
+        'mode' => '100644',
+        'destination' => 'scripts/fable_artifact_controls.py',
+        'purpose' => 'local_codex_artifact_logs_and_worktree_lifecycle'
       }
     }.freeze
     LIVE = {
@@ -205,13 +217,17 @@ module Fable
           if name == 'fable-method' && platform == 'codex'
             fail Error, 'Codex runtime asset set mismatch' unless runtime_assets.map { |asset| asset.is_a?(Hash) && asset['id'] }.compact == CODEX_RUNTIME_ASSETS.keys
             runtime_assets.each do |asset|
-              mapping!(asset, RUNTIME_ASSET_FIELDS, 'runtime asset')
+              fields = RUNTIME_ASSET_FIELDS[asset['id']]
+              fail Error, 'unsupported Codex runtime asset' unless fields
+              mapping!(asset, fields, 'runtime asset')
               contract = CODEX_RUNTIME_ASSETS.fetch(asset['id'])
               contract.each do |field, expected|
                 fail Error, "Codex runtime asset #{asset['id']} #{field} mismatch" unless asset[field] == expected
               end
-              %w[source_commit git_blob].each do |field|
-                fail Error, "Codex runtime asset #{asset['id']} #{field} must be a Git SHA-1" unless asset[field].is_a?(String) && asset[field].match?(/\A[0-9a-f]{40}\z/)
+              if asset.key?('source_commit') || asset.key?('git_blob')
+                %w[source_commit git_blob].each do |field|
+                  fail Error, "Codex runtime asset #{asset['id']} #{field} must be a Git SHA-1" unless asset[field].is_a?(String) && asset[field].match?(/\A[0-9a-f]{40}\z/)
+                end
               end
               fail Error, "Codex runtime asset #{asset['id']} sha256 must be a SHA-256" unless asset['sha256'].is_a?(String) && asset['sha256'].match?(/\A[0-9a-f]{64}\z/)
               fail Error, "Codex runtime asset #{asset['id']} mode mismatch" unless asset['mode'] == contract['mode']
@@ -311,8 +327,10 @@ module Fable
       stat = self.class.safe_path!(path)
       fail Error, "runtime asset source is not a file: #{asset['source']}" unless stat.file?
       content = File.binread(path)
-      git_blob = Digest::SHA1.hexdigest("blob #{content.bytesize}\0#{content}")
-      fail Error, "runtime asset Git blob mismatch: #{asset['source']}" unless git_blob == asset['git_blob']
+      if asset.key?('git_blob')
+        git_blob = Digest::SHA1.hexdigest("blob #{content.bytesize}\0#{content}")
+        fail Error, "runtime asset Git blob mismatch: #{asset['source']}" unless git_blob == asset['git_blob']
+      end
       sha256 = Digest::SHA256.hexdigest(content)
       fail Error, "runtime asset SHA-256 mismatch: #{asset['source']}" unless sha256 == asset['sha256']
       expected_mode = Integer(asset['mode'].delete_prefix('100'), 8)
@@ -427,6 +445,7 @@ module Fable
       unless runtime_assets.empty?
         launcher = runtime_assets.find { |asset| asset['role'] == 'launcher' }
         companion = runtime_assets.find { |asset| asset['role'] == 'required_companion' }
+        artifact_controls = runtime_assets.find { |asset| asset['id'] == 'artifact_controls' }
         files['SKILL.md'] += <<~RUNTIME
 
           ## Codex Runtime Materialization
@@ -435,10 +454,11 @@ module Fable
           - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `#{launcher['destination']}` with the manifest-declared executable mode.
 
           - **Required Companion:** `#{companion['destination']}` is loaded only for `--continue-paused-run`, pinned to Git blob `#{companion['git_blob']}` from commit `#{companion['source_commit']}`.
+          - **Local Artifact Controls:** `#{artifact_controls['destination']}` is a standard-library helper copied from `#{artifact_controls['source']}` with SHA-256 `#{artifact_controls['sha256']}`.
           - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
           - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 
-          A Codex bundle is Runtime Distribution Ready only when every manifest-declared asset matches its pinned bytes and mode; the platform generator's `--check` verifies that state. A documentation-only bundle is not Runtime Distribution Ready.
+          A Codex bundle is Runtime Distribution Ready only when every manifest-declared asset matches its declared SHA-256 and mode; pinned assets also match their Git blob. The platform generator's `--check` verifies that state. A documentation-only bundle is not Runtime Distribution Ready.
         RUNTIME
       end
       # Projection bundles must resolve both paths and fragments entirely within

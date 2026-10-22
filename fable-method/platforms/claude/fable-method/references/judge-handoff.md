@@ -10,11 +10,8 @@
 - [Fresh Judge session lineage](#fresh-judge-session-lineage)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
-<<<<<<< HEAD
-- [Containment and memory evaluation](#containment-and-memory-evaluation)
-=======
   - [Non-Git artifact route](#non-git-artifact-route)
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
+- [Containment and memory evaluation](#containment-and-memory-evaluation)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -286,21 +283,6 @@ must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
 
-<<<<<<< HEAD
-## Containment and memory evaluation
-
-When containment or memory writes are load-bearing for the Packet, evaluate
-those boundaries read-only against the actual final tree and filesystem under
-[workspace containment](workspace-containment.md) and
-[memory boundary](memory-boundary.md). Compare only the current task's T0/T1
-interval; historical absence is an accepted baseline, and unattributed sibling
-changes are report-only unless they affect canonical state or a required input.
-Check that task-created workspaces and persistent memory/handoff writes have
-exact path and purpose authorization. Do not broaden this into an automatic
-workspace or memory audit. The Judge reports observed violations; it does not
-create, remove, or repair them. Remediation stays Worker-owned under the normal
-one-remediation limit. This check adds no Judge trigger or authorization.
-=======
 ### Non-Git artifact route
 
 When the judged output is a generated artifact under a non-Git source root (see
@@ -377,7 +359,20 @@ manifest, hash, or ledger entry is missing, state `UNVERIFIABLE` or `UNKNOWN`
 with the exact missing item rather than filling the gap. This route does not
 change Judge launch authority, depth selection, or verdict standards; the Judge
 still derives its own trigger and depth from the Packet and evidence.
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
+
+## Containment and memory evaluation
+
+When containment or memory writes are load-bearing for the Packet, evaluate
+those boundaries read-only against the actual final tree and filesystem under
+[workspace containment](workspace-containment.md) and
+[memory boundary](memory-boundary.md). Compare only the current task's T0/T1
+interval; historical absence is an accepted baseline, and unattributed sibling
+changes are report-only unless they affect canonical state or a required input.
+Check that task-created workspaces and persistent memory/handoff writes have
+exact path and purpose authorization. Do not broaden this into an automatic
+workspace or memory audit. The Judge reports observed violations; it does not
+create, remove, or repair them. Remediation stays Worker-owned under the normal
+one-remediation limit. This check adds no Judge trigger or authorization.
 
 ## Verdict and lifecycle boundaries
 

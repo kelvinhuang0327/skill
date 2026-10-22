@@ -243,10 +243,10 @@ evidence permits progress; unexplained scoped mutation stops the write and
 requires ownership reconciliation.
 
 `TaskCheckpoint.scope_qualified_active_writer?` is an optional convenience in
-<<<<<<< HEAD
-the source helper (`fable-method/scripts/task_checkpoint.rb`), which the
-canonical platform build intentionally excludes. The observable snapshots are
-authoritative, and helper absence is never a blocker. The complete fallback is
+the source helper (`fable-method/scripts/task_checkpoint.rb`). Codex builds
+materialize only helpers declared in `platforms.yaml`; other platform builds
+may omit executable helpers. The observable snapshots are authoritative, and
+helper absence is never a blocker. The complete fallback is
 to capture the exact designated worktree and task-owned paths, branch, HEAD,
 tree, full status (including staged, unstaged, and untracked paths), and each
 owned path's identity/content metadata; repeat the same capture after a bounded
@@ -255,20 +255,6 @@ process only when directly observed target paths overlap the exact worktree or
 owned surface; a process name alone is insufficient. Unresolved writer
 ownership remains fail-closed. The default observation is about five seconds,
 but callers may choose another bounded interval when the task requires it.
-=======
-the source helper (`fable-method/scripts/task_checkpoint.rb`). Installed
-builds intentionally exclude executable helpers, so helper absence is never a
-blocker. The explicit bounded before/after snapshots are authoritative. If the
-helper is unavailable, capture the exact designated worktree and task-owned
-paths, branch, HEAD, tree, full status (including staged, unstaged, and
-untracked paths), and each owned path's identity/content metadata; repeat the
-same capture after a bounded interval. Any difference is active mutation.
-With stable snapshots, count a process only when directly observed target
-paths overlap the exact worktree or owned surface; a process name alone is
-insufficient. Unresolved writer ownership remains fail-closed. The default
-observation is about five seconds, but callers may choose another bounded
-interval when the task requires it.
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 ## Long-running execution recovery
 
@@ -381,18 +367,6 @@ exits. The lock file is retained; the OS releases the lock when the last
 inherited descriptor closes. This protects one task writer across distinct
 execution IDs and wrapper crashes.
 
-<<<<<<< HEAD
-### Optional protected run entrypoint
-
-This CLI is an optional convenience; executable helpers are intentionally not
-included in the canonical installed build. Its absence from an installed skill
-is never a blocker by itself. When the confirmed Fable checkout has the helper,
-the CLI provides the lock and durable-capture guarantees described here. When
-it is unavailable before execution, use the complete bounded fallback below:
-exact Packet-owned worktree and argv, local-only/no-high-risk effects, exact
-record/PID inspection where applicable, and before/after snapshots. Do not
-claim inherited-lock crash protection for a direct launch.
-=======
 ### Lock generation and migration
 
 Generation-2 protected locks are anchored in Git's common metadata directory
@@ -414,7 +388,15 @@ absent anchor. Workers must not clear the block by deleting, renaming, or
 recreating legacy lock files.
 
 ### Protected run entrypoint
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
+
+This CLI is an optional convenience; executable helpers are intentionally not
+included in the canonical installed build. Its absence from an installed skill
+is never a blocker by itself. When the confirmed Fable checkout has the helper,
+the CLI provides the lock and durable-capture guarantees described here. When
+it is unavailable before execution, use the complete bounded fallback below:
+exact Packet-owned worktree and argv, local-only/no-high-risk effects, exact
+record/PID inspection where applicable, and before/after snapshots. Do not
+claim inherited-lock crash protection for a direct launch.
 
 Select the launcher checkout under SKILL.md's launcher-selection rule, then
 invoke:
@@ -641,7 +623,6 @@ with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
 
-<<<<<<< HEAD
 A terminal failed recovery successor requires separate explicit authorization:
 use `--retry-recover-run` with its failed successor execution ID, the same
 checkpoint/worktree locators, and the complete newly authorized argv after
@@ -652,7 +633,7 @@ or ambiguous sources are refused. Recovery predecessor IDs are historical
 provenance (`recovery_parent_execution_id`), while `parent_execution_id` names
 only active protected descendants; the retry owns a fresh inherited-lock
 lineage. Existing records without verifiable recovery provenance fail closed.
-=======
+
 ## Owner-authorized paused execution continuation
 
 `--recover-run` remains limited to one dead, incomplete `STARTED` execution.
@@ -722,7 +703,6 @@ continuation authority. Neither a generic failed execution nor a
 scientific-terminal checkpoint is eligible through this mode. Historical
 execution outcomes are not reinterpreted; only a new authorized continuation
 can claim a `PAUSED_RESUMABLE` checkpoint.
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 ## Publication live-state classifier
 

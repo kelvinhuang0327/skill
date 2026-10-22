@@ -9,11 +9,6 @@ require 'tmpdir'
 require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
-<<<<<<< HEAD
-class HeavyScientificLeaseTest < Minitest::Test
-  def setup
-    @tmpdir = Dir.mktmpdir('heavy_scientific_lease_test_')
-=======
 module HeavyScientificLeaseTestScratch
   ROOT = File.expand_path('../../.task-disposable-scratch', __dir__).freeze
 
@@ -58,7 +53,6 @@ end
 class HeavyScientificLeaseTest < Minitest::Test
   def setup
     @tmpdir = HeavyScientificLeaseTestScratch.mktmpdir('heavy_scientific_lease_test_')
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
     @repo = File.join(@tmpdir, 'repo')
     @worktree = File.join(@tmpdir, 'worktree')
     FileUtils.mkdir_p([@repo, @worktree])
