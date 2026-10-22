@@ -156,7 +156,7 @@ IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
 JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 ```
 
-`IMPLEMENTATION_DEPTH` 只適用於 `STATE_CHANGING_IMPLEMENTATION`；其他任務類型省略深度與理由。實作任務預設選 `NORMAL`。只有在 Fable 明列的深度觸發條件確實成立時才選 `ENHANCED`：實際修改的行為命中 workload-shape trigger；一次低成本定位後仍有會導向不同修法的多個具體根因；或權威來源衝突經來源核對後仍存在。選擇時在 `IMPLEMENTATION_DEPTH_REASON` 用一句話指出具體觸發條件與任務證據，不使用籠統的「任務複雜」。若 Planner 缺少足夠資訊判斷，省略深度值並在理由欄說明交由 `/fable-method` 按 canonical fallback 決定；不得填 `OMIT`。Worker 必須回報實際採用的深度與 `DEPTH_SOURCE`。深度不改變模型、route、Judge、agent 數、授權、範圍或驗收標準。
+`IMPLEMENTATION_DEPTH` 只適用於 `STATE_CHANGING_IMPLEMENTATION`；其他任務類型省略深度與理由。實作任務預設選 `NORMAL`。只有在 Fable 明列的深度觸發條件確實成立時才選 `ENHANCED`：任務屬研究性質或正確改法尚未確定，須先有界探索並比較候選方案；實際修改的行為命中 workload-shape trigger；一次低成本定位後仍有會導向不同修法的多個具體根因；或權威來源衝突經來源核對後仍存在。選擇時在 `IMPLEMENTATION_DEPTH_REASON` 用一句話指出具體觸發條件與任務證據，不使用籠統的「任務複雜」。若 Planner 缺少足夠資訊判斷，省略深度值並在理由欄說明交由 `/fable-method` 按 canonical fallback 決定；不得填 `OMIT`。Worker 必須回報實際採用的深度與 `DEPTH_SOURCE`。深度不改變模型、route、Judge、agent 數、授權、範圍或驗收標準。
 
 Judge 僅在 canonical trigger 或使用者明確要求時使用；需要時按當前 Fable `references/judge-handoff.md` 決定 depth 與 exact final identity，不複製另一份 trigger 清單。只有發出 Judge request 不算已審查；self-check 不算獨立驗證。Fresh Context 需實際新上下文；沒有該能力就據實回報，不偷偷省略必要 gate。對 session 名稱分開記錄 requested／actual，不捏造 parent 或已改名。
 

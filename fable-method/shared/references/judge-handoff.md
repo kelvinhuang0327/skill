@@ -20,9 +20,10 @@ verdict.
 
 ## When the Judge gate fires
 
-The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
-category and material consequence together. Do not restate or widen that list
-here. `LOOP_JUDGED` is judged by route definition, not by category.
+The Judge trigger has one definition, in `SKILL.md` "Route once": an explicit
+request from the Packet or the Owner. Do not restate or widen that list
+here. Fable never infers a Judge from risk categories, and `LOOP_JUDGED` is
+judged by route definition.
 
 The routing fields have separate jobs: `JUDGE_TRIGGER` answers whether an
 independent Judge is required at all. `JUDGE_MODE` answers how that handoff

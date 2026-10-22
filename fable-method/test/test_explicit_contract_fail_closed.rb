@@ -526,22 +526,16 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
-  def test_shared_front_door_skips_git_tier_load_only_for_resolved_local_commit
-    clauses = [
-      'Consult [operational gates](references/operational-gates.md#git-action-tiers) before any Git lifecycle action except an ordinary local commit on an already-resolved FAST task',
-      '`COMMIT_AUTHORIZED: YES`, the exact repository/worktree and write scope are known, and the commit target/history identity is unambiguous.',
-      'The exception applies only to a non-destructive local commit with no force/fallback, local branch/worktree deletion, remote mutation (including push, Draft/Ready PR, or merge), or authorization conflict; commit directly without loading the detailed Git-action tiers.',
-      'Consult the reference for every other Git action or whenever authorization, scope, or identity is missing, ambiguous, or conflicted.'
-    ]
-    weakenings = {
-      'before any Git lifecycle action except an ordinary local commit' => 'before every Git lifecycle action, including an ordinary local commit',
-      'on an already-resolved FAST task' => 'on any task',
-      'COMMIT_AUTHORIZED: YES' => 'COMMIT_AUTHORIZED: NO',
-      'no force/fallback, local branch/worktree deletion, remote mutation' => 'force/fallback, local branch/worktree deletion, remote mutation',
-      'without loading the detailed Git-action tiers' => 'only after loading the detailed Git-action tiers',
-      'for every other Git action' => 'only for remote Git actions'
-    }
-    assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
+  # The FAST-only front-door exception was removed with the complexity router:
+  # any route commits locally under COMMIT_AUTHORIZED: YES without loading the
+  # Git tiers, and every remote or destructive Git action is an explicit trigger.
+  def test_local_commit_skips_git_tiers_and_remote_actions_trigger_them
+    assert_canonical_contract_controls('SKILL.md', 'Execution', [
+      'Local reversible edits, and a local commit when `COMMIT_AUTHORIZED: YES`, need nothing more.'
+    ], { 'COMMIT_AUTHORIZED: YES' => 'COMMIT_AUTHORIZED: NO' })
+    assert_canonical_contract_controls('SKILL.md', 'Explicit Packet triggers', [
+      '| Push, PR, merge, or branch or worktree deletion | [Git action tiers](references/operational-gates.md#git-action-tiers) |'
+    ], { 'Push, PR, merge, or branch or worktree deletion' => 'Push' })
   end
 
   def test_canonical_exact_untracked_cardinality_contract
@@ -666,7 +660,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'Owner authorization and harness capability are separate facts' => 'Owner authorization and harness capability are equivalent facts',
       'does not change Planner routing semantics' => 'changes Planner routing semantics'
     }
-    assert_includes Parser.skill, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
+    assert_includes Parser.operational_gates, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
     assert_canonical_contract_controls(
       'references/operational-gates.md', 'Authorization evidence and conversation boundary',
       clauses, weakenings
@@ -815,11 +809,11 @@ class ExplicitContractFailClosedTest < Minitest::Test
   # same assertion to fail, then re-reads and verifies the untouched source.
   def test_fast_orchestration_case_a_resolved_facts_and_direct_implementation
     clauses = [
-      'Reuse already-authoritative repository/scope facts unless a live contradiction appears; grouping is not a reason to rediscover them.',
-      'Repeat repository, history, worktree, or process discovery only when a live contradiction makes it load-bearing.'
+      'Treat the facts and decisions it states as given.',
+      'Check a stated fact against live state only when acting on it would otherwise fail.'
     ]
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
-      'unless a live contradiction appears' => 'after every tool call'
+    assert_canonical_contract_controls('SKILL.md', 'Fresh agent', clauses, {
+      'only when acting on it would otherwise fail' => 'after every tool call'
     })
     assert_canonical_contract_controls('SKILL.md', 'Route once', [
       'Once the cause and authorized fix are known on a resolved FAST task, implement directly without a second planning phase.',
@@ -827,74 +821,36 @@ class ExplicitContractFailClosedTest < Minitest::Test
     ], { 'without a second planning phase' => 'after a second planning phase' })
   end
 
-  def test_fast_orchestration_case_b_independent_preflight_group
-    clauses = [
-      'For a resolved FAST task, prefer one bounded grouped read-only action for independent live facts such as repository identity, current HEAD/tree, worktree status, authorized scope, and required local file existence.',
-      'Group only when independence and safety are already established.'
-    ]
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
-      'prefer one bounded grouped read-only action' => 'require a separate read-only action per fact',
-      'independence and safety are already established' => 'independence and safety are unknown'
-    })
-  end
-
-  def test_fast_orchestration_case_c_dependent_safety_gate_remains_serial
-    clauses = [
-      'If a next action depends on a prior result to decide whether it is safe, keep those actions serial.',
-      'No particular shell syntax or mandatory batching is required.'
-    ]
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
-      'keep those actions serial' => 'batch those actions regardless',
-      'No particular shell syntax or mandatory batching is required.' => 'Mandatory shell batching is required.'
-    })
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', [
-      'Keep dependent checks serial under the preflight grouping rule above, and observe every required result; a grouped invocation alone is not PASS.'
-    ], { 'Keep dependent checks serial' => 'Batch dependent checks' })
-  end
-
-  def test_fast_orchestration_case_d_independent_required_acceptance_group
-    clauses = [
-      'For a resolved FAST task, prefer one bounded verification action containing already-required checks when they are independent and safe to group:',
-      'focused tests, formatter/linter checks, `git diff --check`, changed-path verification, and final tracked-status checks when applicable.',
-      'observe every required result; a grouped invocation alone is not PASS.'
-    ]
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, {
-      'already-required checks' => 'additional speculative checks',
-      'when they are independent and safe to group' => 'even when they depend on prior results',
-      'observe every required result' => 'observe only the final result'
-    })
-  end
-
+  # Cases B-D (grouped preflight, serial dependent gates, grouped acceptance)
+  # guarded FAST batching guidance that the complexity router removed.
   def test_fast_orchestration_case_e_acceptance_stops_verification
     clauses = [
-      'Once acceptance is falsifiably covered and every required check passes, stop verification and reuse that evidence for handoff.',
-      'Do not add a broad inspection, full suite, Judge, evidence pass, or separate identity/reporting verification pass unless explicitly required by the task, an applicable existing gate, or a new live contradiction.',
-      'Specifically authorized commit/publication and their required identity/status observations still follow the existing lifecycle gates.'
+      'Run the named acceptance and only directly relevant surrounding checks.',
+      "A full suite, Judge, evidence pass, or repeated review runs only when the Packet's acceptance names it.",
+      'Once acceptance passes, stop verifying.'
     ]
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, {
-      'and every required check passes' => 'even when a required check is missing',
-      'stop verification and reuse that evidence' => 'start another verification phase',
-      'an applicable existing gate' => 'no existing gate',
-      'still follow the existing lifecycle gates' => 'bypass the existing lifecycle gates'
+    assert_canonical_contract_controls('SKILL.md', 'Verification', clauses, {
+      'only directly relevant surrounding checks' => 'the full suite',
+      "runs only when the Packet's acceptance names it" => 'runs on every task',
+      'stop verifying' => 'start another verification phase'
     })
   end
 
-  def test_fast_orchestration_case_f_unresolved_safety_gates_fail_closed
+  # Case F guarded the front-door kernel; the four hard boundaries replace it.
+  def test_hard_boundaries_are_the_only_default_stops
     clauses = [
-      'Any unresolved front-door gate blocks direct FAST entry and follows existing fail-closed or escalation behavior.',
-      'Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.',
-      'If write ownership remains unresolved, stop before edit, verification, or ownership mutation.',
-      'Grouping never resolves or bypasses an unresolved authority, active-writer, ownership, capability, or destructive Git gate; existing fail-closed handling still applies.'
+      'These are the only default stops.',
+      'No push, merge, deletion, external message, or database or cloud write without explicit Owner authorization in the Packet',
+      "Never overwrite, reset, stash, clean, or discard someone else's uncommitted or active work.",
+      '`NOT RUN` is never `PASS`, and neither is `UNKNOWN`.',
+      'Stop only on material conflicts involving explicit authorization, required inputs, or risk of overwriting active work.'
     ]
-    weakenings = {
-      'blocks direct FAST entry' => 'permits direct FAST entry',
-      'stop before edit, verification, or ownership mutation' => 'continue to edit and verify'
-    }
-    %w[authority active-writer ownership capability].each do |gate|
-      weakenings[gate + ','] = ''
-    end
-    weakenings['or destructive Git gate'] = 'or harmless Git gate'
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+    assert_canonical_contract_controls('SKILL.md', 'Hard boundaries', clauses, {
+      'without explicit Owner authorization in the Packet' => 'whenever the Packet does not forbid it',
+      "someone else's uncommitted or active work" => 'stale work',
+      'is never `PASS`' => 'may count as `PASS`',
+      'explicit authorization, required inputs, or risk of overwriting active work' => 'anything unexpected'
+    })
   end
 
   private

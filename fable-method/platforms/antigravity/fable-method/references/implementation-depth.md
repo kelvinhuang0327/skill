@@ -35,7 +35,9 @@ that has only ever been observed green, per
 already demonstrates this rather than adding a new one. When two or more
 concrete root causes remain after one cheap localization step and they would
 lead to different fixes, get the cheapest observation that discriminates
-between them before choosing.
+between them before choosing. For research, or when the right change is not
+known yet, time-box exploration to named candidate approaches, compare them on
+the same evidence, and stop exploring once the choice is made.
 
 Report once, appended to the normal handoff:
 
@@ -58,6 +60,8 @@ acceptance already requires.
 Use the Packet's value when present. Absent a Packet value, select `NORMAL`
 unless one of these applies, and name which one:
 
+- the task is research, or the right change is not known yet, so two or more
+  candidate approaches have to be explored and compared before implementing;
 - a [workload-shape trigger](judge-handoff.md#depth-and-evidence-reuse) is
   materially exercised by behavior this task actually implements or modifies
   — not merely mentioned in surrounding history, a commit message, or a

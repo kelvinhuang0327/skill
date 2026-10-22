@@ -12,6 +12,10 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   FAILURE_MODES = File.read(File.join(SHARED_ROOT, 'references', 'failure-modes.md'))
   RCA_CONTRACT = [SKILL, FLOWCHARTS, FAILURE_MODES].join("\n")
   JUDGE_HANDOFF = File.read(File.join(SHARED_ROOT, 'references', 'judge-handoff.md'))
+  TASK_CHECKPOINT = File.read(File.join(SHARED_ROOT, 'references', 'task-checkpoint.md'))
+  # Recovery of a prior long-running execution is an explicit trigger now; its
+  # prose moved from SKILL.md into this task-checkpoint section unchanged.
+  RECOVERY = TASK_CHECKPOINT[/^## Long-running execution recovery\n.*?(?=^## )/m]
   JUDGE_TRIGGER_CONTRACT = {
     'SKILL.md' => SKILL,
     'references/judge-handoff.md' => JUDGE_HANDOFF,
@@ -181,13 +185,15 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
     end
   end
 
-  def test_material_unknown_remains_the_uncertainty_trigger
+  # The category-based Judge trigger (including material unknown evidence) was
+  # removed: a Judge now runs only on an explicit Packet or Owner request.
+  def test_judge_trigger_is_an_explicit_request_not_a_category
     assert_guarded_contract(SKILL, [
-      'A Judge trigger requires both a listed category and a material consequence:',
-      'explicit independent verification, or material unknown evidence.',
+      'A mandatory Judge trigger is an explicit request:',
+      'Fable never creates a Judge from risk categories or file counts.',
       'A single acceptance failure is not a trigger by itself.'
     ], weakenings: {
-      'or material unknown evidence.' => '.',
+      'never creates a Judge' => 'creates a Judge',
       'not a trigger by itself.' => 'always a trigger.'
     })
     ordinal_fixture = SKILL + ' A second failed attempt automatically triggers the Judge.'
@@ -203,7 +209,9 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   end
 
   def compacted_skill
-    SKILL.gsub(/\s+/, ' ')
+    refute_nil RECOVERY, 'task-checkpoint.md lost its long-running execution recovery section'
+    assert_includes SKILL, 'references/task-checkpoint.md#long-running-execution-recovery'
+    RECOVERY.gsub(/\s+/, ' ')
   end
 
   def recovery_clause(state)
@@ -213,7 +221,7 @@ class ResourceBudgetAndRcaContractTest < Minitest::Test
   def test_expensive_execution_recovery_classifies_exactly_four_states
     prose = compacted_skill
     %w[ACTIVE COMPLETE_VALID TERMINATED_INCOMPLETE UNRESOLVED].each do |state|
-      assert_includes SKILL, "`#{state}`", "shared Skill dropped recovery state #{state}"
+      assert_includes RECOVERY, "`#{state}`", "recovery section dropped recovery state #{state}"
     end
     assert_match(
       /classify the prior execution as exactly one of `ACTIVE`, `COMPLETE_VALID`, `TERMINATED_INCOMPLETE`, or `UNRESOLVED`/,

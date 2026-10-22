@@ -9,9 +9,10 @@
 - [Continuity](#continuity)
 - [Terminal reporting](#terminal-reporting)
 
-These are Gemini-harness integration rules. The shared Fable workflow remains
-the authority for task class, scope, Packet acceptance, route, authorization,
-and lifecycle vocabulary.
+These are Gemini-harness integration rules for `PROJECT_PROFILE:
+FORMAL_SECURE` or a Packet that names one of these gates; ordinary tasks do
+not load them. The shared Fable workflow remains the authority for task class,
+scope, Packet acceptance, route, authorization, and lifecycle vocabulary.
 
 ## Runtime output and process gates
 

@@ -81,13 +81,12 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '不得默認接管。',
       '- overlapping dirty ownership；'
     )
-    assert_fable(
-      'Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.',
-      'Any unresolved front-door gate blocks direct FAST entry and follows existing',
-      'fail-closed or escalation behavior.',
-      'If write ownership remains unresolved, stop before edit, verification, or',
-      'ownership mutation.'
-    )
+    # The front-door write-ownership kernel was replaced by hard boundaries 2
+    # and 4: overlapping active work is still never taken over.
+    assert_guarded_contract(FABLE, [
+      "Never overwrite, reset, stash, clean, or discard someone else's uncommitted or active work.",
+      'Stop only on material conflicts involving explicit authorization, required inputs, or risk of overwriting active work.'
+    ], weakenings: {'risk of overwriting active work.' => 'a failing test.'})
   end
 
   # Expected: an unrelated repository-wide failure is not automatically the

@@ -10,19 +10,19 @@
 - [Destructive action provenance](#destructive-action-provenance)
 - [Ownership and quiescence blocker evidence](#ownership-and-quiescence-blocker-evidence)
 - [Lifecycle closure](#lifecycle-closure)
-- [Context and continuity](#context-and-continuity)
 - [Filesystem accounting](#filesystem-accounting)
 - [Final artifact gate](#final-artifact-gate)
 
-Use the compact form for ordinary `FAST`/`STANDARD` work. Use the full
-evidence handoff for Judge-gated work, a blocked result, or a Packet that names
-additional fields.
+Use the compact form for ordinary work. The other sections apply only when the
+Packet names their fields, the route is judged, `PROJECT_PROFILE:
+FORMAL_SECURE` applies, or the task actually performs the action a section
+describes (a destructive removal, a runtime identity change, a publication).
 
 ## Compact Worker report
 
 ```text
 STATUS: <what happened, in plain language>
-ROUTE: <the selected WORKER_ROUTE>
+ROUTE: <WORKER_ROUTE> / <IMPLEMENTATION_DEPTH> (<DEPTH_SOURCE>)
 CHANGED: <authorized files/surfaces touched>
 VERIFIED: <commands/observations and real output>
 NOT RUN / BLOCKED: <checks not run and why>
@@ -345,31 +345,6 @@ FULL_PR_LIFECYCLE_CLOSED: NO
 Do not prewrite a Judge verdict, claim publication, or call local completion a
 closed PR lifecycle.
 
-## Context and continuity
-
-Never infer model identity, context capacity, current usage, or billing policy
-from the product name or maximum window. Resolve each independently and mark
-unavailable values `UNKNOWN`; do not make a cost-multiplier claim unless the
-active model, plan/policy, and threshold are current and authoritative.
-
-When exact usage metadata is unavailable, report
-`CURRENT_CONTEXT_PERCENT: UNKNOWN`,
-`CURRENT_CONTEXT_USAGE_SOURCE: HEURISTIC`, and a qualitative pressure level.
-At a stable milestone or before a large phase/handoff, preserve only observed
-state: exact repository/branch/HEAD/tree/status, active processes and pending
-mutations, completed files/commits, verification and `NOT RUN`, failed
-attempts, blocker, next action/milestone, and stop conditions. Do not write a
-checkpoint unless the Packet supplies both
-`HANDOFF_STORAGE_MODE: ALLOWLISTED_FILE` and an exact `HANDOFF_OUTPUT_PATH`;
-default to `TRANSCRIPT_ONLY`.
-
-After compaction or resume, report `CONTEXT_REHYDRATION_STATUS: PASS` only when
-project, task, authority, repository, sandbox, modified-path ledger, observable
-history, milestone, blocker, next action, next milestone, and stop conditions
-are all resolved. Otherwise report `CONTEXT_HANDOFF_INCOMPLETE` and do only
-read-only state resolution. Resume never clears a blocker, extends
-authorization, hides a failed attempt, or reopens a stopped mutation.
-
 ## Filesystem accounting
 
 Keep these lifecycle axes distinct:
@@ -456,15 +431,8 @@ Local-only commits use `COMMIT_LINK: NOT_APPLICABLE`.
 
 ## Final artifact gate
 
-Before a behavior-changing edit, include this exact intent line in the final
-report:
-
-```text
-INTENT: code does <X>; the check/task expects <Y>; the opened spec says <Z>
-```
-
-Hostile-review the final report against the Packet and actual diff/status.
-Every changed path must be authorized; every `PASS` needs an observed command,
+Check the final report against the Packet and the actual diff/status. Every
+changed path must be authorized; every `PASS` needs an observed command,
 observation, or valid same-tree evidence. Do not return terminal success while
 a mandatory criterion is `NOT RUN`, unresolved, or contradicted. Add the
 required `AUTH:`, `PENDING:`, or `TWINS:` line when its condition applies. Lead

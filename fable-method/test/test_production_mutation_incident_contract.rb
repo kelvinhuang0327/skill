@@ -50,21 +50,23 @@ class ProductionMutationIncidentContractTest < Minitest::Test
     assert_match(/this\npreflight does not apply to an ordinary non-production command/, OPERATIONAL_GATES)
   end
 
+  # The capability tri-state moved from SKILL.md into the triggered
+  # authorization section; the preflight still reuses that single definition.
   def test_preflight_reuses_existing_capability_status_tristate_not_a_second_one
-    assert_match(/CAPABILITY_STATUS: ALLOWED \| UNKNOWN \| BLOCKED/, SKILL)
+    assert_equal 1, OPERATIONAL_GATES.scan(/^CAPABILITY_STATUS: ALLOWED \| UNKNOWN \| BLOCKED$/).length
+    refute_match(/^CAPABILITY_STATUS:/, SKILL)
     assert_match(
-      /This is \[`CAPABILITY_STATUS`\]\(\.\.\/SKILL\.md#intent-authorization-and-surgical-execution\)'s\nexisting tri-state under one added constraint/,
+      /This is \[`CAPABILITY_STATUS`\]\(#authorization-evidence-and-conversation-boundary\)'s\nexisting tri-state under one added constraint/,
       OPERATIONAL_GATES
     )
-    assert_match(/## Intent, authorization, and surgical execution/, SKILL)
+    assert_match(/^## Authorization evidence and conversation boundary$/, OPERATIONAL_GATES)
   end
 
+  # SKILL.md no longer restates the preflight; a production or deployment
+  # mutation is an explicit trigger that loads it.
   def test_skill_md_points_to_the_same_chain_preflight_contract
-    assert_match(
-      /Before a production or deployment mutation, exercise this same tri-state through the exact harness\/wrapper\/launcher chain that will invoke the mutation/,
-      SKILL
-    )
-    assert_includes SKILL, 'references/operational-gates.md#production-mutation-harness-preflight'
+    assert_includes SKILL,
+                    '| A production or deployment mutation | [production mutation preflight](references/operational-gates.md#production-mutation-harness-preflight) |'
   end
 
   # --- Behavior B: ownership/quiescence blocker diagnostic evidence ---

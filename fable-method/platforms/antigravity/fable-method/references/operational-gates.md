@@ -5,13 +5,17 @@
 - [Packet and authority](#packet-and-authority)
 - [Authorization evidence and conversation boundary](#authorization-evidence-and-conversation-boundary)
 - [Production mutation harness preflight](#production-mutation-harness-preflight)
-- [Runtime outputs](#runtime-outputs)
 - [Shared workstation resource budget](#shared-workstation-resource-budget)
 - [Attempts and process termination](#attempts-and-process-termination)
 - [Git action tiers](#git-action-tiers)
 - [Canonical successor and source remediation dedup](#canonical-successor-and-source-remediation-dedup)
 - [Worktrees and mutation evidence](#worktrees-and-mutation-evidence)
-- [Continuity](#continuity)
+- [Auto worktree reclaim](#auto-worktree-reclaim)
+
+Ordinary work loads none of this file. Each section states its own trigger:
+an explicit Packet or Owner request, `PROJECT_PROFILE: FORMAL_SECURE`, or the
+task actually performing the action the section governs. Without a trigger,
+`SKILL.md` alone applies.
 
 These are conditional details for the shared workflow. They do not broaden a
 Packet or authorize an action that the Packet forbids. An explicitly
@@ -20,6 +24,10 @@ used as a fallback because preferred evidence is incomplete. Transcript is
 not an authority fallback by default.
 
 ## Packet and authority
+
+Trigger: `PROJECT_PROFILE: FORMAL_SECURE`, or a Packet that names a Phase 0,
+clean-worktree, or other pre-mutation gate. The live-activation handoff at the
+end of this section applies when the Packet asks for a Fable live activation.
 
 When a Packet supplies Phase 0 or an equivalent pre-mutation gate, complete it
 before the first write. Retain exact commands, results, authority HEAD/tree,
@@ -235,6 +243,15 @@ never suppresses or renames those fields.
 
 ## Authorization evidence and conversation boundary
 
+Trigger: `PROJECT_PROFILE: FORMAL_SECURE`, or a Packet that requires the Owner's
+authorization to be observed in the Worker's own conversation. Otherwise
+explicit Owner authorization written in the Packet is sufficient
+(`SKILL.md` hard boundary 1), and the rest of this section does not apply.
+
+```text
+CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
+```
+
 A standalone Owner authorization is evidence only where the executing Agent can
 verify the original human message and its provenance. Distinguish the evidence
 source explicitly:
@@ -330,7 +347,7 @@ preflight does not apply to an ordinary non-production command.
 HARNESS_EXECUTION_PERMISSION: ALLOWED | UNKNOWN | BLOCKED
 ```
 
-This is [`CAPABILITY_STATUS`](../SKILL.md#intent-authorization-and-surgical-execution)'s
+This is [`CAPABILITY_STATUS`](#authorization-evidence-and-conversation-boundary)'s
 existing tri-state under one added constraint: the probe must run through the
 exact same harness/wrapper/launcher chain that will invoke the production
 mutation, not a different entry point merely assumed equivalent. If that
@@ -346,35 +363,8 @@ invocation shape is equivalent. Owner authorization and harness capability
 remain separate gates: exact direct Owner authorization for the mutation does
 not itself establish `HARNESS_EXECUTION_PERMISSION`, and an `ALLOWED` probe
 result never substitutes for that authorization. One direct Owner message may
-contain both the authorization and executable Packet; applicable prior direct
-Owner authorization may be reused under the existing conversation-boundary
-contract. This probe adds no two-message requirement.
-
-## Runtime outputs
-
-Before a test, browser, server, reporter, profile, cache, trace, video,
-screenshot, log, PID, or temporary-output command:
-
-1. inspect direct and indirect output paths;
-2. resolve OS temporary paths when discoverable;
-3. compare every output root with the Packet's runtime-output allowlist;
-4. record before-state;
-5. stop before execution if any path is outside the allowlist.
-
-Use:
-
-```text
-ARTIFACT_OUTPUT_PATH_CONFLICT
-EXPECTED_OUTPUT_ALLOWLIST:
-ACTUAL_OUTPUT_PATH:
-OUTPUT_SOURCE:
-CLEANED_LATER:
-AUTHORIZED:
-SMALLEST_SAFE_NEXT_ACTION:
-```
-
-Cleanup does not retroactively authorize an output. A created-then-deleted
-artifact remains in the write ledger.
+contain both the authorization and executable Packet. This probe adds no
+two-message requirement.
 
 ## Shared workstation resource budget
 
@@ -439,6 +429,10 @@ SEMANTIC_EFFECT_OF_WORKER_COUNT:
 ```
 
 ## Attempts and process termination
+
+Trigger: judged, publication-bound, or `PROJECT_PROFILE: FORMAL_SECURE` work,
+or a Packet that asks for an attempt ledger. Otherwise report failed attempts
+briefly with their real output.
 
 For every non-trivial retry, keep:
 
@@ -510,10 +504,10 @@ UNLISTED_FALLBACK: NOT AUTHORIZED
 NEWLY_DISCOVERED_TARGET: NOT AUTHORIZED
 ```
 
-See [Authorization evidence and conversation
-boundary](#authorization-evidence-and-conversation-boundary) above for the
-required human provenance and parent execution fallback before any of these
-permissions take effect.
+Each permission comes from explicit Owner authorization (`SKILL.md` hard
+boundary 1). Under `PROJECT_PROFILE: FORMAL_SECURE`, [Authorization evidence
+and conversation boundary](#authorization-evidence-and-conversation-boundary)
+above also governs its provenance.
 
 `FORCE_FALLBACK_AUTHORIZED: YES` takes effect only for the exact fallback the
 Packet names, and only while every gate below still holds live: the lineage
@@ -613,6 +607,9 @@ Determining canonical supersession does NOT authorize closing PRs, pushing, merg
 
 ## Worktrees and mutation evidence
 
+Trigger: `PROJECT_PROFILE: FORMAL_SECURE`, worktree cleanup or removal, a
+production runtime mutation, or a Packet that names this gate.
+
 Use the exact Packet worktree path. Never create fallback, backup, scratch,
 sibling, or alternate workspaces. For an existing worktree, classify it as
 exact-head, behind remote, stable task-owned dirty, ownership unresolved,
@@ -664,22 +661,22 @@ launchctl actions, does not weaken standalone Owner authorization, does not
 create automatic rollback, and does not permit inferring transition ownership
 from reflog history.
 
-## Continuity
+## Auto worktree reclaim
 
-At stable milestones or before handoff, preserve observable state only:
+Trigger: a new implementation worktree created with
+`WORKTREE_CLOSE_POLICY: AUTO_CLOSE_AFTER_MERGE` preauthorized by the Owner.
 
-```text
-CONTEXT_CHECKPOINT
-CURRENT_MILESTONE:
-LIVE_EXECUTION_STATE:
-FORWARD_PLAN:
-LEDGER_REFERENCES:
-```
-
-Include exact repo/branch/HEAD/tree, worktree, dirty/staged paths, active
-processes, pending external mutations, next action/milestone, blockers,
-settled decisions, and unresolved Owner decisions. Continuation never expands
-authorization and never preserves private chain-of-thought.
-
-When persisting durable continuation state across sessions/models, use the
-contract and bounded live reconciliation algorithm in [task-checkpoint](task-checkpoint.md).
+Under `FABLE_AUTO_WORKTREE_RECLAIM_V1`, such a worktree undergoes two-phase
+safe automatic reclaim upon formal task completion. The helper verifies formal
+merge into the designated durable merge target (supporting both standard
+merges and verified squash merges backed by git tree/patch-id/provenance
+evidence) and ensures required formal artifacts are preserved outside the
+worktree. In the second phase, it performs immediate re-verification of Git
+worktree identity, clean working tree, lock status, active execution claims,
+quiescence of recurring schedulers, and active process inspection (using
+`core.fsmonitor=false` on all helper Git invocations to avoid helper-induced
+daemons and distinguishing caller execution shells from external active
+processes). Worktrees that are unmerged, dirty, locked, active, containing
+ordinary untracked files, lacking preauthorization, or belonging to
+historical/persistent workspaces are strictly preserved without deletion of
+branches or forced removal.

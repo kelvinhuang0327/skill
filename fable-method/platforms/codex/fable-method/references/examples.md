@@ -2,12 +2,12 @@
 
 Each example makes the definition of done and observed verification explicit.
 
-## 1. Trivial gate
+## 1. Simple — FAST
 
-“Rename `getUsrData` to `getUserData` in `api.ts`.” One file, under ten lines,
-no new behavior, and no search needed: edit, run the existing typecheck/build,
-and report the observed result. If search reveals multiple files, reclassify
-and enter the full loop.
+“Rename `getUsrData` to `getUserData` in `api.ts`.” One known file, a small
+change, no new behavior: edit, run the existing typecheck/build, and report the
+observed result. If search reveals multiple files, say so and switch to
+`STANDARD`.
 
 ## 2. Question or assessment
 
@@ -16,78 +16,38 @@ line, network, or measurement evidence. Read the data-fetch and render paths,
 observe requests, state one cause and one recommended fix, and offer the fix as
 a separate future task.
 
-## 3. Task
+## 3. Normal — STANDARD
 
-“Fix the failing date test.” Done means the named test and the surrounding suite
-pass. Read test and implementation, surface a surprise if the test is right
-and the code drops timezone information, make the smallest change, run the
-named acceptance and surrounding suite, and report the real counts.
+“Fix the failing date test.” Done means the named test and the tests that
+cover the changed code pass. Read test and implementation, surface a surprise
+if the test is right and the code drops timezone information, make the
+smallest change, run the focused checks, and report the real counts.
 
-## 4. Plan-first
+## 4. Hard or research — STANDARD / ENHANCED
+
+“Make the nightly import job finish in under ten minutes.” The cause and the
+right change are not known yet. Profile once, name the two or three candidate
+causes, take the cheapest observation that tells them apart, pick one, and
+implement it. Verify the invariants the change could break (same output rows,
+no lost records) with checks that fail on the unfixed code, then report
+`ENHANCED_EVIDENCE`.
+
+## 5. Plan-first
 
 “Analyze project configuration and propose a global standard.” A broad or
 outward change is plan-first. Enumerate actual configurations, read them,
 state conflicts and one recommendation with verification for each step, then
 stop for approval. Do not edit during the plan.
 
-## 5. Lifecycle closure — superseded branch
-
-An original PR closed unmerged; its successor merged after a mechanical
-cherry-pick, so the original is fully superseded. A clean local worktree, a
-local branch still pointing at the original SHA, and the matching remote
-branch all remain. Done means every one of those surfaces reaches a verified
-terminal state, not just the local ones.
-
-Run one bounded closure preflight to confirm the supersession still holds,
-then expose every remaining surface — worktree, local branch, remote branch —
-in one Lifecycle closure bundle. Wait for one standalone Owner authorization
-that names the exact worktree removal, the exact normal local delete, an
-exact force fallback with its gates, and the exact remote delete. Re-check
-target identities, try the normal local delete first, and only use the force
-fallback if it refuses solely because of cherry-pick ancestry and every
-fallback gate still passes. If one target has drifted, skip it and continue
-the others. Report the exact residuals and the true `FULL_PR_LIFECYCLE_CLOSED`
-state.
-
-If the force fallback or the remote delete was not explicitly part of that
-one authorization, stop or leave that action `PENDING` exactly as for any
-other unauthorized destructive or remote action — a generic cleanup
-authorization never covers either one.
-
-## 6. Authorization conversation boundary
-
-A Planner conversation records the Owner's authorization, then hands a Worker
-Packet to a separate Worker conversation that only quotes the token. That
-quote is metadata, not evidence: the Worker has not observed the Owner say it,
-so it holds the high-risk step with `OWNER_ACTION_AUTHORIZATION_REQUIRED`. The
-Owner then sends one direct message here carrying the Packet together with the
-exact action and target — no authorization-only message first. The Worker
-checks that message against the exact action and target, treats it as valid
-evidence, and proceeds without asking again. Had Owner and Worker shared one
-conversation from the start, a still-applicable prior direct authorization
-there would already have been sufficient. In every case, an action outside the authorized envelope — an unlisted remote
-deletion, say — stays `PENDING` regardless of how the original authorization
-arrived.
-
 ## Compact flow without a Packet
 
 1. Classify the ask: plan-first beats task; a mixed “why and fix” is a task;
    a pure question changes nothing. Ask one pointed question only when
    evidence cannot resolve materially different deliverables.
-2. Define done as an observable result and name its verification. Check
-   assumptions instead of assuming them.
-3. Orient by enumerating safe sources, read primary sources, parallelize
-   independent expensive reads, time-box lookups, surface surprises, and make
-   one evidence-backed recommendation.
+2. Define done as an observable result and name its verification.
+3. Pick the complexity flow from `SKILL.md`, read the primary sources it needs,
+   and make one evidence-backed recommendation or change.
 
-The triviality gate requires one file, under about ten changed lines, no new
-behavior, and no searching. Otherwise use the full loop. For implementation,
-continue with intent → smallest coherent change → acceptance → surrounding
-verification → handoff/report.
-
-State checkable assumptions and load the applicable domain adapter before
-Step 2. The Fit gate routes reachable-source questions through the loop,
-researchable unknown techniques through bounded research first, pure inference
-to an explicitly low-confidence answer or one pointed question, and recurring
-specialized procedures to the installed skill-creator Skill. Name each such
-detour; never silently skip the loop.
+Load the matching domain adapter for non-coding work. A researchable unknown
+gets bounded research first; pure inference gets an explicitly low-confidence
+answer or one pointed question.

@@ -1,5 +1,12 @@
 # Resumable Task Checkpoints
 
+Load this file only when the Packet or the Owner explicitly asks for one of its
+procedures: a checkpoint, a deferred blocked-task queue, a protected or
+long-running launch, recovery of a prior long-running execution, paused-run
+continuation, lock migration, or publication reconciliation. Ordinary tasks
+never need it. Long-running compute exclusion is owned by the B-lane launcher,
+which keeps its locks and code; Fable does not require it for ordinary work.
+
 ## Contents
 
 - [Overview and core principles](#overview-and-core-principles)
@@ -321,6 +328,26 @@ above: session or UI disappearance alone is never itself evidence of failure.
 `ExecutionRecord.start!` persists a `STARTED` record with the real PID before
 the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
 `durable_capture_path` once the work's durable terminal evidence exists.
+
+Session, quota, shell, or handoff loss does not prove execution failure.
+Resolve the exact scope-qualified process/writer and canonical durable output,
+then classify the prior execution as exactly one of `ACTIVE`,
+`COMPLETE_VALID`, `TERMINATED_INCOMPLETE`, or `UNRESOLVED`. `ACTIVE`: wait,
+observe, or attach; never launch a duplicate. `COMPLETE_VALID`: reuse the
+existing output; do not rerun. File existence alone is not `COMPLETE_VALID`;
+the durable output must satisfy its task acceptance and available terminal
+evidence. `TERMINATED_INCOMPLETE`: rerun is permitted only if the original
+task authority allows that rerun; classification does not grant new scope or
+authorization. `UNRESOLVED`: stop rather than risk concurrent or duplicate
+execution.
+
+When acceptance concerns serialization or artifact byte determinism, reuse the
+same already-computed semantic result, independently serialize or reconstruct
+the serialized bytes, and compare them. Do not rerun an expensive upstream
+computation solely for byte-level determinism. Independent algorithm/process
+replay is required only when the Packet explicitly makes replay part of
+acceptance. Do not weaken existing `NOT RUN`, retry-ledger, RCA, Judge, or
+evidence-honesty rules.
 
 ### Atomic acquisition boundary
 
