@@ -254,7 +254,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `075fb89a1d93f2db964abd60cc2d72238298b7d916068df9e10ea3b31d8169dc`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `d730c65cf476f031ab9e1ea2d242ddcbcd0d9b6ed69794e637f340da8eb54df4`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

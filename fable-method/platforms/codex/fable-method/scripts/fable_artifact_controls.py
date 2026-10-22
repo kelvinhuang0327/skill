@@ -657,6 +657,85 @@ def _parse_worktree_list(repo: Path) -> set[Path]:
     return paths
 
 
+def _branch_ref_exists(repo: Path, branch: str) -> bool:
+    ref = f"refs/heads/{branch}"
+    result = git(repo, "show-ref", "--verify", "--quiet", ref, check=False)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    detail = result.stderr.strip() or result.stdout.strip()
+    raise ControlError(f"cannot verify planned branch ref {ref}: {detail}")
+
+
+def _worktree_creation_baseline(
+    repo: Path,
+    worktree: Path,
+    base: str,
+    base_commit: str,
+    branch: str,
+) -> dict[str, Any]:
+    if worktree.exists() or worktree.is_symlink():
+        raise ControlError("planned worktree path already exists; refusing to adopt it")
+    branch_ref = f"refs/heads/{branch}"
+    if _branch_ref_exists(repo, branch):
+        raise ControlError(f"planned branch ref already exists; refusing to overwrite: {branch_ref}")
+    base_tree = git(repo, "rev-parse", "--verify", f"{base_commit}^{{tree}}").stdout.strip()
+    common_dir = canonical_directory(
+        git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip(),
+        "Git common directory",
+    )
+    return {
+        "worktree_access_scope": "TARGET_ONLY",
+        "other_worktrees": "NOT_INSPECTED",
+        "target_path": str(worktree),
+        "target_exists": False,
+        "target_registration": "NOT_ENUMERATED",
+        "branch_ref": branch_ref,
+        "branch_ref_exists": False,
+        "base_ref": base,
+        "base_commit": base_commit,
+        "base_tree": base_tree,
+        "repository_git_common_dir": str(common_dir),
+    }
+
+
+def _target_worktree_identity(repo: Path, worktree: Path) -> dict[str, Any]:
+    target = canonical_directory(str(worktree), "target worktree")
+    top = canonical_directory(
+        git(target, "rev-parse", "--show-toplevel").stdout.strip(),
+        "target worktree root",
+    )
+    repo_common = canonical_directory(
+        git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip(),
+        "repository Git common directory",
+    )
+    target_common = canonical_directory(
+        git(target, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip(),
+        "target Git common directory",
+    )
+    if top != target or target_common != repo_common:
+        raise ControlError("target path is not a worktree of the specified repository")
+    head = git(target, "rev-parse", "HEAD").stdout.strip()
+    tree = git(target, "rev-parse", "HEAD^{tree}").stdout.strip()
+    branch_result = git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if branch_result.returncode not in {0, 1}:
+        detail = branch_result.stderr.strip() or branch_result.stdout.strip()
+        raise ControlError(f"cannot verify target worktree branch: {detail}")
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "DETACHED"
+    status = git(target, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching").stdout
+    return {
+        "path": str(target),
+        "git_worktree_root": str(top),
+        "git_common_dir": str(target_common),
+        "head": head,
+        "tree": tree,
+        "branch": branch,
+        "clean": status == "",
+        "status_porcelain": status,
+    }
+
+
 def _lifecycle_directory(repo: Path, *, create: bool) -> Path:
     common_value = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()
     common = canonical_directory(common_value, "Git common directory")
@@ -850,8 +929,7 @@ def prepare_temporary_worktree(
     if space["status"] == "BLOCK":
         raise ControlError("temporary worktree creation blocked below 8 GiB free space")
 
-    if worktree.resolve(strict=False) in _parse_worktree_list(repo):
-        raise ControlError("planned path is already registered as a worktree")
+    before = _worktree_creation_baseline(repo, worktree, base, base_commit, branch)
     marker = _lifecycle_marker_path(repo, worktree, create=True)
     if marker.exists() or marker.is_symlink():
         raise ControlError("a lifecycle record already exists for the planned path")
@@ -861,6 +939,9 @@ def prepare_temporary_worktree(
         "repository": str(repo),
         "worktree": str(worktree),
         "worktree_identity": str(worktree),
+        "worktree_access_scope": "TARGET_ONLY",
+        "other_worktrees": "NOT_INSPECTED",
+        "before_create": before,
         "base_ref": base,
         "base_commit_at_authorization": base_commit,
         "branch": branch,
@@ -889,6 +970,9 @@ def prepare_temporary_worktree(
         "repository": str(repo),
         "worktree": str(worktree),
         "worktree_identity": str(worktree),
+        "before": before,
+        "worktree_access_scope": "TARGET_ONLY",
+        "other_worktrees": "NOT_INSPECTED",
         "base_ref": base,
         "base_commit_at_authorization": base_commit,
         "branch": branch,
@@ -934,8 +1018,6 @@ def create_research_worktree(
     worktree = parent / planned.name
     if worktree.exists() or worktree.is_symlink():
         raise ControlError("planned worktree path already exists; refusing to adopt it")
-    if worktree.resolve(strict=False) in _parse_worktree_list(repo):
-        raise ControlError("planned path is already registered as a worktree")
     base_commit = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}").stdout.strip()
     if (
         not branch
@@ -949,8 +1031,9 @@ def create_research_worktree(
     if space["message"]:
         print(json.dumps(space, sort_keys=True), file=sys.stderr)
 
+    before = None
     if lifecycle == "temporary-task" and effective_auto_close:
-        prepare_temporary_worktree(
+        preauthorization = prepare_temporary_worktree(
             str(repo),
             str(worktree),
             base,
@@ -963,13 +1046,21 @@ def create_research_worktree(
             allowed_rebuildable_caches=allowed_rebuildable_caches,
             fable_ownership=fable_ownership,
         )
+        before = preauthorization["before"]
+    else:
+        before = _worktree_creation_baseline(repo, worktree, base, base_commit, branch)
 
-    created = git(repo, "worktree", "add", "-b", branch, str(worktree), base, check=False)
+    current_baseline = _worktree_creation_baseline(repo, worktree, base, base_commit, branch)
+    if current_baseline != before:
+        raise ControlError("target path, branch ref, or base identity changed before worktree creation")
+
+    created = git(repo, "worktree", "add", "-b", branch, str(worktree), base_commit, check=False)
     if created.returncode != 0:
         detail = created.stderr.strip() or created.stdout.strip()
         raise ControlError(f"git worktree add failed; no cleanup or retry was attempted: {detail}")
 
     lifecycle_record = None
+    creation_after = None
     if lifecycle == "temporary-task" and effective_auto_close:
         lifecycle_record = bind_temporary_worktree(
             str(repo),
@@ -978,7 +1069,21 @@ def create_research_worktree(
             branch,
             task_id,
         )
-    after = check_space(str(parent), "research-worktree", "after")
+        creation_after = lifecycle_record["after"]
+    else:
+        target_identity = _target_worktree_identity(repo, worktree)
+        if target_identity["branch"] != branch or target_identity["head"] != base_commit:
+            raise ControlError("created worktree identity differs from the requested path, branch, or base; preserving it")
+        if not target_identity["clean"]:
+            raise ControlError("created worktree is not clean at the creation receipt; preserving it")
+        creation_after = {
+            "result": "CREATED",
+            "retention_status": "PRESENT_CLEAN",
+            "target_identity": target_identity,
+            "worktree_access_scope": "TARGET_ONLY",
+            "other_worktrees": "NOT_INSPECTED",
+        }
+    space_after = check_space(str(parent), "research-worktree", "after")
     return {
         "status": "CREATED",
         "lifecycle": lifecycle,
@@ -989,11 +1094,13 @@ def create_research_worktree(
         "branch": branch,
         "base": base,
         "base_commit_at_creation": base_commit,
+        "before": before,
+        "creation_receipt": creation_after,
         "available_gib_before": space["available_gib"],
         "warning_before": space["message"] if space["status"] == "WARN" else None,
-        "available_gib_after": after["available_gib"],
-        "status_after": after["status"],
-        "warning_after": after["message"] if after["status"] != "PASS" else None,
+        "available_gib_after": space_after["available_gib"],
+        "status_after": space_after["status"],
+        "warning_after": space_after["message"] if space_after["status"] != "PASS" else None,
         "lifecycle_record": lifecycle_record,
     }
 
@@ -1010,8 +1117,7 @@ def bind_temporary_worktree(
     if Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve(strict=True) != repo:
         raise ControlError("--repo must name the exact Git worktree root")
     worktree = canonical_directory(worktree_text, "temporary worktree")
-    if worktree not in _parse_worktree_list(repo):
-        raise ControlError("new path is not registered as a worktree of this repository")
+    target_identity = _target_worktree_identity(repo, worktree)
 
     marker = _lifecycle_marker_path(repo, worktree, create=False)
     authorization, old_bytes = _load_lifecycle_marker(marker)
@@ -1032,19 +1138,24 @@ def bind_temporary_worktree(
     ):
         raise ControlError("new worktree does not match its exact preauthorization record")
 
-    head = git(worktree, "rev-parse", "HEAD").stdout.strip()
-    actual_branch = git(worktree, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if actual_branch.returncode != 0 or actual_branch.stdout.strip() != branch:
+    head = target_identity["head"]
+    if target_identity["branch"] != branch:
         raise ControlError("new worktree branch differs from its preauthorized branch")
     if head != authorization.get("base_commit_at_authorization"):
         raise ControlError("new worktree HEAD differs from the exact preauthorized base commit")
-    status = git(worktree, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching").stdout
-    if status:
+    if not target_identity["clean"]:
         raise ControlError("new worktree is not clean at lifecycle binding")
 
     authorization["state"] = "ACTIVE"
     authorization["initial_head"] = head
     authorization["bound_base_commit"] = git(repo, "rev-parse", "--verify", f"{base}^{{commit}}").stdout.strip()
+    authorization["after_create"] = {
+        "result": "CREATED",
+        "retention_status": "PRESENT_CLEAN",
+        "target_identity": target_identity,
+        "worktree_access_scope": "TARGET_ONLY",
+        "other_worktrees": "NOT_INSPECTED",
+    }
     updated_bytes = _replace_lifecycle_marker(marker, old_bytes, authorization)
     return {
         "status": "ACTIVE",
@@ -1053,6 +1164,10 @@ def bind_temporary_worktree(
         "branch": branch,
         "initial_head": head,
         "base_ref": base,
+        "before": authorization.get("before_create"),
+        "after": authorization["after_create"],
+        "worktree_access_scope": "TARGET_ONLY",
+        "other_worktrees": "NOT_INSPECTED",
         "lifecycle_record_sha256": hashlib.sha256(updated_bytes).hexdigest(),
     }
 
