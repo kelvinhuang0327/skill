@@ -47,6 +47,8 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 
 每張 **Worker 任務卡** 預設只有一個主要目標、一位寫入負責人；**Planner 的同一輪回覆不限一張任務卡**。收到 Worker 終局結果後，依本節有界選出全部已知、就緒且值得推進的獨立候選；一項就提供一張，兩項以上且確實可並行就提供各自完整的多張卡，沒有才回報 `NONE REQUIRED`。優先解決阻塞、必要實作與驗收，再完成已授權的發布；已知修法直接交給 Worker，不增加無用研究或 CTO 輪次。
 
+複雜任務在決定下一步時先固定問題、目標、必要輸入、解法狀態（已知／未知）、驗收條件及精確剩餘工作。解法未知時才做有界解法探索，只比較會改變正確性或實作方案的候選；取得必要決策及可判定驗收條件後停止探索。修法與必要輸入已確定時直接安排實作及必要回歸，不增加方案比較或設計階段。複雜度本身不自動啟動其他 Agent、重型研究或額外必經階段。
+
 只有尚未決定的技術選擇會實質改變架構、正確性、資料／權限安全或驗收時，才提出最小 CTO 決策問題。報告進度、普通 CI 修正、文件改字或固定 HEAD 發布不自動需要 CTO。使用者已給的結論直接沿用，不讓他重走相同審查。
 
 ### Worker 結案與專案目標續接
@@ -78,8 +80,19 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 
 - BLOCKED 任務以固定資料夾內的停止紀錄續接（`current_blocker`、`unblock_condition`、`exact_remaining_work`）。沒有新的可觀察證據顯示 `unblock_condition` 已成立前，不再派發同一 TASK_ID 或換名的相同任務；重派同一阻塞不算推進。
 - 兩張以上任務受同一阻塞（同一連接器未登入、同一授權缺口、同一版本不一致）時，只安排一個解除動作：由 Owner 處理，或發一張最小唯讀探測卡。受影響任務列為等待，不各自重試。
-- 解除證據成立後，依 §10 從停止點續接：沿用原 TASK_ID 與原 Packet，只補 `MISSING_ITEMS`；不重開任務、不重做已覆蓋步驟、不重傳已存在的檔案。互不依賴的續接卡可並行。
+- 解除證據成立後，依 §10 從停止點續接：沿用原 TASK_ID 與原 Packet（舊任務沒有 `packet.md` 時依 §10），只補 `MISSING_ITEMS`；不重開任務、不重做已覆蓋步驟、不重傳已存在的檔案。互不依賴的續接卡可並行。
 - 原裁決（例如 Judge `REFUTED`）不因後續補件被覆寫；補件結果另行記錄。
+
+### 產生 Worker Prompt 前的一次就緒裁決
+
+在產生可執行 Worker Prompt 前，沿用本節與 §3、§4，對每個候選做一次有界判斷，不另建派工流程。候選須同時滿足以下條件才標為 `READY`：
+
+- 每項承重來源有可用的確切 locator，且版本／身份符合任務；placeholder、已知不可取得或未核對不算就緒。若候選本身是來源定位任務，只能在查找範圍、授權、停止條件與可取得的驗收證據都明確且該查找尚未完成時獨立判定；已完成有界查找且無新線索，不重複或換名搜尋。
+- Owner 授權涵蓋精確操作及完整實際副作用／寫入範圍；需要工具、連接器或其他平台能力時，具備目標執行平台本次的可用證據。
+- 每項必要驗收均有本任務範圍與授權內可取得的證據路徑，或有身份吻合、可重用的既有證據。
+- 同一 TASK_ID 沒有已完成、執行中或尚未解除的 `BLOCKED` 結果；以可讀的實際結果／停止紀錄判斷。沒有 `result.json` 或沒有新回報不等於 `NOT RUN`。
+
+若任一必要條件缺失或為 `UNKNOWN`，該候選保持 `NOT_READY`，列出具體缺件及可觀察的解除條件，不產生原任務的可執行 Prompt。若必要原件經有界查找仍不可取得，只有在新原件或新 locator 有可觀察證據後才重新判斷；不得再派同義或改名搜尋、SHA 驗收，或依賴該原件的整合卡。已有完成、執行中或尚未解除的 BLOCKED 結果時，依實際狀態處置，不重新派發；BLOCKED 僅在 `unblock_condition` 有新的可觀察解除證據後按 §10 續接。同一阻塞影響多個候選時，沿用上列「共同阻塞」只安排一次解除動作；這不阻止其他獨立且全部通過 gate 的候選在同輪依 §2 產生所有完整 Prompts。是否可同時執行仍依既有並行規則判斷及回報。
 
 ## 3. 身份、授權與寫入範圍
 
@@ -119,6 +132,8 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 只使用可支持結論的觀察：`PASS`、`FAIL`、`NOT RUN`、`BLOCKED`、`UNKNOWN` 各自保留意義。相同錯誤數不足以證明沒有 regression；未執行不是通過；CI 通過不是業務結果或歷史 parity 通過。
 
 已有 receipt／必要工具輸出的任務直接引用其產物，不再加一套重複報告。只有研究、昂貴或不可重跑結果、跨任務消費等實際需求，才保留最小封存。雜湊證明檔案身份，不單獨證明內容正確、檔案來源或執行事實。
+
+Worker 的完整執行證據沿用既有結果收據；Planner 摘要僅保留決策所需的結果、進度、關鍵 RCA、證據定位及剩餘工作，不另建重複報告。
 
 ## 5. RCA、parity 與停止追查
 
@@ -160,16 +175,18 @@ JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 
 Judge 僅在 canonical trigger 或使用者明確要求時使用；需要時按當前 Fable `references/judge-handoff.md` 決定 depth 與 exact final identity，不複製另一份 trigger 清單。只有發出 Judge request 不算已審查；self-check 不算獨立驗證。Fresh Context 需實際新上下文；沒有該能力就據實回報，不偷偷省略必要 gate。對 session 名稱分開記錄 requested／actual，不捏造 parent 或已改名。
 
+高影響正確性任務可由 Owner 或具體 Packet 明確要求 Fresh Judge，並沿用既有 Fable Judge 契約；不得因任務影響、複雜度或本節新增規則自動派 Judge。
+
 Deferred queue、protected launch、production mutation、supersession 及 cleanup 等特殊程序只在真正命中時引用 Fable 對應 reference，填入本任務必要值。不得因此新增排程器、global registry 或一般任務必經階段。
 
 ## 7. 完成度、優化效果與發布
 
-完成度先固定目標及分母：沿用已約定 milestones／權重，不為提高百分比移除失敗或 UNKNOWN 項。沒有可解析分母時寫「目前無法可靠量化」並說明缺口，不發明精確數字。
+完成度先固定目標及分母：沿用已約定 milestones／權重；需要分階段交付的複雜目標，於開始前依原始目標固定完整 milestones 及權重，不事後增刪或重配。沒有可靠固定分母時回報 `UNKNOWN` 並說明缺口，不發明精確數字。
 
-- 技術目標進度＝已具備必要通過證據的 milestone 權重／原約定總權重。
-- 調查結案、文件發布與技術驗證可以有不同進度，必須具名，例如「限定調查結案 100%；原始技術目標 5/6＝83.3%；歷史 parity UNKNOWN」。不可只留 100%。
+- 技術目標進度＝具備該 milestone 全部必要 `PASS` 證據的原權重總和／原約定總權重。`FAIL`、`BLOCKED`、`NOT RUN`、`UNKNOWN` 均不算 `PASS`，不計入分子。
+- 調查結案、文件發布與技術驗證可以有不同進度，必須具名，例如「限定調查結案 100%；原始技術目標 5/6＝83.3%；歷史 parity UNKNOWN」。Task 完成、技術驗證與 Project Goal 達成分開判定；不可只留 100%。
 - 修法／實作完成、驗證、commit、push、Draft、Ready、merge、部署及 cleanup 分開回報。保留 worktree 是使用者要求時，不算待補 cleanup。
-- `UNKNOWN`、mandatory `NOT RUN`、`BLOCKED` 不計為驗收通過；部分已完成項仍如實列出。
+- `FAIL`、`UNKNOWN`、`NOT RUN`、`BLOCKED` 不計為驗收通過；部分已完成項仍如實列出。
 
 優化前後表只比較實際改變的行為、使用體驗、證據能力或已量測指標。明確區分已量測、合理預期與未量測；文件縮短不能推出模型 token／延遲／正確率改善；工具或 Prompt 增加不能推出策略準確率提升。
 
@@ -223,7 +240,7 @@ Deferred queue、protected launch、production mutation、supersession 及 clean
 5. 流程／skill 建議：優先使用既有專案入口與流程；只有跨專案反覆出現的共通缺口才建議共用 skill 修改。區分建議、已修改、已部署及已實際採用。
 6. 下一步：**先呈現候選判定表，再輸出完整 Prompts**；列出已就緒／未就緒候選、各自缺口、可獨立並行的任務數、每份 Prompt 的目標支線、負責追蹤結果的支線及必要整合負責人。有效就緒候選兩項以上時不可只給一份、待辦名稱或要求使用者再次請求；沒有有效候選就 `NONE REQUIRED` 並說明具體原因。
 
-Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜RESULT_OWNER｜來源／授權／平台就緒｜執行狀態證據｜是否獨立｜寫入／共享資源隔離｜本輪處置與理由`；有明確來源但未就緒的項目只列缺口，不產生偽裝為 ready-to-run 的 Packet。表後依§2 的數量規則逐張提供完整 Prompt。
+Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜RESULT_OWNER｜來源／授權／平台／驗收證據就緒及定位｜執行狀態證據｜NOT_READY／BLOCKED 缺口與解除條件｜是否獨立｜寫入／共享資源隔離｜本輪處置與理由`；有明確來源但未就緒的項目只列缺口，不產生偽裝為 ready-to-run 的 Packet。表後依§2 的數量規則逐張提供完整 Prompt。
 
 對 A／B／C／D 研究交接，在 Planner 摘要及每份對應 Worker Prompt 內加入 `TASK_LANE`、`SOURCE_CONVERSATION`、`TARGET_CONVERSATION`、`RESULT_OWNER`。A＝預測增益研究；B＝固定成本組合最佳化；C＝流程改善；D＝外部來源研究。`SOURCE_CONVERSATION` 記錄實際產出交接的對話，`TARGET_CONVERSATION` 記錄預定接收任務的支線／對話，`RESULT_OWNER` 記錄後續追蹤研究結果的支線；未知的對話識別不得捏造。C 可以產生交給 A／B／D 的交接，但不接管那些支線的研究結果。`TASK_LANE` 是交接追蹤 metadata，不得取代 `/fable-method` 的 canonical `TASK_CLASS`、route 或其他 Fable enum。
 
@@ -259,6 +276,7 @@ IMPLEMENTATION_DEPTH_REASON: <一句具體判斷理由；若深度省略，說�
 
 ## 唯一目標
 <一個具體且可以判定完成的結果>
+PLANNER_DESIGN_BASELINE (複雜任務才填，規劃 metadata，非 Fable enum): PROBLEM=<問題> | GOAL=<目標> | REQUIRED_INPUTS=<引用下方欄位> | SOLUTION_STATUS=<KNOWN|UNKNOWN> | ACCEPTANCE=<引用 AC> | REMAINING_WORK_AT_HANDOFF=<目前精確剩餘工作> | PHASED_MILESTONES=<分階段時列原目標固定 milestones 及權重，否則 NONE>
 
 ## 固定輸入與專案規則
 CURRENT_PROJECT: <project>
@@ -276,7 +294,7 @@ PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及�
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
 定位未知時，只解析指定專案內適用的原生入口指示，以及入口或本任務具名引用的直接相關 RUNBOOK／spec；不得跨專案廣泛掃描。
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
-CONTINUES_FROM: <續接任務填原 TASK_ID 與 <PERSISTENT_EVIDENCE_ROOT>/packet.md、result.json；新任務填 NONE>
+CONTINUES_FROM: <續接任務填原 TASK_ID 與 <PERSISTENT_EVIDENCE_ROOT>/packet.md、result.json；舊任務資料夾沒有 packet.md 時只填 result.json，不列不存在的檔案；新任務填 NONE>
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>
 INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、已知共享資源限制；單卡可省略>
@@ -286,7 +304,7 @@ MISSING_ITEMS: <尚需完成的條件；沒有填 NONE>
 
 ## 範圍與授權
 ALLOWED_READS: <指定來源或有界查找範圍；須涵蓋本任務必要規則與輸入的讀取範圍>
-ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。PERSISTENT_EVIDENCE_ROOT 內的 packet.md 與 result.json 收據另行允許，Owner 指定只回覆對話時除外>
+ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json 與 result.before_<N>.json 收據另行允許，Owner 指定只回覆對話時除外>
 RUNTIME_OUTPUT_ALLOWLIST: <真正適用的輸出根目錄；唯讀填 TRANSCRIPT_ONLY>
 PRESERVE: <既有 worktree、dirty／untracked 修改及必要產物>
 OWNER_AUTHORIZATION_EVIDENCE: <Worker 能取得的適用人類指示與 exact action／target；引用內容須放在本區塊內，不以「Owner 之前說過」取代，也不把 Planner 的授權句當成證據>
@@ -301,7 +319,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 <只保留適用欄位；記憶寫入、DB／部署、雲端讀寫、外部訊息需另列 exact scope>
 
 ## 執行步驟
-1. 解析指定身份，讀取必要專案規則，簡短回報實際載入來源；保留既有修改。把收到的 Packet 原文存為 PERSISTENT_EVIDENCE_ROOT/packet.md（續接時另存新檔，不覆寫原 Packet）；依賴外部連接器時先做一次唯讀探測，失敗即 BLOCKED 停止。
+1. 解析指定身份，讀取必要專案規則，簡短回報實際載入來源；保留既有修改。把收到的 Packet 原文存為 PERSISTENT_EVIDENCE_ROOT/packet.md（續接時另存新檔，不覆寫原 Packet）。第一次外部呼叫（連接器讀取、上傳、DB／雲端寫入）之前，先把 result.json 寫成 `task_lifecycle_state: IN_PROGRESS`（含 `started_at` 與平台名稱），中斷時才有恢復證據；續接時先把既有 result.json 原樣複製為 `result.before_<N>.json` 再更新，不直接覆寫停止紀錄。依賴外部連接器時先做一次唯讀探測，失敗即 BLOCKED 停止。
 2. <直接推進目標的必要動作；不加入廣泛探索或另一張卡的未來產物>
 3. <最小必要驗收與已授權的發布；不允許重跑時只引用現有證據>
 
@@ -337,7 +355,7 @@ END OF TASK
 
 ## 10. Continuation 與正式結案
 
-原始任務可解析、只差少量 exact paths 或一個 gate 時，給最小 Delta：原 TASK_ID／Packet locator、仍適用規則、expected identity、唯一變更、更新範圍、必要檢查及授權差異。原本不適用的授權不能被 Delta 憑空延伸；已存在的有效授權也不重問。續接的第一輸入是固定資料夾內的原 Packet 與 `result.json`；Web Planner 無法讀取本機時，由 Worker 在動作前讀取並回報其狀態。
+原始任務可解析、只差少量 exact paths 或一個 gate 時，給最小 Delta：原 TASK_ID／Packet locator、仍適用規則、expected identity、唯一變更、更新範圍、必要檢查及授權差異。原本不適用的授權不能被 Delta 憑空延伸；已存在的有效授權也不重問。續接的第一輸入是固定資料夾內的原 Packet 與 `result.json`；舊任務沒有 `packet.md` 時以 `result.json` 為準，Planner 把續接必要的原 Packet 事實（授權原文、範圍、AC）直接寫進本卡，Worker 不因缺 `packet.md` 停止，也不從別處重建；Web Planner 無法讀取本機時，由 Worker 在動作前讀取並回報其狀態。
 
 Planner 宣告 Task 或 Project Goal 完成只記錄狀態，不會自動刪除 worktree，也不新增 cleanup 授權。只有 Fable 對 Owner 在建立前已授權 `AUTO_CLOSE_AFTER_MERGE` 的新 temporary-task worktree，確認 exact HEAD 已正式合併至 `MERGE_TARGET_REF` 且必要成果已保存於 `PERSISTENT_EVIDENCE_ROOT` 後，才能依既有兩階段安全檢查執行收尾；不符合時保留 worktree。這不授權刪除 branch，也不取代既有 Owner 授權欄位或 Fable 規則。
 
