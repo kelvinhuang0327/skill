@@ -78,7 +78,7 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 
 - BLOCKED 任務以固定資料夾內的停止紀錄續接（`current_blocker`、`unblock_condition`、`exact_remaining_work`）。沒有新的可觀察證據顯示 `unblock_condition` 已成立前，不再派發同一 TASK_ID 或換名的相同任務；重派同一阻塞不算推進。
 - 兩張以上任務受同一阻塞（同一連接器未登入、同一授權缺口、同一版本不一致）時，只安排一個解除動作：由 Owner 處理，或發一張最小唯讀探測卡。受影響任務列為等待，不各自重試。
-- 解除證據成立後，依 §10 從停止點續接：沿用原 TASK_ID 與原 Packet，只補 `MISSING_ITEMS`；不重開任務、不重做已覆蓋步驟、不重傳已存在的檔案。互不依賴的續接卡可並行。
+- 解除證據成立後，依 §10 從停止點續接：沿用原 TASK_ID 與原 Packet（舊任務沒有 `packet.md` 時依 §10），只補 `MISSING_ITEMS`；不重開任務、不重做已覆蓋步驟、不重傳已存在的檔案。互不依賴的續接卡可並行。
 - 原裁決（例如 Judge `REFUTED`）不因後續補件被覆寫；補件結果另行記錄。
 
 ## 3. 身份、授權與寫入範圍
@@ -276,7 +276,7 @@ PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及�
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
 定位未知時，只解析指定專案內適用的原生入口指示，以及入口或本任務具名引用的直接相關 RUNBOOK／spec；不得跨專案廣泛掃描。
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
-CONTINUES_FROM: <續接任務填原 TASK_ID 與 <PERSISTENT_EVIDENCE_ROOT>/packet.md、result.json；新任務填 NONE>
+CONTINUES_FROM: <續接任務填原 TASK_ID 與 <PERSISTENT_EVIDENCE_ROOT>/packet.md、result.json；舊任務資料夾沒有 packet.md 時只填 result.json，不列不存在的檔案；新任務填 NONE>
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>
 INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、已知共享資源限制；單卡可省略>
@@ -286,7 +286,7 @@ MISSING_ITEMS: <尚需完成的條件；沒有填 NONE>
 
 ## 範圍與授權
 ALLOWED_READS: <指定來源或有界查找範圍；須涵蓋本任務必要規則與輸入的讀取範圍>
-ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。PERSISTENT_EVIDENCE_ROOT 內的 packet.md 與 result.json 收據另行允許，Owner 指定只回覆對話時除外>
+ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json 與 result.before_<N>.json 收據另行允許，Owner 指定只回覆對話時除外>
 RUNTIME_OUTPUT_ALLOWLIST: <真正適用的輸出根目錄；唯讀填 TRANSCRIPT_ONLY>
 PRESERVE: <既有 worktree、dirty／untracked 修改及必要產物>
 OWNER_AUTHORIZATION_EVIDENCE: <Worker 能取得的適用人類指示與 exact action／target；引用內容須放在本區塊內，不以「Owner 之前說過」取代，也不把 Planner 的授權句當成證據>
@@ -301,7 +301,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 <只保留適用欄位；記憶寫入、DB／部署、雲端讀寫、外部訊息需另列 exact scope>
 
 ## 執行步驟
-1. 解析指定身份，讀取必要專案規則，簡短回報實際載入來源；保留既有修改。把收到的 Packet 原文存為 PERSISTENT_EVIDENCE_ROOT/packet.md（續接時另存新檔，不覆寫原 Packet）；依賴外部連接器時先做一次唯讀探測，失敗即 BLOCKED 停止。
+1. 解析指定身份，讀取必要專案規則，簡短回報實際載入來源；保留既有修改。把收到的 Packet 原文存為 PERSISTENT_EVIDENCE_ROOT/packet.md（續接時另存新檔，不覆寫原 Packet）。第一次外部呼叫（連接器讀取、上傳、DB／雲端寫入）之前，先把 result.json 寫成 `task_lifecycle_state: IN_PROGRESS`（含 `started_at` 與平台名稱），中斷時才有恢復證據；續接時先把既有 result.json 原樣複製為 `result.before_<N>.json` 再更新，不直接覆寫停止紀錄。依賴外部連接器時先做一次唯讀探測，失敗即 BLOCKED 停止。
 2. <直接推進目標的必要動作；不加入廣泛探索或另一張卡的未來產物>
 3. <最小必要驗收與已授權的發布；不允許重跑時只引用現有證據>
 
@@ -337,7 +337,7 @@ END OF TASK
 
 ## 10. Continuation 與正式結案
 
-原始任務可解析、只差少量 exact paths 或一個 gate 時，給最小 Delta：原 TASK_ID／Packet locator、仍適用規則、expected identity、唯一變更、更新範圍、必要檢查及授權差異。原本不適用的授權不能被 Delta 憑空延伸；已存在的有效授權也不重問。續接的第一輸入是固定資料夾內的原 Packet 與 `result.json`；Web Planner 無法讀取本機時，由 Worker 在動作前讀取並回報其狀態。
+原始任務可解析、只差少量 exact paths 或一個 gate 時，給最小 Delta：原 TASK_ID／Packet locator、仍適用規則、expected identity、唯一變更、更新範圍、必要檢查及授權差異。原本不適用的授權不能被 Delta 憑空延伸；已存在的有效授權也不重問。續接的第一輸入是固定資料夾內的原 Packet 與 `result.json`；舊任務沒有 `packet.md` 時以 `result.json` 為準，Planner 把續接必要的原 Packet 事實（授權原文、範圍、AC）直接寫進本卡，Worker 不因缺 `packet.md` 停止，也不從別處重建；Web Planner 無法讀取本機時，由 Worker 在動作前讀取並回報其狀態。
 
 Planner 宣告 Task 或 Project Goal 完成只記錄狀態，不會自動刪除 worktree，也不新增 cleanup 授權。只有 Fable 對 Owner 在建立前已授權 `AUTO_CLOSE_AFTER_MERGE` 的新 temporary-task worktree，確認 exact HEAD 已正式合併至 `MERGE_TARGET_REF` 且必要成果已保存於 `PERSISTENT_EVIDENCE_ROOT` 後，才能依既有兩階段安全檢查執行收尾；不符合時保留 worktree。這不授權刪除 branch，也不取代既有 Owner 授權欄位或 Fable 規則。
 
