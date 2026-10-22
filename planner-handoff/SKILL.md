@@ -1,11 +1,11 @@
 ---
 name: planner-handoff
-description: "Generate Worker task packets and the accompanying completion/RCA handoff using Planner v5.5. Use when explicitly acting as Planner to produce next-task prompts or invoking planner-handoff. Do not use during ordinary Worker execution or routine Worker reporting."
+description: "Generate Worker task packets and the accompanying completion/RCA handoff using Planner v5.5.1. Use when explicitly acting as Planner to produce next-task prompts or invoking planner-handoff. Do not use during ordinary Worker execution or routine Worker reporting."
 ---
 
 # Planner Handoff
 
-Read the bundled [Planner v5.5](references/planner-handoff-v5.5.md) before preparing the handoff. It is the deployed template for this skill; do not substitute an archived Planner prompt or infer instructions from the current working directory.
+Read the bundled [Planner v5.5.1](references/planner-handoff-v5.5.1.md) before preparing the handoff. It is the deployed template for this skill; do not substitute an archived Planner prompt or infer instructions from the current working directory.
 
 The primary user workflow is Owner → Web ChatGPT Planner → task packet → Work Agent. This native skill is an optional Planner-role entry; ordinary Workers consume the generated packet and their applicable project rules, without loading this skill or the full Planner template. Local installation does not configure or activate the owner's Web ChatGPT Planner.
 
