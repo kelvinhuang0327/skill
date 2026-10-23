@@ -568,98 +568,258 @@ def _reported_acceptance_passes(result_data: dict[str, Any]) -> list[str]:
     return sorted(reported_passes) if seen_ac else []
 
 
+def _process_signal_invalid_reasons(signal: Any) -> list[str]:
+    if not isinstance(signal, dict):
+        return ["process_signal: expected object"]
+
+    invalid: list[str] = []
+    allowed = {"trigger", "versions", "route", "cost", "issue"}
+    for key in sorted(signal.keys() - allowed):
+        invalid.append(f"process_signal.{key}: unexpected key")
+
+    trigger = signal.get("trigger")
+    if "trigger" not in signal:
+        invalid.append("process_signal.trigger: required")
+    elif not isinstance(trigger, str) or trigger not in {"INCIDENT", "HIGH_IMPACT"}:
+        invalid.append("process_signal.trigger: expected INCIDENT or HIGH_IMPACT")
+
+    string_fields = {
+        "versions": {"planner", "fable", "planner_load_evidence", "fable_load_evidence"},
+        "route": {"task_class", "worker_route", "depth", "model_tier"},
+        "cost": {"evidence"},
+        "issue": {"evidence", "rca", "smallest_fix"},
+    }
+    allowed_fields = {
+        **string_fields,
+        "cost": {"elapsed_ms", "tokens", "resources", "evidence"},
+        "issue": {"type", "evidence", "rca", "smallest_fix"},
+    }
+    issue_types = {
+        "PLANNER", "FABLE", "PLATFORM", "ENV", "PROJECT", "AUTH",
+        "UNNECESSARY_WORK", "PERFORMANCE", "NONE", "UNKNOWN",
+    }
+
+    for section in ("versions", "route", "cost", "issue"):
+        if section not in signal:
+            continue
+        value = signal[section]
+        if not isinstance(value, dict):
+            invalid.append(f"process_signal.{section}: expected object")
+            continue
+        for key in sorted(value.keys() - allowed_fields[section]):
+            invalid.append(f"process_signal.{section}.{key}: unexpected key")
+        for key, field_value in value.items():
+            path = f"process_signal.{section}.{key}"
+            if key in string_fields[section]:
+                if not isinstance(field_value, str) or not field_value.strip():
+                    invalid.append(f"{path}: expected non-empty string")
+            elif section == "cost" and key in {"elapsed_ms", "tokens"}:
+                if field_value is not None and (type(field_value) is not int or field_value < 0):
+                    invalid.append(f"{path}: expected non-negative integer or null")
+            elif section == "cost" and key == "resources":
+                if field_value is not None and (not isinstance(field_value, str) or not field_value.strip()):
+                    invalid.append(f"{path}: expected non-empty string or null")
+            elif section == "issue" and key == "type" and (
+                not isinstance(field_value, str) or field_value not in issue_types
+            ):
+                invalid.append(f"{path}: unsupported issue type")
+
+    if trigger == "INCIDENT":
+        issue = signal.get("issue")
+        if not isinstance(issue, dict) or "type" not in issue:
+            invalid.append("process_signal.issue.type: required for INCIDENT")
+
+    return sorted(set(invalid))
+
+
+def _packet_header_value(packet_text: str | None, name: str) -> str:
+    if packet_text is None:
+        return "ABSENT"
+    header_lines: list[str] = []
+    for line in packet_text.splitlines():
+        if re.match(r"^#{1,6}[ \t]+", line):
+            break
+        header_lines.append(line)
+    header_text = "\n".join(header_lines)
+    matches = re.findall(rf"(?m)^{re.escape(name)}:[^\r\n]*", header_text)
+    if not matches:
+        return "ABSENT"
+    if len(matches) != 1:
+        return "MALFORMED"
+    raw = matches[0].split(":", 1)[1].strip()
+    if name == "SIGNAL_POLICY":
+        return raw if raw in {"ALWAYS", "ON_INCIDENT"} else "MALFORMED"
+
+    match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", raw)
+    if match is None:
+        return "MALFORMED"
+    task_id = match.group(0)
+    remainder = raw[len(task_id):]
+    if remainder and not remainder[0].isspace():
+        return "MALFORMED"
+    if task_id == "NONE":
+        return "NONE"
+    if TASK_ID_RE.fullmatch(task_id) is None:
+        return "MALFORMED"
+    return task_id
+
+
+def _process_evidence_summary(
+    directory_fd: int | None,
+    identity_status: str,
+    packet_text: str | None,
+    result_data: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if identity_status != "MATCH":
+        return {
+            "status": "NOT_EVALUATED",
+            "reason": "TASK_IDENTITY_NOT_MATCH",
+            "independently_validated": False,
+        }
+
+    if result_data is None:
+        # A matching identity always comes from one valid result object.
+        raise ControlError("matching Task evidence has no parsed result object")
+
+    receipt_count = 0
+    if directory_fd is not None:
+        for name in os.listdir(directory_fd):
+            if re.fullmatch(r"result\.before_[1-9][0-9]*\.json", name) is None:
+                continue
+            try:
+                info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                receipt_count += 1
+
+    lifecycle = result_data.get("task_lifecycle_state")
+    canonical_lifecycle_states = {"IN_PROGRESS", "BLOCKED", "COMPLETED", "ABORTED"}
+    if "task_lifecycle_state" not in result_data:
+        lifecycle_check = "MISSING"
+    elif isinstance(lifecycle, str) and lifecycle in canonical_lifecycle_states:
+        lifecycle_check = "CANONICAL"
+    else:
+        lifecycle_check = "NON_CANONICAL"
+    signal = {"status": "ABSENT"}
+    if "process_signal" in result_data:
+        process_signal = result_data["process_signal"]
+        invalid_reasons = _process_signal_invalid_reasons(process_signal)
+        signal = (
+            {"status": "INVALID", "invalid_reasons": invalid_reasons}
+            if invalid_reasons
+            else {"status": "REPORTED", "value": process_signal}
+        )
+
+    return {
+        "status": "EVALUATED",
+        "independently_validated": False,
+        "lifecycle_state_check": lifecycle_check,
+        "packet_header": {
+            "signal_policy": _packet_header_value(packet_text, "SIGNAL_POLICY"),
+            "continues_from": _packet_header_value(packet_text, "CONTINUES_FROM"),
+        },
+        "prior_result_receipts": receipt_count,
+        "signal": signal,
+    }
+
+
 def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, Any]:
     expected_task_id = _safe_task_id(expected_task_id)
     root, directory_fd = _open_task_evidence_root(root_text, expected_task_id)
     try:
         packet_bytes, packet = _task_evidence_file(directory_fd, root, "packet.md")
         result_bytes, result = _task_evidence_file(directory_fd, root, "result.json")
+        result["lifecycle_status_source"] = "UNKNOWN"
+
+        packet_text: str | None = None
+        if packet_bytes is not None:
+            try:
+                packet_text = packet_bytes.decode("utf-8-sig")
+                packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text)
+            except UnicodeDecodeError:
+                packet_ids = []
+            if len(packet_ids) == 1:
+                packet["task_id"] = packet_ids[0]
+                packet["parse_status"] = "VALID_TASK_ID"
+                if packet_ids[0] != expected_task_id:
+                    packet["status"] = "INVALID"
+                    packet["parse_status"] = "TASK_ID_MISMATCH"
+            else:
+                packet["status"] = "INVALID"
+                packet["parse_status"] = "INVALID_TASK_ID"
+
+        result_data: dict[str, Any] | None = None
+        if result_bytes is not None:
+            try:
+                parsed = json.loads(result_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
+            except (UnicodeDecodeError, ValueError):
+                parsed = None
+            if not isinstance(parsed, dict):
+                result["status"] = "INVALID"
+                result["parse_status"] = "INVALID_JSON"
+            else:
+                result_data = parsed
+                result_task_id = parsed.get("task_id")
+                if not isinstance(result_task_id, str) or not result_task_id:
+                    result["status"] = "INVALID"
+                    result["parse_status"] = "MISSING_TASK_ID"
+                elif result_task_id != expected_task_id:
+                    result["task_id"] = result_task_id
+                    result["status"] = "INVALID"
+                    result["parse_status"] = "TASK_ID_MISMATCH"
+                else:
+                    result["task_id"] = result_task_id
+                    result["parse_status"] = "VALID_JSON"
+                    if "task_lifecycle_state" in parsed:
+                        lifecycle_field = "task_lifecycle_state"
+                    elif "task_local_status" in parsed:
+                        lifecycle_field = "task_local_status"
+                    elif "lifecycle_status" in parsed:
+                        lifecycle_field = "lifecycle_status"
+                    else:
+                        lifecycle_field = "UNKNOWN"
+                    lifecycle = parsed.get(lifecycle_field) if lifecycle_field != "UNKNOWN" else None
+                    result["lifecycle_status_source"] = lifecycle_field
+                    if isinstance(lifecycle, str) and lifecycle.strip():
+                        result["lifecycle_status"] = lifecycle.strip()
+
+        if packet["status"] == "INVALID" or result["status"] == "INVALID":
+            identity_status = "INVALID"
+        elif packet["status"] == "PRESENT" and result["status"] == "PRESENT":
+            identity_status = "MATCH"
+        else:
+            identity_status = "UNKNOWN"
+
+        reported_ac_passes: list[str] = []
+        if result_data is not None and result["status"] == "PRESENT":
+            reported_ac_passes = _reported_acceptance_passes(result_data)
+
+        return {
+            "task_id": expected_task_id,
+            "task_root": str(root),
+            "identity_status": identity_status,
+            "packet": packet,
+            "result": result,
+            "reported_acceptance": {
+                "status": "REPORTED" if reported_ac_passes else "UNKNOWN",
+                "reported_passes": reported_ac_passes,
+                "independently_validated": False,
+            },
+            "unresolved": {
+                "FIRST_ATTEMPT_STATUS": "UNKNOWN",
+                "FIRST_COMPLETION_RATE": "UNKNOWN",
+                "AGENT_RETRY_COUNT": "UNKNOWN",
+                "JUDGE_VERDICT": "UNKNOWN",
+                "FULL_TASK_ELAPSED_TIME": "UNKNOWN",
+            },
+            "process_evidence": _process_evidence_summary(
+                directory_fd, identity_status, packet_text, result_data,
+            ),
+        }
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
-    result["lifecycle_status_source"] = "UNKNOWN"
-
-    if packet_bytes is not None:
-        try:
-            packet_text = packet_bytes.decode("utf-8-sig")
-            packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text)
-        except UnicodeDecodeError:
-            packet_ids = []
-        if len(packet_ids) == 1:
-            packet["task_id"] = packet_ids[0]
-            packet["parse_status"] = "VALID_TASK_ID"
-            if packet_ids[0] != expected_task_id:
-                packet["status"] = "INVALID"
-                packet["parse_status"] = "TASK_ID_MISMATCH"
-        else:
-            packet["status"] = "INVALID"
-            packet["parse_status"] = "INVALID_TASK_ID"
-
-    result_data: dict[str, Any] | None = None
-    if result_bytes is not None:
-        try:
-            parsed = json.loads(result_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
-        except (UnicodeDecodeError, ValueError):
-            parsed = None
-        if not isinstance(parsed, dict):
-            result["status"] = "INVALID"
-            result["parse_status"] = "INVALID_JSON"
-        else:
-            result_data = parsed
-            result_task_id = parsed.get("task_id")
-            if not isinstance(result_task_id, str) or not result_task_id:
-                result["status"] = "INVALID"
-                result["parse_status"] = "MISSING_TASK_ID"
-            elif result_task_id != expected_task_id:
-                result["task_id"] = result_task_id
-                result["status"] = "INVALID"
-                result["parse_status"] = "TASK_ID_MISMATCH"
-            else:
-                result["task_id"] = result_task_id
-                result["parse_status"] = "VALID_JSON"
-                if "task_lifecycle_state" in parsed:
-                    lifecycle_field = "task_lifecycle_state"
-                elif "task_local_status" in parsed:
-                    lifecycle_field = "task_local_status"
-                elif "lifecycle_status" in parsed:
-                    lifecycle_field = "lifecycle_status"
-                else:
-                    lifecycle_field = "UNKNOWN"
-                lifecycle = parsed.get(lifecycle_field) if lifecycle_field != "UNKNOWN" else None
-                result["lifecycle_status_source"] = lifecycle_field
-                if isinstance(lifecycle, str) and lifecycle.strip():
-                    result["lifecycle_status"] = lifecycle.strip()
-
-    if packet["status"] == "INVALID" or result["status"] == "INVALID":
-        identity_status = "INVALID"
-    elif packet["status"] == "PRESENT" and result["status"] == "PRESENT":
-        identity_status = "MATCH"
-    else:
-        identity_status = "UNKNOWN"
-
-    reported_ac_passes: list[str] = []
-    if result_data is not None and result["status"] == "PRESENT":
-        reported_ac_passes = _reported_acceptance_passes(result_data)
-
-    return {
-        "task_id": expected_task_id,
-        "task_root": str(root),
-        "identity_status": identity_status,
-        "packet": packet,
-        "result": result,
-        "reported_acceptance": {
-            "status": "REPORTED" if reported_ac_passes else "UNKNOWN",
-            "reported_passes": reported_ac_passes,
-            "independently_validated": False,
-        },
-        "unresolved": {
-            "FIRST_ATTEMPT_STATUS": "UNKNOWN",
-            "FIRST_COMPLETION_RATE": "UNKNOWN",
-            "AGENT_RETRY_COUNT": "UNKNOWN",
-            "JUDGE_VERDICT": "UNKNOWN",
-            "FULL_TASK_ELAPSED_TIME": "UNKNOWN",
-        },
-    }
 
 
 def summarize_execution_history(

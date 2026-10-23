@@ -33,7 +33,7 @@ class FocusedTestCase(unittest.TestCase):
 
     def task_root(self, parent: Path, task_id: str = TASK_ID) -> Path:
         root = parent / task_id
-        root.mkdir()
+        root.mkdir(parents=True)
         return root
 
     def write_packet(self, root: Path, task_id: str = TASK_ID) -> bytes:
@@ -504,6 +504,286 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             self.check(before == after, "CASE12 source receipt files are unchanged")
             self.check(set(after) == {"packet.md", "result.json"}, "CASE12 parser creates no files")
         print("CASE12: PASS")
+
+    def write_process_packet(self, root: Path, headers: str = "") -> bytes:
+        content = f"TASK_ID: {TASK_ID}\n{headers}".encode("utf-8")
+        (root / "packet.md").write_bytes(content)
+        return content
+
+    def write_process_result(
+        self,
+        root: Path,
+        fields: dict[str, Any] | None = None,
+        *,
+        raw: str | None = None,
+    ) -> bytes:
+        result: dict[str, Any] = {"task_id": TASK_ID}
+        if fields:
+            result.update(fields)
+        content = (raw if raw is not None else json.dumps(result, sort_keys=True)) + "\n"
+        encoded = content.encode("utf-8")
+        (root / "result.json").write_bytes(encoded)
+        return encoded
+
+    def process_evidence(self, root: Path) -> dict[str, Any]:
+        summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+        return summary.get("process_evidence", {})
+
+    def test_process_evidence_ps01_valid_result_and_absent_policy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps01-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root, "CONTINUES_FROM: NONE\n")
+            self.write_process_result(root, {"task_lifecycle_state": "COMPLETED"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            evidence = summary.get("process_evidence", {})
+            self.check(summary["identity_status"] == "MATCH", "PS01 identity matches")
+            self.check(summary["result"]["lifecycle_status"] == "COMPLETED", "PS01 legacy lifecycle value is retained")
+            self.check(evidence.get("status") == "EVALUATED", "PS01 process evidence is evaluated")
+            self.check(evidence.get("lifecycle_state_check") == "CANONICAL", "PS01 canonical lifecycle is recognized")
+            self.check(evidence.get("packet_header") == {"signal_policy": "ABSENT", "continues_from": "NONE"}, "PS01 packet headers are summarized")
+            self.check(evidence.get("prior_result_receipts") == 0, "PS01 no prior receipts are counted")
+            self.check(evidence.get("signal") == {"status": "ABSENT"}, "PS01 signal is absent")
+            self.check(evidence.get("independently_validated") is False, "PS01 process evidence is not independent validation")
+        print("PS01: PASS")
+
+    def test_process_evidence_ps02_minimal_high_impact_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps02-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root)
+            signal = {"trigger": "HIGH_IMPACT"}
+            self.write_process_result(root, {"process_signal": signal})
+            evidence = self.process_evidence(root)
+            self.check(evidence.get("signal") == {"status": "REPORTED", "value": signal}, "PS02 minimal HIGH_IMPACT signal is preserved")
+        print("PS02: PASS")
+
+    def test_process_evidence_ps03_complete_incident_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps03-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root)
+            signal = {
+                "trigger": "INCIDENT",
+                "versions": {"planner": "v5.4", "fable": "sha256:abc"},
+                "route": {"task_class": "STATE_CHANGING_IMPLEMENTATION", "worker_route": "STANDARD"},
+                "cost": {"elapsed_ms": 12, "tokens": 0, "resources": "local", "evidence": "timer"},
+                "issue": {"type": "FABLE", "evidence": "failed assertion", "rca": "missing check", "smallest_fix": "add check"},
+            }
+            self.write_process_result(root, {"process_signal": signal})
+            evidence = self.process_evidence(root)
+            self.check(evidence.get("signal") == {"status": "REPORTED", "value": signal}, "PS03 complete INCIDENT signal is preserved")
+        print("PS03: PASS")
+
+    def test_process_evidence_ps04_incident_requires_issue_type(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps04-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root)
+            self.write_process_result(root, {"process_signal": {"trigger": "INCIDENT"}})
+            evidence = self.process_evidence(root)
+            signal = evidence.get("signal", {})
+            self.check(signal.get("status") == "INVALID", "PS04 INCIDENT without issue.type is invalid")
+            self.check(bool(signal.get("invalid_reasons")), "PS04 invalid reason is present")
+        print("PS04: PASS")
+
+    def test_process_evidence_ps05_attempt_is_not_in_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps05-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root)
+            self.write_process_result(root, {"process_signal": {"trigger": "HIGH_IMPACT", "attempt": 2}})
+            evidence = self.process_evidence(root)
+            self.check(evidence.get("signal", {}).get("status") == "INVALID", "PS05 attempt key invalidates signal")
+        print("PS05: PASS")
+
+    def test_process_evidence_ps06_unmeasured_cost_stays_null(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps06-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root)
+            signal = {"trigger": "HIGH_IMPACT", "cost": {"elapsed_ms": None, "tokens": None}}
+            self.write_process_result(root, {"process_signal": signal})
+            reported = self.process_evidence(root).get("signal", {})
+            self.check(reported == {"status": "REPORTED", "value": signal}, "PS06 null cost fields remain null")
+            if reported.get("status") == "REPORTED":
+                self.check(reported["value"]["cost"]["elapsed_ms"] is None, "PS06 elapsed_ms is not replaced with zero")
+                self.check(reported["value"]["cost"]["tokens"] is None, "PS06 tokens are not replaced with zero")
+        print("PS06: PASS")
+
+    def test_process_evidence_ps07_invalid_contract_values_are_rejected(self) -> None:
+        invalid_signals = [
+            {"trigger": "HIGH_IMPACT", "cost": {"elapsed_ms": True}},
+            {"trigger": "HIGH_IMPACT", "cost": {"tokens": -1}},
+            {"trigger": "HIGH_IMPACT", "cost": {"tokens": "100"}},
+            {"trigger": "HIGH_IMPACT", "cost": {"resources": 5}},
+            {"trigger": "HIGH"},
+            {"trigger": "HIGH_IMPACT", "issue": {"type": "OTHER"}},
+            {"trigger": "HIGH_IMPACT", "versions": []},
+            {"trigger": "HIGH_IMPACT", "route": {"worker_route": "STANDARD", "extra": "x"}},
+            {"trigger": "HIGH_IMPACT", "versions": {"planner": ""}},
+            {"trigger": "HIGH_IMPACT", "route": {"depth": "   "}},
+        ]
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps07-") as temporary:
+            parent = Path(temporary).resolve()
+            for index, signal in enumerate(invalid_signals, start=1):
+                root = self.task_root(parent / str(index))
+                self.write_process_packet(root)
+                self.write_process_result(root, {"task_lifecycle_state": "COMPLETED", "process_signal": signal})
+                evidence = self.process_evidence(root)
+                result = evidence.get("signal", {})
+                reasons = result.get("invalid_reasons", [])
+                self.check(result.get("status") == "INVALID", f"PS07 invalid signal {index} is rejected")
+                self.check(bool(reasons), f"PS07 invalid signal {index} reports a reason")
+                self.check(reasons == sorted(reasons), f"PS07 invalid signal {index} reasons are sorted")
+                legacy = HELPER.summarize_task_evidence(str(root), TASK_ID)
+                self.check(set(legacy) == {
+                    "task_id", "task_root", "identity_status", "packet", "result",
+                    "reported_acceptance", "unresolved", "process_evidence",
+                }, f"PS07 invalid signal {index} does not add unrelated top-level keys")
+        print("PS07: PASS")
+
+    def test_process_evidence_ps08_lifecycle_check_uses_only_canonical_field(self) -> None:
+        scenarios = [
+            ({"task_lifecycle_state": "COMPLETE"}, "NON_CANONICAL", "COMPLETE"),
+            ({"task_lifecycle_state": "IN_PROGRESS"}, "CANONICAL", "IN_PROGRESS"),
+            ({"task_lifecycle_state": "BLOCKED"}, "CANONICAL", "BLOCKED"),
+            ({"task_lifecycle_state": "COMPLETED"}, "CANONICAL", "COMPLETED"),
+            ({"task_lifecycle_state": "ABORTED"}, "CANONICAL", "ABORTED"),
+            ({"task_local_status": "BLOCKED"}, "MISSING", "BLOCKED"),
+        ]
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps08-") as temporary:
+            parent = Path(temporary).resolve()
+            for index, (fields, expected, legacy_value) in enumerate(scenarios, start=1):
+                root = self.task_root(parent / str(index))
+                self.write_process_packet(root)
+                self.write_process_result(root, fields)
+                summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+                self.check(summary["result"]["lifecycle_status"] == legacy_value, f"PS08 lifecycle scenario {index} keeps legacy value")
+                self.check(summary.get("process_evidence", {}).get("lifecycle_state_check") == expected, f"PS08 lifecycle scenario {index} is classified")
+        print("PS08: PASS")
+
+    def test_process_evidence_ps09_packet_headers_are_parsed_strictly(self) -> None:
+        scenarios = [
+            ("SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: X_R1 /path/result.json\n", "ALWAYS", "X_R1"),
+            ("SIGNAL_POLICY: ON_INCIDENT\nCONTINUES_FROM: NONE\n", "ON_INCIDENT", "NONE"),
+            ("", "ABSENT", "ABSENT"),
+            ("SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: NONE\n\n## Contract example\nSIGNAL_POLICY: ALWAYS | ON_INCIDENT\nCONTINUES_FROM: NONE | <prior task>\n", "ALWAYS", "NONE"),
+            ("SIGNAL_POLICY: always\nCONTINUES_FROM: <續接任務填…>\n", "MALFORMED", "MALFORMED"),
+            ("SIGNAL_POLICY: <ALWAYS | ON_INCIDENT>\nCONTINUES_FROM: X_R1、/path\n", "MALFORMED", "MALFORMED"),
+            ("SIGNAL_POLICY: ALWAYS\nSIGNAL_POLICY: ON_INCIDENT\nCONTINUES_FROM: NONE\n", "MALFORMED", "NONE"),
+            ("SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: NONE\nCONTINUES_FROM: X_R1 /path\n", "ALWAYS", "MALFORMED"),
+        ]
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps09-") as temporary:
+            parent = Path(temporary).resolve()
+            for index, (headers, policy, continuation) in enumerate(scenarios, start=1):
+                root = self.task_root(parent / str(index))
+                self.write_process_packet(root, headers)
+                self.write_process_result(root, {"task_lifecycle_state": "COMPLETED"})
+                packet_header = self.process_evidence(root).get("packet_header", {})
+                self.check(packet_header.get("signal_policy") == policy, f"PS09 policy scenario {index} parses")
+                self.check(packet_header.get("continues_from") == continuation, f"PS09 continuation scenario {index} parses")
+        print("PS09: PASS")
+
+    def test_process_evidence_ps10_counts_only_positive_integer_regular_receipts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps10-") as temporary:
+            parent = Path(temporary).resolve()
+            root = self.task_root(parent)
+            self.write_process_packet(root)
+            self.write_process_result(root, {"task_lifecycle_state": "COMPLETED"})
+            (root / "result.before_1.json").write_text("not json", encoding="utf-8")
+            (root / "result.before_2.json").write_text("{}", encoding="utf-8")
+            (root / "result.before_x.json").write_text("{}", encoding="utf-8")
+            (root / "result.before_0.json").write_text("{}", encoding="utf-8")
+            (parent / "receipt-target.json").write_text("{}", encoding="utf-8")
+            (root / "result.before_3.json").symlink_to(parent / "receipt-target.json")
+            evidence = self.process_evidence(root)
+            self.check(evidence.get("prior_result_receipts") == 2, "PS10 counts two regular positive-number receipts without reading contents")
+        print("PS10: PASS")
+
+    def test_process_evidence_ps11_nonmatching_identity_is_not_evaluated(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps11-") as temporary:
+            parent = Path(temporary).resolve()
+            for index, kind in enumerate(("result", "packet", "missing_packet"), start=1):
+                root = self.task_root(parent / str(index))
+                if kind != "missing_packet":
+                    self.write_process_packet(root)
+                if kind == "packet":
+                    (root / "packet.md").write_text("TASK_ID: OTHER_TASK\n", encoding="utf-8")
+                result_task_id = "OTHER_TASK" if kind == "result" else TASK_ID
+                self.write_process_result(root, {"process_signal": {"trigger": "HIGH_IMPACT"}}, raw=(
+                    json.dumps({"task_id": result_task_id, "process_signal": {"trigger": "HIGH_IMPACT"}})
+                    if kind == "result" else None
+                ))
+                evidence = self.process_evidence(root)
+                self.check(evidence.get("status") == "NOT_EVALUATED", f"PS11 {kind} identity is not evaluated")
+                self.check(evidence.get("reason") == "TASK_IDENTITY_NOT_MATCH", f"PS11 {kind} mismatch reason is exact")
+                self.check(evidence.get("independently_validated") is False, f"PS11 {kind} mismatch remains non-independent")
+        print("PS11: PASS")
+
+    def test_process_evidence_ps12_invalid_or_duplicate_result_json_is_not_evaluated(self) -> None:
+        raw_results = [
+            '{"task_id":',
+            f'{{"task_id":"{TASK_ID}","process_signal":{{"trigger":"HIGH_IMPACT","trigger":"INCIDENT"}}}}',
+        ]
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps12-") as temporary:
+            parent = Path(temporary).resolve()
+            for index, raw in enumerate(raw_results, start=1):
+                root = self.task_root(parent / str(index))
+                self.write_process_packet(root)
+                self.write_process_result(root, raw=raw)
+                summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+                evidence = summary.get("process_evidence", {})
+                self.check(summary["result"]["status"] == "INVALID", f"PS12 invalid JSON variant {index} stays INVALID")
+                self.check(evidence.get("status") == "NOT_EVALUATED", f"PS12 invalid JSON variant {index} is not evaluated")
+        print("PS12: PASS")
+
+    def test_process_evidence_ps13_repeated_read_is_deterministic_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps13-") as temporary:
+            repo = Path(temporary).resolve()
+            initialized = subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, text=True, check=False)
+            self.check(initialized.returncode == 0, "PS13 temporary Git repository initialized")
+            root = self.task_root(repo)
+            self.write_process_packet(root, "SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: NONE\n")
+            self.write_process_result(root, {
+                "task_lifecycle_state": "COMPLETED",
+                "process_signal": {"trigger": "HIGH_IMPACT"},
+            })
+            result_path = root / "result.json"
+            digest_before = hashlib.sha256(result_path.read_bytes()).hexdigest()
+            names_before = sorted(path.name for path in root.iterdir())
+            command = [
+                sys.executable, "-B", str(HELPER_PATH), "evidence-summary",
+                "--repo", str(repo), "--task-id", TASK_ID,
+                "--task-evidence-root", str(root),
+            ]
+            first = subprocess.run(command, capture_output=True, check=False)
+            second = subprocess.run(command, capture_output=True, check=False)
+            self.check(first.returncode == 0 and second.returncode == 0, "PS13 both evidence-summary CLI reads succeed")
+            self.check(first.stdout == second.stdout, "PS13 repeated CLI output bytes are identical")
+            self.check(hashlib.sha256(result_path.read_bytes()).hexdigest() == digest_before, "PS13 result SHA256 is unchanged")
+            self.check(sorted(path.name for path in root.iterdir()) == names_before, "PS13 Task directory file list is unchanged")
+        print("PS13: PASS")
+
+    def test_process_evidence_ps14_cli_without_task_evidence_root_is_stable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps14-") as temporary:
+            repo = Path(temporary).resolve()
+            initialized = subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, text=True, check=False)
+            self.check(initialized.returncode == 0, "PS14 temporary Git repository initialized")
+            command = [sys.executable, "-B", str(HELPER_PATH), "evidence-summary", "--repo", str(repo), "--task-id", TASK_ID]
+            first = subprocess.run(command, capture_output=True, check=False)
+            second = subprocess.run(command, capture_output=True, check=False)
+            self.check(first.returncode == 0 and second.returncode == 0, "PS14 CLI succeeds without task evidence root")
+            self.check(first.stdout == second.stdout, "PS14 CLI output is byte-identical across repeated runs")
+            summary = json.loads(first.stdout)
+            self.check("task_evidence" not in summary, "PS14 no task evidence section is added")
+        print("PS14: PASS")
+
+    def test_process_evidence_ps15_non_object_process_signal_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps15-") as temporary:
+            parent = Path(temporary).resolve()
+            for index, value in enumerate(([], "bad", None), start=1):
+                root = self.task_root(parent / str(index))
+                self.write_process_packet(root)
+                self.write_process_result(root, {"process_signal": value})
+                signal = self.process_evidence(root).get("signal", {})
+                self.check(signal.get("status") == "INVALID", f"PS15 non-object variant {index} is invalid")
+                self.check(bool(signal.get("invalid_reasons")), f"PS15 non-object variant {index} has a reason")
+        print("PS15: PASS")
 
 
 if __name__ == "__main__":
