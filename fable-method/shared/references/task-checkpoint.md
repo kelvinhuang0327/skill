@@ -414,6 +414,30 @@ with `confirm_legacy_workers_quiescent: true`, and it is never inferred from an
 absent anchor. Workers must not clear the block by deleting, renaming, or
 recreating legacy lock files.
 
+New anchors also record the stable filesystem volume identity when the host
+can provide one (`diskutil` VolumeUUID on macOS or a filesystem UUID on Linux).
+This value is historical evidence: an ordinary `--run` continues to require
+the recorded device and inode to match, and it never updates either identity.
+Old anchors without a recorded volume identity cannot be rebound by the device
+recovery entrypoint.
+
+`--recover-device-anchor` is a separate, offline, read-only preflight for one
+`task-execution` anchor. It requires the exact repository and task identity,
+the unchanged lock inode, a matching historical and current volume identity,
+an available OS lock, a complete execution journal, and valid lock lineage.
+It does not update Execution records, captures, transitions, or failure
+evidence. To apply an eligible plan, copy the exact `owner_authorization_text`
+from its JSON result into an owner-controlled private file and invoke the same
+command with `--apply-device-anchor-recovery --owner-authorization PATH`.
+The authorization text binds the repository, task, original authority SHA-256,
+old and current devices, inode, and volume identity. The apply path rechecks
+those inputs under the existing OS lock and atomically replaces only
+`authority.json`, preserving the lock file and recording recovery history.
+An already completed replacement is recognized on retry without creating a
+new lock identity. Missing historical volume evidence, a competing or unknown
+writer, or any identity or journal mismatch refuses before recovery writes.
+No ordinary `--run` invokes this entrypoint.
+
 ### Protected run entrypoint
 
 This CLI is an optional convenience; executable helpers are intentionally not

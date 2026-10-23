@@ -13,6 +13,7 @@ require 'shellwords'
 require 'tmpdir'
 require 'rbconfig'
 require 'base64'
+require 'rexml/document'
 
 # StableLockAnchor puts flock authorities in Git's common metadata directory,
 # outside the worktree paths that `git stash -u` can remove. The manifest binds
@@ -215,6 +216,174 @@ class StableLockAnchor
       raise Error, "stable #{namespace} lock generation could not be checked: #{e.message}"
     end
 
+    # A device-anchor recovery snapshot reads the existing task-execution
+    # authority without accepting its recorded device number as current. It
+    # still requires the exact repository/key, private paths, regular files,
+    # and unchanged lock inode. This is intentionally separate from open_lock:
+    # ordinary callers must continue to reject device drift.
+    def device_recovery_snapshot(repo_root, task_id, lock_root: nil)
+      storage, root = resolve_root_pair(repo_root, lock_root: lock_root)
+      common = common_directory(root)
+      validate_repository_generation!(common, repository_generation_path(common))
+      identity = lock_identity(root, 'task-execution', task_id.to_s, storage_root: storage)
+      common_root = File.join(common, 'fable-locks')
+      namespace_root = File.join(common_root, 'task-execution')
+      validate_private_directory!(common_root, common)
+      validate_private_directory!(namespace_root, common_root)
+
+      lock_path = File.join(namespace_root, Digest::SHA256.hexdigest(JSON.generate(identity)), 'execution.lock')
+      anchor_dir = File.dirname(lock_path)
+      anchor_stat = File.lstat(anchor_dir)
+      unless anchor_stat.directory? && !anchor_stat.symlink? && anchor_stat.uid == Process.uid &&
+             (anchor_stat.mode & 0o022).zero?
+        raise Error, "stable task-execution anchor '#{anchor_dir}' is not a private owned directory"
+      end
+
+      authority_path = File.join(anchor_dir, 'authority.json')
+      authority_stat = File.lstat(authority_path)
+      verify_owned_regular!(authority_path, authority_stat)
+      authority_bytes = File.binread(authority_path)
+      manifest = JSON.parse(authority_bytes)
+      raise Error, 'stable task-execution authority must be a JSON Object' unless manifest.is_a?(Hash)
+
+      identity.each do |key, value|
+        raise Error, "stable task-execution authority has mismatched #{key}" unless manifest[key] == value
+      end
+      unless manifest['lock_device'].is_a?(Integer) && manifest['lock_device'].positive? &&
+             manifest['lock_inode'].is_a?(Integer) && manifest['lock_inode'].positive?
+        raise Error, 'stable task-execution authority has invalid device or inode identity'
+      end
+
+      lock_stat = File.lstat(lock_path)
+      verify_owned_regular!(lock_path, lock_stat)
+      unless lock_stat.ino == manifest['lock_inode']
+        raise Error, "stable task-execution anchor '#{anchor_dir}' lock inode changed"
+      end
+
+      {
+        repository: root,
+        storage_root: storage,
+        task_id: task_id.to_s,
+        common_directory: common,
+        anchor_dir: anchor_dir,
+        authority_path: authority_path,
+        lock_path: lock_path,
+        manifest: manifest,
+        authority_bytes: authority_bytes,
+        authority_sha256: Digest::SHA256.hexdigest(authority_bytes),
+        stored_lock_device: manifest['lock_device'],
+        current_lock_device: lock_stat.dev,
+        lock_inode: lock_stat.ino,
+        stored_volume_identity: manifest['volume_identity'],
+        current_volume_identity: stable_volume_identity(common)
+      }
+    rescue Error
+      raise
+    rescue SystemCallError, JSON::ParserError => e
+      raise Error, "device-anchor recovery snapshot is unverifiable: #{e.message}"
+    end
+
+    # Holds the original lock inode while the caller checks the execution
+    # journal or atomically updates authority.json. The lock contents and inode
+    # remain untouched by this operation.
+    def with_device_recovery_lock(snapshot)
+      lock = File.open(snapshot.fetch(:lock_path), File::RDWR | nofollow_flag)
+      verify_owned_regular!(snapshot.fetch(:lock_path), lock.stat)
+      unless lock.stat.dev == snapshot.fetch(:current_lock_device) &&
+             lock.stat.ino == snapshot.fetch(:lock_inode)
+        raise Error, 'device-anchor recovery lock changed after preflight'
+      end
+      unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+        raise Error, 'device-anchor recovery refused: ACTIVE_OR_COMPETING_WRITER'
+      end
+
+      current = device_recovery_snapshot(snapshot.fetch(:storage_root), snapshot.fetch(:task_id),
+                                         lock_root: snapshot.fetch(:repository))
+      unless current.fetch(:authority_sha256) == snapshot.fetch(:authority_sha256) &&
+             current.fetch(:lock_inode) == snapshot.fetch(:lock_inode) &&
+             current.fetch(:current_lock_device) == snapshot.fetch(:current_lock_device)
+        raise Error, 'device-anchor recovery target changed after preflight'
+      end
+      yield current, lock
+    ensure
+      if lock
+        lock.flock(File::LOCK_UN) rescue nil
+        lock.close unless lock.closed?
+      end
+    end
+
+    def stable_volume_identity(path)
+      if RUBY_PLATFORM.include?('darwin')
+        output, status = Open3.capture2('df', '-P', path, err: File::NULL)
+        return nil unless status.success?
+
+        row = output.lines.last.to_s.strip
+        match = /\A\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)\z/.match(row)
+        return nil unless match
+
+        plist, plist_status = Open3.capture2('diskutil', 'info', '-plist', match[1], err: File::NULL)
+        return nil unless plist_status.success?
+
+        document = REXML::Document.new(plist)
+        dictionary = REXML::XPath.first(document, '//dict')
+        return nil unless dictionary
+
+        values = dictionary.elements.to_a
+        volume_uuid = values.each_slice(2).find do |key, _value|
+          key&.name == 'key' && key.text == 'VolumeUUID'
+        end&.last
+        value = volume_uuid&.text.to_s.strip
+        return nil unless /\A[0-9A-Fa-f-]{16,64}\z/.match?(value)
+
+        "macos:VolumeUUID:#{value.upcase}"
+      elsif RbConfig::CONFIG['host_os'].to_s.match?(/linux/i)
+        output, status = Open3.capture2('findmnt', '--json', '--target', path, '--output', 'UUID', err: File::NULL)
+        return nil unless status.success?
+
+        value = JSON.parse(output).dig('filesystems', 0, 'uuid').to_s.strip
+        return nil unless /\A[0-9A-Fa-f-]{16,64}\z/.match?(value)
+
+        "linux:UUID:#{value.upcase}"
+      end
+    rescue SystemCallError, JSON::ParserError, REXML::ParseException
+      nil
+    end
+
+    def replace_device_recovery_manifest!(snapshot, manifest, expected_sha256:)
+      authority_path = snapshot.fetch(:authority_path)
+      anchor_dir = snapshot.fetch(:anchor_dir)
+      authority_stat = File.lstat(authority_path)
+      verify_owned_regular!(authority_path, authority_stat)
+      current_bytes = File.binread(authority_path)
+      unless Digest::SHA256.hexdigest(current_bytes) == expected_sha256
+        raise Error, 'device-anchor recovery authority changed before atomic replacement'
+      end
+
+      Tempfile.create(['.authority-device-recovery-', '.tmp'], anchor_dir) do |temporary|
+        temporary.write(JSON.pretty_generate(manifest))
+        temporary.flush
+        temporary.fsync
+        current_stat = File.lstat(authority_path)
+        verify_owned_regular!(authority_path, current_stat)
+        unless Digest::SHA256.file(authority_path).hexdigest == expected_sha256
+          raise Error, 'device-anchor recovery authority changed before atomic replacement'
+        end
+        File.rename(temporary.path, authority_path)
+        sync_directory!(anchor_dir)
+      end
+
+      readback = File.binread(authority_path)
+      unless JSON.parse(readback) == manifest
+        raise Error, 'device-anchor recovery authority did not match its atomic readback'
+      end
+      true
+    rescue Error
+      raise
+    rescue SystemCallError, JSON::ParserError => e
+      raise Error, "device-anchor recovery could not atomically replace authority.json: #{e.message}"
+    end
+    private :replace_device_recovery_manifest!
+
     private
 
     def repository_generation_path(common)
@@ -377,6 +546,8 @@ class StableLockAnchor
             verify_owned_regular!(lock_path, lock.stat)
             lock.fsync
             manifest = identity.merge('lock_device' => lock.stat.dev, 'lock_inode' => lock.stat.ino)
+            volume_identity = stable_volume_identity(File.dirname(File.dirname(File.dirname(anchor_dir))))
+            manifest['volume_identity'] = volume_identity if volume_identity
             File.open(File.join(temporary_dir, 'authority.json'), File::WRONLY | File::CREAT | File::EXCL | nofollow_flag, 0o600) do |file|
               file.write(JSON.pretty_generate(manifest))
               file.flush
@@ -4145,6 +4316,324 @@ end
 
 # Checkpoint-specific paused continuation is a distinct authorization mode.
 
+# A narrowly scoped, offline repair path for a task-execution anchor whose
+# device number drifted while its lock inode and original stable volume did
+# not. Ordinary --run never calls this class and continues to fail closed.
+class LockDeviceAnchorRecovery
+  AUTHORIZATION_HEADER = 'OWNER_AUTHORIZED_DEVICE_ANCHOR_RECOVERY_V1'
+
+  class Refusal < StandardError
+    attr_reader :code
+
+    def initialize(code, message)
+      @code = code
+      super(message)
+    end
+  end
+
+  class << self
+    def preflight(repo_root:, task_id:, lock_root: nil)
+      validate_task_id!(task_id)
+      snapshot = StableLockAnchor.device_recovery_snapshot(repo_root, task_id, lock_root: lock_root)
+      initial = identity_status(snapshot)
+      return initial unless initial.fetch('status') == 'CANDIDATE'
+
+      StableLockAnchor.with_device_recovery_lock(snapshot) do |locked_snapshot, lock|
+        current = identity_status(locked_snapshot)
+        return current unless current.fetch('status') == 'CANDIDATE'
+
+        validate_execution_journal!(locked_snapshot, lock)
+        current.merge('status' => 'ELIGIBLE_READ_ONLY',
+                      'owner_authorization_text' => owner_authorization_text(locked_snapshot))
+      end
+    rescue Refusal => e
+      refused(e.code, e.message)
+    rescue StableLockAnchor::Error => e
+      code = e.message.include?('ACTIVE_OR_COMPETING_WRITER') ? 'ACTIVE_OR_COMPETING_WRITER' : 'ANCHOR_UNVERIFIABLE'
+      refused(code, e.message)
+    rescue StandardError => e
+      refused('PREFLIGHT_UNVERIFIABLE', e.message)
+    end
+
+    def apply(repo_root:, task_id:, owner_authorization_path:, lock_root: nil)
+      validate_task_id!(task_id)
+      snapshot = StableLockAnchor.device_recovery_snapshot(repo_root, task_id, lock_root: lock_root)
+      initial = identity_status(snapshot)
+      return initial unless initial.fetch('status') == 'CANDIDATE'
+
+      StableLockAnchor.with_device_recovery_lock(snapshot) do |locked_snapshot, lock|
+        current = identity_status(locked_snapshot)
+        return current unless current.fetch('status') == 'CANDIDATE'
+
+        authorization = read_owner_authorization!(owner_authorization_path)
+        unless authorization == owner_authorization_text(locked_snapshot)
+          raise Refusal.new('OWNER_AUTHORIZATION_MISMATCH',
+                            'owner authorization does not bind the current repository, anchor bytes, volume, and device change')
+        end
+        validate_execution_journal!(locked_snapshot, lock)
+
+        latest = StableLockAnchor.device_recovery_snapshot(
+          locked_snapshot.fetch(:storage_root), locked_snapshot.fetch(:task_id),
+          lock_root: locked_snapshot.fetch(:repository)
+        )
+        unless latest.fetch(:authority_sha256) == locked_snapshot.fetch(:authority_sha256) &&
+               latest.fetch(:lock_inode) == locked_snapshot.fetch(:lock_inode) &&
+               latest.fetch(:current_lock_device) == locked_snapshot.fetch(:current_lock_device) &&
+               latest.fetch(:current_volume_identity) == locked_snapshot.fetch(:current_volume_identity)
+          raise Refusal.new('TARGET_CHANGED', 'device-anchor recovery target changed during validation')
+        end
+
+        manifest = locked_snapshot.fetch(:manifest).dup
+        history = manifest['lock_device_recovery_history'] || []
+        unless history.is_a?(Array)
+          raise Refusal.new('RECOVERY_HISTORY_INVALID', 'device-anchor recovery history is malformed')
+        end
+        history << {
+          'source_repository' => locked_snapshot.fetch(:repository),
+          'from_device' => locked_snapshot.fetch(:stored_lock_device),
+          'to_device' => locked_snapshot.fetch(:current_lock_device),
+          'lock_inode' => locked_snapshot.fetch(:lock_inode),
+          'volume_identity' => locked_snapshot.fetch(:current_volume_identity),
+          'previous_authority_sha256' => locked_snapshot.fetch(:authority_sha256),
+          'authorization_sha256' => Digest::SHA256.hexdigest(authorization),
+          'recovered_at' => Time.now.utc.iso8601
+        }
+        manifest['lock_device'] = locked_snapshot.fetch(:current_lock_device)
+        manifest['lock_device_recovery_history'] = history
+        StableLockAnchor.send(:replace_device_recovery_manifest!,
+          locked_snapshot, manifest, expected_sha256: locked_snapshot.fetch(:authority_sha256)
+        )
+
+        verified = StableLockAnchor.device_recovery_snapshot(
+          locked_snapshot.fetch(:storage_root), locked_snapshot.fetch(:task_id),
+          lock_root: locked_snapshot.fetch(:repository)
+        )
+        unless verified.fetch(:stored_lock_device) == verified.fetch(:current_lock_device) &&
+               verified.fetch(:lock_inode) == locked_snapshot.fetch(:lock_inode) &&
+               verified.fetch(:stored_volume_identity) == verified.fetch(:current_volume_identity) &&
+               verified.fetch(:manifest).fetch('lock_device_recovery_history').last == history.last
+          raise Refusal.new('READBACK_MISMATCH', 'device-anchor recovery did not pass exact readback verification')
+        end
+        result(verified, 'RECOVERED', 'same lock inode retained; authority device number atomically rebound')
+      end
+    rescue Refusal => e
+      refused(e.code, e.message)
+    rescue StableLockAnchor::Error => e
+      code = e.message.include?('ACTIVE_OR_COMPETING_WRITER') ? 'ACTIVE_OR_COMPETING_WRITER' : 'ANCHOR_UNVERIFIABLE'
+      refused(code, e.message)
+    rescue StandardError => e
+      refused('RECOVERY_UNVERIFIABLE', e.message)
+    end
+
+    private
+
+    def validate_task_id!(task_id)
+      value = task_id.to_s
+      unless !value.strip.empty? && !%w[. ..].include?(value) && !value.match?(/[\/\\\x00]/)
+        raise Refusal.new('INVALID_TASK_ID', 'device-anchor recovery requires one stable task id')
+      end
+    end
+
+    def identity_status(snapshot)
+      manifest = snapshot.fetch(:manifest)
+      history = validate_recovery_history!(snapshot, manifest['lock_device_recovery_history'] || [])
+
+      if snapshot.fetch(:stored_lock_device) == snapshot.fetch(:current_lock_device)
+        return result(snapshot, 'ALREADY_CURRENT', 'stored device and current device already agree') if history.empty?
+
+        validate_volume_identity!(snapshot)
+        entry = history.last
+        unless entry['to_device'] == snapshot.fetch(:current_lock_device) &&
+               entry['volume_identity'] == snapshot.fetch(:current_volume_identity)
+          raise Refusal.new('RECOVERY_HISTORY_UNVERIFIABLE',
+                            'completed device-anchor recovery history does not match the current anchor identity')
+        end
+        return result(snapshot, 'ALREADY_RECOVERED', 'the exact device recovery is already present')
+      end
+
+      validate_volume_identity!(snapshot)
+      result(snapshot, 'CANDIDATE', 'device drift is present and stable volume identity matches')
+    end
+
+    def validate_recovery_history!(snapshot, history)
+      unless history.is_a?(Array)
+        raise Refusal.new('RECOVERY_HISTORY_INVALID', 'device-anchor recovery history is malformed')
+      end
+      fields = %w[authorization_sha256 from_device lock_inode previous_authority_sha256 recovered_at
+                  source_repository to_device volume_identity].sort
+      previous_to_device = nil
+      history.each do |entry|
+        unless entry.is_a?(Hash) && entry.keys.sort == fields &&
+               entry['source_repository'] == snapshot.fetch(:repository) &&
+               entry['lock_inode'] == snapshot.fetch(:lock_inode) &&
+               entry['volume_identity'] == snapshot.fetch(:stored_volume_identity) &&
+               entry['from_device'].is_a?(Integer) && entry['from_device'].positive? &&
+               entry['to_device'].is_a?(Integer) && entry['to_device'].positive? &&
+               entry['from_device'] != entry['to_device'] &&
+               entry['previous_authority_sha256'].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+               entry['authorization_sha256'].to_s.match?(/\A[0-9a-f]{64}\z/)
+          raise Refusal.new('RECOVERY_HISTORY_INVALID', 'device-anchor recovery history entry is incomplete or mismatched')
+        end
+        if previous_to_device && entry['from_device'] != previous_to_device
+          raise Refusal.new('RECOVERY_HISTORY_INVALID', 'device-anchor recovery history device chain is discontinuous')
+        end
+        begin
+          Time.iso8601(entry['recovered_at'])
+        rescue ArgumentError, TypeError
+          raise Refusal.new('RECOVERY_HISTORY_INVALID', 'device-anchor recovery history timestamp is malformed')
+        end
+        previous_to_device = entry['to_device']
+      end
+      if previous_to_device && previous_to_device != snapshot.fetch(:stored_lock_device)
+        raise Refusal.new('RECOVERY_HISTORY_INVALID', 'device-anchor recovery history does not end at the recorded device')
+      end
+      history
+    end
+
+    def validate_volume_identity!(snapshot)
+      stored = snapshot.fetch(:stored_volume_identity)
+      current = snapshot.fetch(:current_volume_identity)
+      if stored.nil? || stored.to_s.empty?
+        raise Refusal.new('HISTORICAL_VOLUME_IDENTITY_MISSING',
+                          'anchor has no stable volume identity recorded when it was created')
+      end
+      if current.nil? || current.to_s.empty?
+        raise Refusal.new('CURRENT_VOLUME_IDENTITY_UNAVAILABLE',
+                          'the current filesystem does not expose a trusted stable volume identity')
+      end
+      unless stored == current
+        raise Refusal.new('VOLUME_IDENTITY_MISMATCH', 'stored and current stable volume identities differ')
+      end
+    end
+
+    def validate_execution_journal!(snapshot, lock)
+      storage = snapshot.fetch(:storage_root)
+      task_id = snapshot.fetch(:task_id)
+      execution_dir = File.join(storage, '.fable', 'checkpoints', task_id, 'executions')
+      records = {}
+      if File.exist?(execution_dir) || File.symlink?(execution_dir)
+        stat = File.lstat(execution_dir)
+        unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+          raise Refusal.new('JOURNAL_UNVERIFIABLE', 'execution journal directory is not an owned directory')
+        end
+
+        Dir.children(execution_dir).sort.each do |name|
+          path = File.join(execution_dir, name)
+          file_stat = File.lstat(path)
+          unless name.end_with?('.json') && file_stat.file? && !file_stat.symlink? &&
+                 file_stat.uid == Process.uid && (file_stat.mode & 0o022).zero?
+            raise Refusal.new('JOURNAL_UNVERIFIABLE', "execution journal contains an unexpected or unsafe entry '#{name}'")
+          end
+
+          execution_id = name.delete_suffix('.json')
+          record = ExecutionRecord.load(path)
+          unless record.schema_version == ExecutionRecord::SCHEMA_VERSION &&
+                 record.task_id == task_id && record.execution_id == execution_id
+            raise Refusal.new('JOURNAL_IDENTITY_MISMATCH', "execution journal record '#{name}' has mismatched identity")
+          end
+          classification = record.classify(record_path: path, repo_root: storage)
+          unless record.status == ExecutionRecord::STATUS_COMPLETED &&
+                 classification == ExecutionRecord::CLASSIFICATION_COMPLETED
+            raise Refusal.new('JOURNAL_WRITER_OR_STATE_UNKNOWN',
+                              "execution journal record '#{name}' is active, stale, incomplete, or unresolved")
+          end
+          records[execution_id] = record
+        end
+      end
+
+      lineage_bytes = lock.pread(lock.stat.size, 0)
+      return true if lineage_bytes.empty?
+
+      lineage = JSON.parse(lineage_bytes)
+      unless lineage.is_a?(Hash)
+        raise Refusal.new('LOCK_LINEAGE_UNVERIFIABLE', 'execution lock lineage is not a JSON Object')
+      end
+      expected_root = snapshot.fetch(:repository)
+      expected = {
+        'schema_version' => ExecutionRecord::SCHEMA_VERSION,
+        'lock_generation' => StableLockAnchor::GENERATION,
+        'task_id' => task_id,
+        'record_root' => storage
+      }
+      expected['lock_root'] = expected_root unless expected_root == storage
+      unless expected.all? { |key, value| lineage[key] == value }
+        raise Refusal.new('LOCK_LINEAGE_UNVERIFIABLE', 'execution lock lineage source identity does not match')
+      end
+      extra_keys = lineage.keys - expected.keys - %w[execution_id capability_sha256]
+      unless extra_keys.empty?
+        raise Refusal.new('LOCK_LINEAGE_UNVERIFIABLE', 'execution lock lineage contains unknown fields')
+      end
+      execution_id = lineage['execution_id']
+      capability_sha256 = lineage['capability_sha256']
+      if execution_id
+        unless execution_id.is_a?(String) && records.key?(execution_id) &&
+               capability_sha256.is_a?(String) && /\A[0-9a-f]{64}\z/.match?(capability_sha256)
+          raise Refusal.new('LOCK_LINEAGE_UNVERIFIABLE',
+                            'execution lock lineage does not identify a complete historical execution')
+        end
+      elsif capability_sha256
+        raise Refusal.new('LOCK_LINEAGE_UNVERIFIABLE', 'execution lock lineage has an orphan capability digest')
+      end
+      true
+    rescue Refusal
+      raise
+    rescue StandardError => e
+      raise Refusal.new('JOURNAL_UNVERIFIABLE', e.message)
+    end
+
+    def owner_authorization_text(snapshot)
+      payload = {
+        'action' => 'recover-device-anchor',
+        'source_repository' => snapshot.fetch(:repository),
+        'storage_root' => snapshot.fetch(:storage_root),
+        'task_id' => snapshot.fetch(:task_id),
+        'original_authority_sha256' => snapshot.fetch(:authority_sha256),
+        'original_lock_device' => snapshot.fetch(:stored_lock_device),
+        'current_lock_device' => snapshot.fetch(:current_lock_device),
+        'lock_inode' => snapshot.fetch(:lock_inode),
+        'stable_volume_identity' => snapshot.fetch(:stored_volume_identity)
+      }
+      "#{AUTHORIZATION_HEADER}\n#{JSON.generate(payload)}\n"
+    end
+
+    def read_owner_authorization!(path)
+      value = path.to_s
+      unless Pathname.new(value).absolute? && File.expand_path(value) == value && !File.symlink?(value)
+        raise Refusal.new('OWNER_AUTHORIZATION_INVALID', 'owner authorization must be an absolute regular file path')
+      end
+      stat = File.lstat(value)
+      unless stat.file? && stat.uid == Process.uid && (stat.mode & 0o022).zero?
+        raise Refusal.new('OWNER_AUTHORIZATION_INVALID', 'owner authorization file must be owned, regular, and private')
+      end
+      File.binread(value)
+    rescue Refusal
+      raise
+    rescue SystemCallError => e
+      raise Refusal.new('OWNER_AUTHORIZATION_INVALID', e.message)
+    end
+
+    def result(snapshot, status, message)
+      {
+        'status' => status,
+        'message' => message,
+        'source_repository' => snapshot.fetch(:repository),
+        'storage_root' => snapshot.fetch(:storage_root),
+        'task_id' => snapshot.fetch(:task_id),
+        'stored_lock_device' => snapshot.fetch(:stored_lock_device),
+        'current_lock_device' => snapshot.fetch(:current_lock_device),
+        'lock_inode' => snapshot.fetch(:lock_inode),
+        'stored_volume_identity' => snapshot.fetch(:stored_volume_identity),
+        'current_volume_identity' => snapshot.fetch(:current_volume_identity),
+        'authority_sha256' => snapshot.fetch(:authority_sha256)
+      }
+    end
+
+    def refused(code, message)
+      { 'status' => 'REFUSED', 'code' => code, 'message' => message }
+    end
+  end
+end
+
 # CLI interface when executed directly
 if __FILE__ == $PROGRAM_NAME
   require 'optparse'
@@ -4162,6 +4651,8 @@ if __FILE__ == $PROGRAM_NAME
     opts.separator '   or: task_checkpoint.rb --recover-run --repo STORAGE_ROOT [--lock-root GIT_ROOT] --worktree PATH --task-id ID --execution-id OLD_ID --application-state PATH -- <argv...>'
     opts.separator '   or: task_checkpoint.rb --retry-recover-run --repo STORAGE_ROOT [--lock-root GIT_ROOT] --worktree PATH --task-id ID --execution-id FAILED_SUCCESSOR_ID --application-state PATH -- <argv...>'
     opts.separator '   or: task_checkpoint.rb --continue-paused-run --repo PATH --worktree PATH --task-id ID --previous-execution-id OLD_ID --execution-id NEW_ID --application-state PATH --owner-authorization PATH -- <argv...>'
+    opts.separator '   or: task_checkpoint.rb --recover-device-anchor --repo STORAGE_ROOT [--lock-root GIT_ROOT] --task-id ID'
+    opts.separator '       add --apply-device-anchor-recovery --owner-authorization PATH to apply after read-only preflight'
     opts.on('--reconcile', 'Reconcile live state against checkpoint (default)') { selected_modes << (mode = :reconcile) }
     opts.on('--show', 'Display checkpoint contents') { selected_modes << (mode = :show) }
     opts.on('--save', 'Save/update checkpoint') { selected_modes << (mode = :save) }
@@ -4172,6 +4663,12 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--recover-run', 'Explicitly resume one stale execution through a durable successor transition') { selected_modes << (mode = :recover_run) }
     opts.on('--retry-recover-run', 'Explicitly retry one terminal failed recovery successor') { selected_modes << (mode = :retry_recover_run) }
     opts.on('--continue-paused-run', 'Start a new execution from an exactly authorized PAUSED_RESUMABLE checkpoint') { selected_modes << (mode = :continue_paused_run) }
+    opts.on('--recover-device-anchor', 'Read-only device-anchor recovery preflight; never starts an upstream command') do
+      selected_modes << (mode = :device_anchor_recovery)
+    end
+    opts.on('--apply-device-anchor-recovery', 'Apply a preflighted recovery after exact Owner authorization') do
+      options[:apply_device_anchor_recovery] = true
+    end
 
     opts.on('--repo PATH', 'Absolute ExecutionRecord, capture, and recovery storage root') { |v| options[:repository] = v }
     opts.on('--lock-root PATH', 'Exact Git worktree top-level that owns the generation-2 lock') { |v| options[:lock_root] = v }
@@ -4181,7 +4678,7 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--execution-id ID', 'Caller-supplied stable execution identity for --run') { |v| options[:execution_id] = v }
     opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by recovery operations') { |v| options[:application_state] = v }
     opts.on('--previous-execution-id ID', 'Completed protected execution that owns the paused journal prefix') { |v| options[:previous_execution_id] = v }
-    opts.on('--owner-authorization PATH', 'Current Owner authorization text binding the exact continuation target') { |v| options[:owner_authorization] = v }
+    opts.on('--owner-authorization PATH', 'Owner authorization file binding the exact protected-operation target') { |v| options[:owner_authorization] = v }
     opts.on('--head SHA', 'Override live git HEAD SHA') { |v| options[:head] = v }
     opts.on('--tree SHA', 'Override live git tree SHA') { |v| options[:tree] = v }
     opts.on('--branch NAME', 'Override live git branch') { |v| options[:branch] = v }
@@ -4211,6 +4708,9 @@ if __FILE__ == $PROGRAM_NAME
     if selected_modes.include?(:continue_paused_run) && selected_modes != [:continue_paused_run]
       raise OptionParser::InvalidArgument, '--continue-paused-run cannot be combined with another mode'
     end
+    if selected_modes.include?(:device_anchor_recovery) && selected_modes != [:device_anchor_recovery]
+      raise OptionParser::InvalidArgument, '--recover-device-anchor cannot be combined with another mode'
+    end
     if options[:heavy_scientific] && !%i[run recover_run retry_recover_run].include?(mode)
       raise OptionParser::InvalidArgument,
             '--heavy-scientific is only valid with protected run and recovery operations'
@@ -4221,7 +4721,7 @@ if __FILE__ == $PROGRAM_NAME
     if options[:run_root] && !Pathname.new(options[:run_root]).absolute?
       raise OptionParser::InvalidArgument, '--run-root must be an absolute path'
     end
-    if options[:lock_root] && !%i[run recover_run retry_recover_run].include?(mode)
+    if options[:lock_root] && !%i[run recover_run retry_recover_run device_anchor_recovery].include?(mode)
       raise OptionParser::InvalidArgument, '--lock-root is only valid with protected run and recovery operations'
     end
     if options[:lock_root] && (!Pathname.new(options[:lock_root]).absolute? || !File.directory?(options[:lock_root]))
@@ -4274,10 +4774,61 @@ if __FILE__ == $PROGRAM_NAME
               '--previous-execution-id and --owner-authorization are only valid with --continue-paused-run'
       end
     end
+    if options[:apply_device_anchor_recovery] && mode != :device_anchor_recovery
+      raise OptionParser::InvalidArgument, '--apply-device-anchor-recovery requires --recover-device-anchor'
+    end
+    if mode == :device_anchor_recovery
+      unless separator.nil? && ARGV.empty?
+        raise OptionParser::InvalidArgument, '--recover-device-anchor accepts no positional or upstream command arguments'
+      end
+      value = options[:repository]
+      unless value && Pathname.new(value).absolute? && File.directory?(value)
+        raise OptionParser::InvalidArgument, '--recover-device-anchor requires an existing absolute --repo directory'
+      end
+      value = options[:lock_root]
+      if value && (!Pathname.new(value).absolute? || !File.directory?(value))
+        raise OptionParser::InvalidArgument, '--lock-root must explicitly name an existing absolute directory'
+      end
+      task_id = options[:task_id].to_s
+      if task_id.strip.empty? || %w[. ..].include?(task_id) || task_id.match?(/[\/\\\x00]/)
+        raise OptionParser::InvalidArgument, '--recover-device-anchor requires a stable --task-id'
+      end
+      protected_run_only = %i[worktree run_root execution_id application_state previous_execution_id]
+      unless protected_run_only.all? { |key| options[key].nil? }
+        raise OptionParser::InvalidArgument, '--recover-device-anchor cannot be combined with protected-run or execution-recovery options'
+      end
+      if options[:apply_device_anchor_recovery]
+        value = options[:owner_authorization]
+        unless value && Pathname.new(value).absolute?
+          raise OptionParser::InvalidArgument,
+                '--apply-device-anchor-recovery requires an absolute --owner-authorization path'
+        end
+      elsif options[:owner_authorization]
+        raise OptionParser::InvalidArgument,
+              '--owner-authorization is only valid for an applied device-anchor recovery or --continue-paused-run'
+      end
+    elsif options[:apply_device_anchor_recovery]
+      raise OptionParser::InvalidArgument, '--apply-device-anchor-recovery requires --recover-device-anchor'
+    end
   rescue OptionParser::ParseError => e
     warn "ERROR: #{e.message}"
     warn parser
     exit 2
+  end
+
+  if mode == :device_anchor_recovery
+    result = if options[:apply_device_anchor_recovery]
+               LockDeviceAnchorRecovery.apply(
+                 repo_root: options[:repository], task_id: options[:task_id],
+                 lock_root: options[:lock_root], owner_authorization_path: options[:owner_authorization]
+               )
+             else
+               LockDeviceAnchorRecovery.preflight(
+                 repo_root: options[:repository], task_id: options[:task_id], lock_root: options[:lock_root]
+               )
+             end
+    puts JSON.generate(result)
+    exit(%w[ELIGIBLE_READ_ONLY RECOVERED ALREADY_CURRENT ALREADY_RECOVERED].include?(result['status']) ? 0 : 1)
   end
 
   heavy_scientific = mode == :run &&
