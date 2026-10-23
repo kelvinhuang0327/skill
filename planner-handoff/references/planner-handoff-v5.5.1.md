@@ -99,6 +99,7 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 有工具的 Planner 在交接前只做必要的一次 bounded 現況核對；Web Planner 無此能力時依 §1 將必要環境解析放入同一份 Worker Packet。唯讀或不重跑限制仍適用。不能查就標記資訊來源及未核對項，不把歷史值說成 live observation。
 
 - Git 任務提供 source authority、已觀察 base HEAD／tree、branch 與 worktree。非 Git 任務提供確切 artifact／工作根目錄，不強造 Git 身份。
+- **SHA-256 固定值**：可執行 Worker Packet 含 SHA-256 時，值必須是長度恰為 64 個十六進位字元的字串；65 字元值不合格。若來源值已存在於本次可讀的可信輸出，直接依該來源逐字核對並複製，不依記憶重新輸入；若具備實際來源檔案的讀取能力，仍依既有來源身份規則核對，格式正確不代表身份已吻合。格式不符或已知來源身份不符時，候選保持 `NOT_READY`，不得把該值放入 `READY` Packet。此格式要求只套用於明確標示為 SHA-256 的身份；Git blob 等其他雜湊身份仍依各自原有格式與定義處理。
 - 保存 scope 外的 dirty／untracked 檔案。重疊寫入的所有權不清或有 active writer 才構成阻塞；無關 dirty 狀態不是停止整個任務的理由。
 - 優先重用已授權的既有 worktree。不擅自 reset、restore、stash、clean、force、刪除或另建 workspace。新工作根目錄需要 exact path 與 disposition。
 - 只有明確採用新建 temporary-task Git worktree 的實作任務，才在建立前記錄 Owner 對該 worktree lifecycle 的事前授權、用途、正式合併目標 ref 與 worktree 外的持久成果根目錄；依 §9 填寫 `WORKTREE_CLOSE_POLICY`、`MERGE_TARGET_REF`、`PERSISTENT_EVIDENCE_ROOT`。`AUTO_CLOSE_AFTER_MERGE` 僅表示 Owner 已在建立前授權該新暫存 worktree 可於正式合併後交由 Fable 執行既有兩階段安全收尾。普通研究、唯讀與封存任務不要求前兩個欄位；`PERSISTENT_EVIDENCE_ROOT` 依下方「成果存放於固定資料夾」一律適用。
