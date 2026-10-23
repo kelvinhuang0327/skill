@@ -520,6 +520,54 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _reported_acceptance_passes(result_data: dict[str, Any]) -> list[str]:
+    """Read PASS claims only from one explicit, structurally valid AC block."""
+    candidates: list[tuple[str, Any, int]] = []
+    for field, value in result_data.items():
+        if not isinstance(field, str):
+            continue
+        match = re.fullmatch(r"(?i:ac01_to_ac)(\d+)", field)
+        if match is None:
+            continue
+        endpoint = int(match.group(1))
+        if endpoint < 1 or match.group(1) != f"{endpoint:02d}":
+            return []
+        candidates.append((field, value, endpoint))
+
+    # Multiple declarations can disagree. Do not merge them or select one.
+    if len(candidates) != 1:
+        return []
+
+    _, acceptance, endpoint = candidates[0]
+    if not isinstance(acceptance, dict) or not acceptance:
+        return []
+
+    reported_passes: list[str] = []
+    seen_ac = False
+    for field, value in acceptance.items():
+        if not isinstance(field, str):
+            return []
+        match = re.fullmatch(r"AC(\d+)", field)
+        if match is None:
+            return []
+        number = int(match.group(1))
+        if not 1 <= number <= endpoint or field != f"AC{number:02d}":
+            return []
+        if not isinstance(value, (dict, str)):
+            return []
+        seen_ac = True
+
+        if isinstance(value, dict):
+            is_pass = value.get("status") == "PASS"
+        else:
+            declaration = value.strip()
+            is_pass = declaration == "PASS" or declaration.startswith("PASS:")
+        if is_pass:
+            reported_passes.append(field)
+
+    return sorted(reported_passes) if seen_ac else []
+
+
 def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, Any]:
     expected_task_id = _safe_task_id(expected_task_id)
     root, directory_fd = _open_task_evidence_root(root_text, expected_task_id)
@@ -591,12 +639,7 @@ def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, 
 
     reported_ac_passes: list[str] = []
     if result_data is not None and result["status"] == "PRESENT":
-        acceptance = result_data.get("ac01_to_ac15")
-        if isinstance(acceptance, dict):
-            reported_ac_passes = sorted(
-                key for key, value in acceptance.items()
-                if isinstance(key, str) and isinstance(value, dict) and value.get("status") == "PASS"
-            )
+        reported_ac_passes = _reported_acceptance_passes(result_data)
 
     return {
         "task_id": expected_task_id,

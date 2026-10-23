@@ -324,6 +324,187 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             self.check(summary["unresolved"]["FULL_TASK_ELAPSED_TIME"] == "UNKNOWN", "CASE08 full elapsed time remains UNKNOWN")
         print("CASE08: PASS")
 
+    def test_reported_acceptance_case01_variable_ac12_block(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case01-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            acceptance = {
+                f"AC{number:02d}": {"status": "PASS" if number in {1, 12} else "FAIL"}
+                for number in range(1, 13)
+            }
+            self.write_result(root, {"task_id": TASK_ID, "ac01_to_ac12": acceptance})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "REPORTED", "CASE01 AC12 block is recognized")
+            self.check(summary["reported_acceptance"]["reported_passes"] == ["AC01", "AC12"], "CASE01 only explicit PASS entries are reported")
+            self.check(summary["reported_acceptance"]["independently_validated"] is False, "CASE01 worker report is not independent validation")
+        print("CASE01: PASS")
+
+    def test_reported_acceptance_case02_legacy_ac15_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case02-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            acceptance = {
+                f"AC{number:02d}": {"status": "PASS" if number == 15 else "FAIL"}
+                for number in range(1, 16)
+            }
+            self.write_result(root, {"task_id": TASK_ID, "ac01_to_ac15": acceptance})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "REPORTED", "CASE02 legacy AC15 block remains supported")
+            self.check(summary["reported_acceptance"]["reported_passes"] == ["AC15"], "CASE02 legacy PASS result is retained")
+        print("CASE02: PASS")
+
+    def test_reported_acceptance_case03_uppercase_ac16_string_entries(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case03-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            acceptance = {
+                f"AC{number:02d}": ("PASS: verified by worker" if number == 16 else "FAIL: not met")
+                for number in range(1, 17)
+            }
+            self.write_result(root, {"task_id": TASK_ID, "AC01_TO_AC16": acceptance})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "REPORTED", "CASE03 observed uppercase AC16 block is recognized")
+            self.check(summary["reported_acceptance"]["reported_passes"] == ["AC16"], "CASE03 explicit string PASS is recognized")
+        print("CASE03: PASS")
+
+    def test_reported_acceptance_case04_block_without_passes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case04-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            acceptance = {
+                f"AC{number:02d}": {"status": "FAIL", "evidence": "not met"}
+                for number in range(1, 13)
+            }
+            self.write_result(root, {"task_id": TASK_ID, "AC01_TO_AC12": acceptance})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE04 no PASS claims leaves status UNKNOWN")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE04 no AC is reported as PASS")
+        print("CASE04: PASS")
+
+    def test_reported_acceptance_case05_no_recognizable_block(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case05-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "task_local_status": "COMPLETE",
+                "acceptance_notes": {"AC01": {"status": "PASS"}},
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE05 unrecognized nested field is ignored")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE05 nested PASS is not an AC declaration")
+        print("CASE05: PASS")
+
+    def test_reported_acceptance_case06_conflicting_blocks_are_not_merged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case06-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC12": {"AC01": {"status": "PASS"}},
+                "AC01_TO_AC16": {"AC02": {"status": "PASS"}},
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE06 conflicting declarations remain UNKNOWN")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE06 conflicting blocks are not merged or selected")
+        print("CASE06: PASS")
+
+    def test_reported_acceptance_case07_mismatched_task_id_is_untrusted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case07-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            self.write_result(root, {
+                "task_id": "OTHER_TASK",
+                "AC01_TO_AC12": {"AC01": {"status": "PASS"}},
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["status"] == "INVALID", "CASE07 mismatched Task ID remains INVALID")
+            self.check(summary["identity_status"] == "INVALID", "CASE07 identity is INVALID")
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE07 mismatched result cannot assert acceptance")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE07 mismatched PASS is discarded")
+        print("CASE07: PASS")
+
+    def test_reported_acceptance_case08_invalid_and_duplicate_json_are_untrusted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case08-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            result_path = root / "result.json"
+            result_path.write_text('{"task_id":', encoding="utf-8")
+            malformed = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(malformed["result"]["status"] == "INVALID", "CASE08 malformed JSON is INVALID")
+            self.check(malformed["reported_acceptance"]["status"] == "UNKNOWN", "CASE08 malformed JSON has no trusted acceptance")
+
+            result_path.write_text(
+                f'{{"task_id":"{TASK_ID}","task_id":"{TASK_ID}","AC01_TO_AC12":{{"AC01":{{"status":"PASS"}}}}}}',
+                encoding="utf-8",
+            )
+            duplicate = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(duplicate["result"]["status"] == "INVALID", "CASE08 duplicate JSON key is INVALID")
+            self.check(duplicate["reported_acceptance"]["reported_passes"] == [], "CASE08 duplicate-key PASS is discarded")
+        print("CASE08: PASS")
+
+    def test_reported_acceptance_case09_plain_pass_text_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case09-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "report": "PASS: all acceptance criteria are met",
+                "notes": "AC01 PASS",
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE09 plain text PASS is ignored")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE09 arbitrary text cannot create AC results")
+        print("CASE09: PASS")
+
+    def test_reported_acceptance_case10_completion_keeps_first_attempt_unknown(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case10-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            self.write_result(root, {"task_id": TASK_ID, "task_lifecycle_state": "COMPLETED"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "COMPLETED", "CASE10 final Task status is reported verbatim")
+            self.check(summary["unresolved"]["FIRST_ATTEMPT_STATUS"] == "UNKNOWN", "CASE10 first-attempt status remains UNKNOWN")
+            self.check(summary["unresolved"]["FIRST_COMPLETION_RATE"] == "UNKNOWN", "CASE10 first-completion rate remains UNKNOWN")
+        print("CASE10: PASS")
+
+    def test_reported_acceptance_case11_cli_without_evidence_root_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case11-") as temporary:
+            repo = Path(temporary).resolve()
+            initialized = subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, text=True, check=False)
+            self.check(initialized.returncode == 0, "CASE11 temporary Git repository initialized")
+            command = [
+                sys.executable, "-B", str(HELPER_PATH), "evidence-summary",
+                "--repo", str(repo), "--task-id", TASK_ID,
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.check(completed.returncode == 0, f"CASE11 legacy CLI exits successfully: {completed.stderr.strip()}")
+            summary = json.loads(completed.stdout)
+            expected_keys = {
+                "schema", "repository", "task_filter", "inventory", "coverage",
+                "problems", "orphan_captures", "recommendations", "executions",
+            }
+            self.check(set(summary) == expected_keys, "CASE11 legacy CLI output keys are unchanged")
+            self.check("task_evidence" not in summary, "CASE11 no task-evidence section appears without the option")
+        print("CASE11: PASS")
+
+    def test_reported_acceptance_case12_repeated_reads_are_stable_and_read_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case12-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root)
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC12": {"AC01": {"status": "PASS"}},
+            })
+            before = {path.name: path.read_bytes() for path in root.iterdir()}
+            first = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            second = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            after = {path.name: path.read_bytes() for path in root.iterdir()}
+            self.check(first == second, "CASE12 repeated parsing produces identical summaries")
+            self.check(before == after, "CASE12 source receipt files are unchanged")
+            self.check(set(after) == {"packet.md", "result.json"}, "CASE12 parser creates no files")
+        print("CASE12: PASS")
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TaskEvidenceAvailabilityTest)

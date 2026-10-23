@@ -344,6 +344,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 - `TASK_ID`、`TASK_LANE`、`RESULT_OWNER`，以及本 Task 的實際完成／剩餘工作；不可將本 Task 的 `NONE` 推成 lane/project 結案。
 - 結果、已完成與未完成；逐項 AC 對應 PASS／FAIL／NOT RUN／BLOCKED／UNKNOWN 及證據。
 - 終局狀態寫入 PERSISTENT_EVIDENCE_ROOT/result.json（沿用此收據，不另建報告），至少含 task_id、task_lifecycle_state（Fable 值）、逐項 AC 結果、exact_remaining_work；BLOCKED 時另含 current_blocker 與 unblock_condition（能證明阻塞已解除的可觀察證據）。回覆中列出該路徑。
+  - **條件式身份核對：**僅當本 Task Packet 明確要求產生 `PERSISTENT_EVIDENCE_ROOT/result.json`，且該 Result 將作為現有 Evidence Helper 的直接驗收或後續使用輸入時，Worker 交付前須在本地 Helper 可用環境執行一次唯讀 `evidence-summary` 查詢，並確認輸出 `identity_status: MATCH`。Result 必須有頂層小寫 `task_id`，且值與本 Packet 的 `TASK_ID` 完全相同；更新收據時保留既有 `task_lifecycle_state`、AC 與原始證據。使用已解析的實際值執行：`python3 -B <existing-helper-absolute-path> evidence-summary --repo <canonical-repository> --task-id <exact-task-id> --task-evidence-root <exact-task-evidence-root>`。尖括號只是模板佔位，Worker 須以已解析的實際值替換；不得要求使用者手動提供尚未確認存在的執行路徑。此查詢成功只表示 Packet 與 Result 可讀、Result 為有效 JSON 且 Task 身份相符；不代表任何 AC 已獨立驗證或 Task 首次完成成功。若 Web Planner 等環境沒有本地 Helper 能力，仍依既有文字契約交接，不因此設為 BLOCKED；普通 Task 不執行此查詢。
 - 實際載入的規則、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
 - 實作任務回報實際 `IMPLEMENTATION_DEPTH` 與 `DEPTH_SOURCE`（`PLANNER_SUPPLIED`／`SKILL_FALLBACK`）；若由 Fable fallback 選定，簡述採用依據。非實作任務省略此項。
 - 適用時列實際 final HEAD／tree、artifact／receipt locator 與 commit／PR／merge 狀態。
