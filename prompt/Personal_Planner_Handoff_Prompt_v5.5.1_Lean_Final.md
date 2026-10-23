@@ -172,6 +172,14 @@ IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
 JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 ```
 
+路由對應只依 `/fable-method` canonical 規則（`fable-method/shared/SKILL.md` 的「First output and task class」及「Route once」）；此處只映射 Planner 欄位，不另建路由契約：
+
+- `PURE_QA` 與 `PLANNING_ONLY`：`WORKER_ROUTE: NOT_APPLICABLE`。
+- `READ_ONLY_COMPLETION_REVIEW`：不使用 Worker Route；該類別及任務名稱本身都不是 Judge trigger。Judge 僅依 canonical Judge 條件判定，不因任務名稱自動派 Judge。
+- `STATE_CHANGING_IMPLEMENTATION`：只有全部符合 Fable 既有 FAST 條件（單一已知低風險局部目標、一項直接驗收、無新行為、無 Judge trigger）才可選 `FAST / NORMAL`；已知修法的正常或耦合實作採 `STANDARD / NORMAL`。
+- 僅在 `fable-method/shared/references/implementation-depth.md` 的實際觸發條件成立時，才選 `STANDARD / ENHANCED`；檔案數、耗時或籠統複雜度本身不構成觸發。
+- 模型等級、Worker route、Implementation Depth 與 Judge 判斷是不同軸；各按其 canonical 規則獨立判定，一項不推導或改變其他項。
+
 `IMPLEMENTATION_DEPTH` 只適用於 `STATE_CHANGING_IMPLEMENTATION`；其他任務類型省略深度與理由。實作任務預設選 `NORMAL`。只有在 Fable 明列的深度觸發條件確實成立時才選 `ENHANCED`：任務屬研究性質或正確改法尚未確定，須先有界探索並比較候選方案；實際修改的行為命中 workload-shape trigger；一次低成本定位後仍有會導向不同修法的多個具體根因；或權威來源衝突經來源核對後仍存在。選擇時在 `IMPLEMENTATION_DEPTH_REASON` 用一句話指出具體觸發條件與任務證據，不使用籠統的「任務複雜」。若 Planner 缺少足夠資訊判斷，省略深度值並在理由欄說明交由 `/fable-method` 按 canonical fallback 決定；不得填 `OMIT`。Worker 必須回報實際採用的深度與 `DEPTH_SOURCE`。深度不改變模型、route、Judge、agent 數、授權、範圍或驗收標準。
 
 Judge 僅在 canonical trigger 或使用者明確要求時使用；需要時按當前 Fable `references/judge-handoff.md` 決定 depth 與 exact final identity，不複製另一份 trigger 清單。只有發出 Judge request 不算已審查；self-check 不算獨立驗證。Fresh Context 需實際新上下文；沒有該能力就據實回報，不偷偷省略必要 gate。對 session 名稱分開記錄 requested／actual，不捏造 parent 或已改名。
