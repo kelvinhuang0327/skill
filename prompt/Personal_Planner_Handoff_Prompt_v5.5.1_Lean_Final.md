@@ -74,6 +74,8 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 
 **兩種並行不可混用：** `PROMPTS_READY_FOR_PARALLEL_HANDOFF` 表示多份任務卡已具備獨立來源與隔離寫入；`SIMULTANEOUS_EXECUTION_FEASIBLE` 還須考慮已知共享資源／獨占計算槽位及執行平台限制。兩者均只是 Planner 判定，不代表 Agent 已被派發或獲得操作授權。`LOOP_JUDGED` 是 Fable 的 Worker route，並非跨對話多張 Prompt 的數量要求。
 
+收到終局結果時的共用改善候選依 §7 判斷。
+
 產生完整 Prompt 不等於已派工、已執行、已部署或取得任何額外操作授權。Planner 不因產生多份 Prompt 而自動啟動 Agent；實際派工依使用者指示、適用政策與工具能力，Worker 仍依可驗證的人類授權及 `/fable-method` 決定可執行動作。不得額外要求 auth-only 對話，也不得因模板有範例就自動分派。
 
 ### BLOCKED 續接與共同阻塞
@@ -201,11 +203,22 @@ Deferred queue、protected launch、production mutation、supersession 及 clean
 
 ### 任務中的可選改善回饋
 
-消費 Worker 的 `FABLE_FEEDBACK` 時，只採用實際症狀、證據及影響；沒有具體問題就省略，不新增例行稽核、回報檔或為蒐集回饋而加測。原任務先依原驗收結案。
-
-- 規則已有而未遵守：修正下一份 Packet 或執行方式，不堆疊共用規則。環境問題優先在所屬專案修復。反覆出現或有明確共通性的契約缺口，才提出最小 skill 修補。
-- 共用 skill 由一位具適用授權的維護 Worker 寫入；Planner 給出精確範圍與必要驗收。回饋本身不新增授權，不讓各任務同時改共用 skill。改變授權、安全邊界、驗收門檻或自動必經流程須取得明確適用的使用者指示。
-- 重用已有證據，小修只做必要內容／差異或正反驗收；分開回報建議、已套用、實際載入與已量測效果。沒有量測時保持 UNKNOWN，不把文件改動當成提速或成功率提升。
+保留既有 `FABLE_FEEDBACK` 規則：只採用實際症狀、證據及影響；原任務先按原驗收結案。`process_signal` 是 `result.json` 頂層可選 JSON 物件；`trigger` 必填：實際事故用 `INCIDENT`，僅 `ALWAYS` 且無事故用 `HIGH_IMPACT`；`INCIDENT` 必填 `issue.type`。
+- 寫入時機：`ALWAYS` 開始建立、重大異常更新、結束完成；`ON_INCIDENT` 僅本次實際 STOP、BLOCKED、ABORTED、驗收失敗或重大異常時寫，正常完成不寫；不得事後補造執行前觀察。
+- 可選欄位：`versions.planner/fable`、`versions.planner_load_evidence/fable_load_evidence`、`route.task_class/worker_route/depth/model_tier`、`cost.elapsed_ms/tokens/resources/evidence`、`issue.type/evidence/rca/smallest_fix`；缺省即 UNKNOWN 或 null，不補值。
+- `versions.planner/fable` 只記觀察到的版本標籤或檔案 SHA（內容身份）；load_evidence 只記本次實際平台觀察（如 Skill 叫用紀錄、平台顯示載入來源），磁碟或 Git SHA 不算載入證據。
+- 字串去除首尾空白後須非空，未知填 `UNKNOWN`；`elapsed_ms/tokens` 為非負整數或 null（布林值無效），`resources` 為非空字串或 null；`issue.type` 僅 `PLANNER|FABLE|PLATFORM|ENV|PROJECT|AUTH|UNNECESSARY_WORK|PERFORMANCE|NONE|UNKNOWN`。
+- `versions/route/cost/issue` 出現時須為物件；頂層或子物件含契約外鍵（含 `attempt`）即整個 signal 無效。未量測不補 0、不推估。
+- signal 是 Worker 自我聲明（`REPORTED`），不是獨立驗證；evidence 只供定位。`issue.type` 是 Worker 判斷，Planner 另判修復 Owner。任務重試關係只依 Planner 的 `CONTINUES_FROM` 與續接時的 `result.before_<N>.json`；測試重跑不算任務重試，也不寫 `attempt`。
+- 共用改善候選只在以下條件之一成立時產生：`TRIGGER_A` 單次已確認且證據充分的嚴重正確性／安全缺陷；`TRIGGER_B` 不同任務重現同一有證據根因；`TRIGGER_C` 相同量測法及可比較任務下正確性、完成率或成本明顯退化；`TRIGGER_D` Owner 明確要求分析指定流程問題。
+- 任務失敗本身不構成理由；一次普通 BLOCKED、未證實 RCA、等待授權或外部來源缺失，不產生共用 Skill 修補候選。
+- Owner：`PACKET_LOCAL` 單一 Packet 的輸入／分類／交接／驗收設計問題→原任務續接或下一 Packet 局部修正（`LOCAL_REMEDIATION`），除非同時命中 A–D 否則不計共用候選；`PLANNER_SHARED` 不同任務重複的 Planner 契約問題→最小模板修改。
+- `FABLE_SHARED` 有證據的共用 Fable 規則／路由／執行契約問題→最小 Skill 修改；`PLATFORM` 實際載入／安裝／平台差異→平台版本採用 Owner；`PROJECT_DOMAIN` 演算法／資料／數學語義／正式來源→原 A／B／D 支線，C 不代做研究。
+- `AUTH_OR_ENV` 授權／環境阻塞→保留精確缺口、不改共用 Skill；`UNKNOWN` 根因不足→只列缺口、不下修復結論。
+- 終局分析：保留原 Task 驗收結論→讀可得 Result、回覆中的 `PROCESS_SIGNAL` 與 `FABLE_FEEDBACK`→區分 Worker 聲明和已驗證證據→套用 A–D、同根因只算一候選→定 Owner 與最小範圍。
+- 排除已完成及阻塞未解除項目；來源、授權、驗收證據、獨立寫入範圍全就緒才標 `READY`。每個獨立 READY 候選各產一份可單獨複製 Prompt；有依賴者不列入並行組；沒有就緒候選回報 `NONE REQUIRED` 並說明原因。僅收到終局結果時分析，不常駐監控。
+- Planner 可自動分析並產生 Prompt，但不啟動 Worker。建立 worktree、Commit、Push、Deploy、Live 安裝須 Owner 授權精確路徑、Branch、操作及範圍；Prompt 不代表授權。發布集合由正式 Manifest 與實際平台來源決定，不預設副本數。
+- 首次完成／重試只依 `CONTINUES_FROM` 與續接 `result.before_<N>.json` 判定，測試重跑及 Worker 自述不算；FAST、STANDARD/NORMAL、STANDARD/ENHANCED 分別計分並列 UNKNOWN 樣本數。無可比較基準時 `MEASURED_GAIN: UNKNOWN`；不得以 AC 通過率代首次完成率或推論號碼預測增益。
 
 發布任務使用已驗證的固定 candidate identity、exact target 與既有證據；PR Ready／merge 需綁定預期 HEAD。只做缺少的 lifecycle 動作，已達目標就唯讀確認，不重複 mutation。遠端結果不明先依 Fable 做 bounded read-after-write；不擅自換方法或重試。Expected identity 衝突就停，不把 gate 消耗後的舊 Packet 用來再次操作。CI、cleanup、retry 或 fallback 範圍依實際使用者授權，不由模板新增。
 
@@ -248,6 +261,7 @@ Deferred queue、protected launch、production mutation、supersession 及 clean
 4. 優化前／後及量測限制。無可證實的效能收益就直接說明。
 5. 流程／skill 建議：優先使用既有專案入口與流程；只有跨專案反覆出現的共通缺口才建議共用 skill 修改。區分建議、已修改、已部署及已實際採用。
 6. 下一步：**先呈現候選判定表，再輸出完整 Prompts**；列出已就緒／未就緒候選、各自缺口、可獨立並行的任務數、每份 Prompt 的目標支線、負責追蹤結果的支線及必要整合負責人。有效就緒候選兩項以上時不可只給一份、待辦名稱或要求使用者再次請求；沒有有效候選就 `NONE REQUIRED` 並說明具體原因。
+7. 流程改善：`NONE REQUIRED` | 候選（Owner、觸發條件、證據、READY 與否）。
 
 Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜RESULT_OWNER｜來源／授權／平台／驗收證據就緒及定位｜執行狀態證據｜NOT_READY／BLOCKED 缺口與解除條件｜是否獨立｜寫入／共享資源隔離｜本輪處置與理由`；有明確來源但未就緒的項目只列缺口，不產生偽裝為 ready-to-run 的 Packet。表後依§2 的數量規則逐張提供完整 Prompt。
 
@@ -303,7 +317,8 @@ PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及�
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
 定位未知時，只解析指定專案內適用的原生入口指示，以及入口或本任務具名引用的直接相關 RUNBOOK／spec；不得跨專案廣泛掃描。
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
-CONTINUES_FROM: <續接任務填原 TASK_ID 與 <PERSISTENT_EVIDENCE_ROOT>/packet.md、result.json；舊任務資料夾沒有 packet.md 時只填 result.json，不列不存在的檔案；新任務填 NONE>
+SIGNAL_POLICY: ALWAYS | ON_INCIDENT（Planner 填；高難度、研究、關鍵正確性或 CONTINUES_FROM 非 NONE 時 ALWAYS，其他 ON_INCIDENT）
+CONTINUES_FROM: NONE | <前一 TASK_ID><空白><其收據路徑>（Planner 填、Worker 不改；前任務 BLOCKED、ABORTED 或驗收未過而重派必填，不論沿用原 TASK_ID 或新 TASK_ID；成功後新研究或全新任務填 NONE）
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>
 INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、已知共享資源限制；單卡可省略>
@@ -328,7 +343,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 <只保留適用欄位；記憶寫入、DB／部署、雲端讀寫、外部訊息需另列 exact scope>
 
 ## 執行步驟
-1. 解析指定身份，讀取必要專案規則，簡短回報實際載入來源；保留既有修改。把收到的 Packet 原文存為 PERSISTENT_EVIDENCE_ROOT/packet.md（續接時另存新檔，不覆寫原 Packet）。第一次外部呼叫（連接器讀取、上傳、DB／雲端寫入）之前，先把 result.json 寫成 `task_lifecycle_state: IN_PROGRESS`（含 `started_at` 與平台名稱），中斷時才有恢復證據；續接時先把既有 result.json 原樣複製為 `result.before_<N>.json` 再更新，不直接覆寫停止紀錄。依賴外部連接器時先做一次唯讀探測，失敗即 BLOCKED 停止。
+1. 解析指定身份，讀取必要專案規則，簡短回報實際載入來源；保留既有修改。把收到的 Packet 原文存為 PERSISTENT_EVIDENCE_ROOT/packet.md（續接時另存新檔，不覆寫原 Packet）。第一次外部呼叫（連接器讀取、上傳、DB／雲端寫入）之前，先把 result.json 寫成 `task_lifecycle_state: IN_PROGRESS`（含 `started_at` 與平台名稱）；僅續接既有任務時先把舊 result.json 複製為 `result.before_<N>.json`，同次執行更新直接覆寫。依賴外部連接器時先做一次唯讀探測，失敗即 BLOCKED 停止。
 2. <直接推進目標的必要動作；不加入廣泛探索或另一張卡的未來產物>
 3. <最小必要驗收與已授權的發布；不允許重跑時只引用現有證據>
 
@@ -343,7 +358,8 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 ## Worker 必要回覆
 - `TASK_ID`、`TASK_LANE`、`RESULT_OWNER`，以及本 Task 的實際完成／剩餘工作；不可將本 Task 的 `NONE` 推成 lane/project 結案。
 - 結果、已完成與未完成；逐項 AC 對應 PASS／FAIL／NOT RUN／BLOCKED／UNKNOWN 及證據。
-- 終局狀態寫入 PERSISTENT_EVIDENCE_ROOT/result.json（沿用此收據，不另建報告），至少含 task_id、task_lifecycle_state（Fable 值）、逐項 AC 結果、exact_remaining_work；BLOCKED 時另含 current_blocker 與 unblock_condition（能證明阻塞已解除的可觀察證據）。回覆中列出該路徑。
+- 任何終局（含正常完成、STOP、驗收失敗、來源不符、授權不足）回覆前都先直接覆寫 PERSISTENT_EVIDENCE_ROOT/result.json；含 task_id、task_lifecycle_state（僅 IN_PROGRESS | BLOCKED | COMPLETED | ABORTED）、逐項 AC 結果、exact_remaining_work；BLOCKED 另含 current_blocker、unblock_condition。僅續接既有任務時先複製舊檔為 result.before_<N>.json；回覆列出收據路徑。
+- 依 `SIGNAL_POLICY` 寫 `process_signal`：`ALWAYS` 開始建、重大異常更新、結束完成；`ON_INCIDENT` 僅本次實際 STOP／BLOCKED／ABORTED／驗收失敗／重大異常時寫，正常完成不寫，不補造開始前觀察。有 signal 時回覆附同內容的 `PROCESS_SIGNAL:` JSON 區塊，供無法讀本機 Result 的 Web Planner 判讀。
   - **條件式身份核對：**僅當本 Task Packet 明確要求產生 `PERSISTENT_EVIDENCE_ROOT/result.json`，且該 Result 將作為現有 Evidence Helper 的直接驗收或後續使用輸入時，Worker 交付前須在本地 Helper 可用環境執行一次唯讀 `evidence-summary` 查詢，並確認輸出 `identity_status: MATCH`。Result 必須有頂層小寫 `task_id`，且值與本 Packet 的 `TASK_ID` 完全相同；更新收據時保留既有 `task_lifecycle_state`、AC 與原始證據。使用已解析的實際值執行：`python3 -B <existing-helper-absolute-path> evidence-summary --repo <canonical-repository> --task-id <exact-task-id> --task-evidence-root <exact-task-evidence-root>`。尖括號只是模板佔位，Worker 須以已解析的實際值替換；不得要求使用者手動提供尚未確認存在的執行路徑。此查詢成功只表示 Packet 與 Result 可讀、Result 為有效 JSON 且 Task 身份相符；不代表任何 AC 已獨立驗證或 Task 首次完成成功。若 Web Planner 等環境沒有本地 Helper 能力，仍依既有文字契約交接，不因此設為 BLOCKED；普通 Task 不執行此查詢。
 - 實際載入的規則、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
 - 實作任務回報實際 `IMPLEMENTATION_DEPTH` 與 `DEPTH_SOURCE`（`PLANNER_SUPPLIED`／`SKILL_FALLBACK`）；若由 Fable fallback 選定，簡述採用依據。非實作任務省略此項。
