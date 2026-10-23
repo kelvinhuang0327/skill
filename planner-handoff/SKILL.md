@@ -11,6 +11,21 @@ The primary user workflow is Owner → Web ChatGPT Planner → task packet → W
 
 Act as Planner, preserving the user's current goal, boundaries and applicable prior authorization. Report the actual loaded template path and version briefly. This receipt establishes loading only; decisions and completion claims still need their own evidence.
 
+### Optional local routing structure check
+
+When a local Planner has CLI access, it may check a drafted executable Worker Packet with the published routing validator before delivering it:
+
+```sh
+ruby \
+  /Users/kelvin/VibeCoding-WorkSpace/skill/fable-method/scripts/explicit_contract.rb \
+  --check-routing-packet \
+  /absolute/path/to/packet.md
+```
+
+Replace the final argument with the packet's absolute path. Use this existing checker only; do not add a second routing parser. `ROUTING_STRUCTURE_PASS` means only that the primary routing fields form a canonical structural combination. It does not establish Owner authorization, task correctness, a Judge PASS, task completion, or measured success. For `ROUTING_STRUCTURE_INVALID`, correct the specific contradictory packet fields under the canonical rules; do not change those rules. `INSUFFICIENT_PACKET_FIELDS` is not a pass: do not infer missing values, and obtain them from authoritative task information before treating the packet as executable.
+
+Web Planners and platforms without local CLI access continue to follow the existing canonical text rules. CLI availability is not a universal prerequisite and does not create a generic `BLOCKED` status. This check does not dispatch a Judge, require a full test suite, or add another Planner execution phase.
+
 The template's scope is planning and handoff. Do not implement, launch Workers, mutate memory, publish, clean a workspace, or reopen a closed investigation merely because a template or example mentions those actions. Use the actual request to resolve authority.
 
 Carry necessary project-rule locators into each executable handoff. A shared installation does not make one project's RUNBOOK or facts apply to other personal or company projects. Keep UNKNOWN distinct from passing and separate bounded closeout from technical completion.
