@@ -423,6 +423,75 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_equal 'INSUFFICIENT_PACKET_FIELDS', Parser.check_routing_packet(packet)[:status]
   end
 
+  def test_depth_fallback_alignment_cases_01_to_10
+    case01 = routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD')
+    case01_result = Parser.check_routing_packet(case01)
+    assert_equal 'ROUTING_STRUCTURE_PASS', case01_result[:status], 'CASE01'
+    refute case01_result[:fields].key?('IMPLEMENTATION_DEPTH'),
+           'CASE01 must leave actual depth selection to the Worker'
+
+    cases = {
+      'CASE02' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'NORMAL'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE03' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'ENHANCED'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE04' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'FAST', 'ENHANCED'),
+        'ROUTING_STRUCTURE_INVALID'
+      ],
+      'CASE05' => [
+        routing_packet('PURE_QA', 'FAST'),
+        'ROUTING_STRUCTURE_INVALID'
+      ],
+      'CASE06' => [
+        routing_packet('PURE_QA', 'NOT_APPLICABLE'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE08' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', nil, 'FRESH_CONTEXT'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE09' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', nil, 'NOT_APPLICABLE'),
+        'ROUTING_STRUCTURE_INVALID'
+      ]
+    }
+    cases.each do |case_id, (packet, expected)|
+      assert_equal expected, Parser.check_routing_packet(packet)[:status], case_id
+    end
+
+    missing_task_class = "WORKER_ROUTE: STANDARD\nJUDGE_MODE: NOT_APPLICABLE"
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS',
+                 Parser.check_routing_packet(missing_task_class)[:status], 'CASE07 missing TASK_CLASS'
+
+    missing_worker_route = "TASK_CLASS: STATE_CHANGING_IMPLEMENTATION\nJUDGE_MODE: NOT_APPLICABLE"
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS',
+                 Parser.check_routing_packet(missing_worker_route)[:status], 'CASE07 missing WORKER_ROUTE'
+
+    case10 = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      WORKER_ROUTE: STANDARD
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+
+      Quoted packet example:
+      TASK_CLASS: PURE_QA
+      WORKER_ROUTE: FAST
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    case10_result = Parser.check_routing_packet(case10)
+    assert_equal 'ROUTING_STRUCTURE_PASS', case10_result[:status], 'CASE10'
+    assert_equal 'STATE_CHANGING_IMPLEMENTATION', case10_result[:fields]['TASK_CLASS'],
+                 'CASE10 must retain the primary routing block'
+
+    assert_includes Parser::ROUTING_PACKET_LIMITATIONS, 'whether ENHANCED depth was necessary',
+                    'CASE03 must not claim ENHANCED was necessary'
+  end
+
   def test_canonical_implementation_depth_provenance_contract
     implementation_depth = File.read(
       File.expand_path('../shared/references/implementation-depth.md', __dir__),

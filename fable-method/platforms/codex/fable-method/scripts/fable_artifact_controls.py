@@ -529,6 +529,7 @@ def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, 
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
+    result["lifecycle_status_source"] = "UNKNOWN"
 
     if packet_bytes is not None:
         try:
@@ -568,7 +569,16 @@ def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, 
             else:
                 result["task_id"] = result_task_id
                 result["parse_status"] = "VALID_JSON"
-                lifecycle = parsed.get("task_local_status", parsed.get("lifecycle_status"))
+                if "task_lifecycle_state" in parsed:
+                    lifecycle_field = "task_lifecycle_state"
+                elif "task_local_status" in parsed:
+                    lifecycle_field = "task_local_status"
+                elif "lifecycle_status" in parsed:
+                    lifecycle_field = "lifecycle_status"
+                else:
+                    lifecycle_field = "UNKNOWN"
+                lifecycle = parsed.get(lifecycle_field) if lifecycle_field != "UNKNOWN" else None
+                result["lifecycle_status_source"] = lifecycle_field
                 if isinstance(lifecycle, str) and lifecycle.strip():
                     result["lifecycle_status"] = lifecycle.strip()
 

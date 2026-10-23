@@ -148,12 +148,6 @@ module Fable
 
         if task_class == 'STATE_CHANGING_IMPLEMENTATION'
           return routing_result(
-            'INSUFFICIENT_PACKET_FIELDS',
-            ['Missing required routing field: IMPLEMENTATION_DEPTH.'],
-            fields
-          ) if depth.nil?
-
-          return routing_result(
             'ROUTING_STRUCTURE_INVALID',
             ['STATE_CHANGING_IMPLEMENTATION requires a worker route.'],
             fields

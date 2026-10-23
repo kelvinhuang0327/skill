@@ -159,6 +159,106 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             self.expect_control_error(traversed_root, "parent-directory traversal")
         print("CASE06: PASS")
 
+    def test_required_case01_canonical_in_progress_and_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case01-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {"task_id": TASK_ID, "task_lifecycle_state": "IN_PROGRESS"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "IN_PROGRESS", "CASE01 canonical lifecycle value is reported")
+            self.check(summary["result"]["lifecycle_status_source"] == "task_lifecycle_state", "CASE01 canonical field source is identified")
+        print("REQUIRED_CASE01: PASS")
+
+    def test_required_case02_canonical_complete_is_reported_verbatim(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case02-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {"task_id": TASK_ID, "task_lifecycle_state": "COMPLETE"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "COMPLETE", "CASE02 canonical COMPLETE value is reported")
+            self.check(summary["result"]["lifecycle_status_source"] == "task_lifecycle_state", "CASE02 canonical field source is identified")
+            self.check(summary["unresolved"]["FIRST_ATTEMPT_STATUS"] == "UNKNOWN", "CASE02 does not infer first-attempt status")
+        print("REQUIRED_CASE02: PASS")
+
+    def test_required_case03_legacy_task_local_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case03-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {"task_id": TASK_ID, "task_local_status": "BLOCKED"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "BLOCKED", "CASE03 legacy task-local status remains supported")
+            self.check(summary["result"]["lifecycle_status_source"] == "task_local_status", "CASE03 legacy source is identified")
+        print("REQUIRED_CASE03: PASS")
+
+    def test_required_case04_legacy_lifecycle_status(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case04-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {"task_id": TASK_ID, "lifecycle_status": "IN_PROGRESS"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "IN_PROGRESS", "CASE04 legacy lifecycle status remains supported")
+            self.check(summary["result"]["lifecycle_status_source"] == "lifecycle_status", "CASE04 legacy source is identified")
+        print("REQUIRED_CASE04: PASS")
+
+    def test_required_case05_missing_or_invalid_fields_stay_unknown(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case05-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "task_local_status": None,
+                "lifecycle_status": "",
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "UNKNOWN", "CASE05 no valid lifecycle declaration stays UNKNOWN")
+            self.check(summary["result"]["lifecycle_status_source"] == "task_local_status", "CASE05 selected legacy source is explicit")
+        print("REQUIRED_CASE05: PASS")
+
+    def test_required_case06_unreadable_canonical_does_not_fall_back_to_complete(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case06-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "task_lifecycle_state": {"status": "COMPLETE"},
+                "task_local_status": "COMPLETE",
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "UNKNOWN", "CASE06 non-string canonical value cannot become COMPLETE")
+            self.check(summary["result"]["lifecycle_status_source"] == "task_lifecycle_state", "CASE06 invalid canonical source remains identifiable")
+        print("REQUIRED_CASE06: PASS")
+
+    def test_required_case07_mismatched_task_identity_rejects_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case07-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {"task_id": "OTHER_TASK", "task_lifecycle_state": "COMPLETE"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["status"] == "INVALID", "CASE07 mismatched identity is INVALID")
+            self.check(summary["result"]["lifecycle_status"] == "UNKNOWN", "CASE07 mismatched lifecycle is not trusted")
+        print("REQUIRED_CASE07: PASS")
+
+    def test_required_case08_malformed_and_duplicate_json_reject_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case08-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            (root / "result.json").write_text(
+                f'{{"task_id":"{TASK_ID}","task_lifecycle_state":"COMPLETE","task_id":"{TASK_ID}"}}',
+                encoding="utf-8",
+            )
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["status"] == "INVALID", "CASE08 duplicate JSON key is INVALID")
+            self.check(summary["result"]["lifecycle_status"] == "UNKNOWN", "CASE08 duplicate-key lifecycle is not trusted")
+
+            (root / "result.json").write_text('{"task_id":', encoding="utf-8")
+            malformed = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(malformed["result"]["status"] == "INVALID", "CASE08 malformed JSON is INVALID")
+            self.check(malformed["result"]["lifecycle_status"] == "UNKNOWN", "CASE08 malformed lifecycle is not trusted")
+        print("REQUIRED_CASE08: PASS")
+
+    def test_required_case09_complete_keeps_first_attempt_unknown(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case09-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_result(root, {"task_id": TASK_ID, "task_lifecycle_state": "COMPLETE"})
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["result"]["lifecycle_status"] == "COMPLETE", "CASE09 final lifecycle is COMPLETE")
+            self.check(summary["unresolved"]["FIRST_ATTEMPT_STATUS"] == "UNKNOWN", "CASE09 first attempt remains UNKNOWN")
+            self.check(summary["unresolved"]["AGENT_RETRY_COUNT"] == "UNKNOWN", "CASE09 retry count remains UNKNOWN")
+            self.check(summary["unresolved"]["JUDGE_VERDICT"] == "UNKNOWN", "CASE09 Judge verdict remains UNKNOWN")
+        print("REQUIRED_CASE09: PASS")
+
     def test_case07_legacy_cli_output_shape_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory(prefix="task-evidence-case07-") as temporary:
             repo = Path(temporary).resolve()
@@ -184,6 +284,32 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             self.check(set(summary) == expected_keys, "CASE07 legacy output keys are unchanged")
             self.check("task_evidence" not in summary, "CASE07 no evidence detail appears without the option")
         print("CASE07: PASS")
+
+    def test_required_case10_legacy_cli_output_without_task_evidence_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="task-evidence-required-case10-") as temporary:
+            repo = Path(temporary).resolve()
+            initialized = subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, text=True, check=False)
+            self.check(initialized.returncode == 0, "CASE10 temporary Git repository initialized")
+            command = [
+                sys.executable,
+                "-B",
+                str(HELPER_PATH),
+                "evidence-summary",
+                "--repo",
+                str(repo),
+                "--task-id",
+                TASK_ID,
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            self.check(completed.returncode == 0, f"CASE10 legacy CLI exits successfully: {completed.stderr.strip()}")
+            summary = json.loads(completed.stdout)
+            expected_keys = {
+                "schema", "repository", "task_filter", "inventory", "coverage",
+                "problems", "orphan_captures", "recommendations", "executions",
+            }
+            self.check(set(summary) == expected_keys, "CASE10 legacy output keys are unchanged")
+            self.check("task_evidence" not in summary, "CASE10 no evidence detail appears without the option")
+        print("REQUIRED_CASE10: PASS")
 
     def test_case08_final_complete_does_not_imply_first_attempt_success(self) -> None:
         with tempfile.TemporaryDirectory(prefix="task-evidence-case08-") as temporary:
