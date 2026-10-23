@@ -586,7 +586,16 @@ guard_runtime_helper_preservation() {
 # Approved identities for Reviewed Runtime Upgrade contract
 readonly APPROVED_OLD_CODEX_LAUNCHER_BLOB='00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
 readonly APPROVED_NEW_CODEX_LAUNCHER_BLOB='c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+readonly APPROVED_NEXT_CODEX_LAUNCHER_BLOB='0851b2fa877cb3f9692eb0ef84b543caa9088ccf'
 readonly APPROVED_CODEX_COMPANION_BLOB='91592132733be6b697bdbef667b97d9065c829c1'
+
+# Accept only the reviewed directed upgrade pairs; independent old/new allowlists
+# would also admit unreviewed cross-pairs.
+is_approved_codex_runtime_pair() {
+  local old="$1" new="$2"
+  [[ "$old:$new" == "$APPROVED_OLD_CODEX_LAUNCHER_BLOB:$APPROVED_NEW_CODEX_LAUNCHER_BLOB" \
+    || "$old:$new" == "$APPROVED_NEW_CODEX_LAUNCHER_BLOB:$APPROVED_NEXT_CODEX_LAUNCHER_BLOB" ]]
+}
 
 # Computes Git blob SHA1 hash for a file.
 # Uses git hash-object with trusted path, falling back to Ruby digest if needed.
@@ -612,10 +621,13 @@ compute_git_blob() {
 # Fails closed on any symlink, unapproved identity, missing helper, pin mismatch, or drift.
 verify_reviewed_runtime_upgrade() {
   local canonical_abs="$1" live="$2" platform="$3"
-  local expected_old="${4:-}" expected_new="${5:-}"
+  local expected_old="${4:-$APPROVED_OLD_CODEX_LAUNCHER_BLOB}"
+  local expected_new="${5:-$APPROVED_NEW_CODEX_LAUNCHER_BLOB}"
 
   [[ "$platform" == codex ]] \
     || die "REVIEWED_RUNTIME_UPGRADE_UNSUPPORTED_PLATFORM: runtime upgrade is only supported for platform codex (got ${platform})"
+  is_approved_codex_runtime_pair "$expected_old" "$expected_new" \
+    || die "REVIEWED_RUNTIME_UPGRADE_REJECTED: runtime pair (${expected_old} -> ${expected_new}) is not approved"
 
   # 1. Symlink and directory integrity checks
   local sym
@@ -658,11 +670,8 @@ verify_reviewed_runtime_upgrade() {
   live_launcher_blob="$(compute_git_blob "$live_launcher")" \
     || die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: failed to compute live launcher blob"
 
-  if [[ -n "$expected_old" && "$live_launcher_blob" != "$expected_old" ]]; then
+  if [[ "$live_launcher_blob" != "$expected_old" ]]; then
     die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live launcher blob (${live_launcher_blob}) does not match expected (${expected_old})"
-  fi
-  if [[ "$live_launcher_blob" != "$APPROVED_OLD_CODEX_LAUNCHER_BLOB" ]]; then
-    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live launcher blob (${live_launcher_blob}) is not an approved old runtime version (${APPROVED_OLD_CODEX_LAUNCHER_BLOB})"
   fi
 
   # 3. Live SKILL.md pin verification
@@ -673,8 +682,8 @@ verify_reviewed_runtime_upgrade() {
   if [[ ! -f "$live_skill" || ! -r "$live_skill" ]]; then
     die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: live SKILL.md is missing or unreadable: ${live_skill}"
   fi
-  if ! grep -q "$APPROVED_OLD_CODEX_LAUNCHER_BLOB" "$live_skill"; then
-    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live SKILL.md does not contain approved old launcher pin (${APPROVED_OLD_CODEX_LAUNCHER_BLOB})"
+  if ! grep -q "$expected_old" "$live_skill"; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: live SKILL.md does not contain approved old launcher pin (${expected_old})"
   fi
 
   # 4. Source launcher verification
@@ -693,11 +702,8 @@ verify_reviewed_runtime_upgrade() {
   src_launcher_blob="$(compute_git_blob "$src_launcher")" \
     || die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: failed to compute source launcher blob"
 
-  if [[ -n "$expected_new" && "$src_launcher_blob" != "$expected_new" ]]; then
+  if [[ "$src_launcher_blob" != "$expected_new" ]]; then
     die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source launcher blob (${src_launcher_blob}) does not match expected (${expected_new})"
-  fi
-  if [[ "$src_launcher_blob" != "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" ]]; then
-    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source launcher blob (${src_launcher_blob}) is not approved new runtime version (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
   fi
 
   # 5. Source SKILL.md pin verification
@@ -708,8 +714,8 @@ verify_reviewed_runtime_upgrade() {
   if [[ ! -f "$src_skill" || ! -r "$src_skill" ]]; then
     die "REVIEWED_RUNTIME_UPGRADE_UNVERIFIABLE: source SKILL.md is missing or unreadable: ${src_skill}"
   fi
-  if ! grep -q "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" "$src_skill"; then
-    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source SKILL.md does not contain approved new launcher pin (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+  if ! grep -q "$expected_new" "$src_skill"; then
+    die "REVIEWED_RUNTIME_UPGRADE_REJECTED: source SKILL.md does not contain approved new launcher pin (${expected_new})"
   fi
 
   # 6. Companion helper verification
@@ -784,7 +790,8 @@ verify_reviewed_runtime_upgrade() {
 # Executes an approved reviewed runtime upgrade using staging and fail-closed verification.
 upgrade_reviewed_runtime() {
   local canonical_abs="$1" live="$2" platform="$3"
-  local expected_old="${4:-}" expected_new="${5:-}"
+  local expected_old="${4:-$APPROVED_OLD_CODEX_LAUNCHER_BLOB}"
+  local expected_new="${5:-$APPROVED_NEW_CODEX_LAUNCHER_BLOB}"
 
   # Step 1: Preflight verification
   verify_reviewed_runtime_upgrade "$canonical_abs" "$live" "$platform" "$expected_old" "$expected_new"
@@ -812,11 +819,11 @@ upgrade_reviewed_runtime() {
   fi
   local staged_launcher_blob
   staged_launcher_blob="$(compute_git_blob "$staged_launcher")"
-  if [[ "$staged_launcher_blob" != "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" ]]; then
+  if [[ "$staged_launcher_blob" != "$expected_new" ]]; then
     rm -rf "$staging_dir"
-    die "REVIEWED_RUNTIME_UPGRADE_FAILED: staged launcher blob (${staged_launcher_blob}) does not match new launcher (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+    die "REVIEWED_RUNTIME_UPGRADE_FAILED: staged launcher blob (${staged_launcher_blob}) does not match new launcher (${expected_new})"
   fi
-  if ! grep -q "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" "$staged_skill"; then
+  if ! grep -q "$expected_new" "$staged_skill"; then
     rm -rf "$staging_dir"
     die 'REVIEWED_RUNTIME_UPGRADE_FAILED: staged SKILL.md pin does not match new launcher'
   fi
@@ -850,8 +857,8 @@ upgrade_reviewed_runtime() {
     || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write launcher is missing, symlink, or non-executable'
   local post_launcher_blob
   post_launcher_blob="$(compute_git_blob "$post_launcher")"
-  [[ "$post_launcher_blob" == "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" ]] \
-    || die "REVIEWED_RUNTIME_UPGRADE_FAILED: post-write launcher blob (${post_launcher_blob}) does not match new launcher (${APPROVED_NEW_CODEX_LAUNCHER_BLOB})"
+  [[ "$post_launcher_blob" == "$expected_new" ]] \
+    || die "REVIEWED_RUNTIME_UPGRADE_FAILED: post-write launcher blob (${post_launcher_blob}) does not match new launcher (${expected_new})"
 
   [[ -f "$post_companion" && ! -L "$post_companion" ]] \
     || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write companion is missing or symlink'
@@ -862,7 +869,7 @@ upgrade_reviewed_runtime() {
   [[ ! -x "$post_companion" ]] \
     || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write companion must not be executable'
 
-  grep -q "$APPROVED_NEW_CODEX_LAUNCHER_BLOB" "$post_skill" \
+  grep -q "$expected_new" "$post_skill" \
     || die 'REVIEWED_RUNTIME_UPGRADE_FAILED: post-write SKILL.md pin does not match new launcher'
 
   # Run standard helper preservation guard to confirm full consistency
@@ -1371,7 +1378,8 @@ do_activate_replace_reviewed_local_drift() {
 do_activate_upgrade_reviewed_runtime() {
   acquire_activation_lock
   local platform="$1"
-  local expected_old="${2:-}" expected_new="${3:-}"
+  local expected_old="${2:-$APPROVED_OLD_CODEX_LAUNCHER_BLOB}"
+  local expected_new="${3:-$APPROVED_NEW_CODEX_LAUNCHER_BLOB}"
 
   [[ "$platform" == codex ]] \
     || die "REVIEWED_RUNTIME_UPGRADE_UNSUPPORTED_PLATFORM: runtime upgrade is only supported for platform codex (got ${platform})"
@@ -1413,8 +1421,8 @@ do_activate_upgrade_reviewed_runtime() {
 
   printf 'PLATFORM: %s\n' "$platform"
   printf 'ACTIVATION_MODE: UPGRADE_REVIEWED_RUNTIME\n'
-  printf 'OLD_LAUNCHER_BLOB: %s\n' "$APPROVED_OLD_CODEX_LAUNCHER_BLOB"
-  printf 'NEW_LAUNCHER_BLOB: %s\n' "$APPROVED_NEW_CODEX_LAUNCHER_BLOB"
+  printf 'OLD_LAUNCHER_BLOB: %s\n' "$expected_old"
+  printf 'NEW_LAUNCHER_BLOB: %s\n' "$expected_new"
   printf 'COMPANION_BLOB: %s\n' "$APPROVED_CODEX_COMPANION_BLOB"
   printf 'ACTIVATION_RESULT: ACTIVATED\n'
   printf 'FINAL_STATE: %s\n' "$CLASSIFY_STATE"

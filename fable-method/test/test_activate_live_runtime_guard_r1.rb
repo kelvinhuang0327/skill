@@ -10,6 +10,11 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
   ROOT = File.expand_path('../..', __dir__)
   ACTIVATE_SCRIPT = File.join(ROOT, 'fable-method/scripts/activate-live.sh')
   REAL_LIVE_CODEX_SKILL = '/Users/kelvin/.codex/skills/fable-method'
+  APPROVED_OLD_LAUNCHER_BLOB = '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
+  APPROVED_NEW_LAUNCHER_BLOB = 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+  APPROVED_NEXT_LAUNCHER_BLOB = '0851b2fa877cb3f9692eb0ef84b543caa9088ccf'
+  APPROVED_COMPANION_BLOB = '91592132733be6b697bdbef667b97d9065c829c1'
+  APPROVED_NEXT_LAUNCHER_SHA256 = '2e3dc83f1d23953044fb487b40af63c95027c0446a82e385d6987df11c361484'
 
   def setup
     @scratch = File.realpath(Dir.mktmpdir('fable-guard-r1-test-'))
@@ -429,57 +434,90 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
   # --- Reviewed Runtime Upgrade Fixtures and Helpers ---
 
+  def bytes_from_git_blob(blob)
+    bytes, stderr, status = Open3.capture3('git', '-C', ROOT, 'cat-file', 'blob', blob)
+    raise "Could not load pinned launcher blob #{blob}: #{stderr}" unless status.success?
+
+    bytes = bytes.b
+    actual_blob = Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
+    raise "Pinned fixture mismatch: #{actual_blob} != #{blob}" unless actual_blob == blob
+
+    bytes
+  end
+
+  def git_blob_for_file(path)
+    bytes = File.binread(path)
+    Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
+  end
+
+  def launcher_bytes_for_blob(blob)
+    path = File.join(ROOT, 'fable-method/scripts/task_checkpoint.rb')
+    bytes = blob == APPROVED_NEXT_LAUNCHER_BLOB ? File.binread(path) : bytes_from_git_blob(blob)
+    actual_blob = Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
+    raise "Launcher fixture mismatch: #{actual_blob} != #{blob}" unless actual_blob == blob
+    if blob == APPROVED_NEXT_LAUNCHER_BLOB
+      actual_sha256 = Digest::SHA256.hexdigest(bytes)
+      raise "New launcher SHA-256 mismatch: #{actual_sha256}" unless actual_sha256 == APPROVED_NEXT_LAUNCHER_SHA256
+    end
+
+    bytes
+  end
+
   def create_old_live_skill(root, overrides: {})
+    create_live_runtime_skill(root, launcher_blob: APPROVED_OLD_LAUNCHER_BLOB, overrides: overrides)
+  end
+
+  def create_live_runtime_skill(root, launcher_blob:, overrides: {})
     FileUtils.mkdir_p(File.join(root, 'references'))
-    old_pin = overrides[:skill_pin] || '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
+    old_pin = overrides[:skill_pin] || launcher_blob
     File.write(File.join(root, 'SKILL.md'), "# Fable Method Live Old\nLauncher pin: #{old_pin}\n")
     File.write(File.join(root, 'references/operational-gates.md'), "# Operational Gates\n")
 
     scripts_dir = File.join(root, 'scripts')
     FileUtils.mkdir_p(scripts_dir)
 
-    launcher_bytes = overrides[:launcher_bytes] || File.binread('/Users/kelvin/.codex/skills/fable-method/scripts/task_checkpoint.rb')
+    launcher_bytes = overrides[:launcher_bytes] || launcher_bytes_for_blob(launcher_blob)
     launcher = File.join(scripts_dir, 'task_checkpoint.rb')
     File.binwrite(launcher, launcher_bytes)
     FileUtils.chmod(overrides[:launcher_mode] || 0755, launcher)
 
     unless overrides[:skip_companion]
-      companion_bytes = overrides[:companion_bytes] || File.binread(File.join(ROOT, 'fable-method/scripts/paused_run_continuation.rb'))
+      companion_bytes = overrides[:companion_bytes] || bytes_from_git_blob(APPROVED_COMPANION_BLOB)
       companion = File.join(scripts_dir, 'paused_run_continuation.rb')
       File.binwrite(companion, companion_bytes)
       FileUtils.chmod(overrides[:companion_mode] || 0644, companion)
     end
   end
 
-  def create_new_source_materialization(root, overrides: {})
+  def create_new_source_materialization(root, overrides: {}, launcher_blob: APPROVED_NEW_LAUNCHER_BLOB)
     FileUtils.mkdir_p(File.join(root, 'references'))
-    new_pin = overrides[:skill_pin] || 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+    new_pin = overrides[:skill_pin] || launcher_blob
     File.write(File.join(root, 'SKILL.md'), "# Fable Method Source New\nLauncher pin: #{new_pin}\n")
     File.write(File.join(root, 'references/operational-gates.md'), "# Operational Gates\n")
 
     scripts_dir = File.join(root, 'scripts')
     FileUtils.mkdir_p(scripts_dir)
 
-    launcher_bytes = overrides[:launcher_bytes] || File.binread(File.join(ROOT, 'fable-method/scripts/task_checkpoint.rb'))
+    launcher_bytes = overrides[:launcher_bytes] || launcher_bytes_for_blob(launcher_blob)
     launcher = File.join(scripts_dir, 'task_checkpoint.rb')
     File.binwrite(launcher, launcher_bytes)
     FileUtils.chmod(overrides[:launcher_mode] || 0755, launcher)
 
     unless overrides[:skip_companion]
-      companion_bytes = overrides[:companion_bytes] || File.binread(File.join(ROOT, 'fable-method/scripts/paused_run_continuation.rb'))
+      companion_bytes = overrides[:companion_bytes] || bytes_from_git_blob(APPROVED_COMPANION_BLOB)
       companion = File.join(scripts_dir, 'paused_run_continuation.rb')
       File.binwrite(companion, companion_bytes)
       FileUtils.chmod(overrides[:companion_mode] || 0644, companion)
     end
   end
 
-  def run_upgrade(canonical_abs, live, platform = 'codex', expected_old = '', expected_new = '')
+  def run_upgrade(canonical_abs, live, platform = 'codex', expected_old = '', expected_new = '', env: {})
     script_path = ACTIVATE_SCRIPT
     bash_cmd = <<~BASH
       source #{script_path}
       upgrade_reviewed_runtime "#{canonical_abs}" "#{live}" "#{platform}" "#{expected_old}" "#{expected_new}"
     BASH
-    Open3.capture3('bash', '-c', bash_cmd)
+    Open3.capture3(env, 'bash', '-c', bash_cmd)
   end
 
   def run_verify_upgrade(canonical_abs, live, platform = 'codex', expected_old = '', expected_new = '')
@@ -533,6 +571,47 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     # Standard helper preservation guard must now PASS cleanly (full parity)
     stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
     assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_next_approved_runtime_pair_upgrades_exact_launcher_and_preserves_companion
+    live_dir = File.join(@scratch, 'live_c201_codex')
+    src_dir = File.join(@scratch, 'source_0851_codex')
+
+    create_live_runtime_skill(live_dir, launcher_blob: APPROVED_NEW_LAUNCHER_BLOB)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_NEXT_LAUNCHER_BLOB)
+
+    stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', APPROVED_NEW_LAUNCHER_BLOB, APPROVED_NEXT_LAUNCHER_BLOB
+    )
+    assert_equal 0, status.exitstatus, "Expected the newly approved pair to upgrade. Stderr: #{stderr}"
+
+    post_launcher = File.join(live_dir, 'scripts/task_checkpoint.rb')
+    post_companion = File.join(live_dir, 'scripts/paused_run_continuation.rb')
+    assert_equal APPROVED_NEXT_LAUNCHER_BLOB, git_blob_for_file(post_launcher)
+    assert_equal APPROVED_NEXT_LAUNCHER_SHA256, Digest::SHA256.file(post_launcher).hexdigest
+    assert_equal 0755, File.stat(post_launcher).mode & 0777
+    assert_includes File.read(File.join(live_dir, 'SKILL.md')), APPROVED_NEXT_LAUNCHER_BLOB
+    assert_equal APPROVED_COMPANION_BLOB, git_blob_for_file(post_companion)
+    assert_equal 0644, File.stat(post_companion).mode & 0777
+    assert_equal File.binread(File.join(src_dir, 'scripts/paused_run_continuation.rb')), File.binread(post_companion)
+
+    _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
+    assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_runtime_pair_allowlist_rejects_an_unapproved_cross_pair
+    live_dir = File.join(@scratch, 'live_00e2_codex')
+    src_dir = File.join(@scratch, 'source_0851_codex')
+    create_old_live_skill(live_dir)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_NEXT_LAUNCHER_BLOB)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', APPROVED_OLD_LAUNCHER_BLOB, APPROVED_NEXT_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'runtime pair ('
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
   end
 
   def test_unauthorized_helper_mismatch_refuses_upgrade_and_fails_closed
@@ -615,6 +694,23 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     assert_equal fingerprint_before, fingerprint_after
   end
 
+  def test_new_pair_live_skill_pin_mismatch_refuses_upgrade
+    live_dir = File.join(@scratch, 'live_new_pair_wrong_pin')
+    src_dir = File.join(@scratch, 'source_0851_codex')
+    create_live_runtime_skill(live_dir, launcher_blob: APPROVED_NEW_LAUNCHER_BLOB, overrides: {
+      skill_pin: APPROVED_OLD_LAUNCHER_BLOB
+    })
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_NEXT_LAUNCHER_BLOB)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', APPROVED_NEW_LAUNCHER_BLOB, APPROVED_NEXT_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'live SKILL.md does not contain approved old launcher pin'
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
   def test_missing_runtime_helper_in_live_refuses_upgrade
     live_dir = File.join(@scratch, 'live_missing_companion')
     src_dir = File.join(@scratch, 'source_new_codex')
@@ -653,6 +749,67 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     assert_equal fingerprint_before, fingerprint_after
   end
 
+  def test_companion_permission_and_symlink_errors_refuse_upgrade
+    live_dir = File.join(@scratch, 'live_companion_permission')
+    src_dir = File.join(@scratch, 'source_companion_permission')
+    create_old_live_skill(live_dir)
+    create_new_source_materialization(src_dir, overrides: { companion_mode: 0755 })
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(src_dir, live_dir)
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'source companion must not be executable'
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+
+    bad_source_live = File.join(@scratch, 'live_bad_source_companion')
+    bad_source = File.join(@scratch, 'source_bad_companion')
+    create_old_live_skill(bad_source_live)
+    create_new_source_materialization(bad_source, overrides: {
+      companion_bytes: "# invalid source companion\n"
+    })
+    fingerprint_before = capture_tree_fingerprint(bad_source_live)
+
+    _stdout, stderr, status = run_upgrade(bad_source, bad_source_live)
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'source companion blob'
+    assert_equal fingerprint_before, capture_tree_fingerprint(bad_source_live)
+
+    live_symlink = File.join(@scratch, 'live_companion_symlink')
+    source = File.join(@scratch, 'source_companion_symlink')
+    create_old_live_skill(live_symlink)
+    create_new_source_materialization(source)
+    companion = File.join(live_symlink, 'scripts/paused_run_continuation.rb')
+    FileUtils.rm(companion)
+    File.symlink(File.join(@scratch, 'external_companion.rb'), companion)
+    fingerprint_before = capture_tree_fingerprint(live_symlink)
+
+    _stdout, stderr, status = run_upgrade(source, live_symlink)
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'ACTIVATION_RUNTIME_HELPER_SYMLINK'
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_symlink)
+  end
+
+  def test_live_and_source_launcher_permission_errors_refuse_upgrade
+    [ :live, :source ].each do |invalid_target|
+      live_dir = File.join(@scratch, "live_permission_#{invalid_target}")
+      src_dir = File.join(@scratch, "source_permission_#{invalid_target}")
+      live_overrides = invalid_target == :live ? { launcher_mode: 0644 } : {}
+      source_overrides = invalid_target == :source ? { launcher_mode: 0644 } : {}
+      create_live_runtime_skill(live_dir, launcher_blob: APPROVED_NEW_LAUNCHER_BLOB, overrides: live_overrides)
+      create_new_source_materialization(
+        src_dir, launcher_blob: APPROVED_NEXT_LAUNCHER_BLOB, overrides: source_overrides
+      )
+      fingerprint_before = capture_tree_fingerprint(live_dir)
+
+      _stdout, stderr, status = run_upgrade(
+        src_dir, live_dir, 'codex', APPROVED_NEW_LAUNCHER_BLOB, APPROVED_NEXT_LAUNCHER_BLOB
+      )
+      assert_equal 2, status.exitstatus
+      assert_includes stderr, "#{invalid_target} launcher is not executable"
+      assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+    end
+  end
+
   def test_symlink_in_live_or_source_refuses_upgrade_and_fails_closed
     live_dir = File.join(@scratch, 'live_symlink')
     src_dir = File.join(@scratch, 'source_new_codex')
@@ -675,6 +832,20 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
     fingerprint_after = capture_tree_fingerprint(live_dir)
     assert_equal fingerprint_before, fingerprint_after
+
+    source_live = File.join(@scratch, 'live_source_symlink')
+    source_dir = File.join(@scratch, 'source_symlink')
+    create_old_live_skill(source_live)
+    create_new_source_materialization(source_dir)
+    source_launcher = File.join(source_dir, 'scripts/task_checkpoint.rb')
+    FileUtils.rm(source_launcher)
+    File.symlink(target, source_launcher)
+    fingerprint_before = capture_tree_fingerprint(source_live)
+
+    _stdout, stderr, status = run_upgrade(source_dir, source_live, 'codex')
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'source helper is a symlink'
+    assert_equal fingerprint_before, capture_tree_fingerprint(source_live)
   end
 
   def test_staging_or_update_failure_fails_closed_and_does_not_claim_success
@@ -685,7 +856,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     create_new_source_materialization(src_dir)
 
     # Invalidate source launcher permissions so verification fails
-    FileUtils.chmod(0000, File.join(src_dir, 'scripts/task_checkpoint.rb'))
+    FileUtils.chmod(0644, File.join(src_dir, 'scripts/task_checkpoint.rb'))
 
     fingerprint_before = capture_tree_fingerprint(live_dir)
 
@@ -699,6 +870,67 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     # Restore permissions for tmp cleanup
     p = File.join(src_dir, 'scripts/task_checkpoint.rb')
     FileUtils.chmod(0755, p) if File.exist?(p)
+  end
+
+  def test_prewrite_live_or_source_identity_change_is_rejected_before_live_write
+    real_rsync = ENV.fetch('PATH').split(File::PATH_SEPARATOR)
+                      .map { |dir| File.join(dir, 'rsync') }
+                      .find { |path| File.file?(path) && File.executable?(path) }
+    flunk 'rsync is required for prewrite identity injection test' unless real_rsync
+
+    [ :live, :source ].each do |target_kind|
+      live_dir = File.join(@scratch, "live_prewrite_#{target_kind}")
+      src_dir = File.join(@scratch, "source_prewrite_#{target_kind}")
+      create_live_runtime_skill(live_dir, launcher_blob: APPROVED_NEW_LAUNCHER_BLOB)
+      create_new_source_materialization(src_dir, launcher_blob: APPROVED_NEXT_LAUNCHER_BLOB)
+
+      bin_dir = File.join(@scratch, "prewrite_bin_#{target_kind}")
+      FileUtils.mkdir_p(bin_dir)
+      wrapper = File.join(bin_dir, 'rsync')
+      File.write(wrapper, <<~BASH)
+        #!/usr/bin/env bash
+        set -u
+        "$RUNTIME_REAL_RSYNC" "$@"
+        rsync_status=$?
+        if [[ $rsync_status -ne 0 ]]; then exit "$rsync_status"; fi
+        if [[ ! -e "$RUNTIME_PREWRITE_FLAG" ]]; then
+          printf '%s' "$RUNTIME_PREWRITE_BYTES" > "$RUNTIME_PREWRITE_TARGET"
+          chmod 0755 "$RUNTIME_PREWRITE_TARGET"
+          : > "$RUNTIME_PREWRITE_FLAG"
+        fi
+        exit 0
+      BASH
+      FileUtils.chmod(0755, wrapper)
+
+      target_path = if target_kind == :live
+                      File.join(live_dir, 'scripts/task_checkpoint.rb')
+                    else
+                      File.join(src_dir, 'scripts/task_checkpoint.rb')
+                    end
+      injected_bytes = "# identity changed after staging\n"
+      live_fingerprint_before = capture_tree_fingerprint(live_dir)
+      env = {
+        'PATH' => "#{bin_dir}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH')}",
+        'RUNTIME_REAL_RSYNC' => real_rsync,
+        'RUNTIME_PREWRITE_FLAG' => File.join(@scratch, "prewrite_#{target_kind}.flag"),
+        'RUNTIME_PREWRITE_TARGET' => target_path,
+        'RUNTIME_PREWRITE_BYTES' => injected_bytes
+      }
+
+      stdout, stderr, status = run_upgrade(
+        src_dir, live_dir, 'codex', APPROVED_NEW_LAUNCHER_BLOB, APPROVED_NEXT_LAUNCHER_BLOB, env: env
+      )
+      assert_equal 2, status.exitstatus, "#{target_kind} identity change should fail before write: #{stderr}"
+      assert_includes stderr, "#{target_kind} launcher blob"
+      refute_includes stdout, 'ACTIVATION_RESULT: ACTIVATED'
+      assert_equal injected_bytes, File.binread(target_path)
+      if target_kind == :live
+        refute_equal File.binread(File.join(src_dir, 'scripts/task_checkpoint.rb')),
+                     File.binread(File.join(live_dir, 'scripts/task_checkpoint.rb'))
+      else
+        assert_equal live_fingerprint_before, capture_tree_fingerprint(live_dir)
+      end
+    end
   end
 
   def test_full_upgrade_cli_flow_in_disposable_repo
@@ -765,7 +997,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
     # Setup live destination in fixture_home with approved old runtime
     disposable_live = File.join(fixture_home, '.codex/skills/fable-method')
-    create_old_live_skill(disposable_live)
+    create_live_runtime_skill(disposable_live, launcher_blob: APPROVED_NEW_LAUNCHER_BLOB)
 
     activate_cmd = File.join(fixture_canonical, 'fable-method/scripts/activate-live.sh')
 
@@ -779,11 +1011,13 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
       '/bin/bash', activate_cmd,
       '--activate', '--platform', 'codex',
       '--upgrade-reviewed-runtime',
-      '--expected-old-launcher-blob', '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4',
-      '--expected-new-launcher-blob', 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
+      '--expected-old-launcher-blob', APPROVED_NEW_LAUNCHER_BLOB,
+      '--expected-new-launcher-blob', APPROVED_NEXT_LAUNCHER_BLOB
     )
     assert_equal 0, status.exitstatus, "Expected CLI upgrade to succeed. Stderr: #{stderr}"
     assert_includes stdout, 'ACTIVATION_MODE: UPGRADE_REVIEWED_RUNTIME'
+    assert_includes stdout, "OLD_LAUNCHER_BLOB: #{APPROVED_NEW_LAUNCHER_BLOB}"
+    assert_includes stdout, "NEW_LAUNCHER_BLOB: #{APPROVED_NEXT_LAUNCHER_BLOB}"
     assert_includes stdout, 'ACTIVATION_RESULT: ACTIVATED'
     assert_includes stdout, 'FINAL_STATE: EXACT_CURRENT_MATERIALIZATION'
 
