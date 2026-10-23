@@ -8,6 +8,7 @@ them. Its log writer owns only .fable/temporary/<task-id>/logs/observer*.jsonl.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -409,12 +410,220 @@ def _command_outcome(record_status: Any, exit_status: Any) -> str:
     return "UNKNOWN"
 
 
-def summarize_execution_history(repo_text: str, task_id_filter: str | None = None) -> dict[str, Any]:
+def _task_evidence_file(
+    directory_fd: int | None,
+    root: Path,
+    name: str,
+) -> tuple[bytes | None, dict[str, Any]]:
+    locator = str(root / name)
+    if directory_fd is None:
+        return None, {
+            "status": "MISSING",
+            "locator": locator,
+            "sha256": None,
+            "task_id": None,
+            "parse_status": "UNKNOWN",
+            "lifecycle_status": "UNKNOWN",
+        }
+
+    try:
+        file_fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        return None, {
+            "status": "MISSING",
+            "locator": locator,
+            "sha256": None,
+            "task_id": None,
+            "parse_status": "UNKNOWN",
+            "lifecycle_status": "UNKNOWN",
+        }
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise ControlError(f"task evidence file must not be a symlink: {locator}") from exc
+        raise ControlError(f"cannot safely open task evidence file {locator}: {exc}") from exc
+
+    try:
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ControlError(f"task evidence file is not a regular file: {locator}")
+        with os.fdopen(file_fd, "rb") as handle:
+            file_fd = -1
+            raw = handle.read()
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+    return raw, {
+        "status": "PRESENT",
+        "locator": locator,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "task_id": None,
+        "parse_status": "UNKNOWN",
+        "lifecycle_status": "UNKNOWN",
+    }
+
+
+def _open_task_evidence_root(root_text: str, expected_task_id: str) -> tuple[Path, int | None]:
+    root = Path(root_text)
+    if not root.is_absolute():
+        raise ControlError("--task-evidence-root must be an absolute path")
+    if ".." in root.parts:
+        raise ControlError("--task-evidence-root must not contain parent-directory traversal")
+    root = Path(os.path.normpath(str(root)))
+    if root.name != expected_task_id:
+        raise ControlError("task evidence root directory name must match --task-id")
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        current_fd = os.open(root.anchor, directory_flags)
+    except OSError as exc:
+        raise ControlError(f"cannot safely open task evidence root {root}: {exc}") from exc
+
+    try:
+        for component in root.parts[1:]:
+            try:
+                next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            except FileNotFoundError:
+                os.close(current_fd)
+                return root, None
+            except OSError as exc:
+                symlink_component = False
+                if exc.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR):
+                    try:
+                        component_info = os.stat(component, dir_fd=current_fd, follow_symlinks=False)
+                        symlink_component = stat.S_ISLNK(component_info.st_mode)
+                    except OSError:
+                        pass
+                if exc.errno in (errno.ELOOP, errno.EMLINK) or symlink_component:
+                    raise ControlError(f"task evidence root must not contain symlinks: {root}") from exc
+                raise ControlError(f"cannot safely open task evidence root {root}: {exc}") from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return root, current_fd
+    except Exception:
+        try:
+            os.close(current_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
+def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, Any]:
+    expected_task_id = _safe_task_id(expected_task_id)
+    root, directory_fd = _open_task_evidence_root(root_text, expected_task_id)
+    try:
+        packet_bytes, packet = _task_evidence_file(directory_fd, root, "packet.md")
+        result_bytes, result = _task_evidence_file(directory_fd, root, "result.json")
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+    if packet_bytes is not None:
+        try:
+            packet_text = packet_bytes.decode("utf-8-sig")
+            packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text)
+        except UnicodeDecodeError:
+            packet_ids = []
+        if len(packet_ids) == 1:
+            packet["task_id"] = packet_ids[0]
+            packet["parse_status"] = "VALID_TASK_ID"
+            if packet_ids[0] != expected_task_id:
+                packet["status"] = "INVALID"
+                packet["parse_status"] = "TASK_ID_MISMATCH"
+        else:
+            packet["status"] = "INVALID"
+            packet["parse_status"] = "INVALID_TASK_ID"
+
+    result_data: dict[str, Any] | None = None
+    if result_bytes is not None:
+        try:
+            parsed = json.loads(result_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, ValueError):
+            parsed = None
+        if not isinstance(parsed, dict):
+            result["status"] = "INVALID"
+            result["parse_status"] = "INVALID_JSON"
+        else:
+            result_data = parsed
+            result_task_id = parsed.get("task_id")
+            if not isinstance(result_task_id, str) or not result_task_id:
+                result["status"] = "INVALID"
+                result["parse_status"] = "MISSING_TASK_ID"
+            elif result_task_id != expected_task_id:
+                result["task_id"] = result_task_id
+                result["status"] = "INVALID"
+                result["parse_status"] = "TASK_ID_MISMATCH"
+            else:
+                result["task_id"] = result_task_id
+                result["parse_status"] = "VALID_JSON"
+                lifecycle = parsed.get("task_local_status", parsed.get("lifecycle_status"))
+                if isinstance(lifecycle, str) and lifecycle.strip():
+                    result["lifecycle_status"] = lifecycle.strip()
+
+    if packet["status"] == "INVALID" or result["status"] == "INVALID":
+        identity_status = "INVALID"
+    elif packet["status"] == "PRESENT" and result["status"] == "PRESENT":
+        identity_status = "MATCH"
+    else:
+        identity_status = "UNKNOWN"
+
+    reported_ac_passes: list[str] = []
+    if result_data is not None and result["status"] == "PRESENT":
+        acceptance = result_data.get("ac01_to_ac15")
+        if isinstance(acceptance, dict):
+            reported_ac_passes = sorted(
+                key for key, value in acceptance.items()
+                if isinstance(key, str) and isinstance(value, dict) and value.get("status") == "PASS"
+            )
+
+    return {
+        "task_id": expected_task_id,
+        "task_root": str(root),
+        "identity_status": identity_status,
+        "packet": packet,
+        "result": result,
+        "reported_acceptance": {
+            "status": "REPORTED" if reported_ac_passes else "UNKNOWN",
+            "reported_passes": reported_ac_passes,
+            "independently_validated": False,
+        },
+        "unresolved": {
+            "FIRST_ATTEMPT_STATUS": "UNKNOWN",
+            "FIRST_COMPLETION_RATE": "UNKNOWN",
+            "AGENT_RETRY_COUNT": "UNKNOWN",
+            "JUDGE_VERDICT": "UNKNOWN",
+            "FULL_TASK_ELAPSED_TIME": "UNKNOWN",
+        },
+    }
+
+
+def summarize_execution_history(
+    repo_text: str,
+    task_id_filter: str | None = None,
+    task_evidence_root: str | None = None,
+) -> dict[str, Any]:
     repo = canonical_directory(repo_text, "repository")
     if Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve(strict=True) != repo:
         raise ControlError("--repo must name the exact Git worktree root")
     if task_id_filter is not None:
         task_id_filter = _safe_task_id(task_id_filter)
+    task_evidence = None
+    if task_evidence_root is not None:
+        if task_id_filter is None:
+            raise ControlError("--task-id is required with --task-evidence-root")
+        task_evidence = summarize_task_evidence(task_evidence_root, task_id_filter)
     checkpoint_root = repo / ".fable" / "checkpoints"
     if checkpoint_root.is_symlink():
         raise ControlError("checkpoint root must not be a symlink")
@@ -607,7 +816,7 @@ def summarize_execution_history(repo_text: str, task_id_filter: str | None = Non
             orphan_captures.append(artifact)
     temp_log_root = repo / ".fable" / "temporary"
     temp_logs = [path for path in temp_log_root.rglob("observer*.jsonl") if path.is_file() and not path.is_symlink()] if temp_log_root.is_dir() and not temp_log_root.is_symlink() else []
-    return {
+    summary = {
         "schema": "fable-evidence-feedback-v1",
         "repository": str(repo),
         "task_filter": task_id_filter,
@@ -645,6 +854,9 @@ def summarize_execution_history(repo_text: str, task_id_filter: str | None = Non
         "recommendations": recommendations,
         "executions": records,
     }
+    if task_evidence is not None:
+        summary["task_evidence"] = task_evidence
+    return summary
 
 
 def _parse_worktree_list(repo: Path) -> set[Path]:
@@ -2287,6 +2499,7 @@ def main() -> int:
     feedback = sub.add_parser("evidence-summary")
     feedback.add_argument("--repo", required=True)
     feedback.add_argument("--task-id")
+    feedback.add_argument("--task-evidence-root")
     scratch = sub.add_parser("validate-test-scratch")
     scratch.add_argument("--repo", required=True)
     scratch.add_argument("--path", required=True)
@@ -2347,7 +2560,7 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0 if result["status"] == "PASS" else 1
         if args.action == "evidence-summary":
-            result = summarize_execution_history(args.repo, args.task_id)
+            result = summarize_execution_history(args.repo, args.task_id, args.task_evidence_root)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if args.action == "validate-test-scratch":

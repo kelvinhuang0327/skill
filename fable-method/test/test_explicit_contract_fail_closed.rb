@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require 'open3'
+require 'rbconfig'
+require 'tempfile'
 require_relative '../scripts/explicit_contract'
 
 # Fail-closed binding for five explicit /fable-method Worker contract
@@ -47,6 +50,8 @@ class ExplicitContractFailClosedTest < Minitest::Test
   def test_parser_reads_live_canonical_files
     paths = Parser.live_paths
     assert_equal File.expand_path('../shared/SKILL.md', __dir__), paths[:skill]
+    assert_equal File.expand_path('../shared/references/implementation-depth.md', __dir__),
+                 paths[:implementation_depth]
     assert_equal File.expand_path('../shared/references/reporting.md', __dir__), paths[:reporting]
     assert_equal File.expand_path('../shared/references/operational-gates.md', __dir__),
                  paths[:operational_gates]
@@ -303,8 +308,119 @@ class ExplicitContractFailClosedTest < Minitest::Test
   def test_canonical_route_and_task_class_enums_reject_unknown_values
     assert Parser.enum_accepted?('WORKER_ROUTE', 'STANDARD_JUDGED')
     assert Parser.enum_accepted?('TASK_CLASS', 'STATE_CHANGING_IMPLEMENTATION')
+    assert Parser.enum_accepted?('IMPLEMENTATION_DEPTH', 'ENHANCED')
     refute Parser.enum_accepted?('WORKER_ROUTE', 'AUTO')
     refute Parser.enum_accepted?('TASK_CLASS', 'WHATEVER')
+  end
+
+  def test_case01_pure_qa_fast_is_invalid
+    result = Parser.check_routing_packet(routing_packet('PURE_QA', 'FAST'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case02_planning_only_standard_is_invalid
+    result = Parser.check_routing_packet(routing_packet('PLANNING_ONLY', 'STANDARD'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case03_read_only_review_fast_is_invalid
+    result = Parser.check_routing_packet(routing_packet('READ_ONLY_COMPLETION_REVIEW', 'FAST'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case04_fast_normal_implementation_is_structurally_valid
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'FAST', 'NORMAL'))
+    assert_equal 'ROUTING_STRUCTURE_PASS', result[:status]
+  end
+
+  def test_case05_fast_enhanced_implementation_is_invalid
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'FAST', 'ENHANCED'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case06_standard_normal_implementation_is_structurally_valid
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'NORMAL'))
+    assert_equal 'ROUTING_STRUCTURE_PASS', result[:status]
+  end
+
+  def test_case07_standard_enhanced_is_valid_without_claiming_depth_necessity
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'ENHANCED'))
+    assert_equal 'ROUTING_STRUCTURE_PASS', result[:status]
+    assert_includes Parser::ROUTING_PACKET_LIMITATIONS, 'whether ENHANCED depth was necessary'
+  end
+
+  def test_case08_judged_routes_accept_canonical_judge_modes
+    [
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', 'NORMAL', 'FRESH_CONTEXT'),
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'LOOP_JUDGED', 'ENHANCED', 'SELF_CHECK_ONLY')
+    ].each do |packet|
+      assert_equal 'ROUTING_STRUCTURE_PASS', Parser.check_routing_packet(packet)[:status]
+    end
+  end
+
+  def test_case09_missing_required_route_field_is_insufficient
+    packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    result = Parser.check_routing_packet(packet)
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS', result[:status]
+  end
+
+  def test_case10_cli_reads_only_primary_routing_block
+    packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      WORKER_ROUTE: STANDARD
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+
+      Historical example from another task:
+      TASK_CLASS: PURE_QA
+      WORKER_ROUTE: FAST
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    stdout, stderr, status = run_routing_packet_cli(packet)
+    assert status.success?, stderr
+    assert_includes stdout, 'ROUTING_STRUCTURE_PASS'
+    assert_includes stdout, 'SEMANTIC_LIMITATIONS:'
+
+    incomplete_packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      JUDGE_MODE: NOT_APPLICABLE
+
+      Historical example from another task:
+      WORKER_ROUTE: FAST
+      IMPLEMENTATION_DEPTH: NORMAL
+    PACKET
+    stdout, stderr, status = run_routing_packet_cli(incomplete_packet)
+    assert_equal 2, status.exitstatus, stderr
+    assert_includes stdout, 'INSUFFICIENT_PACKET_FIELDS'
+  end
+
+  def test_judged_route_cannot_be_paired_with_not_applicable_judge_mode
+    result = Parser.check_routing_packet(
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', 'NORMAL', 'NOT_APPLICABLE')
+    )
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_unknown_route_value_is_invalid
+    result = Parser.check_routing_packet(
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'AUTO', 'NORMAL')
+    )
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_primary_routing_block_does_not_merge_across_blank_lines
+    packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+
+      WORKER_ROUTE: STANDARD
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS', Parser.check_routing_packet(packet)[:status]
   end
 
   def test_canonical_implementation_depth_provenance_contract
@@ -854,6 +970,22 @@ class ExplicitContractFailClosedTest < Minitest::Test
   end
 
   private
+
+  def routing_packet(task_class, worker_route, implementation_depth = nil, judge_mode = 'NOT_APPLICABLE')
+    fields = ["TASK_CLASS: #{task_class}", "WORKER_ROUTE: #{worker_route}"]
+    fields << "IMPLEMENTATION_DEPTH: #{implementation_depth}" unless implementation_depth.nil?
+    fields << "JUDGE_MODE: #{judge_mode}"
+    fields.join("\n")
+  end
+
+  def run_routing_packet_cli(packet)
+    script = File.expand_path('../scripts/explicit_contract.rb', __dir__)
+    Tempfile.create(['routing-packet', '.md']) do |file|
+      file.write(packet)
+      file.flush
+      Open3.capture3(RbConfig.ruby, script, '--check-routing-packet', file.path)
+    end
+  end
 
   def canonical_contract_section(relative_path, heading)
     path = File.expand_path("../shared/#{relative_path}", __dir__)
