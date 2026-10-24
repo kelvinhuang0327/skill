@@ -173,6 +173,32 @@ line for anything boundary 1 held back. Never claim publication, deployment,
 runtime success, or cleanup that was not observed. Add other fields only when
 the Packet names them; see [reporting](references/reporting.md).
 
+### Task receipt
+
+When the Packet names a `PERSISTENT_EVIDENCE_ROOT` or has a `SIGNAL_POLICY`
+header line, keep this receipt even if the Packet body does not mention it:
+
+- At task start, save the Packet text exactly as received to
+  `<root>/packet.md`; never replace it with a summary. On a same-`TASK_ID`
+  continuation keep that file and save the new Packet as
+  `packet.continuation_<N>.md`.
+- `<root>/result.json` holds lowercase `task_id` equal to `TASK_ID` and
+  `task_lifecycle_state`: `IN_PROGRESS` at start, then `COMPLETED`,
+  `BLOCKED`, or `ABORTED` before every reply, stops included. Keep any other
+  fields the Packet asks for.
+- `process_signal` follows `SIGNAL_POLICY`: write it for `ALWAYS`; for
+  `ON_INCIDENT` only after an actual stop, block, abort, failed acceptance,
+  or major anomaly; never without the header. `trigger` is `INCIDENT` when
+  something went wrong, else `HIGH_IMPACT`; `INCIDENT` also needs
+  `issue.type`, one of `PLANNER`, `FABLE`, `PLATFORM`, `ENV`, `PROJECT`,
+  `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or `UNKNOWN`. Omit what
+  was not measured and never write `attempt`.
+  Repeat the block in the reply as `PROCESS_SIGNAL:`.
+- If the installed skill has `scripts/fable_artifact_controls.py`, run
+  `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
+  once before replying and fix the receipt until it reports
+  `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`.
+
 ## Explicit Packet triggers
 
 Ordinary tasks need none of these. Load a procedure only when the Packet or
