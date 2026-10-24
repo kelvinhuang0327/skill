@@ -179,25 +179,33 @@ When the Packet names a `PERSISTENT_EVIDENCE_ROOT` or has a `SIGNAL_POLICY`
 header line, keep this receipt even if the Packet body does not mention it:
 
 - At task start, save the Packet text exactly as received to
-  `<root>/packet.md`; never replace it with a summary. On a same-`TASK_ID`
-  continuation keep that file and save the new Packet as
-  `packet.continuation_<N>.md`.
-- `<root>/result.json` holds lowercase `task_id` equal to `TASK_ID` and
-  `task_lifecycle_state`: `IN_PROGRESS` at start, then `COMPLETED`,
-  `BLOCKED`, or `ABORTED` before every reply, stops included. Keep any other
-  fields the Packet asks for.
+  `<root>/packet.md`, dropping only a leading platform command such as
+  `/goal ` so the file starts with `TASK_ID:`; never replace it with a
+  summary. On a same-`TASK_ID` continuation keep that file and save the new
+  Packet as `packet.continuation_<N>.md`.
+- `<root>/result.json` holds a `task_id` key whose value is the Packet's
+  `TASK_ID` copied exactly (same case), and `task_lifecycle_state`:
+  `IN_PROGRESS` at start, then `COMPLETED`, `BLOCKED`, or `ABORTED` before
+  every reply, stops included. Keep any other fields the Packet asks for.
 - `process_signal` follows `SIGNAL_POLICY`: write it for `ALWAYS`; for
   `ON_INCIDENT` only after an actual stop, block, abort, failed acceptance,
-  or major anomaly; never without the header. `trigger` is `INCIDENT` when
-  something went wrong, else `HIGH_IMPACT`; `INCIDENT` also needs
-  `issue.type`, one of `PLANNER`, `FABLE`, `PLATFORM`, `ENV`, `PROJECT`,
-  `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or `UNKNOWN`. Omit what
-  was not measured and never write `attempt`.
-  Repeat the block in the reply as `PROCESS_SIGNAL:`.
+  or major anomaly; never without the header. It may hold only these keys:
+  `trigger`; `versions` (`planner`, `planner_load_evidence`, `fable`,
+  `fable_load_evidence`); `route` (`task_class`, `worker_route`, `depth`,
+  `model_tier`); `cost` (`elapsed_ms`, `tokens`, `resources`, `evidence`);
+  `issue` (`type`, `evidence`, `rca`, `smallest_fix`). Add no other key:
+  no `status`, `summary`, `outcome`, `signal_policy`, or `attempt`.
+  `trigger` is `INCIDENT` when something went wrong, else `HIGH_IMPACT`;
+  `INCIDENT` also needs `issue.type`, one of `PLANNER`, `FABLE`, `PLATFORM`,
+  `ENV`, `PROJECT`, `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or
+  `UNKNOWN`. Omit what was not measured. Repeat the block in the reply as
+  `PROCESS_SIGNAL:`.
 - If the installed skill has `scripts/fable_artifact_controls.py`, run
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
   once before replying and fix the receipt until it reports
-  `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`.
+  `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`. A receipt
+  format slip fixed this way is not an incident: it does not by itself make
+  `trigger` `INCIDENT`.
 
 ## Explicit Packet triggers
 

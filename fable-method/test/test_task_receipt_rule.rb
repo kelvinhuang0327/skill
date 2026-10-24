@@ -13,7 +13,8 @@ class TaskReceiptRuleTest < Minitest::Test
   ].freeze
   REQUIRED_TEXT = [
     'packet.md',
-    'lowercase `task_id`',
+    '`task_id` key whose value',
+    'copied exactly (same case)',
     '`IN_PROGRESS`',
     '`COMPLETED`',
     '`BLOCKED`',
@@ -21,7 +22,14 @@ class TaskReceiptRuleTest < Minitest::Test
     'SIGNAL_POLICY',
     'process_signal',
     'UNNECESSARY_WORK',
-    'never write `attempt`',
+    'Add no other key',
+    '`status`',
+    '`summary`',
+    '`outcome`',
+    '`signal_policy`',
+    '`attempt`',
+    '`/goal `',
+    'is not an incident',
     'evidence-summary'
   ].freeze
 
