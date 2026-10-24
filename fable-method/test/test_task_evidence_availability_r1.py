@@ -785,6 +785,121 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
                 self.check(bool(signal.get("invalid_reasons")), f"PS15 non-object variant {index} has a reason")
         print("PS15: PASS")
 
+    def test_process_evidence_px01_planner_template_header_contract(self) -> None:
+        planner_paths = (
+            ROOT / "prompt/Personal_Planner_Handoff_Prompt_v5.5.1_Lean_Final.md",
+            ROOT / "planner-handoff/references/planner-handoff-v5.5.1.md",
+        )
+        test_task_id = "PX01_TEMPLATE_HEADER_CONTRACT_R1"
+        results_by_source: dict[str, list[dict[str, Any]]] = {}
+
+        def replace_one_line(packet_text: str, field: str, replacement: str) -> str | None:
+            lines = packet_text.splitlines(keepends=True)
+            matches = [index for index, line in enumerate(lines) if line.startswith(f"{field}:")]
+            if len(matches) != 1:
+                return None
+            original = lines[matches[0]]
+            ending = "\r\n" if original.endswith("\r\n") else "\n" if original.endswith("\n") else ""
+            lines[matches[0]] = replacement + ending
+            return "".join(lines)
+
+        scenarios = (
+            ("unfilled", None, None),
+            ("always_prior", "SIGNAL_POLICY: ALWAYS", "CONTINUES_FROM: PX01_PRIOR_R1 /abs/prior/result.json"),
+            ("on_incident_none", "SIGNAL_POLICY: ON_INCIDENT", "CONTINUES_FROM: NONE"),
+        )
+
+        for planner_path in planner_paths:
+            source_name = planner_path.relative_to(ROOT).as_posix()
+            source_text = planner_path.read_text(encoding="utf-8")
+            section_start = source_text.find("## 9.")
+            self.check(section_start >= 0, f"PX01 {source_name} contains the §9 heading")
+            if section_start < 0:
+                continue
+
+            section = source_text[section_start:]
+            fence_start = section.find("```text")
+            self.check(fence_start >= 0, f"PX01 {source_name} contains a §9 text block")
+            if fence_start < 0:
+                continue
+            content_start = fence_start + len("```text")
+            if section[content_start:content_start + 2] == "\r\n":
+                content_start += 2
+            elif section[content_start:content_start + 1] == "\n":
+                content_start += 1
+            closing_fence = section.find("```", content_start)
+            self.check(closing_fence >= 0, f"PX01 {source_name} §9 text block is closed")
+            if closing_fence < 0:
+                continue
+            template = section[content_start:closing_fence]
+
+            for field in ("TASK_ID", "SIGNAL_POLICY", "CONTINUES_FROM"):
+                matches = [line for line in template.splitlines() if line.startswith(f"{field}:")]
+                self.check(len(matches) == 1, f"PX01 {source_name} has exactly one {field} line")
+                if len(matches) != 1:
+                    break
+            else:
+                packet_base = replace_one_line(
+                    template,
+                    "TASK_ID",
+                    f"TASK_ID: {test_task_id}",
+                )
+                self.check(packet_base is not None, f"PX01 {source_name} TASK_ID line can be replaced")
+                if packet_base is None:
+                    continue
+
+                source_results: list[dict[str, Any]] = []
+                for case_name, policy_line, continuation_line in scenarios:
+                    packet_text = packet_base
+                    if policy_line is not None and continuation_line is not None:
+                        packet_text = replace_one_line(packet_text, "SIGNAL_POLICY", policy_line)
+                        self.check(packet_text is not None, f"PX01 {source_name} {case_name} policy line can be replaced")
+                        if packet_text is None:
+                            continue
+                        packet_text = replace_one_line(packet_text, "CONTINUES_FROM", continuation_line)
+                        self.check(packet_text is not None, f"PX01 {source_name} {case_name} continuation line can be replaced")
+                        if packet_text is None:
+                            continue
+
+                    with tempfile.TemporaryDirectory(prefix="process-evidence-px01-") as temporary:
+                        task_root = self.task_root(Path(temporary).resolve(), test_task_id)
+                        (task_root / "packet.md").write_text(packet_text, encoding="utf-8")
+                        (task_root / "result.json").write_text(
+                            json.dumps({
+                                "task_id": test_task_id,
+                                "task_lifecycle_state": "COMPLETED",
+                            }) + "\n",
+                            encoding="utf-8",
+                        )
+                        summary = HELPER.summarize_task_evidence(str(task_root), test_task_id)
+                        evidence = summary.get("process_evidence", {})
+                        header = evidence.get("packet_header", {})
+                        self.check(summary.get("identity_status") == "MATCH", f"PX01 {source_name} {case_name} identity matches")
+                        self.check(evidence.get("status") == "EVALUATED", f"PX01 {source_name} {case_name} is evaluated")
+                        self.check(evidence.get("lifecycle_state_check") == "CANONICAL", f"PX01 {source_name} {case_name} lifecycle is canonical")
+
+                        if case_name == "unfilled":
+                            self.check(header.get("signal_policy") == "MALFORMED", f"PX01 {source_name} unfilled policy is in the header")
+                            self.check(header.get("continues_from") == "MALFORMED", f"PX01 {source_name} unfilled continuation is in the header")
+                        elif case_name == "always_prior":
+                            self.check(header.get("signal_policy") == "ALWAYS", f"PX01 {source_name} ALWAYS policy parses")
+                            self.check(header.get("continues_from") == "PX01_PRIOR_R1", f"PX01 {source_name} prior task ID parses")
+                        else:
+                            self.check(header.get("signal_policy") == "ON_INCIDENT", f"PX01 {source_name} ON_INCIDENT policy parses")
+                            self.check(header.get("continues_from") == "NONE", f"PX01 {source_name} NONE continuation parses")
+
+                        source_results.append({
+                            "identity_status": summary.get("identity_status"),
+                            "process_evidence": evidence,
+                        })
+                results_by_source[source_name] = source_results
+
+        self.check(
+            results_by_source.get(planner_paths[0].relative_to(ROOT).as_posix())
+            == results_by_source.get(planner_paths[1].relative_to(ROOT).as_posix()),
+            "PX01 both Planner templates produce identical Helper results",
+        )
+
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(TaskEvidenceAvailabilityTest)

@@ -296,6 +296,8 @@ WORKER_ROUTE: <canonical value>
 JUDGE_MODE: <canonical value>
 IMPLEMENTATION_DEPTH: <NORMAL | ENHANCED；僅實作任務填寫，證據不足時省略並交由 Fable fallback>
 IMPLEMENTATION_DEPTH_REASON: <一句具體判斷理由；若深度省略，說明為何交由 Fable 判斷；非實作任務省略>
+SIGNAL_POLICY: ALWAYS | ON_INCIDENT（Planner 填；高難度、研究、關鍵正確性或 CONTINUES_FROM 非 NONE 時 ALWAYS，其他 ON_INCIDENT）
+CONTINUES_FROM: <NONE | 前一 TASK_ID><空白><其收據路徑>（Planner 填、Worker 不改；前任務 BLOCKED、ABORTED 或驗收未過而重派必填，不論沿用原 TASK_ID 或新 TASK_ID；成功後新研究或全新任務填 NONE）
 
 ## 唯一目標
 <一個具體且可以判定完成的結果>
@@ -317,8 +319,6 @@ PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及�
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
 定位未知時，只解析指定專案內適用的原生入口指示，以及入口或本任務具名引用的直接相關 RUNBOOK／spec；不得跨專案廣泛掃描。
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
-SIGNAL_POLICY: ALWAYS | ON_INCIDENT（Planner 填；高難度、研究、關鍵正確性或 CONTINUES_FROM 非 NONE 時 ALWAYS，其他 ON_INCIDENT）
-CONTINUES_FROM: NONE | <前一 TASK_ID><空白><其收據路徑>（Planner 填、Worker 不改；前任務 BLOCKED、ABORTED 或驗收未過而重派必填，不論沿用原 TASK_ID 或新 TASK_ID；成功後新研究或全新任務填 NONE）
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>
 INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、已知共享資源限制；單卡可省略>
