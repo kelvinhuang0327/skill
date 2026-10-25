@@ -44,7 +44,7 @@ module Fable
       'artifact_controls' => {
         'role' => 'supporting_helper',
         'source' => 'fable-method/scripts/fable_artifact_controls.py',
-        'sha256' => '1682632ec89566d50f40f3484cd618ce62c92d1cdf40be1f0ef1741cb6416195',
+        'sha256' => '0148c586f7aa68c53d9de3472f8f4abba0d3b62eb07d67c9a05533315cfcf18a',
         'mode' => '100644',
         'destination' => 'scripts/fable_artifact_controls.py',
         'purpose' => 'local_codex_artifact_logs_and_worktree_lifecycle'

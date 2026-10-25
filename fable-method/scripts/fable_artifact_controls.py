@@ -632,6 +632,22 @@ def _process_signal_invalid_reasons(signal: Any) -> list[str]:
     return sorted(set(invalid))
 
 
+def _packet_next_line_values(packet_text: str, name: str) -> list[str]:
+    """Read empty header fields without crossing a heading or another field."""
+    header_lines: list[str] = []
+    for line in packet_text.splitlines():
+        if re.match(r"^#{1,6}[ \t]+", line):
+            break
+        header_lines.append(line)
+    values: list[str] = []
+    for index, line in enumerate(header_lines):
+        if re.fullmatch(rf"{re.escape(name)}:[ \t]*", line) is None:
+            continue
+        raw = next((line.strip() for line in header_lines[index + 1:] if line.strip()), "")
+        values.append("" if re.match(r"^[A-Z][A-Z0-9_]*:", raw) else raw)
+    return values
+
+
 def _packet_header_value(packet_text: str | None, name: str) -> str:
     if packet_text is None:
         return "ABSENT"
@@ -647,6 +663,8 @@ def _packet_header_value(packet_text: str | None, name: str) -> str:
     if len(matches) != 1:
         return "MALFORMED"
     raw = matches[0].split(":", 1)[1].strip()
+    if not raw:
+        raw = next(iter(_packet_next_line_values(packet_text, name)), "")
     if name == "SIGNAL_POLICY":
         return raw if raw in {"ALWAYS", "ON_INCIDENT"} else "MALFORMED"
 
@@ -737,6 +755,10 @@ def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, 
             try:
                 packet_text = packet_bytes.decode("utf-8-sig")
                 packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text)
+                packet_ids.extend(
+                    value for value in _packet_next_line_values(packet_text, "TASK_ID")
+                    if TASK_ID_RE.fullmatch(value) is not None
+                )
             except UnicodeDecodeError:
                 packet_ids = []
             if len(packet_ids) == 1:

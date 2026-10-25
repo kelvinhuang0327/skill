@@ -785,6 +785,83 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
                 self.check(bool(signal.get("invalid_reasons")), f"PS15 non-object variant {index} has a reason")
         print("PS15: PASS")
 
+    def test_process_evidence_nl01_next_line_task_id_matches(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl01-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            (root / "packet.md").write_text(f"TASK_ID:\n{TASK_ID}\n", encoding="utf-8")
+            self.write_process_result(root)
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["packet"]["parse_status"] == "VALID_TASK_ID", "NL01 next-line ID is valid")
+            self.check(summary["identity_status"] == "MATCH", "NL01 identity matches")
+
+    def test_process_evidence_nl02_next_line_task_id_skips_blank_lines(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl02-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            (root / "packet.md").write_text(f"TASK_ID: \t\n\n \t\n  {TASK_ID}  \n", encoding="utf-8")
+            self.write_process_result(root)
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["packet"]["parse_status"] == "VALID_TASK_ID", "NL02 blank lines are skipped")
+            self.check(summary["identity_status"] == "MATCH", "NL02 identity matches")
+
+    def test_process_evidence_nl03_next_field_is_not_a_task_id(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl03-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            (root / "packet.md").write_text("TASK_ID:\nTASK_LANE: C\n", encoding="utf-8")
+            self.write_process_result(root)
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["packet"]["parse_status"] == "INVALID_TASK_ID", "NL03 another field is not a value")
+            self.check(summary["identity_status"] == "INVALID", "NL03 identity is invalid")
+
+    def test_process_evidence_nl04_next_line_task_id_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl04-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            (root / "packet.md").write_text("TASK_ID:\nOTHER_TASK\n", encoding="utf-8")
+            self.write_process_result(root)
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["packet"]["parse_status"] == "TASK_ID_MISMATCH", "NL04 different ID is a mismatch")
+            self.check(summary["identity_status"] == "INVALID", "NL04 identity is invalid")
+
+    def test_process_evidence_nl05_mixed_task_id_declarations_are_invalid(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl05-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            (root / "packet.md").write_text(f"TASK_ID: {TASK_ID}\nTASK_ID:\n{TASK_ID}\n", encoding="utf-8")
+            self.write_process_result(root)
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["packet"]["parse_status"] == "INVALID_TASK_ID", "NL05 mixed declarations are duplicates")
+            self.check(summary["identity_status"] == "INVALID", "NL05 identity is invalid")
+
+    def test_process_evidence_nl06_next_line_task_id_is_header_only(self) -> None:
+        scenarios = [
+            (f"TASK_ID: {TASK_ID}\n## Body\nTASK_ID:\nOTHER_TASK\n", "VALID_TASK_ID", "MATCH"),
+            (f"## Body\nTASK_ID:\n{TASK_ID}\n", "INVALID_TASK_ID", "INVALID"),
+        ]
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl06-") as temporary:
+            for index, (packet, parse_status, identity) in enumerate(scenarios):
+                with self.subTest(index=index):
+                    root = self.task_root(Path(temporary).resolve() / str(index))
+                    (root / "packet.md").write_text(packet, encoding="utf-8")
+                    self.write_process_result(root)
+                    summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+                    self.check(summary["packet"]["parse_status"] == parse_status, "NL06 body next-line IDs are ignored")
+                    self.check(summary["identity_status"] == identity, "NL06 identity follows header declaration")
+
+    def test_process_evidence_nl07_next_line_process_headers(self) -> None:
+        scenarios = [
+            ("SIGNAL_POLICY:\n\n ALWAYS \n", "ALWAYS", "ABSENT"),
+            ("CONTINUES_FROM:\n\n PRIOR_R1 /path/result.json \n", "ABSENT", "PRIOR_R1"),
+            ("CONTINUES_FROM:\nPRIOR_STOP_STATUS:\n", "ABSENT", "MALFORMED"),
+            ("CONTINUES_FROM:\n<NONE | 前一 TASK_ID>…\n", "ABSENT", "MALFORMED"),
+        ]
+        with tempfile.TemporaryDirectory(prefix="process-evidence-nl07-") as temporary:
+            for index, (headers, policy, continuation) in enumerate(scenarios):
+                with self.subTest(index=index):
+                    root = self.task_root(Path(temporary).resolve() / str(index))
+                    self.write_process_packet(root, headers)
+                    self.write_process_result(root)
+                    header = self.process_evidence(root).get("packet_header", {})
+                    self.check(header.get("signal_policy") == policy, "NL07 policy uses its next-line value")
+                    self.check(header.get("continues_from") == continuation, "NL07 continuation uses its next-line value")
+
     def test_process_evidence_px01_planner_template_header_contract(self) -> None:
         planner_paths = (
             ROOT / "prompt/Personal_Planner_Handoff_Prompt_v5.5.1_Lean_Final.md",
