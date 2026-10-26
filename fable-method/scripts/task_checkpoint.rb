@@ -2510,6 +2510,80 @@ class HeavyScientificLease
     nil
   end
 
+  # Recognize the controller's complete argv, including its task-owned repository,
+  # role, source identity and child command. A runtime name or low CPU alone is
+  # insufficient; unknown options or workloads deliberately retain the writer gate.
+  def self.local_runtime_child_argv(argv)
+    return nil unless File.basename(argv.first.to_s).match?(/\Apython(?:\d+(?:\.\d+)*)?\z/i)
+    return nil unless argv[1, 3] == %w[-m lottolab.infrastructure.local_runtime _launch]
+    return nil unless [4, 6, 8, 10, 12, 14].map { |i| argv[i] } ==
+                      %w[--role --token --repository --source-commit --cwd --]
+
+    role, token, repository, source, cwd = [5, 7, 9, 11, 13].map { |i| argv[i] }
+    return nil unless %w[backend frontend].include?(role) && token.to_s.match?(/\A[0-9a-f]{32}\z/)
+    return nil unless source.to_s.match?(/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/)
+    return nil unless repository.to_s.start_with?('/') && Pathname.new(repository).cleanpath.to_s == repository
+    return nil unless repository.match?(%r{/\.task-data/[A-Za-z0-9_-]+/repo\z})
+    return nil unless cwd == (role == 'backend' ? repository : "#{repository}/frontend")
+
+    child = argv[15..-1]
+    return nil unless child && child.first.to_s.start_with?('/')
+
+    expected = if role == 'backend' && File.basename(child.first) == 'uv'
+                 [child.first, 'run', '--no-sync', 'uvicorn', '--factory',
+                  'lottolab.interfaces.api.local_app:create_local_app', '--app-dir', "#{repository}/src",
+                  '--host', '127.0.0.1', '--port', '8000', '--header', "X-LottoLab-Owner:#{token}",
+                  '--no-access-log', '--log-level', 'warning']
+               elsif role == 'frontend' && File.basename(child.first) == 'node'
+                 [child.first, "#{repository}/frontend/node_modules/vite/bin/vite.js",
+                  '--host', '127.0.0.1', '--port', '5173', '--strictPort',
+                  '--config', "#{repository}/frontend/vite.config.ts"]
+               end
+    child == expected ? child : nil
+  end
+
+  def self.low_load_local_runtime_pids(rows)
+    # Duplicate identities or unparseable argv cannot establish a runtime role.
+    return [] unless rows.map(&:first).uniq.length == rows.length
+
+    parsed = rows.each_with_object({}) do |row, memo|
+      pid, parent, cpu, _memory, state, command = row
+      next unless pid.positive? && parent >= 0 && cpu.finite? && cpu >= 0.0 && cpu < 5.0
+      next if state.start_with?('Z')
+
+      begin
+        memo[pid] = [parent, Shellwords.split(command)]
+      rescue ArgumentError
+        next
+      end
+    end
+    launchers = parsed.each_with_object({}) do |(pid, (_parent, argv)), memo|
+      child = local_runtime_child_argv(argv)
+      memo[pid] = child if child
+    end
+    runtime_pids = launchers.keys
+    parsed.each do |pid, (parent, argv)|
+      next unless File.basename(argv.first.to_s).match?(/\Apython(?:\d+(?:\.\d+)*)?\z/i)
+
+      child = launchers[parent]
+      if !child && parsed[parent]
+        bridge_parent, bridge_argv = parsed[parent]
+        candidate = launchers[bridge_parent]
+        child = candidate if candidate && bridge_argv == candidate
+      end
+      next unless child && File.basename(child.first) == 'uv'
+
+      # Uvicorn must belong to that backend launcher, with exactly the same
+      # app, repository, loopback endpoint and ownership token, through at most
+      # its declared uv child. Descendant Python workers receive no exemption.
+      repository = child[7].delete_suffix('/src')
+      if argv[1] == "#{repository}/.venv/bin/uvicorn" && argv[2..-1] == child[4..-1]
+        runtime_pids << pid
+      end
+    end
+    runtime_pids
+  end
+
   def self.legacy_heavy_writers_once
     output, status = Open3.capture2('/bin/ps', '-ww', '-axo', 'pid=,ppid=,%cpu=,%mem=,state=,command=')
     raise OwnershipUnresolved, 'legacy heavy-writer snapshot could not be read safely' unless status.success?
@@ -2532,6 +2606,7 @@ class HeavyScientificLease
       ancestors << current
       current = parents.fetch(current, 0)
     end
+    runtime_pids = low_load_local_runtime_pids(rows)
 
     rows.each_with_object([]) do |(pid, _parent, cpu, memory, state, command), writers|
       next if ancestors.include?(pid) || state.start_with?('Z')
@@ -2552,6 +2627,7 @@ class HeavyScientificLease
                       (scientific && cpu >= 5.0 &&
                        !%w[ruby zsh bash sh ps tail cat].include?(executable))
       next unless scientific && computational
+      next if runtime_pids.include?(pid)
 
       evidence = { 'PID' => pid, 'COMMAND' => command, 'CPU_PERCENT' => cpu, 'MEMORY_PERCENT' => memory }
       argv.each do |argument|
