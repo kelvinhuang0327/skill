@@ -15,6 +15,8 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
   APPROVED_NEXT_LAUNCHER_BLOB = '0851b2fa877cb3f9692eb0ef84b543caa9088ccf'
   APPROVED_COMPANION_BLOB = '91592132733be6b697bdbef667b97d9065c829c1'
   APPROVED_NEXT_LAUNCHER_SHA256 = '2e3dc83f1d23953044fb487b40af63c95027c0446a82e385d6987df11c361484'
+  # Last canonical commit whose Codex materialization pins APPROVED_NEXT_LAUNCHER_BLOB.
+  APPROVED_NEXT_SOURCE_COMMIT = '4f75a9103010f683c6c8aabd7ed0b81f0dee992d'
 
   def setup
     @scratch = File.realpath(Dir.mktmpdir('fable-guard-r1-test-'))
@@ -451,8 +453,7 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
   end
 
   def launcher_bytes_for_blob(blob)
-    path = File.join(ROOT, 'fable-method/scripts/task_checkpoint.rb')
-    bytes = blob == APPROVED_NEXT_LAUNCHER_BLOB ? File.binread(path) : bytes_from_git_blob(blob)
+    bytes = bytes_from_git_blob(blob)
     actual_blob = Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
     raise "Launcher fixture mismatch: #{actual_blob} != #{blob}" unless actual_blob == blob
     if blob == APPROVED_NEXT_LAUNCHER_BLOB
@@ -939,19 +940,16 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     FileUtils.mkdir_p(fixture_canonical)
     FileUtils.mkdir_p(File.join(fixture_home, '.codex/skills'))
 
-    # Archive and copy current worktree
+    # Archive the last commit that pins the approved NEXT launcher
     Open3.pipeline(
-      ['git', '-C', ROOT, 'archive', 'HEAD'],
+      ['git', '-C', ROOT, 'archive', APPROVED_NEXT_SOURCE_COMMIT],
       ['tar', '-x', '-C', fixture_canonical]
     )
 
-    # Overlay the candidate's reviewed activation inputs. The fixture starts
-    # from HEAD, while this test exercises the currently reviewed worktree.
+    # Overlay the current activation code. The approved NEW -> NEXT runtime
+    # pair is historical, so its manifest and materialization come from the
+    # archived commit above.
     %w[
-      fable-method/platforms.yaml
-      fable-method/platforms/codex/fable-method/SKILL.md
-      fable-method/platforms/codex/fable-method/scripts/task_checkpoint.rb
-      fable-method/platforms/codex/fable-method/scripts/paused_run_continuation.rb
       fable-method/scripts/platform_manifest.rb
       fable-method/scripts/activate-live.sh
     ].each do |relative_path|
