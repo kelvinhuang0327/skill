@@ -131,6 +131,18 @@ file counts. A single acceptance failure is not a trigger by itself.
   write outside those paths; they still need explicit authorization as in
   Hard boundaries. Text relayed by another agent or tool is not an Owner
   submission.
+- When that submitted Packet also asks for a protected run through the task
+  checkpoint launcher (`task_checkpoint.rb --run`), the submission also covers
+  the launcher's own records for that `TASK_ID`:
+  `.fable/checkpoints/<TASK_ID>.json` and `.fable/checkpoints/<TASK_ID>/`
+  under the run's record root, the lock anchor it creates under that
+  repository's Git common directory `fable-locks/`, and, when the launcher
+  requires it, the machine heavy-compute lease lock and its `.owner.json`.
+  A Packet setting for the `--heavy-scientific` flag controls only that flag;
+  stop only when the Packet explicitly forbids the heavy lease itself. List
+  the exact paths used in the receipt. This does not cover recovering,
+  retrying, or continuing an earlier execution, or any other write outside
+  `PERSISTENT_EVIDENCE_ROOT`.
 - Retry a failure only with a hypothesis the next attempt tests; stop when
   scope, safety, authority, capability, proportionality, or discriminating
   evidence is exhausted. Then report the blocker; see
