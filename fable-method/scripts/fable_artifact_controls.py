@@ -93,7 +93,7 @@ def disk_decision(free_bytes: int, operation: str, phase: str) -> tuple[str, str
         raise ControlError("unsupported disk-check operation or phase")
     restricted = operation in {"research-worktree", "high-disk-task"}
     if phase == "before" and restricted and free_bytes < 8 * GIB:
-        return "BLOCK", "available space is below 8 GiB"
+        return "WARN", "available space is below 8 GiB; continuing because low space only warns"
     if free_bytes < 15 * GIB:
         if operation in {"read-only-diagnostic", "authorized-reclaim"}:
             return "WARN_EXEMPT", "available space is below 15 GiB; this operation is exempt from the creation block"
@@ -118,7 +118,7 @@ def check_space(path_text: str, operation: str, phase: str) -> dict[str, Any]:
         "available_bytes": free_bytes,
         "available_gib": round(free_bytes / GIB, 3),
         "warning_below_gib": 15,
-        "block_below_gib": 8,
+        "low_space_warning_below_gib": 8,
         "status": status,
         "message": message,
     }
@@ -132,8 +132,6 @@ def launch_gated_command(path_text: str, operation: str, command: list[str]) -> 
     if operation == "research-worktree":
         raise ControlError("use create-worktree for research worktree creation")
     before = check_space(path_text, operation, "before")
-    if before["status"] == "BLOCK":
-        raise ControlError("task launch blocked below 8 GiB free space")
     if before["message"]:
         print(json.dumps(before, sort_keys=True), file=sys.stderr)
     completed = subprocess.run(command, check=False)
@@ -1373,8 +1371,6 @@ def prepare_temporary_worktree(
         raise ControlError("planned branch is not a valid Git branch name")
 
     space = check_space(str(parent), "research-worktree", "before")
-    if space["status"] == "BLOCK":
-        raise ControlError("temporary worktree creation blocked below 8 GiB free space")
 
     before = _worktree_creation_baseline(repo, worktree, base, base_commit, branch)
     marker = _lifecycle_marker_path(repo, worktree, create=True)
@@ -1473,8 +1469,6 @@ def create_research_worktree(
     ):
         raise ControlError("planned branch is not a valid Git branch name")
     space = check_space(str(parent), "research-worktree", "before")
-    if space["status"] == "BLOCK":
-        raise ControlError("research worktree creation blocked below 8 GiB free space")
     if space["message"]:
         print(json.dumps(space, sort_keys=True), file=sys.stderr)
 
@@ -2278,11 +2272,13 @@ def self_test() -> dict[str, Any]:
     checks: dict[str, Any] = {}
     checks["disk_policy"] = (
         disk_decision(14 * GIB, "research-worktree", "before")[0] == "WARN"
-        and disk_decision(7 * GIB, "research-worktree", "before")[0] == "BLOCK"
+        and disk_decision(7 * GIB, "research-worktree", "before")[0] == "WARN"
+        and "below 8 GiB" in str(disk_decision(7 * GIB, "research-worktree", "before")[1])
+        and disk_decision(7 * GIB, "high-disk-task", "before")[0] == "WARN"
         and disk_decision(7 * GIB, "ordinary", "before")[0] == "WARN"
         and disk_decision(7 * GIB, "read-only-diagnostic", "before")[0] == "WARN_EXEMPT"
         and disk_decision(7 * GIB, "authorized-reclaim", "before")[0] == "WARN_EXEMPT"
-        and disk_decision(7 * GIB, "high-disk-task", "after")[0] != "BLOCK"
+        and disk_decision(7 * GIB, "high-disk-task", "after")[0] == "WARN"
     )
 
     canonical_tmp = Path(tempfile.gettempdir()).resolve(strict=True)
@@ -2323,37 +2319,29 @@ def self_test() -> dict[str, Any]:
                 "available_bytes": 7 * GIB,
                 "available_gib": 7.0,
                 "warning_below_gib": 15,
-                "block_below_gib": 8,
+                "low_space_warning_below_gib": 8,
                 "status": status,
                 "message": message,
             }
 
         globals()["check_space"] = simulated_low_space
-        blocked_worktree = root / "must-not-be-created"
-        worktree_blocked = False
-        try:
-            create_research_worktree(
-                str(repo), str(blocked_worktree), "main", "codex/synthetic-blocked",
-                "synthetic-blocked", "persistent-research", auto_close_authorized=False,
-            )
-        except ControlError as exc:
-            worktree_blocked = "blocked below 8 GiB" in str(exc)
-        command_marker = root / "gated-command-was-run"
-        task_blocked = False
-        try:
-            launch_gated_command(
-                str(root), "high-disk-task",
-                [sys.executable, "-B", "-c", f"from pathlib import Path; Path({str(command_marker)!r}).touch()"],
-            )
-        except ControlError as exc:
-            task_blocked = "blocked below 8 GiB" in str(exc)
-        globals()["check_space"] = original_check_space
-        checks["low_space_blocks_worktree_creation"] = (
-            worktree_blocked
-            and not blocked_worktree.exists()
-            and blocked_worktree not in _parse_worktree_list(repo)
+        low_space_worktree = root / "created-with-low-space-warning"
+        low_space_result = create_research_worktree(
+            str(repo), str(low_space_worktree), "main", "codex/synthetic-low-space",
+            "synthetic-low-space", "persistent-research", auto_close_authorized=False,
         )
-        checks["low_space_blocks_high_disk_launch"] = task_blocked and not command_marker.exists()
+        command_marker = root / "gated-command-was-run"
+        launch_gated_command(
+            str(root), "high-disk-task",
+            [sys.executable, "-B", "-c", f"from pathlib import Path; Path({str(command_marker)!r}).touch()"],
+        )
+        globals()["check_space"] = original_check_space
+        checks["low_space_warns_and_creates_worktree"] = (
+            low_space_worktree.exists()
+            and "below 8 GiB" in str(low_space_result.get("warning_before"))
+        )
+        checks["low_space_warns_and_runs_high_disk_launch"] = command_marker.exists()
+        _run_git_for_test(repo, "worktree", "remove", str(low_space_worktree))
 
         capture_dir = repo / ".fable" / "checkpoints" / "synthetic" / "captures"
         capture_dir.mkdir(parents=True)
@@ -2777,7 +2765,7 @@ def main() -> int:
         if args.action == "space-check":
             result = check_space(args.path, args.operation, args.phase)
             print(json.dumps(result, sort_keys=True))
-            return 2 if result["status"] == "BLOCK" else 0
+            return 0
         if args.action == "append-log":
             try:
                 record = json.loads(args.record_json)

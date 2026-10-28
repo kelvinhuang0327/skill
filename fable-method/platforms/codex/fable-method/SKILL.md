@@ -119,6 +119,9 @@ file counts. A single acceptance failure is not a trigger by itself.
   path that the Packet, the project rules, or this skill names. Any other
   place, such as `/tmp` or a tool's default temporary directory, is out of
   scope; point tools that default there at one of those paths.
+  Python bytecode counts too: when Python imports or runs code from a
+  folder outside your write scope, run it with `-B` or with
+  `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` appears there.
 - Keep reads inside what the Packet lets you read. Give search, status,
   diff, and listing commands explicit path operands, and check that a
   generated path list is non-empty before using it: an empty list must stop
@@ -288,11 +291,11 @@ At task start, classify the requested workspace as WORKTREE_LIFECYCLE: PERSISTEN
 
 Use create-worktree to prepare and create the exact absent path, branch, base ref, and task ID. For a temporary task, pass --auto-close-authorized only when the Owner approved that lifecycle before creation; the helper writes its one-use record in Git common metadata immediately before creating the worktree. Do not manually create or adopt a different path. An existing worktree has no matching preauthorization record and cannot pass the close helper.
 
-For this local Codex installation, use scripts/fable_artifact_controls.py for disk admission, temporary Observer/debug JSONL, and eligible temporary-worktree closure. At each task start, classify its storage use and run space-check against the filesystem where the work or outputs will be written; run it again when the task ends. Less than 15 GiB free reports a warning. Less than 8 GiB blocks creation of a research worktree and launch of a high-disk task. Ordinary work may continue with a warning. Read-only diagnostics and Owner-authorized space-recovery work are admitted below either threshold, while still reporting low space. The check is on demand and has no background service:
+For this local Codex installation, use scripts/fable_artifact_controls.py for disk checks, temporary Observer/debug JSONL, and eligible temporary-worktree closure. At each task start, classify its storage use and run space-check against the filesystem where the work or outputs will be written; run it again when the task ends. Less than 15 GiB free reports a warning. Less than 8 GiB adds a stronger warning when creating a research worktree or launching a high-disk task, but the work still proceeds; report the free space in the reply. Low space never blocks work. Read-only diagnostics and Owner-authorized space-recovery work report WARN_EXEMPT. The check is on demand and has no background service:
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py space-check --path <existing-output-volume> --operation <ordinary|research-worktree|high-disk-task|read-only-diagnostic|authorized-reclaim> --phase <before|after>
 
-Use create-worktree for every new research worktree so the capacity block runs immediately before git worktree add. Select persistent-research by default. Select temporary-task only when the task has that lifecycle; include --auto-close-authorized or --close-policy AUTO_CLOSE_AFTER_MERGE only when the Owner approved auto-close before the exact worktree is created:
+Use create-worktree for every new research worktree so the space check runs immediately before git worktree add. Select persistent-research by default. Select temporary-task only when the task has that lifecycle; include --auto-close-authorized or --close-policy AUTO_CLOSE_AFTER_MERGE only when the Owner approved auto-close before the exact worktree is created:
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py create-worktree --repo <canonical-repository> --worktree <exact-absent-path> --base <durable-base-ref> --branch <task-branch> --task-id <task-id> --lifecycle <persistent-research|temporary-task> [--auto-close-authorized] [--close-policy <PRESERVE|AUTO_CLOSE_AFTER_MERGE>] [--merge-target-ref <ref>] [--persistent-evidence-root <path>]
 
@@ -322,7 +325,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `baf902cac6252fb35f62eabc3d80863eb3b51742bca53d4f75a2cad12bbf9d49`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `e5e75bccd1e44de82829d1fda6ca220d798003a01ec78e856bade9a3a2048d4a`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

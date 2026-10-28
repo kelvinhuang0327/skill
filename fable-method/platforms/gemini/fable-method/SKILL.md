@@ -120,6 +120,9 @@ file counts. A single acceptance failure is not a trigger by itself.
   path that the Packet, the project rules, or this skill names. Any other
   place, such as `/tmp` or a tool's default temporary directory, is out of
   scope; point tools that default there at one of those paths.
+  Python bytecode counts too: when Python imports or runs code from a
+  folder outside your write scope, run it with `-B` or with
+  `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` appears there.
 - Keep reads inside what the Packet lets you read. Give search, status,
   diff, and listing commands explicit path operands, and check that a
   generated path list is non-empty before using it: an empty list must stop
