@@ -365,15 +365,37 @@ classify_repository_dirty_state() {
   done
 }
 
+# Compare the two authority directories at the already-resolved commit IDs.
+# A missing path or non-tree object cannot establish a matching scope.
+canonical_repository_scope_trees_match() {
+  local source_head="$1" canonical_head="$2" scope source_tree canonical_tree
+  for scope in fable-method fable-judge; do
+    source_tree="$(git_identity -C "$REPOSITORY_ROOT" rev-parse --verify "${source_head}:${scope}" 2>/dev/null)" || return 1
+    canonical_tree="$(git_identity -C "$REPOSITORY_ROOT" rev-parse --verify "${canonical_head}:${scope}" 2>/dev/null)" || return 1
+    [[ "$source_tree" == "$canonical_tree" ]] || return 1
+    [[ "$(git_identity -C "$REPOSITORY_ROOT" cat-file -t "$canonical_tree" 2>/dev/null)" == tree ]] || return 1
+  done
+}
+
 require_canonical_repository_state_for_activation() {
   local branch source_head canonical_head
+  local allow_scope_match="${1:-}" matching_source=0
   branch="$(current_branch)"
   source_head="$(activation_source_head)" \
     || die 'ACTIVATION_SOURCE_HEAD_UNRESOLVED: executing worktree HEAD is not a commit'
   canonical_head="$(canonical_master_head)" \
     || die 'CANONICAL_MASTER_REF_UNRESOLVED: refs/remotes/origin/master is not a commit'
   classify_repository_dirty_state
-  if [[ "$source_head" != "$canonical_head" || "$FABLE_STAGED_COUNT" -ne 0 \
+  if [[ "$allow_scope_match" == ordinary ]]; then
+    activation_source_scope_match=''
+  fi
+  if [[ "$source_head" == "$canonical_head" ]]; then
+    matching_source=1
+  elif [[ "$allow_scope_match" == ordinary ]] && canonical_repository_scope_trees_match "$source_head" "$canonical_head"; then
+    matching_source=1
+    activation_source_scope_match="$canonical_head"
+  fi
+  if [[ "$matching_source" -ne 1 || "$FABLE_STAGED_COUNT" -ne 0 \
         || "$FABLE_TRACKED_DIRTY_COUNT" -ne 0 || "$FABLE_UNTRACKED_COUNT" -ne 0 ]]; then
     printf 'ACTIVATION_REPOSITORY_STATE_NOT_READY\n' >&2
     printf '  branch: %s (informational; detached HEAD is allowed)\n' "$branch" >&2
@@ -1184,11 +1206,11 @@ do_check() {
 
 do_activate() {
   acquire_activation_lock
-  local platform="$1"
+  local platform="$1" activation_source_scope_match=''
   guard_repository_root
   verify_manifest_paths
   require_canonical_source_gate
-  require_canonical_repository_state_for_activation
+  require_canonical_repository_state_for_activation ordinary
   require_rsync
 
   local live canonical_abs result
@@ -1222,7 +1244,7 @@ do_activate() {
 
   verify_manifest_paths
   require_canonical_source_gate
-  require_canonical_repository_state_for_activation
+  require_canonical_repository_state_for_activation ordinary
   [[ "$(activation_source_head)" == "$preflight_head" && "$(git_identity -C "$REPOSITORY_ROOT" rev-parse HEAD^{tree})" == "$preflight_tree" ]] \
     || die 'ACTIVATION_SOURCE_CHANGED_BEFORE_WRITE'
   classify_platform "$platform"
@@ -1274,6 +1296,9 @@ do_activate() {
   printf 'FINAL_STATE: %s\n' "$CLASSIFY_STATE"
   printf 'CANONICAL_HEAD: %s\n' "$(activation_source_head)"
   printf 'CANONICAL_MASTER_HEAD: %s\n' "$(canonical_master_head)"
+  if [[ -n "$activation_source_scope_match" ]]; then
+    printf 'ACTIVATION_SOURCE_SCOPE_MATCH: %s\n' "$activation_source_scope_match"
+  fi
   printf 'LIVE_TARGET: %s\n' "$live"
 }
 

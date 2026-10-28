@@ -241,6 +241,198 @@ readonly STALE_SCRIPT="${LINKED_STALE}/fable-method/scripts/activate-live.sh"
 readonly OLD_MASTER_SCRIPT="${FIXTURE_CANONICAL}/fable-method/scripts/activate-live.sh"
 readonly SCRATCH_LIVE="${FIXTURE_HOME}/.codex/skills/fable-method"
 
+# These commits differ from origin/master only outside both authority scopes.
+# They exercise the production script through the existing isolated fixture.
+scope_assert_matching_trees() {
+  local worktree="$1" skill
+  for skill in fable-method fable-judge; do
+    [[ "$(git -C "$worktree" rev-parse --verify "HEAD:${skill}")" == \
+       "$(git -C "$worktree" rev-parse --verify "refs/remotes/origin/master:${skill}")" ]] \
+      || fail "scope fixture trees differ for ${skill}"
+  done
+  [[ "$(git -C "$worktree" rev-parse HEAD)" != "$CURRENT_HEAD" ]] \
+    || fail 'scope fixture HEAD must differ from origin/master'
+}
+
+scope_assert_match_report() {
+  local label="$1"
+  [[ "$COMMAND_OUTPUT" == *$'\n'"ACTIVATION_SOURCE_SCOPE_MATCH: ${CURRENT_HEAD}"$'\n'* ]] \
+    || fail "${label}: missing the exact origin/master scope-match line"
+  [[ "$(printf '%s\n' "$COMMAND_OUTPUT" | grep -c '^ACTIVATION_SOURCE_SCOPE_MATCH: ')" -eq 1 ]] \
+    || fail "${label}: expected exactly one scope-match line"
+  [[ -f "$SCRATCH_LIVE/SKILL.md" ]] || fail "${label}: scratch activation was not written"
+  pass_case "${label}: reported the exact origin/master scope match"
+}
+
+scope_clear_live() {
+  case "$SCRATCH_LIVE" in
+    "${SCRATCH}"/*) rm -r -- "$SCRATCH_LIVE" ;;
+    *) fail 'scope fixture refused to remove a live target outside scratch' ;;
+  esac
+}
+
+run_scope_01() {
+  local expected
+  [[ ! -e "$SCRATCH_LIVE" ]] || fail 'SCOPE01 precondition: scratch target already exists'
+  assert_success_contains 'SCOPE01 identical HEAD activates' 'ACTIVATION_RESULT: ACTIVATED' \
+    "$CURRENT_SCRIPT" --activate --platform codex
+  printf -v expected 'PLATFORM: codex\nPREVIOUS_STATE: ABSENT\nACTIVATION_RESULT: ACTIVATED\nFINAL_STATE: EXACT_CURRENT_MATERIALIZATION\nCANONICAL_HEAD: %s\nCANONICAL_MASTER_HEAD: %s\nLIVE_TARGET: %s' \
+    "$CURRENT_HEAD" "$CURRENT_HEAD" "$SCRATCH_LIVE"
+  [[ "$COMMAND_OUTPUT" == "$expected" ]] \
+    || fail 'SCOPE01: output changed from the original exact-HEAD success output'
+  [[ -f "$SCRATCH_LIVE/SKILL.md" ]] || fail 'SCOPE01: scratch activation was not written'
+  pass_case 'SCOPE01: exact-HEAD output is unchanged and has no scope-match line'
+  scope_clear_live
+}
+
+run_scope_02() {
+  local worktree="${SCRATCH}/scope-ancestor"
+  git -C "$FIXTURE_CANONICAL" worktree add -q --detach "$worktree" "$CURRENT_HEAD"
+  mkdir -p "$worktree/prompt"
+  printf 'outside-scope ancestor\n' >"$worktree/prompt/scope-ancestor-probe"
+  git -C "$worktree" add -- prompt/scope-ancestor-probe
+  git -C "$worktree" commit -q -m 'fixture outside-scope ancestor'
+  scope_assert_matching_trees "$worktree"
+  [[ ! -e "$SCRATCH_LIVE" ]] || fail 'SCOPE02 precondition: scratch target already exists'
+  assert_success_contains 'SCOPE02 --check remains informational' \
+    "CANONICAL_REPOSITORY_STATE_NOTE: branch=DETACHED activation_source_head=$(git -C "$worktree" rev-parse HEAD) canonical_master_head=${CURRENT_HEAD}" \
+    "$worktree/fable-method/scripts/activate-live.sh" --check --platform codex
+  [[ "$COMMAND_OUTPUT" != *'ACTIVATION_SOURCE_SCOPE_MATCH:'* ]] \
+    || fail 'SCOPE02: --check unexpectedly reported an activation scope match'
+  printf 'outside-scope untracked work\n' >"$worktree/prompt/scope-untracked-probe"
+  assert_success_contains 'SCOPE02 outside-scope descendant activates' 'ACTIVATION_RESULT: ACTIVATED' \
+    "$worktree/fable-method/scripts/activate-live.sh" --activate --platform codex
+  scope_assert_match_report 'SCOPE02'
+  scope_clear_live
+}
+
+run_scope_03() {
+  local worktree="${SCRATCH}/scope-merge" other="${SCRATCH}/scope-merge-other" other_head
+  git -C "$FIXTURE_CANONICAL" worktree add -q --detach "$worktree" "$CURRENT_HEAD"
+  git -C "$FIXTURE_CANONICAL" worktree add -q --detach "$other" "$CURRENT_HEAD"
+  mkdir -p "$worktree/prompt" "$other/prompt"
+  printf 'outside-scope merge side A\n' >"$worktree/prompt/scope-merge-a"
+  git -C "$worktree" add -- prompt/scope-merge-a
+  git -C "$worktree" commit -q -m 'fixture merge side A'
+  printf 'outside-scope merge side B\n' >"$other/prompt/scope-merge-b"
+  git -C "$other" add -- prompt/scope-merge-b
+  git -C "$other" commit -q -m 'fixture merge side B'
+  other_head="$(git -C "$other" rev-parse HEAD)"
+  git -C "$worktree" merge -q --no-ff -m 'fixture divergent scope merge' "$other_head"
+  [[ "$(git -C "$worktree" merge-base HEAD^1 HEAD^2)" == "$CURRENT_HEAD" ]] \
+    || fail 'SCOPE03 precondition: merge parents did not diverge at origin/master'
+  scope_assert_matching_trees "$worktree"
+  [[ ! -e "$SCRATCH_LIVE" ]] || fail 'SCOPE03 precondition: scratch target already exists'
+  assert_success_contains 'SCOPE03 divergent merge activates' 'ACTIVATION_RESULT: ACTIVATED' \
+    "$worktree/fable-method/scripts/activate-live.sh" --activate --platform codex
+  scope_assert_match_report 'SCOPE03'
+  scope_clear_live
+}
+
+scope_assert_refused_without_write() {
+  local label="$1"
+  shift
+  [[ ! -e "$SCRATCH_LIVE" ]] || fail "${label}: scratch target existed before refusal"
+  assert_failure_contains "$label" 'ACTIVATION_REPOSITORY_STATE_NOT_READY' "$@"
+  [[ "$COMMAND_STATUS" -eq 2 ]] || fail "${label}: expected exit 2, got ${COMMAND_STATUS}"
+  [[ "$COMMAND_OUTPUT" != *'ACTIVATION_SOURCE_SCOPE_MATCH:'* ]] \
+    || fail "${label}: refused activation reported a scope match"
+  [[ ! -e "$SCRATCH_LIVE" ]] || fail "${label}: refused activation wrote the scratch target"
+  pass_case "${label}: exit 2 and no live write"
+}
+
+run_scope_refusals() {
+  local ancestor="${SCRATCH}/scope-ancestor" method="${SCRATCH}/scope-method-diff"
+  local judge="${SCRATCH}/scope-judge-diff" ancestor_head script zero_l zero_t
+  ancestor_head="$(git -C "$ancestor" rev-parse HEAD)"
+  script="$ancestor/fable-method/scripts/activate-live.sh"
+  git -C "$FIXTURE_CANONICAL" worktree add -q --detach "$method" "$ancestor_head"
+  printf 'committed method change\n' >"$method/fable-method/scope-committed-probe"
+  git -C "$method" add -- fable-method/scope-committed-probe
+  git -C "$method" commit -q -m 'fixture committed method difference'
+  scope_assert_refused_without_write 'SCOPE04 committed method difference' \
+    "$method/fable-method/scripts/activate-live.sh" --activate --platform codex
+
+  git -C "$FIXTURE_CANONICAL" worktree add -q --detach "$judge" "$ancestor_head"
+  printf 'committed judge change\n' >"$judge/fable-judge/scope-committed-probe"
+  git -C "$judge" add -- fable-judge/scope-committed-probe
+  git -C "$judge" commit -q -m 'fixture committed judge difference'
+  scope_assert_refused_without_write 'SCOPE05 committed judge difference' \
+    "$judge/fable-method/scripts/activate-live.sh" --activate --platform codex
+
+  scope_assert_matching_trees "$ancestor"
+  cp "$ancestor/fable-method/test/test_activate_live.sh" "$SCRATCH/scope-test-backup"
+  printf '\n# dirty scope fixture\n' >>"$ancestor/fable-method/test/test_activate_live.sh"
+  scope_assert_refused_without_write 'SCOPE06 tracked dirty method file' \
+    "$script" --activate --platform codex
+  cp "$SCRATCH/scope-test-backup" "$ancestor/fable-method/test/test_activate_live.sh"
+  printf 'untracked\n' >"$ancestor/fable-method/scope-untracked-probe"
+  scope_assert_refused_without_write 'SCOPE06 untracked method file' \
+    "$script" --activate --platform codex
+  rm "$ancestor/fable-method/scope-untracked-probe"
+  printf 'staged\n' >"$ancestor/fable-method/scope-staged-probe"
+  git -C "$ancestor" add -- fable-method/scope-staged-probe
+  scope_assert_refused_without_write 'SCOPE06 staged method file' \
+    "$script" --activate --platform codex
+  git -C "$ancestor" rm -q --cached -- fable-method/scope-staged-probe
+  rm "$ancestor/fable-method/scope-staged-probe"
+  git -C "$ancestor" mv fable-judge/MIGRATION.md prompt/scope-judge-moved.md
+  scope_assert_refused_without_write 'SCOPE06 cross-scope staged rename' \
+    "$script" --activate --platform codex
+  git -C "$ancestor" mv prompt/scope-judge-moved.md fable-judge/MIGRATION.md
+
+  printf -v zero_l '%064d' 0
+  printf -v zero_t '%040d' 0
+  scope_assert_refused_without_write 'SCOPE07 reviewed local-drift replacement' \
+    "$script" --activate --platform codex --replace-reviewed-local-drift \
+    --expected-live-sha256 "$zero_l" --expected-canonical-head "$CURRENT_HEAD" \
+    --expected-canonical-tree "$zero_t" --expected-materialization-tree "$zero_t"
+  scope_assert_refused_without_write 'SCOPE07 reviewed runtime upgrade' \
+    "$script" --activate --platform codex --upgrade-reviewed-runtime
+}
+
+# Repoint only the disposable repository's remote ref immediately before the
+# second ordinary guard. Its different trees must prevent the first live write.
+run_scope_prewrite_refusal() {
+  local runner="${SCRATCH}/scope-prewrite-runner.sh"
+  cat >"$runner" <<'SCOPE_RUNNER_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+script="$1" stale="$2"
+source "$script"
+eval "$(declare -f require_canonical_repository_state_for_activation | sed '1s/require_canonical_repository_state_for_activation/original_scope_guard/')"
+calls=0
+require_canonical_repository_state_for_activation() {
+  calls=$((calls + 1))
+  if [[ "$calls" -eq 2 ]]; then
+    git -C "$REPOSITORY_ROOT" update-ref refs/remotes/origin/master "$stale"
+  fi
+  original_scope_guard "$@"
+}
+main --activate --platform codex
+SCOPE_RUNNER_EOF
+  scope_assert_refused_without_write 'SCOPE prewrite changed remote scope' \
+    /bin/bash "$runner" "$SCRATCH/scope-ancestor/fable-method/scripts/activate-live.sh" "$STALE_HEAD"
+  git -C "$FIXTURE_CANONICAL" update-ref refs/remotes/origin/master "$CURRENT_HEAD"
+}
+
+case "${FABLE_SCOPE_TEST_ONLY:-all}" in
+  02) run_scope_02; exit 0 ;;
+  03) run_scope_03; exit 0 ;;
+  scope|all)
+    run_scope_01
+    run_scope_02
+    run_scope_03
+    run_scope_refusals
+    run_scope_prewrite_refusal
+    if [[ "${FABLE_SCOPE_TEST_ONLY:-all}" == scope ]]; then
+      printf 'PASS: %s focused scope cases\n' "$PASS_COUNT"
+      exit 0
+    fi
+    ;;
+  *) fail "unknown FABLE_SCOPE_TEST_ONLY: ${FABLE_SCOPE_TEST_ONLY}" ;;
+esac
+
 [[ ! -e "$SCRATCH_LIVE" ]] || fail 'normal --check precondition: scratch live target already exists'
 assert_success_contains \
   'same common repository detached current master --check' \
