@@ -67,7 +67,7 @@ Dir.mktmpdir('fable-sync-platforms-') do |tmp|
   artifact_controls_bytes = File.binread(artifact_controls)
   check.call(Digest::SHA1.hexdigest("blob #{launcher_bytes.bytesize}\0#{launcher_bytes}") == '8683aa28bfaada3f4b196036ab9a5b4fa39b841a' && (File.stat(launcher).mode & 0o777) == 0o755, 'Codex launcher bytes and executable mode match the source pin')
   check.call(Digest::SHA256.hexdigest(companion_bytes) == 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0' && (File.stat(companion).mode & 0o777) == 0o644, 'companion bytes and mode match the versioned runtime asset pin')
-  check.call(Digest::SHA256.hexdigest(artifact_controls_bytes) == '0148c586f7aa68c53d9de3472f8f4abba0d3b62eb07d67c9a05533315cfcf18a' && (File.stat(artifact_controls).mode & 0o777) == 0o644, 'artifact controls bytes and mode match the declared helper asset')
+  check.call(Digest::SHA256.hexdigest(artifact_controls_bytes) == 'baf902cac6252fb35f62eabc3d80863eb3b51742bca53d4f75a2cad12bbf9d49' && (File.stat(artifact_controls).mode & 0o777) == 0o644, 'artifact controls bytes and mode match the declared helper asset')
   skill_pin = File.read(File.join(codex_dir, 'SKILL.md')).match(/is pinned to Git blob `([0-9a-f]{40})` from commit/)
   check.call(skill_pin && skill_pin[1] == '8683aa28bfaada3f4b196036ab9a5b4fa39b841a', 'generated Codex SKILL.md pin matches the launcher blob')
   check.call(File.read(File.join(codex_dir, 'SKILL.md')).include?('artifact_controls.py') && File.read(File.join(codex_dir, 'SKILL.md')).include?('Artifact budgets and worktree lifecycle'), 'generated Codex skill includes the lifecycle instructions and helper')

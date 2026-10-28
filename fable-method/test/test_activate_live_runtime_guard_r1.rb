@@ -959,6 +959,15 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
       FileUtils.cp(source, destination)
     end
 
+    manifest_path = File.join(fixture_canonical, 'fable-method/scripts/platform_manifest.rb')
+    root_helper_sha = Digest::SHA256.file(File.join(ROOT, 'fable-method/scripts/fable_artifact_controls.py')).hexdigest
+    fixture_helper_sha = Digest::SHA256.file(File.join(fixture_canonical, 'fable-method/scripts/fable_artifact_controls.py')).hexdigest
+    manifest = File.binread(manifest_path)
+    root_helper_pin = "'sha256' => '#{root_helper_sha}'"
+    fixture_helper_pin = "'sha256' => '#{fixture_helper_sha}'"
+    raise 'fixture manifest must contain the current root Helper SHA exactly once' unless manifest.scan(Regexp.new(Regexp.escape(root_helper_pin))).length == 1
+    File.binwrite(manifest_path, manifest.sub(root_helper_pin, fixture_helper_pin))
+
     # Rewrite paths in fixture scripts
     replacements = {
       '/Users/kelvin/VibeCoding-WorkSpace/skill' => fixture_canonical,

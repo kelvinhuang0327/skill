@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -976,6 +977,122 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             == results_by_source.get(planner_paths[1].relative_to(ROOT).as_posix()),
             "PX01 both Planner templates produce identical Helper results",
         )
+
+    def test_optional_repo_case01_task_evidence_without_repository(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="optional-repo-case01-") as temporary:
+            parent = Path(temporary).resolve()
+            root = self.task_root(parent)
+            self.write_process_packet(root, "SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: NONE\n")
+            self.write_process_result(root, {
+                "task_lifecycle_state": "COMPLETED",
+                "process_signal": {"trigger": "HIGH_IMPACT"},
+            })
+            command = [
+                sys.executable, "-B", str(HELPER_PATH), "evidence-summary",
+                "--task-id", TASK_ID, "--task-evidence-root", str(root),
+            ]
+            completed = subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+            self.check(completed.returncode == 0, f"OPTIONAL_REPO_CASE01 succeeds without a repository: {completed.stderr.strip()}")
+            summary = json.loads(completed.stdout)
+            self.check(
+                set(summary) == {"schema", "repository", "task_filter", "execution_history", "task_evidence"},
+                "OPTIONAL_REPO_CASE01 has exactly the no-repository keys",
+            )
+            self.check(summary["schema"] == "fable-evidence-feedback-v1", "OPTIONAL_REPO_CASE01 schema matches")
+            self.check(summary["repository"] is None, "OPTIONAL_REPO_CASE01 repository is null")
+            self.check(summary["task_filter"] == TASK_ID, "OPTIONAL_REPO_CASE01 task filter matches")
+            self.check(
+                summary["execution_history"] == "NOT_READ_WITHOUT_REPOSITORY",
+                "OPTIONAL_REPO_CASE01 execution history is not read",
+            )
+            expected_evidence = json.loads(json.dumps(HELPER.summarize_task_evidence(str(root), TASK_ID)))
+            self.check(
+                json.loads(json.dumps(summary["task_evidence"])) == expected_evidence,
+                "OPTIONAL_REPO_CASE01 task evidence matches the direct receipt summary",
+            )
+            self.check(summary["task_evidence"]["identity_status"] == "MATCH", "OPTIONAL_REPO_CASE01 task identity matches")
+            self.check(
+                summary["task_evidence"]["process_evidence"]["lifecycle_state_check"] == "CANONICAL",
+                "OPTIONAL_REPO_CASE01 lifecycle is canonical",
+            )
+            print("OPTIONAL_REPO_CASE01: PASS")
+
+    def test_optional_repo_case02_task_evidence_matches_with_and_without_repository(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="optional-repo-case02-") as temporary:
+            repo = Path(temporary).resolve()
+            initialized = subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, text=True, check=False)
+            self.check(initialized.returncode == 0, "OPTIONAL_REPO_CASE02 temporary Git repository initialized")
+            root = self.task_root(repo)
+            self.write_process_packet(root, "SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: NONE\n")
+            self.write_process_result(root, {
+                "task_lifecycle_state": "COMPLETED",
+                "process_signal": {"trigger": "HIGH_IMPACT"},
+            })
+            base_command = [sys.executable, "-B", str(HELPER_PATH), "evidence-summary"]
+            common_args = ["--task-id", TASK_ID, "--task-evidence-root", str(root)]
+            without_repo = subprocess.run(
+                base_command + common_args, cwd=root, capture_output=True, text=True, check=False,
+            )
+            with_repo = subprocess.run(
+                base_command + ["--repo", str(repo)] + common_args,
+                cwd=root, capture_output=True, text=True, check=False,
+            )
+            self.check(
+                without_repo.returncode == 0 and with_repo.returncode == 0,
+                "OPTIONAL_REPO_CASE02 both invocations succeed",
+            )
+            no_repo_summary = json.loads(without_repo.stdout)
+            repo_summary = json.loads(with_repo.stdout)
+            self.check(
+                json.loads(json.dumps(no_repo_summary["task_evidence"]))
+                == json.loads(json.dumps(repo_summary["task_evidence"])),
+                "OPTIONAL_REPO_CASE02 task evidence is identical after JSON round trips",
+            )
+            print("OPTIONAL_REPO_CASE02: PASS")
+
+    def test_optional_repo_case03_no_git_call_when_path_has_no_git(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="optional-repo-case03-") as temporary:
+            parent = Path(temporary).resolve()
+            root = self.task_root(parent)
+            self.write_process_packet(root, "SIGNAL_POLICY: ALWAYS\nCONTINUES_FROM: NONE\n")
+            self.write_process_result(root, {
+                "task_lifecycle_state": "COMPLETED",
+                "process_signal": {"trigger": "HIGH_IMPACT"},
+            })
+            environment = os.environ.copy()
+            environment["PATH"] = str(parent / "missing-bin")
+            command = [
+                sys.executable, "-B", str(HELPER_PATH), "evidence-summary",
+                "--task-id", TASK_ID, "--task-evidence-root", str(root),
+            ]
+            self.check(Path(sys.executable).is_absolute(), "OPTIONAL_REPO_CASE03 interpreter path is absolute")
+            completed = subprocess.run(
+                command, cwd=root, env=environment, capture_output=True, text=True, check=False,
+            )
+            self.check(
+                completed.returncode == 0,
+                f"OPTIONAL_REPO_CASE03 succeeds without git on PATH: {completed.stderr.strip()}",
+            )
+            summary = json.loads(completed.stdout)
+            self.check(
+                summary["execution_history"] == "NOT_READ_WITHOUT_REPOSITORY",
+                "OPTIONAL_REPO_CASE03 execution history stays unread",
+            )
+            print("OPTIONAL_REPO_CASE03: PASS")
+
+    def test_optional_repo_case04_missing_repository_and_evidence_root_is_blocked(self) -> None:
+        command = [sys.executable, "-B", str(HELPER_PATH), "evidence-summary"]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        self.check(completed.returncode == 2, "OPTIONAL_REPO_CASE04 exits with ControlError")
+        self.check(completed.stdout == "", "OPTIONAL_REPO_CASE04 stdout is empty")
+        blocked = json.loads(completed.stderr)
+        self.check(blocked["status"] == "BLOCKED", "OPTIONAL_REPO_CASE04 is reported BLOCKED")
+        self.check("--repo" in blocked["reason"], "OPTIONAL_REPO_CASE04 reason names --repo")
+        self.check(
+            "--task-evidence-root" in blocked["reason"],
+            "OPTIONAL_REPO_CASE04 reason names --task-evidence-root",
+        )
+        print("OPTIONAL_REPO_CASE04: PASS")
 
 
 if __name__ == "__main__":

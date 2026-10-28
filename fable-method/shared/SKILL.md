@@ -114,6 +114,16 @@ file counts. A single acceptance failure is not a trigger by itself.
 
 - Keep writes inside the Packet's allowed scope. Adjacent files count only
   when acceptance needs them; a new outcome needs a Planner Delta.
+- Temporary files are writes too. Put helper scripts, intermediate output,
+  and diagnostic reports under `PERSISTENT_EVIDENCE_ROOT` or under a scratch
+  path that the Packet, the project rules, or this skill names. Any other
+  place, such as `/tmp` or a tool's default temporary directory, is out of
+  scope; point tools that default there at one of those paths.
+- Keep reads inside what the Packet lets you read. Give search, status,
+  diff, and listing commands explicit path operands, and check that a
+  generated path list is non-empty before using it: an empty list must stop
+  the command, not widen it to the whole repository. macOS `/bin/bash` is
+  3.2 and has no `mapfile` or `readarray`.
 - Read the exact target before editing. Stop on unexplained changes; do not
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
@@ -215,7 +225,8 @@ header line, keep this receipt even if the Packet body does not mention it:
   `PROCESS_SIGNAL:`.
 - If the installed skill has `scripts/fable_artifact_controls.py`, run
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
-  once before replying and fix the receipt until it reports
+  once before replying (leave out `--repo <repo>` when the Packet names no
+  repository or forbids reading it) and fix the receipt until it reports
   `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`. A receipt
   format slip fixed this way is not an incident: it does not by itself make
   `trigger` `INCIDENT`.
