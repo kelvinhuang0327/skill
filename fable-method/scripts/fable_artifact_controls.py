@@ -2732,7 +2732,7 @@ def main() -> int:
     sub.add_parser("self-test")
     sub.add_parser("feedback-self-test")
     feedback = sub.add_parser("evidence-summary")
-    feedback.add_argument("--repo", required=True)
+    feedback.add_argument("--repo")
     feedback.add_argument("--task-id")
     feedback.add_argument("--task-evidence-root")
     scratch = sub.add_parser("validate-test-scratch")
@@ -2795,7 +2795,21 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0 if result["status"] == "PASS" else 1
         if args.action == "evidence-summary":
-            result = summarize_execution_history(args.repo, args.task_id, args.task_evidence_root)
+            if args.repo is not None:
+                result = summarize_execution_history(args.repo, args.task_id, args.task_evidence_root)
+            else:
+                if args.task_evidence_root is None:
+                    raise ControlError("--repo or --task-evidence-root is required")
+                if args.task_id is None:
+                    raise ControlError("--task-id is required with --task-evidence-root")
+                task_id = _safe_task_id(args.task_id)
+                result = {
+                    "schema": "fable-evidence-feedback-v1",
+                    "repository": None,
+                    "task_filter": task_id,
+                    "execution_history": "NOT_READ_WITHOUT_REPOSITORY",
+                    "task_evidence": summarize_task_evidence(args.task_evidence_root, task_id),
+                }
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if args.action == "validate-test-scratch":
