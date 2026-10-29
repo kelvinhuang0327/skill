@@ -182,6 +182,13 @@ Verification is an observation, not a command run or "should work". Reuse
 evidence from the exact same tree instead of re-running it, and label it
 `REUSED_EXACT_TREE_EVIDENCE`.
 
+When the work enumerates or recomputes a set (targets, records, candidates),
+take the set's expected size from the Packet or from an independent count made
+before the run, and report expected and produced counts side by side. An
+unexplained difference fails verification: fix it, or report `BLOCKED` with
+both counts; never report `COMPLETED` over it. If no expected size can be
+known, say so and state how the whole set was covered.
+
 ## Report
 
 ```text
