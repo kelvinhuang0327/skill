@@ -24,7 +24,11 @@ class ReadScopeTempWritesRuleTest < Minitest::Test
     'an empty list must stop the command, not widen it to the whole repository',
     '`/bin/bash`',
     '`mapfile`',
-    '`readarray`'
+    '`readarray`',
+    'Python bytecode counts too:',
+    '`-B`',
+    '`PYTHONDONTWRITEBYTECODE=1`',
+    'so no `__pycache__` appears there'
   ].freeze
 
   def test_temp_write_and_read_scope_rules_appear_once_in_execution_order
@@ -47,6 +51,7 @@ class ReadScopeTempWritesRuleTest < Minitest::Test
       ordered_text = [
         'a new outcome needs a Planner Delta.',
         TEMP_WRITES_RULE,
+        'Python bytecode counts too:',
         READ_SCOPE_RULE,
         '- Read the exact target before editing.'
       ]
