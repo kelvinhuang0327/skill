@@ -10,13 +10,13 @@ require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
 module HeavyScientificLeaseTestScratch
-  ROOT = File.expand_path('../../.task-disposable-scratch', __dir__).freeze
+  ROOT = File.realpath(ENV.fetch('FABLE_TEST_SCRATCH_ROOT')).freeze
 
   requested_root = ENV.fetch('FABLE_TEST_SCRATCH_ROOT') do
-    raise 'FABLE_TEST_SCRATCH_ROOT must name this worktree disposable root'
+    raise 'FABLE_TEST_SCRATCH_ROOT must name an existing disposable root'
   end
   unless File.expand_path(requested_root) == ROOT && File.directory?(ROOT) && File.realpath(ROOT) == ROOT
-    raise 'test scratch root is not the canonical worktree disposable root'
+    raise 'test scratch root is not the canonical disposable root'
   end
   ENV['TMPDIR'] = ROOT
   ENV['GIT_CEILING_DIRECTORIES'] = ROOT
@@ -52,6 +52,8 @@ end
 
 class HeavyScientificLeaseTest < Minitest::Test
   def setup
+    @previous_heavy_lease = ENV['FABLE_HEAVY_SCIENTIFIC_LEASE']
+    ENV['FABLE_HEAVY_SCIENTIFIC_LEASE'] = 'on'
     @tmpdir = HeavyScientificLeaseTestScratch.mktmpdir('heavy_scientific_lease_test_')
     @repo = File.join(@tmpdir, 'repo')
     @worktree = File.join(@tmpdir, 'worktree')
@@ -62,6 +64,7 @@ class HeavyScientificLeaseTest < Minitest::Test
   end
 
   def teardown
+    ENV['FABLE_HEAVY_SCIENTIFIC_LEASE'] = @previous_heavy_lease
     @children.each do |pid|
       begin
         Process.kill('TERM', pid) if Process.kill(0, pid)
