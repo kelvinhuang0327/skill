@@ -440,6 +440,9 @@ No ordinary `--run` invokes this entrypoint.
 
 ### Protected run entrypoint
 
+The machine-wide heavy-compute lease is paused by default; set
+`FABLE_HEAVY_SCIENTIFIC_LEASE=on` in the launcher environment to re-enable it.
+
 This CLI is an optional convenience; executable helpers are intentionally not
 included in the canonical installed build. Its absence from an installed skill
 is never a blocker by itself. When the confirmed Fable checkout has the helper,

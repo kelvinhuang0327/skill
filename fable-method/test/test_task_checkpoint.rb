@@ -10,13 +10,13 @@ require 'timeout'
 require_relative '../scripts/task_checkpoint'
 
 module TaskCheckpointTestScratch
-  ROOT = File.expand_path('../../.task-disposable-scratch', __dir__).freeze
+  ROOT = File.realpath(ENV.fetch('FABLE_TEST_SCRATCH_ROOT')).freeze
 
   requested_root = ENV.fetch('FABLE_TEST_SCRATCH_ROOT') do
-    raise 'FABLE_TEST_SCRATCH_ROOT must name this worktree disposable root'
+    raise 'FABLE_TEST_SCRATCH_ROOT must name an existing disposable root'
   end
   unless File.expand_path(requested_root) == ROOT && File.directory?(ROOT) && File.realpath(ROOT) == ROOT
-    raise 'test scratch root is not the canonical worktree disposable root'
+    raise 'test scratch root is not the canonical disposable root'
   end
   ENV['TMPDIR'] = ROOT
   ENV['GIT_CEILING_DIRECTORIES'] = ROOT
@@ -4531,6 +4531,8 @@ end
 # previously verified machine-wide heavy-scientific lease.
 class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   def setup
+    @previous_heavy_lease = ENV['FABLE_HEAVY_SCIENTIFIC_LEASE']
+    ENV['FABLE_HEAVY_SCIENTIFIC_LEASE'] = 'on'
     @tmpdir = TaskCheckpointTestScratch.mktmpdir('gen2_heavy_lease_compat_')
     @main_repo = File.join(@tmpdir, 'common-repository')
     @repo = File.join(@tmpdir, 'linked-worktree')
@@ -4572,6 +4574,7 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   end
 
   def teardown
+    ENV['FABLE_HEAVY_SCIENTIFIC_LEASE'] = @previous_heavy_lease
     Array(@release_files).each { |path| File.write(path, 'release') }
     Array(@children).each do |pid|
       begin
@@ -4583,6 +4586,166 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
       end
     end
     FileUtils.remove_entry(@tmpdir) if @tmpdir && File.directory?(@tmpdir)
+  end
+
+  def test_paused_switch_requires_exact_on_value
+    refute HeavyScientificLease.enabled?({})
+    %w[off ON On true 1].each { |value| refute HeavyScientificLease.enabled?('FABLE_HEAVY_SCIENTIFIC_LEASE' => value) }
+    assert HeavyScientificLease.enabled?('FABLE_HEAVY_SCIENTIFIC_LEASE' => 'on')
+  end
+
+  def test_paused_heavy_command_ignores_a_synthetic_heavy_writer_and_preserves_upstream_exit
+    with_paused_lease do
+      calls = install_synthetic_writer
+      marker = File.join(@tmpdir, 'paused-writer-child')
+      result = run_cli(paused_args('writer', marker, exit_code: 17))
+      assert_paused_launch(result, marker, 17)
+      refute File.exist?(calls), 'paused launch must not scan legacy heavy writers'
+      refute File.exist?(@lease_path), 'paused launch must not open the machine slot'
+    end
+  end
+
+  def test_paused_heavy_command_ignores_another_process_holding_the_slot
+    with_paused_lease do
+      hold_synthetic_slot
+      marker = File.join(@tmpdir, 'paused-slot-child')
+      result = run_cli(paused_args('slot', marker, exit_code: 19))
+      assert_paused_launch(result, marker, 19)
+      assert_equal '', File.binread(@lease_path), 'paused launch must leave the held slot untouched'
+    end
+  end
+
+  def test_paused_explicit_heavy_flag_does_not_acquire_or_scan
+    with_paused_lease do
+      calls = install_synthetic_writer
+      hold_synthetic_slot
+      marker = File.join(@tmpdir, 'paused-flag-child')
+      result = run_cli(paused_args('flag', marker, heavy_flag: true))
+      assert_paused_launch(result, marker, 0)
+      refute File.exist?(calls)
+    end
+  end
+
+  def test_paused_same_task_and_execution_still_reports_prior_process_active
+    with_paused_lease do
+      marker = File.join(@tmpdir, 'paused-owner-child')
+      release = File.join(@tmpdir, 'paused-owner-release')
+      @release_files << release
+      command = [RbConfig.ruby, '-e',
+                 'File.write(ARGV[0], "started"); sleep 0.01 until File.exist?(ARGV[1])', marker, release]
+      args = protected_args(task_id: 'PAUSED_SCIENTIFIC_TASK', execution_id: 'paused-owner',
+                            command: command, run_root: @worktree)
+      owner = start_cli(args, 'paused-owner')
+      wait_for_file(marker)
+      record_path = ExecutionRecord.default_path(@repo, 'PAUSED_SCIENTIFIC_TASK', 'paused-owner')
+      before = File.binread(record_path)
+      second = run_cli(args)
+      assert_equal 1, second[2].exitstatus, second[0] + second[1]
+      assert_includes second[0] + second[1], 'PRIOR_PROCESS_ACTIVE'
+      assert_equal before, File.binread(record_path), 'duplicate execution must not replace its active record'
+      refute File.exist?(@lease_path)
+      refute File.exist?(HeavyScientificLease.default_metadata_path(@lease_path))
+      File.write(release, 'release')
+      assert_equal 0, wait_cli(owner).exitstatus
+    end
+  end
+
+  def test_paused_nested_run_ignores_heavy_capability_and_keeps_task_lineage
+    with_paused_lease do
+      marker = File.join(@tmpdir, 'paused-nested-child')
+      inner = paused_args('inner', marker, heavy_flag: true)
+      driver = <<~'RUBY'
+        require 'open3'
+        require 'rbconfig'
+        stdout, stderr, status = Open3.capture3(
+          { 'FABLE_HEAVY_SCIENTIFIC_LEASE_FD' => 'invalid' },
+          RbConfig.ruby, *ARGV, { 10 => 10 }
+        )
+        STDOUT.write(stdout)
+        STDERR.write(stderr)
+        exit(status.exitstatus || 1)
+      RUBY
+      outer = protected_args(task_id: 'PAUSED_SCIENTIFIC_TASK', execution_id: 'paused-outer',
+                             command: [RbConfig.ruby, '-e', driver, @test_launcher_path, *inner],
+                             run_root: @worktree)
+      result = run_cli(outer)
+      assert_paused_launch(result, marker, 0)
+      record = ExecutionRecord.load(ExecutionRecord.default_path(@repo, 'PAUSED_SCIENTIFIC_TASK', 'paused-inner'))
+      assert_equal 'paused-outer', record.parent_execution_id
+      assert_nil record.heavy_scientific
+      refute File.exist?(@lease_path)
+    end
+  end
+
+  def test_paused_heavy_recovery_does_not_acquire_or_scan
+    with_paused_lease do
+      task = 'PAUSED_SCIENTIFIC_TASK'
+      state = seed_stale_execution(task_id: task, execution_id: 'paused-old', heavy_scientific: true)
+      calls = install_synthetic_writer
+      hold_synthetic_slot
+      marker = File.join(@tmpdir, 'paused-recovery-child')
+      result = run_cli(recovery_args(task_id: task, old_execution_id: 'paused-old',
+                                    application_state: state, command: quick_fake_command(marker)))
+      assert_paused_launch(result, marker, 0)
+      refute File.exist?(calls)
+    end
+  end
+
+  def with_paused_lease
+    previous = ENV.delete('FABLE_HEAVY_SCIENTIFIC_LEASE')
+    yield
+  ensure
+    ENV['FABLE_HEAVY_SCIENTIFIC_LEASE'] = previous
+  end
+
+  def paused_args(id, marker, exit_code: 0, heavy_flag: false)
+    command = [RbConfig.ruby, '-e',
+               'File.write(ARGV[0], "started"); puts "PAUSED_CHILD_OK"; exit(Integer(ARGV[1]))', marker, exit_code.to_s]
+    args = protected_args(task_id: 'PAUSED_SCIENTIFIC_TASK', execution_id: "paused-#{id}",
+                          command: command, run_root: @worktree)
+    args.delete('--heavy-scientific') unless heavy_flag
+    args
+  end
+
+  def assert_paused_launch(result, marker, exit_code)
+    assert_equal exit_code, result[2].exitstatus, result[0] + result[1]
+    assert File.file?(marker), 'paused lease must let the upstream command start'
+    refute_match(/STOP_ONCE|STOPPED_HEAVY_SLOT_OWNED|LEASE_ACQUIRED/, result[0] + result[1])
+    refute File.exist?(HeavyScientificLease.default_metadata_path(@lease_path)), 'paused lease must not write owner metadata'
+  end
+
+  def install_synthetic_writer
+    calls = File.join(@tmpdir, 'synthetic-writer-check-called')
+    source = File.read(@test_launcher_path)
+    isolated = "    kwargs[:legacy_writer_checker] ||= -> { [] }\n"
+    raise 'isolated writer seam missing' unless source.include?(isolated)
+    source.sub!(isolated, '')
+    fake = <<~RUBY
+      class HeavyScientificLease
+        def self.legacy_heavy_writers_once
+          File.write(#{calls.inspect}, 'called')
+          [{ 'PID' => 424242, 'TASK_ID' => 'SYNTHETIC_OTHER_TASK' }]
+        end
+      end
+    RUBY
+    source.sub!("if __FILE__ == $PROGRAM_NAME", fake + "\nif __FILE__ == $PROGRAM_NAME")
+    File.write(@test_launcher_path, source)
+    calls
+  end
+
+  def hold_synthetic_slot
+    ready = File.join(@tmpdir, 'synthetic-slot-ready')
+    release = File.join(@tmpdir, 'synthetic-slot-release')
+    @release_files << release
+    holder = <<~'RUBY'
+      File.open(ARGV[0], File::RDWR | File::CREAT, 0o600) do |file|
+        abort 'synthetic slot was busy' unless file.flock(File::LOCK_EX | File::LOCK_NB)
+        File.write(ARGV[1], 'ready')
+        sleep 0.01 until File.exist?(ARGV[2])
+      end
+    RUBY
+    @children << Process.spawn(RbConfig.ruby, '-e', holder, @lease_path, ready, release)
+    wait_for_file(ready)
   end
 
   def test_gen2_marker_and_legacy_lock_guards_fail_closed
@@ -4935,11 +5098,12 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
     task_id = 'ORDINARY_RECOVERY_TASK'
     old_id = 'ordinary-stale-run'
     application_state = seed_stale_execution(task_id: task_id, execution_id: old_id)
-    child_marker = File.join(@tmpdir, 'ordinary-recovery-child-started')
+    child_marker = File.join(@worktree, 'ordinary-recovery-child-started')
+    ordinary_command = [RbConfig.ruby, '-e', 'File.write("ordinary-recovery-child-started", "started")']
 
     result = run_cli(recovery_args(
       task_id: task_id, old_execution_id: old_id, application_state: application_state,
-      command: quick_fake_command(child_marker), heavy_flag: true
+      command: ordinary_command, heavy_flag: true
     ))
 
     refute result[2].success?

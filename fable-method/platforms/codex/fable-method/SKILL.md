@@ -268,6 +268,10 @@ optional conveniences; their absence alone never blocks a task. When a
 triggered procedure needs a missing helper, follow that procedure's own
 fallback.
 
+The machine-wide heavy-compute lease is paused. The launcher does not take the heavy slot or check other tasks'
+heavy processes unless `FABLE_HEAVY_SCIENTIFIC_LEASE=on` is set in its environment. Do not wait for another
+task's computation before starting your own; check only that no process writes to your own task's surfaces.
+
 Other references load only when their condition applies:
 [examples](references/examples.md) for a missing Packet,
 [implementation depth](references/implementation-depth.md),
@@ -306,7 +310,7 @@ Use create-worktree for every new research worktree so the space check runs imme
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py create-worktree --repo <canonical-repository> --worktree <exact-absent-path> --base <durable-base-ref> --branch <task-branch> --task-id <task-id> --lifecycle <persistent-research|temporary-task> [--auto-close-authorized] [--close-policy <PRESERVE|AUTO_CLOSE_AFTER_MERGE>] [--merge-target-ref <ref>] [--persistent-evidence-root <path>]
 
-Launch high-disk tasks through run-gated so a low-space result prevents the command from starting and the available-space check runs again after it exits:
+Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits; low space never blocks the command.
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
 
@@ -328,7 +332,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 ## Codex Runtime Materialization
 
-- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `8683aa28bfaada3f4b196036ab9a5b4fa39b841a` from commit `0d537d193adcd9ec188575a7666cafcbf63d1237`.
+- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `88734ed8dac16eaacdeb1821ebd5d38de40bc3b7` from commit `0d537d193adcd9ec188575a7666cafcbf63d1237`.
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.

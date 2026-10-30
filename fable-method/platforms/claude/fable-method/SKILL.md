@@ -278,6 +278,10 @@ optional conveniences; their absence alone never blocks a task. When a
 triggered procedure needs a missing helper, follow that procedure's own
 fallback.
 
+The machine-wide heavy-compute lease is paused. The launcher does not take the heavy slot or check other tasks'
+heavy processes unless `FABLE_HEAVY_SCIENTIFIC_LEASE=on` is set in its environment. Do not wait for another
+task's computation before starting your own; check only that no process writes to your own task's surfaces.
+
 Other references load only when their condition applies:
 [examples](references/examples.md) for a missing Packet,
 [implementation depth](references/implementation-depth.md),

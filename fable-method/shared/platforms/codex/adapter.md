@@ -13,7 +13,7 @@ Use create-worktree for every new research worktree so the space check runs imme
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py create-worktree --repo <canonical-repository> --worktree <exact-absent-path> --base <durable-base-ref> --branch <task-branch> --task-id <task-id> --lifecycle <persistent-research|temporary-task> [--auto-close-authorized] [--close-policy <PRESERVE|AUTO_CLOSE_AFTER_MERGE>] [--merge-target-ref <ref>] [--persistent-evidence-root <path>]
 
-Launch high-disk tasks through run-gated so a low-space result prevents the command from starting and the available-space check runs again after it exits:
+Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits; low space never blocks the command.
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
 

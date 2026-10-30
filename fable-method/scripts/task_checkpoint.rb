@@ -2458,6 +2458,10 @@ class HeavyScientificLease
 
   attr_reader :lock, :metadata, :lock_path
 
+  def self.enabled?(env = ENV)
+    env['FABLE_HEAVY_SCIENTIFIC_LEASE'] == 'on'
+  end
+
   def self.heavy_command?(task_id, command)
     return true if task_id.to_s.match?(/B649|SCIENTIFIC|WBC/i)
 
@@ -4230,8 +4234,9 @@ class ExecutionRecoveryTransition
                    end
       transition_path = default_path(repo_root, task_id, old_execution_id)
       transition.verify_readback!(transition_path)
-      heavy_scientific = authority_record.heavy_scientific == true ||
-                         HeavyScientificLease.heavy_command?(transition.task_id, command)
+      heavy_scientific = HeavyScientificLease.enabled? &&
+                         (authority_record.heavy_scientific == true ||
+                          HeavyScientificLease.heavy_command?(transition.task_id, command))
       heavy_run_root = if heavy_scientific
                          authority_record.heavy_scientific == true ? authority_record.heavy_run_root :
                            HeavyScientificLease.run_root_from_command(command, worktree_path)
@@ -4270,7 +4275,7 @@ class ExecutionRecoveryTransition
                                         execution_record: record, durable_capture: capture,
                                         recovery_transition: transition)
         elsif record.status == ExecutionRecord::STATUS_STARTED
-          if record.heavy_scientific == true &&
+          if HeavyScientificLease.enabled? && record.heavy_scientific == true &&
              (!heavy_scientific || record.heavy_run_root != heavy_run_root)
             raise ExecutionRecord::UnresolvedExecutionStateError,
                   'recovery successor heavy authority does not match its validated transition'
@@ -4907,7 +4912,7 @@ if __FILE__ == $PROGRAM_NAME
     exit(%w[ELIGIBLE_READ_ONLY RECOVERED ALREADY_CURRENT ALREADY_RECOVERED].include?(result['status']) ? 0 : 1)
   end
 
-  heavy_scientific = mode == :run &&
+  heavy_scientific = HeavyScientificLease.enabled? && mode == :run &&
                      (options[:heavy_scientific] || HeavyScientificLease.heavy_command?(options[:task_id], upstream_argv))
   heavy_run_root = if heavy_scientific
                      File.expand_path(options[:run_root] ||
@@ -4926,7 +4931,8 @@ if __FILE__ == $PROGRAM_NAME
       nested_request = nil
       ExecutionRecord.assert_task_lock_generation!(options[:repository], options[:task_id],
                                                    lock_root: options[:lock_root])
-      if options[:heavy_scientific] && %i[recover_run retry_recover_run].include?(mode)
+      if HeavyScientificLease.enabled? && options[:heavy_scientific] &&
+         %i[recover_run retry_recover_run].include?(mode)
         authority_record = if mode == :recover_run
                             ExecutionRecoveryTransition.verify_stale_execution!(
                               repo_root: options[:repository], task_id: options[:task_id],
@@ -5004,9 +5010,11 @@ if __FILE__ == $PROGRAM_NAME
       end
       unless mode == :run
         ExecutionRecord.verify_heavy_authority_metadata!(record)
-        heavy_scientific = record.heavy_scientific == true ||
-                           HeavyScientificLease.heavy_command?(record.task_id, upstream_argv)
-        if options[:heavy_scientific] && !heavy_scientific && recovery.classification.nil?
+        heavy_scientific = HeavyScientificLease.enabled? &&
+                           (record.heavy_scientific == true ||
+                            HeavyScientificLease.heavy_command?(record.task_id, upstream_argv))
+        if HeavyScientificLease.enabled? && options[:heavy_scientific] &&
+           !heavy_scientific && recovery.classification.nil?
           raise ExecutionRecord::UnresolvedExecutionStateError,
                 '--heavy-scientific recovery requires heavy authority from the execution record or validated task command'
         end
@@ -5123,7 +5131,7 @@ if __FILE__ == $PROGRAM_NAME
           lease = nil
           begin
             inherited_locks = [task_lock]
-            if heavy_scientific
+            if HeavyScientificLease.enabled? && heavy_scientific
               lease = if nested
                         request = HeavyScientificLease.nested_capability_request(ENV)
                         if request

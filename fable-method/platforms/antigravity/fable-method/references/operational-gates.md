@@ -368,64 +368,23 @@ two-message requirement.
 
 ## Shared workstation resource budget
 
-This budget applies only to CPU-heavy work; do not artificially limit ordinary
-low-CPU commands. CPU-heavy work includes replay, backtesting, simulation,
-optimization, statistical resampling, batch feature generation,
-multiprocessing/process pools, and CPU-heavy parallel test execution.
+Resource guidance is non-blocking. When the Packet does not specify a worker
+count, default to 2 CPU-heavy workers. Use the worker count specified by the
+Packet when it provides one. Never stop, wait, or request authorization because
+of the worker count, machine load, or another task's computation. Record the
+actual worker count in the task receipt.
 
-```text
-RESOURCE_POLICY:
-SHARED_WORKSTATION
+Task duplicate-execution protection and checks for processes writing to the
+same task surfaces still apply.
 
-CPU_BOUND_DEFAULT_WORKERS:
-2
-
-CPU_BOUND_MAX_WORKERS_WITHOUT_OWNER_AUTHORIZATION:
-2
-
-AUTO_CPU_SCALING:
-FORBIDDEN
-
-ALL_CORE_EXECUTION:
-FORBIDDEN
-
-WORKSTATION_SATURATION:
-FORBIDDEN
-
-LONGER_RUNTIME_PREFERRED_OVER_SATURATION:
-YES
-```
-
-A Worker may reduce CPU-heavy concurrency from 2 to 1 without authorization.
-It must not raise concurrency above 2 without direct Owner authorization; a
-10-worker request is rejected without that authorization. Do not silently
-increase concurrency.
-
-Never use unrestricted CPU-heavy worker selection such as `--workers auto`,
-`--workers > 2`, `-j auto`, `pytest -n auto`, `os.cpu_count()` worker pools,
-`multiprocessing.cpu_count()` worker pools, `nproc`-derived pools, or duplicate
-concurrent CPU-heavy runs for the same task.
-
-Process-worker limits do not prevent hidden BLAS/OpenMP thread
-oversubscription. Where technically applicable and semantics-preserving,
-constrain:
+Where technically applicable and without changing results, avoid hidden
+BLAS/OpenMP thread oversubscription by setting:
 
 ```text
 OMP_NUM_THREADS=1
 MKL_NUM_THREADS=1
 OPENBLAS_NUM_THREADS=1
 NUMEXPR_NUM_THREADS=1
-```
-
-If more than 2 workers are genuinely required, stop and emit:
-
-```text
-RESOURCE_BUDGET_INCREASE_REQUIRED
-WORKLOAD:
-CURRENT_LIMIT: 2
-REQUESTED_WORKERS:
-WHY_TWO_WORKERS_ARE_INSUFFICIENT:
-SEMANTIC_EFFECT_OF_WORKER_COUNT:
 ```
 
 ## Attempts and process termination
