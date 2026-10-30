@@ -332,7 +332,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 ## Codex Runtime Materialization
 
-- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `88734ed8dac16eaacdeb1821ebd5d38de40bc3b7` from commit `0d537d193adcd9ec188575a7666cafcbf63d1237`.
+- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `88734ed8dac16eaacdeb1821ebd5d38de40bc3b7` from commit `cadcd68ba44fc30b263a54386dfd5ab882b1367d`.
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
