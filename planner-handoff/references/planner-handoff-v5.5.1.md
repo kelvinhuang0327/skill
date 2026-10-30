@@ -63,16 +63,16 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 2. 重用身份、語義仍適用的研究成果及驗收證據。
 3. 排除已完成、重複或受阻工作；同一搜尋已由有效證據閉合時，不再建立相同重算／查找任務。
 4. 從本輪 Owner 目標、既有明確命名但尚未閉合的任務、已交付研究的直接後續缺口，以及指定 locator 可有界核對的 A／B／C／D 需求建立候選；不掃描全部歷史對話，也不建立全域任務資料庫。以任務所屬 lane 的目標為優先，不為讓每個 lane 都有工作而硬湊。
-5. 對每項候選分開確認 **必要輸入是否就緒**（含 §3 的授權涵蓋、目標平台連線與多層版本身份）與 **同一 TASK_ID 是否已派工／正在執行／已有結果**。列出實際來源 locator 與可觀察狀態。執行狀態優先以該任務固定資料夾內的 `result.json` 為證據；未提及或沒有 `result.json` 不代表 `NOT RUN`；現有 Worker 執行狀態未知時標 `UNKNOWN`，不可當成待派發的新任務而重複派工。需要確認時，只發一張唯讀卡，讀取具名 TASK_ID 的 `result.json` 並回報狀態表。
+5. 對每項候選分開確認 **必要輸入是否就緒**（含 §3 的授權涵蓋、目標平台連線與多層版本身份）與 **同一 TASK_ID，或其他支線針對同一實際效果（例：同一批資料寫入、同一 PR 分支更新）的任務，是否已派工／正在執行／已有結果**。列出實際來源 locator 與可觀察狀態。執行狀態優先以該任務固定資料夾內的 `result.json` 為證據；未提及或沒有 `result.json` 不代表 `NOT RUN`；現有 Worker 執行狀態未知時標 `UNKNOWN`，不可當成待派發的新任務而重複派工。需要確認時，只發一張唯讀卡，讀取具名 TASK_ID 的 `result.json` 並回報狀態表。
 6. 確認候選可否各自完成，不等待另一張卡的產物。
-7. 確認寫入路徑、worktree、資料庫／外部副作用彼此隔離，並能各自驗收；確有獨占的 Launcher／計算槽位或其他共享執行資源時，另外確認**是否真的可以同時啟動**，不得僅因輸出目錄不同就宣稱可同時運算。
+7. 確認寫入路徑、worktree、資料庫／外部副作用彼此隔離，並能各自驗收；確有實際互斥的共享對象（例：同一資料庫或檔案的寫入、同一需登入的連接器、Packet 明確設定的獨占鎖）時，另外確認**是否真的可以同時啟動**，不得僅因輸出目錄不同就宣稱可同時運算。CPU、記憶體、磁碟用量與 Fable 的機器重計算鎖（預設關閉，只有設定 `FABLE_HEAVY_SCIENTIFIC_LEASE=on` 才啟用）不算互斥對象，不得因此判定不能同時啟動、要求等待其他任務或限制並行數。
 8. 只保留真正能推進目標的候選集合。
 
 對候選任務卡逐一確認：所有必要輸入已就緒且有明確 locator；沒有 producer→consumer 等待；能各自完成及驗收；寫入路徑、worktree 與副作用隔離；有實際平行收益；不重複已完成研究。整合只能消費已交付並核對身份的產物。
 
 當至少兩項已知候選均符合上述條件，Planner 必須在同一輪產生至少兩份**各自完整、可單獨複製**的 Worker Prompt，不必等使用者再次要求並行；不能只列任務名稱或建議 Owner「再請我產 Prompt」。只有一項有效候選時，產生一份完整 Prompt，並說明其他已知候選未就緒的具體缺口；沒有有效候選時輸出 `NONE REQUIRED`，區分「專案／lane 目標已完成」與「仍未達標但缺少可立即執行輸入」。不得為湊數捏造來源、任務、狀態或驗收證據。有 producer→consumer 依賴的工作列為未就緒的後續依賴，不包裝成同批並行。
 
-**兩種並行不可混用：** `PROMPTS_READY_FOR_PARALLEL_HANDOFF` 表示多份任務卡已具備獨立來源與隔離寫入；`SIMULTANEOUS_EXECUTION_FEASIBLE` 還須考慮已知共享資源／獨占計算槽位及執行平台限制。兩者均只是 Planner 判定，不代表 Agent 已被派發或獲得操作授權。`LOOP_JUDGED` 是 Fable 的 Worker route，並非跨對話多張 Prompt 的數量要求。
+**兩種並行不可混用：** `PROMPTS_READY_FOR_PARALLEL_HANDOFF` 表示多份任務卡已具備獨立來源與隔離寫入；`SIMULTANEOUS_EXECUTION_FEASIBLE` 還須考慮 §2 第 7 項的實際互斥對象及執行平台限制。兩者均只是 Planner 判定，不代表 Agent 已被派發或獲得操作授權。`LOOP_JUDGED` 是 Fable 的 Worker route，並非跨對話多張 Prompt 的數量要求。
 
 收到終局結果時的共用改善候選依 §7 判斷。
 
@@ -321,7 +321,7 @@ PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及�
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>
-INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、已知共享資源限制；單卡可省略>
+INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、§2 第 7 項的實際互斥對象（CPU、記憶體、磁碟用量不列）；單卡可省略>
 EXISTING_EVIDENCE: <可重用的 exact locator 及它實際覆蓋的驗收；沒有填 NONE>
 COVERED_ITEMS: <已被現有證據支持的條件；沒有填 NONE>
 MISSING_ITEMS: <尚需完成的條件；沒有填 NONE>
@@ -411,7 +411,7 @@ Planner 宣告 Task 或 Project Goal 完成只記錄狀態，不會自動刪除 
 - **案例 A2**：研究已交付、只缺同版本聚焦測試收據 → 僅補必要收據；證據已覆蓋時不再派工。
 - **案例缺來源**：候選缺少承重 literal locator，另一候選來源已就緒 → 只產後者完整卡，缺口維持 `NOT_READY/UNKNOWN`，不偽造 placeholder 為 READY。
 - **案例 C→A**：C 對話可以產生 A 研究卡，但須寫 `TASK_LANE: A`、`RESULT_OWNER: A`；研究執行結果由 A 追蹤。
-- **案例資源衝突**：兩個計算任務各有獨立輸出，但共享一個獨占 heavy slot → 可分別交接，`SIMULTANEOUS_EXECUTION_FEASIBLE: NO`；不得聲稱能同時啟動。
+- **案例資源衝突**：兩個任務各有獨立輸出，但都要寫入同一個資料庫檔 → 可分別交接，`SIMULTANEOUS_EXECUTION_FEASIBLE: NO`；不得聲稱能同時啟動。兩個計算只是同時佔用 CPU 或記憶體則不算衝突，可同時啟動。
 - **案例無候選**：無可直接推進且來源已就緒的任務 → `NONE REQUIRED` 並指出是目標已完成或具體輸入缺口，不建新治理任務。
 - **案例共同阻塞**：兩張 C 卡都因同一連接器 `USER_NOT_LOGGED_IN` 停止 → 不重派兩張；只安排一個解除動作。取得解除證據後，兩張各自從 `result.json` 續接，只補缺少的 AC，不重傳檔案。
 - **案例授權不足**：安裝程式會覆寫整個 skill 目錄，授權只涵蓋少數檔案 → 該卡 NOT_READY 並列出缺少的授權，不發可執行卡。
