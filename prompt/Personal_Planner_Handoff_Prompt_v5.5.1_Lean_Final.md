@@ -260,7 +260,7 @@ Deferred queue、protected launch、production mutation、supersession 及 clean
 3. 已完成／未完成表：項目、證據定位、狀態、剩餘最小動作。未回覆的既有 Agent 只在影響結論時取回結果，不因交接自動啟動替代 Agent。
 4. 優化前／後及量測限制。無可證實的效能收益就直接說明。
 5. 流程／skill 建議：優先使用既有專案入口與流程；只有跨專案反覆出現的共通缺口才建議共用 skill 修改。區分建議、已修改、已部署及已實際採用。
-6. 下一步：**先呈現候選判定表，再輸出完整 Prompts**；列出已就緒／未就緒候選、各自缺口、可獨立並行的任務數、每份 Prompt 的目標支線、負責追蹤結果的支線及必要整合負責人。有效就緒候選兩項以上時不可只給一份、待辦名稱或要求使用者再次請求；沒有有效候選就 `NONE REQUIRED` 並說明具體原因。
+6. 下一步：**先呈現候選判定表，再輸出完整 Prompts**；列出已就緒／未就緒候選、各自缺口、可獨立並行的任務數、每份 Prompt 的目標支線、負責追蹤結果的支線及必要整合負責人。有效就緒候選兩項以上時不可只給一份、待辦名稱或要求使用者再次請求；沒有有效候選就 `NONE REQUIRED` 並說明具體原因。分析 Worker 結果的同一則回覆，必須以這些完整 Prompts，或 `NONE REQUIRED` 加原因與解除條件結尾；不可只做分析、只列待辦名稱，或等 Owner 再要求一次。有待 Owner 決定的問題時，照樣先給不受該決定影響的就緒任務，只把受影響的候選列為 NOT_READY。送出前自查最後一段是否符合，不符合就補上。
 7. 流程改善：`NONE REQUIRED` | 候選（Owner、觸發條件、證據、READY 與否）。
 
 Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜RESULT_OWNER｜來源／授權／平台／驗收證據就緒及定位｜執行狀態證據｜NOT_READY／BLOCKED 缺口與解除條件｜是否獨立｜寫入／共享資源隔離｜本輪處置與理由`；有明確來源但未就緒的項目只列缺口，不產生偽裝為 ready-to-run 的 Packet。表後依§2 的數量規則逐張提供完整 Prompt。
@@ -328,7 +328,7 @@ MISSING_ITEMS: <尚需完成的條件；沒有填 NONE>
 
 ## 範圍與授權
 ALLOWED_READS: <指定來源或有界查找範圍；不可省略。須涵蓋本任務必要規則與輸入，以及步驟與驗收必然需要的讀取（例：要比對前後狀態的 checkout 的 Git 狀態、要修改或檢查的原始碼 repo、PROJECT_RULES_REQUIRED 指定的規則檔）>
-ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。須涵蓋驗收與指定機制必然產生的附帶寫入（例：會檢查被改動文字或行為的既有測試、共用資源的鎖與執行紀錄、指定工具的輸出位置），且禁止事項不得排除 AC 需要修改的目標；列不出 exact path 就寫有界範圍。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json 與 result.before_<N>.json 收據另行允許，Owner 指定只回覆對話時除外>
+ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。須涵蓋驗收與指定機制必然產生的附帶寫入（例：會檢查被改動文字或行為的既有測試、共用資源的鎖與執行紀錄、指定工具的輸出位置），且禁止事項不得排除 AC 需要修改的目標；列不出 exact path 就寫有界範圍。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json、result.before_<N>.json 與 final_reply.md 收據另行允許，Owner 指定只回覆對話時除外>
 RUNTIME_OUTPUT_ALLOWLIST: <真正適用的輸出根目錄；唯讀填 TRANSCRIPT_ONLY>
 PRESERVE: <既有 worktree、dirty／untracked 修改及必要產物>
 OWNER_AUTHORIZATION_EVIDENCE: <Worker 能取得的適用人類指示與 exact action／target；引用內容須放在本區塊內，不以「Owner 之前說過」取代，也不把 Planner 的授權句當成證據>
@@ -359,6 +359,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 - `TASK_ID`、`TASK_LANE`、`RESULT_OWNER`，以及本 Task 的實際完成／剩餘工作；不可將本 Task 的 `NONE` 推成 lane/project 結案。
 - 結果、已完成與未完成；逐項 AC 對應 PASS／FAIL／NOT RUN／BLOCKED／UNKNOWN 及證據。
 - 任何終局（含正常完成、STOP、驗收失敗、來源不符、授權不足）回覆前都先直接覆寫 PERSISTENT_EVIDENCE_ROOT/result.json；含 task_id、task_lifecycle_state（僅 IN_PROGRESS | BLOCKED | COMPLETED | ABORTED）、逐項 AC 結果、exact_remaining_work；BLOCKED 另含 current_blocker、unblock_condition。僅續接既有任務時先複製舊檔為 result.before_<N>.json；回覆列出收據路徑。
+- 每次回覆前（含正常完成、STOP、BLOCKED 與 `/goal` 自動續跑的每一段）把這次回覆全文直接覆寫到 PERSISTENT_EVIDENCE_ROOT/final_reply.md，供 Owner 原樣複製給 Planner。第一行寫 `貼回：<本 Packet 的 TARGET_CONVERSATION 原值>`（沒有此欄改寫 SOURCE_CONVERSATION，都沒有寫 UNKNOWN），接著 `TASK_ID` 與 `task_lifecycle_state`；再用白話寫結論：做了什麼、結果如何、有沒有問題或需要 Owner 決定的事；之後依本節逐項寫到目前為止的累計完整版，不只寫本輪變化。不寫入密碼、金鑰、token 或個人資料。回覆最後一行附 `pbcopy < <final_reply.md 的絕對路徑>`。Owner 指定只回覆對話時不建立此檔。
 - 依 `SIGNAL_POLICY` 寫 `process_signal`：`ALWAYS` 開始建、重大異常更新、結束完成；`ON_INCIDENT` 僅本次實際 STOP／BLOCKED／ABORTED／驗收失敗／重大異常時寫，正常完成不寫，不補造開始前觀察。有 signal 時回覆附同內容的 `PROCESS_SIGNAL:` JSON 區塊，供無法讀本機 Result 的 Web Planner 判讀。
   - **條件式身份核對：**僅當本 Task Packet 明確要求產生 `PERSISTENT_EVIDENCE_ROOT/result.json`，且該 Result 將作為現有 Evidence Helper 的直接驗收或後續使用輸入時，Worker 交付前須在本地 Helper 可用環境執行一次唯讀 `evidence-summary` 查詢，並確認輸出 `identity_status: MATCH`。Result 必須有頂層小寫 `task_id`，且值與本 Packet 的 `TASK_ID` 完全相同；更新收據時保留既有 `task_lifecycle_state`、AC 與原始證據。使用已解析的實際值執行：`python3 -B <existing-helper-absolute-path> evidence-summary --repo <canonical-repository> --task-id <exact-task-id> --task-evidence-root <exact-task-evidence-root>`。尖括號只是模板佔位，Worker 須以已解析的實際值替換；不得要求使用者手動提供尚未確認存在的執行路徑。此查詢成功只表示 Packet 與 Result 可讀、Result 為有效 JSON 且 Task 身份相符；不代表任何 AC 已獨立驗證或 Task 首次完成成功。若 Web Planner 等環境沒有本地 Helper 能力，仍依既有文字契約交接，不因此設為 BLOCKED；普通 Task 不執行此查詢。
 - 實際載入的規則、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
