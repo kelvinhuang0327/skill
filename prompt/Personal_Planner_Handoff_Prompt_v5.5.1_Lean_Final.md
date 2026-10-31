@@ -112,7 +112,7 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 - 真正 production/runtime mutation 才解析直接與連帶的持久寫入，使用 Fable 的同一 harness capability preflight；普通文件及唯讀任務不套用 production preflight。
 - **授權涵蓋實際寫入**：派工前比對任務實際會產生的寫入集合與授權範圍；工具或安裝程式的實際寫入（例如安裝程式會覆寫整個 skill 目錄）、上傳、試算表／DB 更新都算在內。授權只涵蓋一部分時，該卡為 NOT_READY 並列出缺少的 exact 授權，不發出會在執行中途才停下的 Packet。Owner 只要求讀取時，Packet 只能唯讀。
 - **外部連線以目標平台本次探測為準**：Drive／Sheets 等連接器是否可用，只以執行該卡的平台在本次執行中的唯讀探測為準；其他平台（例如 Web ChatGPT）或先前的成功不代表本次可用。依賴連接器的卡第一步先做唯讀探測，失敗即 BLOCKED 並寫入 `unblock_condition`，不改走替代路徑。
-- **成果存放於固定資料夾**：正式成果、停止紀錄與必要證據寫入本機固定資料夾 `PERSISTENT_EVIDENCE_ROOT`（Owner 預設 `/Users/kelvin/VibeCoding-WorkSpace/.task-data/<TASK_ID>/`；Packet 可指定其他固定路徑）。本機各平台的 Worker 都能讀取，不依賴連接器登入。雲端硬碟只作選用鏡像：任務驗收不以雲端連線為前提；以雲端同步為目標的任務，也先在固定資料夾完成本機成果再同步，同步失敗不改變本機成果的驗收結果。
+- **成果存放於固定資料夾**：正式成果、停止紀錄與必要證據寫入本機固定資料夾 `PERSISTENT_EVIDENCE_ROOT`（Owner 預設 `/Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/`：YYYYMMDD 是 Planner 產生 Packet 的日期，Packet 內寫出完整路徑；續接與 BLOCKED 續行沿用原任務已有的資料夾。已存在的任務資料夾一律不搬移，舊任務仍在 `.task-data/<TASK_ID>/`；程式固定讀取的運作資料夾（例：`B649_OPERATIONAL_PREDICTION_LOOP_R1`）也照原路徑。Packet 可指定其他固定路徑）。本機各平台的 Worker 都能讀取，不依賴連接器登入。雲端硬碟只作選用鏡像：任務驗收不以雲端連線為前提；以雲端同步為目標的任務，也先在固定資料夾完成本機成果再同步，同步失敗不改變本機成果的驗收結果。
 
 跨 lane 的 input 逐項列出種類、literal locator 與可用狀態。區分 `CANONICAL_SOURCE_AUTHORITY`（Git source/ref）與 `RUN_ARTIFACT_AUTHORITY_LOCATOR`（非 Git 執行產物）；不要在 Git 裡搜尋非 Git 執行產物。已知 locator 直接使用；缺少必要輸入、只有 placeholder 或 producer 未完成時，不發 ready-to-run consumer Packet，不掃所有 worktree 自行重建。同一物件有多層版本或格式時（來源／SHA pin／已安裝版本；本機 CSV 欄位／雲端投影欄位），逐層列出 exact identity 並指定本任務的驗收層；已確認的對應寫入固定資料夾後直接引用，不再重查。
 
@@ -313,7 +313,7 @@ WORKTREE_MODE: <依本任務選定的 mode；不適用時省略>
 WORKTREE_PATH: <本輪指定路徑；不適用時省略>
 WORKTREE_CLOSE_POLICY: <PRESERVE | AUTO_CLOSE_AFTER_MERGE；僅新建 temporary-task Git worktree 適用>
 MERGE_TARGET_REF: <正式合併的 exact durable ref；新建 temporary-task worktree 必填>
-PERSISTENT_EVIDENCE_ROOT: <worktree 外的本機固定結果資料夾 exact path；預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<TASK_ID>/；保存正式成果、packet.md 與 result.json>
+PERSISTENT_EVIDENCE_ROOT: <worktree 外的本機固定結果資料夾 exact path；預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/（YYYYMMDD 為 Packet 產生日；續接沿用原資料夾）；保存正式成果、packet.md 與 result.json>
 PROJECT_RULES_REQUIRED: <已知規則的 exact paths + 必要 sections／短摘錄；已確認無額外規則填 NONE 並說明依據；定位未知填 RESOLVE_AT_WORKER_START 並填下列欄位>
 PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及允許讀取的入口／具名引用文件範圍；規則定位已明確時省略>
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
@@ -359,7 +359,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 - `TASK_ID`、`TASK_LANE`、`RESULT_OWNER`，以及本 Task 的實際完成／剩餘工作；不可將本 Task 的 `NONE` 推成 lane/project 結案。
 - 結果、已完成與未完成；逐項 AC 對應 PASS／FAIL／NOT RUN／BLOCKED／UNKNOWN 及證據。
 - 任何終局（含正常完成、STOP、驗收失敗、來源不符、授權不足）回覆前都先直接覆寫 PERSISTENT_EVIDENCE_ROOT/result.json；含 task_id、task_lifecycle_state（僅 IN_PROGRESS | BLOCKED | COMPLETED | ABORTED）、逐項 AC 結果、exact_remaining_work；BLOCKED 另含 current_blocker、unblock_condition。僅續接既有任務時先複製舊檔為 result.before_<N>.json；回覆列出收據路徑。
-- 每次回覆前（含正常完成、STOP、BLOCKED 與 `/goal` 自動續跑的每一段）把這次回覆全文直接覆寫到 PERSISTENT_EVIDENCE_ROOT/final_reply.md，供 Owner 原樣複製給 Planner。第一行寫 `貼回：<本 Packet 的 TARGET_CONVERSATION 原值>`（沒有此欄改寫 SOURCE_CONVERSATION，都沒有寫 UNKNOWN），接著 `TASK_ID` 與 `task_lifecycle_state`；再用白話寫結論：做了什麼、結果如何、有沒有問題或需要 Owner 決定的事；之後依本節逐項寫到目前為止的累計完整版，不只寫本輪變化。不寫入密碼、金鑰、token 或個人資料。回覆最後一行附 `pbcopy < <final_reply.md 的絕對路徑>`。Owner 指定只回覆對話時不建立此檔。
+- 每次回覆前（含正常完成、STOP、BLOCKED 與 `/goal` 自動續跑的每一段）把這次回覆全文直接覆寫到 PERSISTENT_EVIDENCE_ROOT/final_reply.md，供 Owner 原樣複製給 Planner。第一行寫 `貼回：<本 Packet 的 TARGET_CONVERSATION 原值>`（沒有此欄改寫 SOURCE_CONVERSATION，都沒有寫 UNKNOWN），接著 `TASK_ID` 與 `task_lifecycle_state`；再用白話寫結論：做了什麼、結果如何、有沒有問題或需要 Owner 決定的事；之後依本節逐項寫到目前為止的累計完整版，不只寫本輪變化。不寫入密碼、金鑰、token 或個人資料。回覆最後兩行依序附任務資料夾連結 `[任務資料夾](file://<PERSISTENT_EVIDENCE_ROOT 的絕對路徑>)` 與 `pbcopy < <final_reply.md 的絕對路徑>`。Owner 指定只回覆對話時不建立此檔。
 - 依 `SIGNAL_POLICY` 寫 `process_signal`：`ALWAYS` 開始建、重大異常更新、結束完成；`ON_INCIDENT` 僅本次實際 STOP／BLOCKED／ABORTED／驗收失敗／重大異常時寫，正常完成不寫，不補造開始前觀察。有 signal 時回覆附同內容的 `PROCESS_SIGNAL:` JSON 區塊，供無法讀本機 Result 的 Web Planner 判讀。
   - **條件式身份核對：**僅當本 Task Packet 明確要求產生 `PERSISTENT_EVIDENCE_ROOT/result.json`，且該 Result 將作為現有 Evidence Helper 的直接驗收或後續使用輸入時，Worker 交付前須在本地 Helper 可用環境執行一次唯讀 `evidence-summary` 查詢，並確認輸出 `identity_status: MATCH`。Result 必須有頂層小寫 `task_id`，且值與本 Packet 的 `TASK_ID` 完全相同；更新收據時保留既有 `task_lifecycle_state`、AC 與原始證據。使用已解析的實際值執行：`python3 -B <existing-helper-absolute-path> evidence-summary --repo <canonical-repository> --task-id <exact-task-id> --task-evidence-root <exact-task-evidence-root>`。尖括號只是模板佔位，Worker 須以已解析的實際值替換；不得要求使用者手動提供尚未確認存在的執行路徑。此查詢成功只表示 Packet 與 Result 可讀、Result 為有效 JSON 且 Task 身份相符；不代表任何 AC 已獨立驗證或 Task 首次完成成功。若 Web Planner 等環境沒有本地 Helper 能力，仍依既有文字契約交接，不因此設為 BLOCKED；普通 Task 不執行此查詢。
 - 實際載入的規則、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
