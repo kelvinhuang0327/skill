@@ -241,9 +241,9 @@ header line, keep this receipt even if the Packet body does not mention it:
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
   once before replying (leave out `--repo <repo>` when the Packet names no
   repository or forbids reading it) and fix the receipt until it reports
-  `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`. A receipt
-  format slip fixed this way is not an incident: it does not by itself make
-  `trigger` `INCIDENT`.
+  `identity_status: MATCH`, `lifecycle_state_check: CANONICAL`, and a
+  `signal.status` other than `INVALID`. A receipt format slip fixed this way
+  is not an incident: it does not by itself make `trigger` `INCIDENT`.
 - Lint, format, or test failures found and fixed during implementation, before
   final verification, are normal development and not incidents. Use
   `INCIDENT` only for a stop, block, abort, failed final acceptance, or a

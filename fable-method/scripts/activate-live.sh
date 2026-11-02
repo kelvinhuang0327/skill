@@ -925,6 +925,10 @@ reviewed_replacement_known_entries() {
 # that stream, lowercase hex. Size and mtime never substitute for file bytes.
 compute_live_bundle_sha256() {
   local root="$1" platform="$2" output_format="${3:-digest}"
+  # A pyc-only __pycache__ is regenerated data, not a local source edit. The
+  # normal activation uses rsync --delete, which removes this cache on install.
+  # This exception applies only to git-entries classification; the reviewed
+  # LIVE_BUNDLE_SHA256_SERIALIZATION_V1 digest remains byte-for-byte unchanged.
   reviewed_replacement_known_entries "$platform" | ruby -e '
     require "digest"
 
@@ -942,6 +946,32 @@ compute_live_bundle_sha256() {
       root, prefix, output_format = ARGV
       prefix = prefix.b
       allowed = {".".b => [:directory]}
+      ignored_pycache = []
+      ignore_regenerable_pycache = lambda do |path|
+        next false unless File.basename(path) == "__pycache__"
+
+        directory_stat = File.lstat(path)
+        next false unless directory_stat.directory?
+
+        names = Dir.children(path, encoding: Encoding::BINARY).sort
+        child_stats = []
+        only_pyc_files = names.all? do |name|
+          next false unless name.end_with?(".pyc".b)
+
+          child_path = File.join(path, name)
+          child_stat = File.lstat(child_path)
+          next false unless child_stat.file?
+
+          child_stats << [child_path, child_stat]
+          true
+        end
+        if only_pyc_files
+          ignored_pycache << [path, directory_stat, names, child_stats]
+          true
+        else
+          false
+        end
+      end
       STDIN.binmode.read.split("\x00").each do |entry|
         metadata, path = entry.split("\t", 2)
         mode, type, _hash = metadata.split(" ")
@@ -969,6 +999,8 @@ compute_live_bundle_sha256() {
         Dir.children(dir, encoding: Encoding::BINARY).sort.each do |name|
           child = File.join(dir, name)
           child_rel = rel == "." ? name : "#{rel}/#{name}"
+          next if output_format == "git-entries" && ignore_regenerable_pycache.call(child)
+
           stat = File.lstat(child)
           check_readable.call(child, stat)
           actual = kind(stat)
@@ -1010,6 +1042,14 @@ compute_live_bundle_sha256() {
       inventory.each do |rel, original|
         full = rel == "." ? root : File.join(root, rel)
         raise "path/type changed during scan: #{rel}" unless identity(File.lstat(full)) == identity(original)
+      end
+      ignored_pycache.each do |path, original_dir, original_names, original_children|
+        raise "ignored cache directory changed during scan: #{path}" unless identity(File.lstat(path)) == identity(original_dir)
+        current_names = Dir.children(path, encoding: Encoding::BINARY).sort
+        raise "ignored cache directory entries changed during scan: #{path}" unless current_names == original_names
+        original_children.each do |child_path, original_child|
+          raise "ignored cache file changed during scan: #{child_path}" unless identity(File.lstat(child_path)) == identity(original_child)
+        end
       end
       if output_format == "git-entries"
         puts git_entries.sort
