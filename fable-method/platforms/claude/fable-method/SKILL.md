@@ -58,6 +58,10 @@ These are the only default stops.
 
 Before any tool call, emit one routing block. Copy the Packet's values when it
 supplies them.
+When the Packet arrives only as an attached or pasted-text file (for example
+a Codex `/goal` attachment), read that file first, and call `get_goal` first
+where the platform requires it; then emit the routing block before any other
+tool call. That order is expected and is not an incident.
 
 ```text
 TASK_CLASS: STATE_CHANGING_IMPLEMENTATION | READ_ONLY_COMPLETION_REVIEW | PLANNING_ONLY | PURE_QA
@@ -250,6 +254,10 @@ header line, keep this receipt even if the Packet body does not mention it:
   `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`. A receipt
   format slip fixed this way is not an incident: it does not by itself make
   `trigger` `INCIDENT`.
+- Lint, format, or test failures found and fixed during implementation, before
+  final verification, are normal development and not incidents. Use
+  `INCIDENT` only for a stop, block, abort, failed final acceptance, or a
+  problem that remains or changed a result.
 
 ## Explicit Packet triggers
 
