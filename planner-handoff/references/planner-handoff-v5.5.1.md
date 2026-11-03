@@ -112,7 +112,7 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 - 真正 production/runtime mutation 才解析直接與連帶的持久寫入，使用 Fable 的同一 harness capability preflight；普通文件及唯讀任務不套用 production preflight。
 - **授權涵蓋實際寫入**：派工前比對任務實際會產生的寫入集合與授權範圍；工具或安裝程式的實際寫入（例如安裝程式會覆寫整個 skill 目錄）、上傳、試算表／DB 更新都算在內。授權只涵蓋一部分時，該卡為 NOT_READY 並列出缺少的 exact 授權，不發出會在執行中途才停下的 Packet。Owner 只要求讀取時，Packet 只能唯讀。
 - **外部連線以目標平台本次探測為準**：Drive／Sheets 等連接器是否可用，只以執行該卡的平台在本次執行中的唯讀探測為準；其他平台（例如 Web ChatGPT）或先前的成功不代表本次可用。依賴連接器的卡第一步先做唯讀探測，失敗即 BLOCKED 並寫入 `unblock_condition`，不改走替代路徑。
-- **成果存放於固定資料夾**：正式成果、停止紀錄與必要證據寫入本機固定資料夾 `PERSISTENT_EVIDENCE_ROOT`（Owner 預設 `/Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/`：YYYYMMDD 是 Planner 產生 Packet 的日期，Packet 內寫出完整路徑；續接與 BLOCKED 續行沿用原任務已有的資料夾。已存在的任務資料夾一律不搬移，舊任務仍在 `.task-data/<TASK_ID>/`；程式固定讀取的運作資料夾（例：`B649_OPERATIONAL_PREDICTION_LOOP_R1`）也照原路徑。Packet 可指定其他固定路徑）。本機各平台的 Worker 都能讀取，不依賴連接器登入。雲端硬碟只作選用鏡像：任務驗收不以雲端連線為前提；以雲端同步為目標的任務，也先在固定資料夾完成本機成果再同步，同步失敗不改變本機成果的驗收結果。
+- **成果存放於固定資料夾**：正式成果、停止紀錄與必要證據寫入本機固定資料夾 `PERSISTENT_EVIDENCE_ROOT`（專案規則（例如專案根目錄的 AGENTS.md）有指定任務資料夾位置時依專案規則；未指定時 Owner 預設 `/Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/`：YYYYMMDD 是 Planner 產生 Packet 的日期，Packet 內寫出完整路徑；續接與 BLOCKED 續行沿用原任務已有的資料夾。已存在的任務資料夾一律不搬移，舊任務仍在 `.task-data/<TASK_ID>/`；程式固定讀取的運作資料夾（例：`B649_OPERATIONAL_PREDICTION_LOOP_R1`）也照原路徑。Packet 可指定其他固定路徑）。本機各平台的 Worker 都能讀取，不依賴連接器登入。雲端硬碟只作選用鏡像：任務驗收不以雲端連線為前提；以雲端同步為目標的任務，也先在固定資料夾完成本機成果再同步，同步失敗不改變本機成果的驗收結果。
 
 跨 lane 的 input 逐項列出種類、literal locator 與可用狀態。區分 `CANONICAL_SOURCE_AUTHORITY`（Git source/ref）與 `RUN_ARTIFACT_AUTHORITY_LOCATOR`（非 Git 執行產物）；不要在 Git 裡搜尋非 Git 執行產物。已知 locator 直接使用；缺少必要輸入、只有 placeholder 或 producer 未完成時，不發 ready-to-run consumer Packet，不掃所有 worktree 自行重建。同一物件有多層版本或格式時（來源／SHA pin／已安裝版本；本機 CSV 欄位／雲端投影欄位），逐層列出 exact identity 並指定本任務的驗收層；已確認的對應寫入固定資料夾後直接引用，不再重查。
 
@@ -313,7 +313,7 @@ WORKTREE_MODE: <依本任務選定的 mode；不適用時省略>
 WORKTREE_PATH: <本輪指定路徑；不適用時省略>
 WORKTREE_CLOSE_POLICY: <PRESERVE | AUTO_CLOSE_AFTER_MERGE；僅新建 temporary-task Git worktree 適用>
 MERGE_TARGET_REF: <正式合併的 exact durable ref；新建 temporary-task worktree 必填>
-PERSISTENT_EVIDENCE_ROOT: <worktree 外的本機固定結果資料夾 exact path；預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/（YYYYMMDD 為 Packet 產生日；續接沿用原資料夾）；保存正式成果、packet.md 與 result.json>
+PERSISTENT_EVIDENCE_ROOT: <本機固定結果資料夾 exact path，不得放在會隨任務 worktree 刪除的位置；專案規則（例如 AGENTS.md）有指定時依專案規則，否則預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/（YYYYMMDD 為 Packet 產生日；續接沿用原資料夾）；保存正式成果、packet.md 與 result.json>
 PROJECT_RULES_REQUIRED: <已知規則的 exact paths + 必要 sections／短摘錄；已確認無額外規則填 NONE 並說明依據；定位未知填 RESOLVE_AT_WORKER_START 並填下列欄位>
 PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及允許讀取的入口／具名引用文件範圍；規則定位已明確時省略>
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
