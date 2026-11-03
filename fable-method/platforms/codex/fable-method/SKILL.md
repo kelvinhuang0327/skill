@@ -322,9 +322,9 @@ Launch high-disk tasks through run-gated so free space is recorded before the co
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
 
-Before launching or retrying pytest with an explicit --basetemp, validate the scratch path. It must be outside the repository and every nested Git worktree, and must not contain protected path components used by the data boundary checks. If blocked, select a neutral external scratch path and validate it before launching pytest:
+Before launching or retrying pytest with an explicit --basetemp, validate the scratch path. It must be outside the repository and every nested Git worktree, and must not contain protected path components used by the data boundary checks. When the project's own rules name an approved scratch root inside the main checkout, pass it with --approved-root; the scratch path must then be inside that root, the root must be ignored by Git in the main checkout and outside every linked worktree, and protected path components are still rejected. If blocked, select a neutral external scratch path and validate it before launching pytest:
 
-    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py validate-test-scratch --repo <canonical-repository> --path <pytest-basetemp>
+    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py validate-test-scratch --repo <canonical-repository> --path <pytest-basetemp> [--approved-root <approved-scratch-root>]
 
 After a failed or blocked execution, inspect the existing records before retrying. evidence-summary reads execution JSON and its durable captures, emits source paths and SHA-256 values, identifies repeated exact output and evidence-backed problem candidates, and writes no summary file. Use candidate findings to propose the smallest change and a verification method; never automatically rewrite Skill rules from a single failure or an unverified aggregate. Treat missing retry, Judge, task-completion, and lifecycle fields as unknown rather than estimating them:
 
@@ -344,7 +344,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `e5e75bccd1e44de82829d1fda6ca220d798003a01ec78e856bade9a3a2048d4a`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `24ddc13f0df65ea499a22e0f5483046abf10ef609aab7113457cc58ed6d726fa`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 
