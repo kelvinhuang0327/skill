@@ -326,19 +326,136 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-def _test_scratch_violations(repo: Path, path_text: str) -> list[str]:
+def _path_has_symlink(path: Path) -> bool:
+    cursor = Path(path.anchor)
+    for part in path.parts[1:]:
+        cursor = cursor / part
+        try:
+            if stat.S_ISLNK(cursor.lstat().st_mode):
+                return True
+        except FileNotFoundError:
+            continue
+    return False
+
+
+def _protected_scratch_components(path: Path) -> list[str]:
+    violations = []
+    if "b649" in str(path).casefold():
+        violations.append("test scratch path contains protected B649 token")
+    if any(part.casefold() == "lotterynew" for part in path.parts):
+        violations.append("test scratch path contains protected LotteryNew component")
+    return violations
+
+
+def _worktree_paths(repo: Path) -> list[Path]:
+    listing = git(repo, "worktree", "list", "--porcelain").stdout
+    paths = []
+    for line in listing.splitlines():
+        if line.startswith("worktree "):
+            paths.append(Path(line[len("worktree "):]).resolve(strict=False))
+    return paths
+
+
+def _approved_root_result(repo: Path, root_text: str) -> dict[str, Any]:
+    raw = Path(root_text)
+    absolute = raw.is_absolute()
+    no_parent = ".." not in raw.parts
+    resolved = raw.resolve(strict=False) if absolute else raw
+    no_symlinks = absolute and not _path_has_symlink(raw) and raw == resolved
+    checks: dict[str, dict[str, Any]] = {
+        "absolute": {"status": "PASS" if absolute else "FAIL", "passed": absolute},
+        "no_parent_components": {"status": "PASS" if no_parent else "FAIL", "passed": no_parent},
+        "no_symlinks": {"status": "PASS" if no_symlinks else "FAIL", "passed": no_symlinks},
+    }
+    violations = []
+    if not absolute:
+        violations.append("approved root must be an absolute path")
+    if not no_parent:
+        violations.append("approved root must not contain '..' path components")
+    if not no_symlinks:
+        violations.append("approved root path must not contain symlinks and must match its resolved path")
+
+    worktrees = _worktree_paths(repo)
+    main = worktrees[0] if worktrees else None
+    in_main = bool(main and _is_within(resolved, main))
+    in_linked = any(_is_within(resolved, linked) for linked in worktrees[1:])
+    checks["inside_main_worktree"] = {
+        "status": "PASS" if in_main else "FAIL", "passed": in_main,
+        "main_worktree": str(main) if main else None,
+    }
+    checks["outside_linked_worktrees"] = {
+        "status": "PASS" if not in_linked else "FAIL", "passed": not in_linked,
+        "linked_worktrees": [str(path) for path in worktrees[1:]],
+    }
+    if not in_main:
+        violations.append("approved root must be inside the repository main worktree")
+    if in_linked:
+        violations.append("approved root must be outside every linked worktree")
+
+    ignored = False
+    ignore_error = None
+    if main and absolute:
+        ignored_check = git(main, "check-ignore", "-q", "--", str(resolved), check=False)
+        ignored = ignored_check.returncode == 0
+        if ignored_check.returncode not in {0, 1}:
+            ignore_error = ignored_check.stderr.strip() or "git check-ignore failed"
+    checks["ignored_in_main_worktree"] = {
+        "status": "PASS" if ignored else "FAIL", "passed": ignored,
+        "error": ignore_error,
+    }
+    if not ignored:
+        violations.append("approved root must be ignored by Git in the main worktree")
+
+    protected = _protected_scratch_components(raw if absolute else resolved)
+    checks["no_protected_components"] = {
+        "status": "PASS" if not protected else "FAIL", "passed": not protected,
+        "violations": protected,
+    }
+    violations.extend("approved root " + item.removeprefix("test scratch path ") for item in protected)
+    return {
+        "path": root_text,
+        "resolved_path": str(resolved),
+        "status": "BLOCKED" if violations else "PASS",
+        "checks": checks,
+        "violations": list(dict.fromkeys(violations)),
+    }
+
+
+def _test_scratch_violations(
+    repo: Path, path_text: str, approved_root: Path | None = None,
+) -> list[str]:
     raw = Path(path_text)
     if not raw.is_absolute() or "\n" in path_text or "\r" in path_text:
         return ["test scratch path must be absolute and contain no newlines"]
     resolved = raw.resolve(strict=False)
     candidates = (raw, resolved)
     violations: list[str] = []
-    if any("b649" in str(candidate).casefold() for candidate in candidates):
-        violations.append("test scratch path contains protected B649 token")
-    if any(any(part.casefold() == "lotterynew" for part in candidate.parts) for candidate in candidates):
-        violations.append("test scratch path contains protected LotteryNew component")
-    if any(_is_within(candidate.resolve(strict=False), repo) for candidate in candidates):
+    for candidate in candidates:
+        violations.extend(_protected_scratch_components(candidate))
+    inside_approved_root = bool(approved_root and _is_within(resolved, approved_root) and resolved != approved_root)
+    if not inside_approved_root and any(_is_within(candidate.resolve(strict=False), repo) for candidate in candidates):
         violations.append("test scratch path is inside the repository worktree")
+
+    if inside_approved_root:
+        linked = _worktree_paths(repo)[1:]
+        if any(_is_within(resolved, path) for path in linked):
+            violations.append("test scratch path is inside a linked Git worktree")
+        cursor = resolved
+        while cursor != repo and _is_within(cursor, repo):
+            try:
+                (cursor / ".git").lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                violations.append("cannot safely inspect Git worktree boundary")
+                break
+            else:
+                violations.append("test scratch path is inside a Git worktree")
+                break
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        return list(dict.fromkeys(violations))
 
     # Also catch a registered or unregistered nested worktree without relying on
     # its .git entry being a directory; linked worktrees use a .git file.
@@ -360,19 +477,31 @@ def _test_scratch_violations(repo: Path, path_text: str) -> list[str]:
     return list(dict.fromkeys(violations))
 
 
-def validate_test_scratch(repo_text: str, path_text: str) -> dict[str, Any]:
+def validate_test_scratch(
+    repo_text: str, path_text: str, approved_root_text: str | None = None,
+) -> dict[str, Any]:
     repo = canonical_directory(repo_text, "repository")
     if Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve(strict=True) != repo:
         raise ControlError("--repo must name the exact Git worktree root")
     raw = Path(path_text)
     resolved = raw.resolve(strict=False) if raw.is_absolute() else raw
-    violations = _test_scratch_violations(repo, path_text)
-    return {
+    root_result = _approved_root_result(repo, approved_root_text) if approved_root_text is not None else None
+    approved_root = None
+    if root_result and root_result["status"] == "PASS":
+        approved_root = Path(root_result["resolved_path"])
+    violations = _test_scratch_violations(repo, path_text, approved_root)
+    if root_result:
+        violations.extend(root_result["violations"])
+    result = {
         "status": "BLOCKED" if violations else "PASS",
         "path": str(resolved),
-        "violations": violations,
+        "violations": list(dict.fromkeys(violations)),
         "checked_boundaries": ["repository and nested Git worktrees", "protected B649 token", "protected LotteryNew component"],
     }
+    if root_result:
+        result["approved_root"] = root_result
+        result["checked_boundaries"].append("approved root policy")
+    return result
 
 
 def _duration_seconds(start: Any, end: Any) -> float | None:
@@ -2726,6 +2855,7 @@ def main() -> int:
     scratch = sub.add_parser("validate-test-scratch")
     scratch.add_argument("--repo", required=True)
     scratch.add_argument("--path", required=True)
+    scratch.add_argument("--approved-root")
     create = sub.add_parser("create-worktree")
     create.add_argument("--repo", required=True)
     create.add_argument("--worktree", required=True)
@@ -2801,7 +2931,7 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if args.action == "validate-test-scratch":
-            result = validate_test_scratch(args.repo, args.path)
+            result = validate_test_scratch(args.repo, args.path, args.approved_root)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 2 if result["status"] == "BLOCKED" else 0
         if args.action == "create-worktree":

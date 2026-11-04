@@ -17,9 +17,9 @@ Launch high-disk tasks through run-gated so free space is recorded before the co
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
 
-Before launching or retrying pytest with an explicit --basetemp, validate the scratch path. It must be outside the repository and every nested Git worktree, and must not contain protected path components used by the data boundary checks. If blocked, select a neutral external scratch path and validate it before launching pytest:
+Before launching or retrying pytest with an explicit --basetemp, validate the scratch path. It must be outside the repository and every nested Git worktree, and must not contain protected path components used by the data boundary checks. When the project's own rules name an approved scratch root inside the main checkout, pass it with --approved-root; the scratch path must then be inside that root, the root must be ignored by Git in the main checkout and outside every linked worktree, and protected path components are still rejected. If blocked, select a neutral external scratch path and validate it before launching pytest:
 
-    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py validate-test-scratch --repo <canonical-repository> --path <pytest-basetemp>
+    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py validate-test-scratch --repo <canonical-repository> --path <pytest-basetemp> [--approved-root <approved-scratch-root>]
 
 After a failed or blocked execution, inspect the existing records before retrying. evidence-summary reads execution JSON and its durable captures, emits source paths and SHA-256 values, identifies repeated exact output and evidence-backed problem candidates, and writes no summary file. Use candidate findings to propose the smallest change and a verification method; never automatically rewrite Skill rules from a single failure or an unverified aggregate. Treat missing retry, Judge, task-completion, and lifecycle fields as unknown rather than estimating them:
 
