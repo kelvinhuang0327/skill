@@ -60,9 +60,12 @@ These are the only default stops.
 Before any tool call, emit one routing block. Copy the Packet's values when it
 supplies them.
 When the Packet arrives only as an attached or pasted-text file (for example
-a Codex `/goal` attachment), read that file first, and call `get_goal` first
-where the platform requires it; then emit the routing block before any other
-tool call. That order is expected and is not an incident.
+a Codex `/goal` attachment), read the complete Task Packet first. If the
+platform requires `get_goal`, call it next; then immediately emit the routing
+block. Do not read `AGENTS.md`, this Skill, source code, or make any other
+task tool call before that block. After emitting it, read the Packet-named
+project rules and any needed Skill references before acting. That order is
+expected and is not an incident.
 
 ```text
 TASK_CLASS: STATE_CHANGING_IMPLEMENTATION | READ_ONLY_COMPLETION_REVIEW | PLANNING_ONLY | PURE_QA
@@ -248,13 +251,32 @@ header line, keep this receipt even if the Packet body does not mention it:
   `ENV`, `PROJECT`, `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or
   `UNKNOWN`. Omit what was not measured. Repeat the block in the reply as
   `PROCESS_SIGNAL:`.
-- If the installed skill has `scripts/fable_artifact_controls.py`, run
+- Before showing tool output from a structured receipt, determine whether it
+  contains per-run or payload-bearing fields. Never `cat` or dump the full
+  document or rows; parse only an explicit field allowlist and report
+  aggregated counts, statuses, or hashes. If a safe allowlist cannot be
+  established, stop and mark the task `BLOCKED` without reproducing values.
+- Before any evidence-summary identity query, finish writing a complete,
+  readable `<root>/result.json`; do not claim canonical result validation
+  while that file is missing.
+- If the installed skill has `scripts/fable_artifact_controls.py` and the
+  Packet permits repository-wide checkpoint and history inventory, run
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
-  once before replying (leave out `--repo <repo>` when the Packet names no
-  repository or forbids reading it) and fix the receipt until it reports
-  `identity_status: MATCH`, `lifecycle_state_check: CANONICAL`, and a
-  `signal.status` other than `INVALID`. A receipt format slip fixed this way
-  is not an incident: it does not by itself make `trigger` `INCIDENT`.
+  once before replying. Omit `--repo <repo>` when the Packet names no
+  repository or forbids repository reads.
+- When the Packet permits task-local receipt reads but forbids repository-wide
+  checkpoint enumeration or historical Task inventory, use the existing
+  task-local mode with no `--repo`:
+  `evidence-summary --task-id <exact Task ID> --task-evidence-root <exact Task root>`.
+  A `--task-id` filter in repository mode does not prevent its earlier global
+  enumeration. Record `execution_history` as
+  `NOT_READ_WITHOUT_REPOSITORY`. This mode validates receipt identity,
+  lifecycle, and signal fields only; it does not independently validate all
+  acceptance criteria or actual execution history.
+- Fix the receipt until it reports `identity_status: MATCH`,
+  `lifecycle_state_check: CANONICAL`, and a `signal.status` other than
+  `INVALID`. A receipt format slip fixed this way is not an incident: it does
+  not by itself make `trigger` `INCIDENT`.
 - Lint, format, or test failures found and fixed during implementation, before
   final verification, are normal development and not incidents. Use
   `INCIDENT` only for a stop, block, abort, failed final acceptance, or a

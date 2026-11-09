@@ -11,7 +11,7 @@ class EvidenceSummaryOptionalRepoRuleTest < Minitest::Test
     'fable-method/platforms/gemini/fable-method/SKILL.md',
     'fable-method/platforms/antigravity/fable-method/SKILL.md'
   ].freeze
-  RULE = 'leave out `--repo <repo>` when the Packet names no repository or forbids reading it'
+  RULE = 'Omit `--repo <repo>` when the Packet names no repository or forbids repository reads.'
 
   def test_optional_repo_instruction_appears_once_inside_task_receipt
     SKILLS.each do |relative_path|

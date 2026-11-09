@@ -12,9 +12,10 @@ class ReceiptSignalInvalidRuleTest < Minitest::Test
     'fable-method/platforms/antigravity/fable-method/SKILL.md'
   ].freeze
   REQUIRED_RULE = [
-    '  `identity_status: MATCH`, `lifecycle_state_check: CANONICAL`, and a',
-    '  `signal.status` other than `INVALID`. A receipt format slip fixed this way',
-    '  is not an incident: it does not by itself make `trigger` `INCIDENT`.'
+    '- Fix the receipt until it reports `identity_status: MATCH`,',
+    '  `lifecycle_state_check: CANONICAL`, and a `signal.status` other than',
+    '  `INVALID`. A receipt format slip fixed this way is not an incident: it does',
+    '  not by itself make `trigger` `INCIDENT`.'
   ].join("\n").freeze
   OLD_RULE = [
     '  `identity_status: MATCH` and `lifecycle_state_check: CANONICAL`. A receipt',
@@ -37,7 +38,7 @@ class ReceiptSignalInvalidRuleTest < Minitest::Test
       assert_operator receipt, :<, rule, "#{relative_path} places the condition before Task receipt"
       assert_operator rule + REQUIRED_RULE.length, :<, explicit_triggers,
                       "#{relative_path} places the condition after Explicit Packet triggers"
-      assert_includes skill, '`signal.status` other than `INVALID`', relative_path
+      assert_includes skill, "`signal.status` other than\n  `INVALID`", relative_path
       refute_includes skill, OLD_RULE, "#{relative_path} retains the old receipt condition"
     end
   end

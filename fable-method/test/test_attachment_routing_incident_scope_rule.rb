@@ -13,9 +13,12 @@ class AttachmentRoutingIncidentScopeRuleTest < Minitest::Test
   ].freeze
   ATTACHMENT_RULE = <<~TEXT.chomp
     When the Packet arrives only as an attached or pasted-text file (for example
-    a Codex `/goal` attachment), read that file first, and call `get_goal` first
-    where the platform requires it; then emit the routing block before any other
-    tool call. That order is expected and is not an incident.
+    a Codex `/goal` attachment), read the complete Task Packet first. If the
+    platform requires `get_goal`, call it next; then immediately emit the routing
+    block. Do not read `AGENTS.md`, this Skill, source code, or make any other
+    task tool call before that block. After emitting it, read the Packet-named
+    project rules and any needed Skill references before acting. That order is
+    expected and is not an incident.
   TEXT
   INCIDENT_RULE = <<~TEXT.chomp
     - Lint, format, or test failures found and fixed during implementation, before
@@ -24,8 +27,9 @@ class AttachmentRoutingIncidentScopeRuleTest < Minitest::Test
       problem that remains or changed a result.
   TEXT
   REQUIRED_TEXT = [
-    'read that file first',
-    'That order is expected and is not an incident',
+    'read the complete Task Packet first',
+    'Do not read `AGENTS.md`, this Skill, source code',
+    'After emitting it, read the Packet-named',
     'are normal development and not incidents',
     'problem that remains or changed a result'
   ].freeze
