@@ -39,7 +39,7 @@ Web Planner 沒有本機工具時，以 Owner 提供的專案識別、Worker 回
 
 在每份交接中提供 `PROJECT_RULES_REQUIRED`：已知規則使用確切路徑、section／symbol 或必要短摘錄；已確認沒有額外規則才填 `NONE`。Web Planner 尚未得知規則定位時，可填 task-specific 的 `RESOLVE_AT_WORKER_START`，同時指定唯一專案根目錄與限定解析範圍：Worker 在寫入前讀取該專案適用的原生入口指示，以及已知或由入口引用的相關 RUNBOOK／spec，回報解析結果。這不是 Fable 的新 enum，也不表示缺少的上游 artifact 已 READY。不得掃描所有文件、worktree 或使用者目錄。額外 supporting spec 只提供一個已解析的 locator；任務必要輸入另外逐項列出，不藏在 authority chain 裡。
 
-Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到的版本／section；該項只能證明已載入。是否遵守仍須由 changed paths、必要檢查及實際交付判斷。無法讀到會影響正確性或授權的必要規則時，該任務停止執行並回報確切缺口，不編造內容。
+Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到的版本／section；該項只能證明已載入。規則檔須是版本庫已追蹤、且與本次派工基準一致的檔；回報時一併寫該檔的 SHA-256 與是否被 Git 追蹤，未追蹤或與基準不同要明確標示，不得把它當成已載入的權威版本。是否遵守仍須由 changed paths、必要檢查及實際交付判斷。無法讀到會影響正確性或授權的必要規則時，該任務停止執行並回報確切缺口，不編造內容。
 
 不為了實現此流程自動新增平台入口檔、改全域 skill 或同步所有專案。專案規則的自動載入、平台部署與機器強制驗收，是另有範圍及驗收的實作任務。
 
@@ -108,6 +108,7 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 - Allowed writes 使用 exact paths 或可驗收的有界範圍。滿足驗收必要的 adjacent paths 依 Fable 規則處理；新產品結果、無關子系統或風險擴張才要求 Delta。
 - 可逆本地工作依使用者要求及可執行 Packet 的授權執行。commit、push、Draft PR、Ready、merge、部署、刪除、DB 寫入與對外訊息逐項辨識；不得由其中一項推出其他權限。
 - 相同且仍適用的使用者授權不重問。使用者可在同一則訊息提供 exact action／target 授權及 Packet，不要求額外 auth-only 訊息。Assistant 產生的授權句、token 或跨對話引用不自行形成授權；交接給新 Worker 時需保留平台可驗證的人類授權來源。
+- **自動續跑不是 Owner 續行**：平台在上一輪結束時自動開的下一輪（例如 Codex `/goal` 的續跑）不是 Owner 的新指示。狀態改變型任務首次嘗試失敗或授權用盡時停在 BLOCKED；自動續跑的回合只做唯讀複核，不重做任何寫入；要再寫入，須有 Owner 本人在對話中另送、含 TASK_ID 的授權句。Worker 回報註明每一輪是 Owner 訊息還是自動續跑。
 - 記憶檔寫入依專案規則與明確授權；append-only 補記保留原文，不把全檔同步當成追加授權。
 - 真正 production/runtime mutation 才解析直接與連帶的持久寫入，使用 Fable 的同一 harness capability preflight；普通文件及唯讀任務不套用 production preflight。
 - **授權涵蓋實際寫入**：派工前比對任務實際會產生的寫入集合與授權範圍；工具或安裝程式的實際寫入（例如安裝程式會覆寫整個 skill 目錄）、上傳、試算表／DB 更新都算在內。授權只涵蓋一部分時，該卡為 NOT_READY 並列出缺少的 exact 授權，不發出會在執行中途才停下的 Packet。Owner 只要求讀取時，Packet 只能唯讀。
@@ -362,7 +363,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 - 每次回覆前（含正常完成、STOP、BLOCKED 與 `/goal` 自動續跑的每一段）把這次回覆全文直接覆寫到 PERSISTENT_EVIDENCE_ROOT/final_reply.md，供 Owner 原樣複製給 Planner。第一行寫 `貼回：<本 Packet 的 TARGET_CONVERSATION 原值>`（沒有此欄改寫 SOURCE_CONVERSATION，都沒有寫 UNKNOWN），接著 `TASK_ID` 與 `task_lifecycle_state`；再用白話寫結論：做了什麼、結果如何、有沒有問題或需要 Owner 決定的事；之後依本節逐項寫到目前為止的累計完整版，不只寫本輪變化。不寫入密碼、金鑰、token 或個人資料。回覆最後兩行依序是 `任務資料夾：<PERSISTENT_EVIDENCE_ROOT 的絕對路徑>` 與 `pbcopy < <final_reply.md 的絕對路徑>`。對話中的完整回報放在單一程式碼區塊，內容與 final_reply.md 逐字相同；程式碼區塊內的路徑點不開。區塊之後（區塊外）另寫兩行 Markdown 連結：「總結檔：[final_reply.md](<final_reply.md 絕對路徑>)」與「任務資料夾：[<TASK_ID>](<PERSISTENT_EVIDENCE_ROOT 絕對路徑>)」，Codex 桌面版會顯示成可點的連結；連結外面不要加反引號，連結裡也不要有反引號，不要用 file://。同一對話中的後續工作（包括採用 Worker 建議的下一步）：屬於既有 TASK_ID 的，照續行規則寫進該任務資料夾與 final_reply.md；不屬於任何任務的（例如彙整表、狀態矩陣），產出檔案放在本對話主任務的資料夾，並在主任務 final_reply.md 新增「後續追加」一節，每輪列出 Owner 原句、結果與產出檔案路徑。Owner 指定只回覆對話時不建立此檔。
 - 依 `SIGNAL_POLICY` 寫 `process_signal`：`ALWAYS` 開始建、重大異常更新、結束完成；`ON_INCIDENT` 僅本次實際 STOP／BLOCKED／ABORTED／驗收失敗／重大異常時寫，正常完成不寫，不補造開始前觀察。有 signal 時回覆附同內容的 `PROCESS_SIGNAL:` JSON 區塊，供無法讀本機 Result 的 Web Planner 判讀。
   - **條件式身份核對：**僅當本 Task Packet 明確要求產生 `PERSISTENT_EVIDENCE_ROOT/result.json`，且該 Result 將作為現有 Evidence Helper 的直接驗收或後續使用輸入時，Worker 交付前須在本地 Helper 可用環境執行一次唯讀 `evidence-summary` 查詢，並確認輸出 `identity_status: MATCH`。Result 必須有頂層小寫 `task_id`，且值與本 Packet 的 `TASK_ID` 完全相同；更新收據時保留既有 `task_lifecycle_state`、AC 與原始證據。使用已解析的實際值執行：`python3 -B <existing-helper-absolute-path> evidence-summary --repo <canonical-repository> --task-id <exact-task-id> --task-evidence-root <exact-task-evidence-root>`。尖括號只是模板佔位，Worker 須以已解析的實際值替換；不得要求使用者手動提供尚未確認存在的執行路徑。此查詢成功只表示 Packet 與 Result 可讀、Result 為有效 JSON 且 Task 身份相符；不代表任何 AC 已獨立驗證或 Task 首次完成成功。若 Web Planner 等環境沒有本地 Helper 能力，仍依既有文字契約交接，不因此設為 BLOCKED；普通 Task 不執行此查詢。
-- 實際載入的規則、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
+- 實際載入的規則（含檔案 SHA-256 與是否被 Git 追蹤）、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
 - 實作任務回報實際 `IMPLEMENTATION_DEPTH` 與 `DEPTH_SOURCE`（`PLANNER_SUPPLIED`／`SKILL_FALLBACK`）；若由 Fable fallback 選定，簡述採用依據。非實作任務省略此項。
 - 適用時列實際 final HEAD／tree、artifact／receipt locator 與 commit／PR／merge 狀態。
 - RCA／剩餘風險與最小缺口；進度沿用原分母，不自行改 scope 以提高百分比。
