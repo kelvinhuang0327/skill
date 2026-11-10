@@ -262,6 +262,10 @@ header line, keep this receipt even if the Packet body does not mention it:
   `NOT_READ_WITHOUT_REPOSITORY`. This mode validates receipt identity,
   lifecycle, and signal fields only; it does not independently validate all
   acceptance criteria or actual execution history.
+- If a continuation receipt is in a differently named root, add
+  `--continuation-id <exact directory name>`. The root name and the result's
+  `continuation_id` must match it, while the Packet and result still retain the
+  original `task_id`; this does not change the checks' evidentiary scope.
 - Fix the receipt until it reports `identity_status: MATCH`,
   `lifecycle_state_check: CANONICAL`, and a `signal.status` other than
   `INVALID`. A receipt format slip fixed this way is not an incident: it does
@@ -366,7 +370,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `24ddc13f0df65ea499a22e0f5483046abf10ef609aab7113457cc58ed6d726fa`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `161dca9922914fe4fe6a6c54a1ad0b6644bf2fbcdf7603812d63966646f93903`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 
