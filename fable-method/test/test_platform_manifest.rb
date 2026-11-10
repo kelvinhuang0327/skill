@@ -62,7 +62,7 @@ class PlatformManifestTest < Minitest::Test
     assert_equal 'e6f8581cdabe21f3683b8a5d8effb6855d98a041', companion['source_commit']
     assert_equal '91592132733be6b697bdbef667b97d9065c829c1', companion['git_blob']
     assert_equal 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0', companion['sha256']
-    assert_equal '24ddc13f0df65ea499a22e0f5483046abf10ef609aab7113457cc58ed6d726fa', artifact_controls['sha256']
+    assert_equal '161dca9922914fe4fe6a6c54a1ad0b6644bf2fbcdf7603812d63966646f93903', artifact_controls['sha256']
 
     rendered = @model.render(ROOT, 'fable-method', 'codex')
     launcher_bytes = File.binread(File.join(ROOT, launcher['source']))

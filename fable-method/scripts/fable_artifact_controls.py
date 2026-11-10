@@ -869,9 +869,17 @@ def _process_evidence_summary(
     }
 
 
-def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, Any]:
+def summarize_task_evidence(
+    root_text: str,
+    expected_task_id: str,
+    expected_continuation_id: str | None = None,
+) -> dict[str, Any]:
     expected_task_id = _safe_task_id(expected_task_id)
-    root, directory_fd = _open_task_evidence_root(root_text, expected_task_id)
+    if expected_continuation_id is not None:
+        expected_continuation_id = _safe_task_id(expected_continuation_id)
+    root, directory_fd = _open_task_evidence_root(
+        root_text, expected_continuation_id or expected_task_id
+    )
     try:
         packet_bytes, packet = _task_evidence_file(directory_fd, root, "packet.md")
         result_bytes, result = _task_evidence_file(directory_fd, root, "result.json")
@@ -940,11 +948,21 @@ def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, 
         else:
             identity_status = "UNKNOWN"
 
+        if expected_continuation_id is not None and (
+            identity_status != "MATCH"
+            or result_data is None
+            or result_data.get("continuation_id") != expected_continuation_id
+        ):
+            raise ControlError(
+                "continuation root requires matching packet task ID, "
+                "result task ID, and continuation_id"
+            )
+
         reported_ac_passes: list[str] = []
         if result_data is not None and result["status"] == "PRESENT":
             reported_ac_passes = _reported_acceptance_passes(result_data)
 
-        return {
+        summary = {
             "task_id": expected_task_id,
             "task_root": str(root),
             "identity_status": identity_status,
@@ -966,6 +984,12 @@ def summarize_task_evidence(root_text: str, expected_task_id: str) -> dict[str, 
                 directory_fd, identity_status, packet_text, result_data,
             ),
         }
+        if expected_continuation_id is not None:
+            summary["continuation_root_check"] = {
+                "status": "MATCH",
+                "continuation_id": expected_continuation_id,
+            }
+        return summary
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
@@ -975,17 +999,22 @@ def summarize_execution_history(
     repo_text: str,
     task_id_filter: str | None = None,
     task_evidence_root: str | None = None,
+    continuation_id: str | None = None,
 ) -> dict[str, Any]:
     repo = canonical_directory(repo_text, "repository")
     if Path(git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve(strict=True) != repo:
         raise ControlError("--repo must name the exact Git worktree root")
     if task_id_filter is not None:
         task_id_filter = _safe_task_id(task_id_filter)
+    if continuation_id is not None and task_evidence_root is None:
+        raise ControlError("--continuation-id requires --task-evidence-root")
     task_evidence = None
     if task_evidence_root is not None:
         if task_id_filter is None:
             raise ControlError("--task-id is required with --task-evidence-root")
-        task_evidence = summarize_task_evidence(task_evidence_root, task_id_filter)
+        task_evidence = summarize_task_evidence(
+            task_evidence_root, task_id_filter, continuation_id
+        )
     checkpoint_root = repo / ".fable" / "checkpoints"
     if checkpoint_root.is_symlink():
         raise ControlError("checkpoint root must not be a symlink")
@@ -2852,6 +2881,10 @@ def main() -> int:
     feedback.add_argument("--repo")
     feedback.add_argument("--task-id")
     feedback.add_argument("--task-evidence-root")
+    feedback.add_argument(
+        "--continuation-id",
+        help="expected continuation directory name and result continuation_id",
+    )
     scratch = sub.add_parser("validate-test-scratch")
     scratch.add_argument("--repo", required=True)
     scratch.add_argument("--path", required=True)
@@ -2914,7 +2947,9 @@ def main() -> int:
             return 0 if result["status"] == "PASS" else 1
         if args.action == "evidence-summary":
             if args.repo is not None:
-                result = summarize_execution_history(args.repo, args.task_id, args.task_evidence_root)
+                result = summarize_execution_history(
+                    args.repo, args.task_id, args.task_evidence_root, args.continuation_id
+                )
             else:
                 if args.task_evidence_root is None:
                     raise ControlError("--repo or --task-evidence-root is required")
@@ -2926,7 +2961,9 @@ def main() -> int:
                     "repository": None,
                     "task_filter": task_id,
                     "execution_history": "NOT_READ_WITHOUT_REPOSITORY",
-                    "task_evidence": summarize_task_evidence(args.task_evidence_root, task_id),
+                    "task_evidence": summarize_task_evidence(
+                        args.task_evidence_root, task_id, args.continuation_id
+                    ),
                 }
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0

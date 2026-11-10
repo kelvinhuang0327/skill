@@ -273,6 +273,10 @@ header line, keep this receipt even if the Packet body does not mention it:
   `NOT_READ_WITHOUT_REPOSITORY`. This mode validates receipt identity,
   lifecycle, and signal fields only; it does not independently validate all
   acceptance criteria or actual execution history.
+- If a continuation receipt is in a differently named root, add
+  `--continuation-id <exact directory name>`. The root name and the result's
+  `continuation_id` must match it, while the Packet and result still retain the
+  original `task_id`; this does not change the checks' evidentiary scope.
 - Fix the receipt until it reports `identity_status: MATCH`,
   `lifecycle_state_check: CANONICAL`, and a `signal.status` other than
   `INVALID`. A receipt format slip fixed this way is not an incident: it does
