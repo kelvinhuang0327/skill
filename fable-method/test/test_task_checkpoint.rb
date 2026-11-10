@@ -8,6 +8,7 @@ require 'open3'
 require 'rbconfig'
 require 'timeout'
 require_relative '../scripts/task_checkpoint'
+require_relative '../scripts/execution_evidence_fingerprint'
 
 module TaskCheckpointTestScratch
   ROOT = File.realpath(ENV.fetch('FABLE_TEST_SCRATCH_ROOT')).freeze
@@ -2612,6 +2613,127 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal File.realpath(RbConfig.ruby), candidate.fetch('runtime_executable')
     assert_equal RUBY_DESCRIPTION, candidate.fetch('runtime_version')
     assert_equal File.realpath(@repo), result[0].strip
+  end
+
+  def test_run_fingerprint_uses_one_path_through_validation_argv_and_durable_receipt
+    input_path = File.join(@repo, 'fingerprint-input.txt')
+    input_bytes = "hash me\n"
+    File.binwrite(input_path, input_bytes)
+    _add_out, add_err, add_status = Open3.capture3('git', '-C', @repo, 'add', '--', 'fingerprint-input.txt')
+    assert add_status.success?, add_err
+    _commit_out, commit_err, commit_status = Open3.capture3(
+      'git', '-C', @repo, 'commit', '--quiet', '-m', 'fingerprint input'
+    )
+    assert commit_status.success?, commit_err
+
+    result_dir = File.join(@tmpdir, 'fingerprint-output')
+    FileUtils.mkdir_p(result_dir)
+    result_path = File.join(result_dir, 'result.json')
+    child_path = File.join(@tmpdir, 'fingerprint-child.rb')
+    File.write(child_path, <<~'RUBY')
+      require 'json'
+      launches = ARGV.shift
+      index = ARGV.index('--result-path') || abort('missing generated result path')
+      result_path = ARGV.fetch(index + 1)
+      File.open(launches, 'a') { |file| file.puts "#{Process.pid}:#{Process.ppid}" }
+      File.write(result_path, JSON.generate('result_path' => result_path))
+      puts result_path
+    RUBY
+    identity = 'fingerprinted_run'
+    command = [RbConfig.ruby, child_path, @launches]
+    args = ['--run', '--repo', @repo, '--worktree', @repo,
+            '--task-id', TASK_ID, '--execution-id', identity,
+            '--fingerprint-result-path', result_path,
+            '--fingerprint-input', 'fingerprint-input.txt', '--', *command]
+
+    first = run_cli(args)
+
+    assert_equal 0, first[2].exitstatus, "stdout=#{first[0].inspect} stderr=#{first[1].inspect}"
+    assert_equal result_path, first[0].strip
+    assert_equal result_path, JSON.parse(File.read(result_path)).fetch('result_path')
+    capture = DurableCommandCapture.load(capture_path(identity))
+    expected_command = command + ['--result-path', result_path]
+    assert_equal expected_command, capture.command
+    evidence = capture.execution_identity.fetch('execution_evidence')
+    assert_equal result_path, evidence.fetch('result_path')
+    assert_equal result_path, evidence.fetch('validated_result_path')
+    assert_equal expected_command, evidence.fetch('execution_argv')
+
+    payload_path = "#{result_path}#{ExecutionEvidenceFingerprint::FINGERPRINT_SUFFIX}"
+    payload = File.binread(payload_path)
+    observation = JSON.parse(payload)
+    assert_equal payload, JSON.generate(observation), 'saved fingerprint must remain canonical JSON'
+    assert_equal payload, evidence.dig('fingerprint', 'canonical_payload')
+    digest = Digest::SHA256.hexdigest(payload)
+    assert_equal digest, evidence.dig('fingerprint', 'sha256')
+    assert_equal digest, ExecutionEvidenceFingerprint.digest_saved_payload(payload_path)
+    assert_equal result_path, observation.fetch('result_path')
+    hashed_input = observation.fetch('hashed_inputs').fetch(0)
+    assert_equal 'fingerprint-input.txt', hashed_input.fetch('path')
+    assert_equal '  ', hashed_input.fetch('status')
+    assert_equal '100644', hashed_input.fetch('mode')
+    assert_equal Digest::SHA256.hexdigest(input_bytes), hashed_input.fetch('sha256')
+    assert_equal %w[mode path sha256 status], hashed_input.keys.sort
+
+    saved_bytes = [File.binread(record_path(identity)), File.binread(capture_path(identity))]
+    replay = run_cli(args)
+    assert_equal 0, replay[2].exitstatus, "replay stderr=#{replay[1].inspect}"
+    assert_equal first[0, 2], replay[0, 2]
+    assert_equal 1, launch_records.size, 'completed fingerprinted execution must replay without a second launch'
+    assert_equal saved_bytes, [File.binread(record_path(identity)), File.binread(capture_path(identity))]
+  end
+
+  def test_run_fingerprint_fails_closed_for_missing_input_before_child_launch
+    result_dir = File.join(@tmpdir, 'missing-fingerprint-output')
+    FileUtils.mkdir_p(result_dir)
+    result_path = File.join(result_dir, 'result.json')
+    identity = 'fingerprint_missing_input'
+    command = [RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "launched")', @launches]
+    args = ['--run', '--repo', @repo, '--worktree', @repo,
+            '--task-id', TASK_ID, '--execution-id', identity,
+            '--fingerprint-result-path', result_path,
+            '--fingerprint-input', 'missing-input.txt', '--', *command]
+
+    result = run_cli(args)
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], 'required hashed input is missing'
+    assert_empty launch_records
+    refute File.exist?(record_path(identity))
+    refute File.exist?(result_path)
+    refute File.exist?("#{result_path}#{ExecutionEvidenceFingerprint::FINGERPRINT_SUFFIX}")
+  end
+
+  def test_run_fingerprint_rejects_a_second_result_path_source_before_child_launch
+    input_path = File.join(@repo, 'fingerprint-input.txt')
+    File.write(input_path, "hash me\n")
+    _add_out, add_err, add_status = Open3.capture3('git', '-C', @repo, 'add', '--', 'fingerprint-input.txt')
+    assert add_status.success?, add_err
+    _commit_out, commit_err, commit_status = Open3.capture3(
+      'git', '-C', @repo, 'commit', '--quiet', '-m', 'fingerprint input'
+    )
+    assert commit_status.success?, commit_err
+
+    result_dir = File.join(@tmpdir, 'second-path-output')
+    FileUtils.mkdir_p(result_dir)
+    result_path = File.join(result_dir, 'result.json')
+    alternate_path = File.join(result_dir, 'alternate.json')
+    identity = 'fingerprint_second_path'
+    command = [RbConfig.ruby, '-e', 'File.write(ARGV.fetch(0), "launched")', @launches,
+               '--result-path', alternate_path]
+    args = ['--run', '--repo', @repo, '--worktree', @repo,
+            '--task-id', TASK_ID, '--execution-id', identity,
+            '--fingerprint-result-path', result_path,
+            '--fingerprint-input', 'fingerprint-input.txt', '--', *command]
+
+    result = run_cli(args)
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], 'reserves --result-path'
+    assert_empty launch_records
+    refute File.exist?(record_path(identity))
+    refute File.exist?(result_path)
+    refute File.exist?("#{result_path}#{ExecutionEvidenceFingerprint::FINGERPRINT_SUFFIX}")
   end
 
   def test_run_real_cli_two_contenders_and_completed_replay

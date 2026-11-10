@@ -4757,6 +4757,14 @@ if __FILE__ == $PROGRAM_NAME
     opts.on('--run-root PATH', 'Absolute run root recorded in the heavy-scientific lease') { |v| options[:run_root] = v }
     opts.on('--task-id ID', 'Caller-supplied stable task identity for --run') { |v| options[:task_id] = v }
     opts.on('--execution-id ID', 'Caller-supplied stable execution identity for --run') { |v| options[:execution_id] = v }
+    opts.on('--fingerprint-input PATH', 'Required worktree file to bind into a --run execution fingerprint; repeatable') do |v|
+      (options[:fingerprint_inputs] ||= []) << v
+    end
+    opts.on('--fingerprint-result-path PATH', 'Absolute result path passed to a fingerprinted --run child') do |v|
+      raise OptionParser::InvalidArgument, '--fingerprint-result-path may be supplied only once' if options.key?(:fingerprint_result_path)
+
+      options[:fingerprint_result_path] = v
+    end
     opts.on('--application-state PATH', 'Absolute durable application checkpoint file required by recovery operations') { |v| options[:application_state] = v }
     opts.on('--previous-execution-id ID', 'Completed protected execution that owns the paused journal prefix') { |v| options[:previous_execution_id] = v }
     opts.on('--owner-authorization PATH', 'Owner authorization file binding the exact protected-operation target') { |v| options[:owner_authorization] = v }
@@ -4891,6 +4899,17 @@ if __FILE__ == $PROGRAM_NAME
     elsif options[:apply_device_anchor_recovery]
       raise OptionParser::InvalidArgument, '--apply-device-anchor-recovery requires --recover-device-anchor'
     end
+    fingerprint_requested = options.key?(:fingerprint_result_path) || !Array(options[:fingerprint_inputs]).empty?
+    if fingerprint_requested
+      raise OptionParser::InvalidArgument, 'execution fingerprints are supported only with --run' unless mode == :run
+      unless options[:fingerprint_result_path] && !Array(options[:fingerprint_inputs]).empty?
+        raise OptionParser::InvalidArgument,
+              '--fingerprint-result-path and at least one --fingerprint-input are required together'
+      end
+      unless Pathname.new(options[:fingerprint_result_path]).absolute?
+        raise OptionParser::InvalidArgument, '--fingerprint-result-path must be absolute'
+      end
+    end
   rescue OptionParser::ParseError => e
     warn "ERROR: #{e.message}"
     warn parser
@@ -4951,6 +4970,49 @@ if __FILE__ == $PROGRAM_NAME
         end
       end
       record_path = ExecutionRecord.default_path(options[:repository], options[:task_id], options[:execution_id])
+      fingerprint_plan = nil
+      if options[:fingerprint_result_path]
+        begin
+          require_relative 'execution_evidence_fingerprint'
+        rescue LoadError => e
+          raise ExecutionRecord::UnresolvedExecutionStateError,
+                "execution-evidence helper is unavailable from this launcher: #{e.message}"
+        end
+
+        result_path_validator = lambda do |candidate|
+          requested = File.expand_path(options[:fingerprint_result_path])
+          expected = File.join(File.realpath(File.dirname(requested)), File.basename(requested))
+          unless candidate == expected
+            raise ExecutionEvidenceFingerprint::Error,
+                  'result path validation disagrees with the generated result path'
+          end
+          true
+        end
+        payload_path = "#{File.expand_path(options[:fingerprint_result_path])}#{ExecutionEvidenceFingerprint::FINGERPRINT_SUFFIX}"
+        record_exists = File.exist?(record_path) || File.symlink?(record_path)
+        if record_exists
+          fingerprint_plan = ExecutionEvidenceFingerprint.restore(
+            repository_path: options[:repository], worktree_path: options[:worktree],
+            hashed_paths: options[:fingerprint_inputs],
+            result_path: options[:fingerprint_result_path],
+            result_path_validator: result_path_validator,
+            execution_argv: upstream_argv
+          )
+        else
+          if File.exist?(payload_path) || File.symlink?(payload_path)
+            raise ExecutionEvidenceFingerprint::Error,
+                  'fingerprint payload exists without its protected execution record'
+          end
+          fingerprint_plan = ExecutionEvidenceFingerprint.prepare(
+            repository_path: options[:repository], worktree_path: options[:worktree],
+            hashed_paths: options[:fingerprint_inputs],
+            result_path_generator: -> { options[:fingerprint_result_path] },
+            result_path_validator: result_path_validator,
+            execution_argv: upstream_argv
+          )
+        end
+        upstream_argv = fingerprint_plan.execution_argv
+      end
       if %i[recover_run retry_recover_run].include?(mode)
         recovery = ExecutionRecoveryTransition.acquire_successor!(
           repo_root: options[:repository], task_id: options[:task_id],
@@ -5043,6 +5105,19 @@ if __FILE__ == $PROGRAM_NAME
                identity['execution_id'] == record.execution_id
           raise ExecutionRecord::UnresolvedExecutionStateError, 'terminal capture execution identity is missing or mismatched'
         end
+        if fingerprint_plan
+          expected_evidence = JSON.parse(JSON.generate(fingerprint_plan.receipt))
+          unless candidate.command == fingerprint_plan.execution_argv &&
+                 identity['execution_evidence'] == expected_evidence
+            raise ExecutionRecord::UnresolvedExecutionStateError,
+                  'terminal capture execution fingerprint does not match its command'
+          end
+          unless ExecutionEvidenceFingerprint.digest_saved_payload(fingerprint_plan.fingerprint_payload_path) ==
+                 fingerprint_plan.fingerprint_sha256
+            raise ExecutionRecord::UnresolvedExecutionStateError,
+                  'saved execution fingerprint digest does not match its receipt'
+          end
+        end
 
         result = candidate.exit_status
         signal_match = result.is_a?(String) && /\ASIGNALED:([1-9]\d*)\z/.match(result)
@@ -5059,6 +5134,18 @@ if __FILE__ == $PROGRAM_NAME
         $stderr.binmode.write(candidate.stderr)
         $stdout.flush
         $stderr.flush
+      end
+
+      capture_identity = lambda do
+        identity = DurableCommandCapture.capture_execution_identity(
+          repository_path: options[:repository], worktree_path: options[:worktree],
+          task_id: options[:task_id], execution_id: record.execution_id,
+          lock_root: options[:lock_root]
+        )
+        if fingerprint_plan
+          identity['execution_evidence'] = JSON.parse(JSON.generate(fingerprint_plan.receipt))
+        end
+        identity
       end
 
       result = nil
@@ -5107,6 +5194,15 @@ if __FILE__ == $PROGRAM_NAME
                            )
                          end
                        end
+        if fingerprint_plan
+          prior_before_spawn = before_spawn
+          before_spawn = lambda do
+            prior_before_spawn.call if prior_before_spawn
+            ExecutionEvidenceFingerprint.verify_current!(
+              fingerprint_plan, worktree_path: options[:worktree], generated_status_paths: [record_path]
+            )
+          end
+        end
         capture_blocked = lambda do |status_line, detail|
           now = Time.now.utc.iso8601
           candidate = DurableCommandCapture.new(command: upstream_argv, stdout: "#{status_line}\n",
@@ -5114,13 +5210,7 @@ if __FILE__ == $PROGRAM_NAME
                                                started_at: now, ended_at: now,
                                                task_id: options[:task_id],
                                                execution_id: record.execution_id,
-                                               execution_identity: DurableCommandCapture.capture_execution_identity(
-                                                 repository_path: options[:repository],
-                                                 worktree_path: options[:worktree],
-                                                 task_id: options[:task_id],
-                                                 execution_id: record.execution_id,
-                                                 lock_root: options[:lock_root]
-                                               ))
+                                               execution_identity: capture_identity.call)
           candidate.save(capture_path)
           result, capture_signal = validate_capture.call(candidate)
           record.complete!(record_path, durable_capture_path: capture_path)
@@ -5168,15 +5258,7 @@ if __FILE__ == $PROGRAM_NAME
                                                   inherited_locks: inherited_locks, child_env: child_env,
                                                   task_id: options[:task_id],
                                                   execution_id: record.execution_id,
-                                                  execution_identity: lambda {
-                                                    DurableCommandCapture.capture_execution_identity(
-                                                      repository_path: options[:repository],
-                                                      worktree_path: options[:worktree],
-                                                      task_id: options[:task_id],
-                                                      execution_id: record.execution_id,
-                                                      lock_root: options[:lock_root]
-                                                    )
-                                                  }) do |candidate|
+                                                  execution_identity: capture_identity) do |candidate|
               result, capture_signal = validate_capture.call(candidate)
               record.complete!(record_path, durable_capture_path: capture_path)
               emit_capture.call(candidate)

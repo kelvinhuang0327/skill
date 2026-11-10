@@ -24,6 +24,7 @@ module Fable
     RUNTIME_ASSET_FIELDS = {
       'task_checkpoint' => %w[id role source source_commit git_blob sha256 mode destination purpose],
       'paused_run_continuation' => %w[id role source source_commit git_blob sha256 mode destination purpose],
+      'execution_evidence_fingerprint' => %w[id role source source_commit git_blob sha256 mode destination purpose],
       'artifact_controls' => %w[id role source sha256 mode destination purpose]
     }.freeze
     CODEX_RUNTIME_ASSETS = {
@@ -40,6 +41,13 @@ module Fable
         'mode' => '100644',
         'destination' => 'scripts/paused_run_continuation.rb',
         'purpose' => 'required_only_for_continue_paused_run_transition'
+      },
+      'execution_evidence_fingerprint' => {
+        'role' => 'required_companion',
+        'source' => 'fable-method/scripts/execution_evidence_fingerprint.rb',
+        'mode' => '100644',
+        'destination' => 'scripts/execution_evidence_fingerprint.rb',
+        'purpose' => 'required_only_for_fingerprinted_run'
       },
       'artifact_controls' => {
         'role' => 'supporting_helper',
@@ -445,7 +453,9 @@ module Fable
       unless runtime_assets.empty?
         launcher = runtime_assets.find { |asset| asset['role'] == 'launcher' }
         companion = runtime_assets.find { |asset| asset['role'] == 'required_companion' }
+        execution_evidence = runtime_assets.find { |asset| asset['id'] == 'execution_evidence_fingerprint' }
         artifact_controls = runtime_assets.find { |asset| asset['id'] == 'artifact_controls' }
+        fail Error, 'Codex runtime asset contract is incomplete' unless launcher && companion && execution_evidence && artifact_controls
         files['SKILL.md'] += <<~RUNTIME
 
           ## Codex Runtime Materialization
@@ -454,6 +464,7 @@ module Fable
           - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `#{launcher['destination']}` with the manifest-declared executable mode.
 
           - **Required Companion:** `#{companion['destination']}` is loaded only for `--continue-paused-run`, pinned to Git blob `#{companion['git_blob']}` from commit `#{companion['source_commit']}`.
+          - **Execution Evidence Helper:** `#{execution_evidence['destination']}` is loaded only for fingerprinted `--run` requests, pinned to Git blob `#{execution_evidence['git_blob']}` from commit `#{execution_evidence['source_commit']}`.
           - **Local Artifact Controls:** `#{artifact_controls['destination']}` is a standard-library helper copied from `#{artifact_controls['source']}` with SHA-256 `#{artifact_controls['sha256']}`.
           - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
           - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
