@@ -11,14 +11,18 @@ class AttachmentRoutingIncidentScopeRuleTest < Minitest::Test
     'fable-method/platforms/gemini/fable-method/SKILL.md',
     'fable-method/platforms/antigravity/fable-method/SKILL.md'
   ].freeze
+  TASK_TOOL_RULE = <<~TEXT.chomp
+    Loading this Skill and reading the Packet or its
+    attachment are not task tool calls.
+  TEXT
   ATTACHMENT_RULE = <<~TEXT.chomp
     When the Packet arrives only as an attached or pasted-text file (for example
     a Codex `/goal` attachment), read the complete Task Packet first. If the
     platform requires `get_goal`, call it next; then immediately emit the routing
-    block. Do not read `AGENTS.md`, this Skill, source code, or make any other
-    task tool call before that block. After emitting it, read the Packet-named
-    project rules and any needed Skill references before acting. That order is
-    expected and is not an incident.
+    block. Do not read `AGENTS.md`, source code, or make any other task tool call
+    before that block. After emitting it, read the Packet-named project rules and
+    any needed Skill references before acting. That order is expected and is not
+    an incident.
   TEXT
   INCIDENT_RULE = <<~TEXT.chomp
     - Lint, format, or test failures found and fixed during implementation, before
@@ -28,7 +32,7 @@ class AttachmentRoutingIncidentScopeRuleTest < Minitest::Test
   TEXT
   REQUIRED_TEXT = [
     'read the complete Task Packet first',
-    'Do not read `AGENTS.md`, this Skill, source code',
+    'Do not read `AGENTS.md`, source code',
     'After emitting it, read the Packet-named',
     'are normal development and not incidents',
     'problem that remains or changed a result'
@@ -47,8 +51,14 @@ class AttachmentRoutingIncidentScopeRuleTest < Minitest::Test
       refute_nil receipt, "#{relative_path} is missing ### Task receipt"
       refute_nil explicit_triggers, "#{relative_path} is missing ## Explicit Packet triggers"
 
+      task_tool_pattern = Regexp.new(Regexp.escape(TASK_TOOL_RULE))
       attachment_pattern = Regexp.new(Regexp.escape(ATTACHMENT_RULE))
       incident_pattern = Regexp.new(Regexp.escape(INCIDENT_RULE))
+      assert_equal 1, skill.scan(task_tool_pattern).length, "#{relative_path} repeats the task tool rule"
+      assert_operator first_output, :<, skill.index(TASK_TOOL_RULE), relative_path
+      assert_operator skill.index(TASK_TOOL_RULE), :<, skill.index(ATTACHMENT_RULE), relative_path
+      refute_includes skill, 'this Skill, source code', "#{relative_path} retains the old exclusion wording"
+      refute_includes skill, 'Before any tool call, emit one routing block', "#{relative_path} retains the old opening wording"
       assert_equal 1, skill.scan(attachment_pattern).length, "#{relative_path} repeats the attachment rule"
       assert_equal 1, skill.scan(incident_pattern).length, "#{relative_path} repeats the incident rule"
       assert_operator first_output, :<, skill.index(ATTACHMENT_RULE), relative_path
