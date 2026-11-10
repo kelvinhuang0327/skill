@@ -39,13 +39,16 @@ Web Planner 沒有本機工具時，以 Owner 提供的專案識別、Worker 回
 
 在每份交接中提供 `PROJECT_RULES_REQUIRED`：已知規則使用確切路徑、section／symbol 或必要短摘錄；已確認沒有額外規則才填 `NONE`。Web Planner 尚未得知規則定位時，可填 task-specific 的 `RESOLVE_AT_WORKER_START`，同時指定唯一專案根目錄與限定解析範圍：Worker 在寫入前讀取該專案適用的原生入口指示，以及已知或由入口引用的相關 RUNBOOK／spec，回報解析結果。這不是 Fable 的新 enum，也不表示缺少的上游 artifact 已 READY。不得掃描所有文件、worktree 或使用者目錄。額外 supporting spec 只提供一個已解析的 locator；任務必要輸入另外逐項列出，不藏在 authority chain 裡。
 
-Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到的版本／section；該項只能證明已載入。是否遵守仍須由 changed paths、必要檢查及實際交付判斷。無法讀到會影響正確性或授權的必要規則時，該任務停止執行並回報確切缺口，不編造內容。
+Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到的版本／section；該項只能證明已載入。規則檔須是版本庫已追蹤、且與本次派工基準一致的檔；回報時一併寫該檔的 SHA-256 與是否被 Git 追蹤，未追蹤或與基準不同要明確標示，不得把它當成已載入的權威版本。是否遵守仍須由 changed paths、必要檢查及實際交付判斷。無法讀到會影響正確性或授權的必要規則時，該任務停止執行並回報確切缺口，不編造內容。
 
 不為了實現此流程自動新增平台入口檔、改全域 skill 或同步所有專案。專案規則的自動載入、平台部署與機器強制驗收，是另有範圍及驗收的實作任務。
 
 ## 2. 選擇最小且有用的下一步
 
 每張 **Worker 任務卡** 預設只有一個主要目標、一位寫入負責人；**Planner 的同一輪回覆不限一張任務卡**。收到 Worker 終局結果後，依本節有界選出全部已知、就緒且值得推進的獨立候選；一項就提供一張，兩項以上且確實可並行就提供各自完整的多張卡，沒有才回報 `NONE REQUIRED`。優先解決阻塞、必要實作與驗收，再完成已授權的發布；已知修法直接交給 Worker，不增加無用研究或 CTO 輪次。
+
+When the Owner specifies a retrospective evaluation or historical strategy ranking, preserve that historical horizon and use existing historical cohorts; do not substitute a future-period prediction or sealing task unless the Owner explicitly requests prospective evaluation.
+When ranking historical strategy results, compare only groups with the same lottery rules, stake count, scorer/result versions, and target cohort; report incompatible or unproven items separately instead of mixing them into a ranking.
 
 複雜任務在決定下一步時先固定問題、目標、必要輸入、解法狀態（已知／未知）、驗收條件及精確剩餘工作。解法未知時才做有界解法探索，只比較會改變正確性或實作方案的候選；取得必要決策及可判定驗收條件後停止探索。修法與必要輸入已確定時直接安排實作及必要回歸，不增加方案比較或設計階段。複雜度本身不自動啟動其他 Agent、重型研究或額外必經階段。
 
@@ -63,16 +66,16 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 2. 重用身份、語義仍適用的研究成果及驗收證據。
 3. 排除已完成、重複或受阻工作；同一搜尋已由有效證據閉合時，不再建立相同重算／查找任務。
 4. 從本輪 Owner 目標、既有明確命名但尚未閉合的任務、已交付研究的直接後續缺口，以及指定 locator 可有界核對的 A／B／C／D 需求建立候選；不掃描全部歷史對話，也不建立全域任務資料庫。以任務所屬 lane 的目標為優先，不為讓每個 lane 都有工作而硬湊。
-5. 對每項候選分開確認 **必要輸入是否就緒**（含 §3 的授權涵蓋、目標平台連線與多層版本身份）與 **同一 TASK_ID 是否已派工／正在執行／已有結果**。列出實際來源 locator 與可觀察狀態。執行狀態優先以該任務固定資料夾內的 `result.json` 為證據；未提及或沒有 `result.json` 不代表 `NOT RUN`；現有 Worker 執行狀態未知時標 `UNKNOWN`，不可當成待派發的新任務而重複派工。需要確認時，只發一張唯讀卡，讀取具名 TASK_ID 的 `result.json` 並回報狀態表。
+5. 對每項候選分開確認 **必要輸入是否就緒**（含 §3 的授權涵蓋、目標平台連線與多層版本身份）與 **同一 TASK_ID，或其他支線針對同一實際效果（例：同一批資料寫入、同一 PR 分支更新）的任務，是否已派工／正在執行／已有結果**。列出實際來源 locator 與可觀察狀態。執行狀態優先以該任務固定資料夾內的 `result.json` 為證據；未提及或沒有 `result.json` 不代表 `NOT RUN`；現有 Worker 執行狀態未知時標 `UNKNOWN`，不可當成待派發的新任務而重複派工。需要確認時，只發一張唯讀卡，讀取具名 TASK_ID 的 `result.json` 並回報狀態表。
 6. 確認候選可否各自完成，不等待另一張卡的產物。
-7. 確認寫入路徑、worktree、資料庫／外部副作用彼此隔離，並能各自驗收；確有獨占的 Launcher／計算槽位或其他共享執行資源時，另外確認**是否真的可以同時啟動**，不得僅因輸出目錄不同就宣稱可同時運算。
+7. 確認寫入路徑、worktree、資料庫／外部副作用彼此隔離，並能各自驗收；確有實際互斥的共享對象（例：同一資料庫或檔案的寫入、同一需登入的連接器、Packet 明確設定的獨占鎖）時，另外確認**是否真的可以同時啟動**，不得僅因輸出目錄不同就宣稱可同時運算。CPU、記憶體、磁碟用量與 Fable 的機器重計算鎖（預設關閉，只有設定 `FABLE_HEAVY_SCIENTIFIC_LEASE=on` 才啟用）不算互斥對象，不得因此判定不能同時啟動、要求等待其他任務或限制並行數。
 8. 只保留真正能推進目標的候選集合。
 
 對候選任務卡逐一確認：所有必要輸入已就緒且有明確 locator；沒有 producer→consumer 等待；能各自完成及驗收；寫入路徑、worktree 與副作用隔離；有實際平行收益；不重複已完成研究。整合只能消費已交付並核對身份的產物。
 
 當至少兩項已知候選均符合上述條件，Planner 必須在同一輪產生至少兩份**各自完整、可單獨複製**的 Worker Prompt，不必等使用者再次要求並行；不能只列任務名稱或建議 Owner「再請我產 Prompt」。只有一項有效候選時，產生一份完整 Prompt，並說明其他已知候選未就緒的具體缺口；沒有有效候選時輸出 `NONE REQUIRED`，區分「專案／lane 目標已完成」與「仍未達標但缺少可立即執行輸入」。不得為湊數捏造來源、任務、狀態或驗收證據。有 producer→consumer 依賴的工作列為未就緒的後續依賴，不包裝成同批並行。
 
-**兩種並行不可混用：** `PROMPTS_READY_FOR_PARALLEL_HANDOFF` 表示多份任務卡已具備獨立來源與隔離寫入；`SIMULTANEOUS_EXECUTION_FEASIBLE` 還須考慮已知共享資源／獨占計算槽位及執行平台限制。兩者均只是 Planner 判定，不代表 Agent 已被派發或獲得操作授權。`LOOP_JUDGED` 是 Fable 的 Worker route，並非跨對話多張 Prompt 的數量要求。
+**兩種並行不可混用：** `PROMPTS_READY_FOR_PARALLEL_HANDOFF` 表示多份任務卡已具備獨立來源與隔離寫入；`SIMULTANEOUS_EXECUTION_FEASIBLE` 還須考慮 §2 第 7 項的實際互斥對象及執行平台限制。兩者均只是 Planner 判定，不代表 Agent 已被派發或獲得操作授權。`LOOP_JUDGED` 是 Fable 的 Worker route，並非跨對話多張 Prompt 的數量要求。
 
 收到終局結果時的共用改善候選依 §7 判斷。
 
@@ -108,11 +111,12 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 - Allowed writes 使用 exact paths 或可驗收的有界範圍。滿足驗收必要的 adjacent paths 依 Fable 規則處理；新產品結果、無關子系統或風險擴張才要求 Delta。
 - 可逆本地工作依使用者要求及可執行 Packet 的授權執行。commit、push、Draft PR、Ready、merge、部署、刪除、DB 寫入與對外訊息逐項辨識；不得由其中一項推出其他權限。
 - 相同且仍適用的使用者授權不重問。使用者可在同一則訊息提供 exact action／target 授權及 Packet，不要求額外 auth-only 訊息。Assistant 產生的授權句、token 或跨對話引用不自行形成授權；交接給新 Worker 時需保留平台可驗證的人類授權來源。
+- **自動續跑不是 Owner 續行**：平台在上一輪結束時自動開的下一輪（例如 Codex `/goal` 的續跑）不是 Owner 的新指示。狀態改變型任務首次嘗試失敗或授權用盡時停在 BLOCKED；自動續跑的回合只做唯讀複核，不重做任何寫入；要再寫入，須有 Owner 本人在對話中另送、含 TASK_ID 的授權句。Worker 回報註明每一輪是 Owner 訊息還是自動續跑。
 - 記憶檔寫入依專案規則與明確授權；append-only 補記保留原文，不把全檔同步當成追加授權。
 - 真正 production/runtime mutation 才解析直接與連帶的持久寫入，使用 Fable 的同一 harness capability preflight；普通文件及唯讀任務不套用 production preflight。
 - **授權涵蓋實際寫入**：派工前比對任務實際會產生的寫入集合與授權範圍；工具或安裝程式的實際寫入（例如安裝程式會覆寫整個 skill 目錄）、上傳、試算表／DB 更新都算在內。授權只涵蓋一部分時，該卡為 NOT_READY 並列出缺少的 exact 授權，不發出會在執行中途才停下的 Packet。Owner 只要求讀取時，Packet 只能唯讀。
 - **外部連線以目標平台本次探測為準**：Drive／Sheets 等連接器是否可用，只以執行該卡的平台在本次執行中的唯讀探測為準；其他平台（例如 Web ChatGPT）或先前的成功不代表本次可用。依賴連接器的卡第一步先做唯讀探測，失敗即 BLOCKED 並寫入 `unblock_condition`，不改走替代路徑。
-- **成果存放於固定資料夾**：正式成果、停止紀錄與必要證據寫入本機固定資料夾 `PERSISTENT_EVIDENCE_ROOT`（Owner 預設 `/Users/kelvin/VibeCoding-WorkSpace/.task-data/<TASK_ID>/`；Packet 可指定其他固定路徑）。本機各平台的 Worker 都能讀取，不依賴連接器登入。雲端硬碟只作選用鏡像：任務驗收不以雲端連線為前提；以雲端同步為目標的任務，也先在固定資料夾完成本機成果再同步，同步失敗不改變本機成果的驗收結果。
+- **成果存放於固定資料夾**：正式成果、停止紀錄與必要證據寫入本機固定資料夾 `PERSISTENT_EVIDENCE_ROOT`（專案規則（例如專案根目錄的 AGENTS.md）有指定任務資料夾位置時依專案規則；未指定時 Owner 預設 `/Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/`：YYYYMMDD 是 Planner 產生 Packet 的日期，Packet 內寫出完整路徑；續接與 BLOCKED 續行沿用原任務已有的資料夾。已存在的任務資料夾一律不搬移，舊任務仍在 `.task-data/<TASK_ID>/`；程式固定讀取的運作資料夾（例：`B649_OPERATIONAL_PREDICTION_LOOP_R1`）也照原路徑。Packet 可指定其他固定路徑）。本機各平台的 Worker 都能讀取，不依賴連接器登入。雲端硬碟只作選用鏡像：任務驗收不以雲端連線為前提；以雲端同步為目標的任務，也先在固定資料夾完成本機成果再同步，同步失敗不改變本機成果的驗收結果。
 
 跨 lane 的 input 逐項列出種類、literal locator 與可用狀態。區分 `CANONICAL_SOURCE_AUTHORITY`（Git source/ref）與 `RUN_ARTIFACT_AUTHORITY_LOCATOR`（非 Git 執行產物）；不要在 Git 裡搜尋非 Git 執行產物。已知 locator 直接使用；缺少必要輸入、只有 placeholder 或 producer 未完成時，不發 ready-to-run consumer Packet，不掃所有 worktree 自行重建。同一物件有多層版本或格式時（來源／SHA pin／已安裝版本；本機 CSV 欄位／雲端投影欄位），逐層列出 exact identity 並指定本任務的驗收層；已確認的對應寫入固定資料夾後直接引用，不再重查。
 
@@ -260,14 +264,14 @@ Deferred queue、protected launch、production mutation、supersession 及 clean
 3. 已完成／未完成表：項目、證據定位、狀態、剩餘最小動作。未回覆的既有 Agent 只在影響結論時取回結果，不因交接自動啟動替代 Agent。
 4. 優化前／後及量測限制。無可證實的效能收益就直接說明。
 5. 流程／skill 建議：優先使用既有專案入口與流程；只有跨專案反覆出現的共通缺口才建議共用 skill 修改。區分建議、已修改、已部署及已實際採用。
-6. 下一步：**先呈現候選判定表，再輸出完整 Prompts**；列出已就緒／未就緒候選、各自缺口、可獨立並行的任務數、每份 Prompt 的目標支線、負責追蹤結果的支線及必要整合負責人。有效就緒候選兩項以上時不可只給一份、待辦名稱或要求使用者再次請求；沒有有效候選就 `NONE REQUIRED` 並說明具體原因。
+6. 下一步：**先呈現候選判定表，再輸出完整 Prompts**；列出已就緒／未就緒候選、各自缺口、可獨立並行的任務數、每份 Prompt 的目標支線、負責追蹤結果的支線及必要整合負責人。有效就緒候選兩項以上時不可只給一份、待辦名稱或要求使用者再次請求；沒有有效候選就 `NONE REQUIRED` 並說明具體原因。分析 Worker 結果的同一則回覆，必須以這些完整 Prompts，或 `NONE REQUIRED` 加原因與解除條件結尾；不可只做分析、只列待辦名稱，或等 Owner 再要求一次。有待 Owner 決定的問題時，照樣先給不受該決定影響的就緒任務，只把受影響的候選列為 NOT_READY。送出前自查最後一段是否符合，不符合就補上。
 7. 流程改善：`NONE REQUIRED` | 候選（Owner、觸發條件、證據、READY 與否）。
 
 Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜RESULT_OWNER｜來源／授權／平台／驗收證據就緒及定位｜執行狀態證據｜NOT_READY／BLOCKED 缺口與解除條件｜是否獨立｜寫入／共享資源隔離｜本輪處置與理由`；有明確來源但未就緒的項目只列缺口，不產生偽裝為 ready-to-run 的 Packet。表後依§2 的數量規則逐張提供完整 Prompt。
 
 對 A／B／C／D 研究交接，在 Planner 摘要及每份對應 Worker Prompt 內加入 `TASK_LANE`、`SOURCE_CONVERSATION`、`TARGET_CONVERSATION`、`RESULT_OWNER`。A＝預測增益研究；B＝固定成本組合最佳化；C＝流程改善；D＝外部來源研究。`SOURCE_CONVERSATION` 記錄實際產出交接的對話，`TARGET_CONVERSATION` 記錄預定接收任務的支線／對話，`RESULT_OWNER` 記錄後續追蹤研究結果的支線；未知的對話識別不得捏造。C 可以產生交給 A／B／D 的交接，但不接管那些支線的研究結果。`TASK_LANE` 是交接追蹤 metadata，不得取代 `/fable-method` 的 canonical `TASK_CLASS`、route 或其他 Fable enum。
 
-每位 Agent 的模型等級與名稱放在區塊外；每份完整 Prompt 使用**各自單獨的 Markdown `text` 程式碼區塊**。一個區塊只放一位 Agent 的全部可執行上下文（模型、任務歸屬、確切輸入、規則、授權界線、AC、回報、禁止事項）。**CTO 分析／完成度／RCA 一律放在 Prompts 前方**；不要使用 WritingBlock、合併多位 Agent、把必要驗收留在區塊外，或用「同上一張卡」代替必要內容。預設 `/fable-method` 使用 canonical 小寫名稱。
+每位 Agent 的模型等級、預估執行時間、資源用量與名稱放在區塊外（格式見 §9 的區塊外標題）。預估執行時間是 Worker 從開始到最終回報的大約時間，含計算與測試（例：約 15–30 分鐘、約 2–4 小時）；資源用量只看該任務本身：低＝讀取、改文件或少量程式、幾分鐘內跑完的測試；中＝完整測試套件、單核數十分鐘的計算或數 GiB 以內的寫入；高＝多核平行或超過約 1 小時的計算、數 GiB 以上記憶體或大量磁碟寫入。這兩項只供 Owner 安排，不是 gate，不得據此阻擋、排隊或限制並行。每份完整 Prompt 使用**各自單獨的 Markdown `text` 程式碼區塊**。一個區塊只放一位 Agent 的全部可執行上下文（模型、任務歸屬、確切輸入、規則、授權界線、AC、回報、禁止事項）。**CTO 分析／完成度／RCA 一律放在 Prompts 前方**；不要使用 WritingBlock、合併多位 Agent、把必要驗收留在區塊外，或用「同上一張卡」代替必要內容。預設 `/fable-method` 使用 canonical 小寫名稱。
 
 每份 Worker Packet（含並行卡、精簡發布任務及 Continuation）都必須在自己的程式碼區塊內保留四項內容：**必要專案規則如何讀取、已授權的動作與範圍、可判定的驗收標準、禁止事項與停止邊界**。可以簡短，但不可因「同上一份」「沿用 A 任務」或「參照 Planner 某節」而省略。適用規則已確認不存在時寫明 `NONE` 的依據；Web Planner 不知道定位時，須把有界解析範圍及寫入前讀取要求直接寫進該份 Packet。交付前逐份檢查這四項；任一缺少就先補齊，不把半份任務交給 Worker 自行還原。
 
@@ -277,7 +281,7 @@ Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜R
 
 以下是供 Planner 填寫的骨架，**不是已授權、可立即執行的 Packet**。生成真正任務時，所有必要值必須已解析；§1 明確允許的 Worker 環境前置解析除外。可選欄位不適用就刪除。`PENDING` 的必要授權或未就緒上游輸入只能回報缺口，不能發 ready-to-run Prompt。Planner 不預填未來執行結果，也不把整份 Planner 文件或其 skill 的讀取當成 Worker 前置條件。
 
-區塊外標題：`【模型等級】Agent A — 具體任務名稱`
+區塊外標題：`【模型等級｜約 <預估執行時間>｜資源 <高／中／低>】Agent A — 具體任務名稱`（例：`【強模型｜約 20–40 分鐘｜資源 低】Agent A — 模板規則修正`）
 
 ```text
 TASK_ID: <唯一任務識別>
@@ -313,7 +317,7 @@ WORKTREE_MODE: <依本任務選定的 mode；不適用時省略>
 WORKTREE_PATH: <本輪指定路徑；不適用時省略>
 WORKTREE_CLOSE_POLICY: <PRESERVE | AUTO_CLOSE_AFTER_MERGE；僅新建 temporary-task Git worktree 適用>
 MERGE_TARGET_REF: <正式合併的 exact durable ref；新建 temporary-task worktree 必填>
-PERSISTENT_EVIDENCE_ROOT: <worktree 外的本機固定結果資料夾 exact path；預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<TASK_ID>/；保存正式成果、packet.md 與 result.json>
+PERSISTENT_EVIDENCE_ROOT: <本機固定結果資料夾 exact path，不得放在會隨任務 worktree 刪除的位置；專案規則（例如 AGENTS.md）有指定時依專案規則，否則預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/（YYYYMMDD 為 Packet 產生日；續接沿用原資料夾）；保存正式成果、packet.md 與 result.json>
 PROJECT_RULES_REQUIRED: <已知規則的 exact paths + 必要 sections／短摘錄；已確認無額外規則填 NONE 並說明依據；定位未知填 RESOLVE_AT_WORKER_START 並填下列欄位>
 PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及允許讀取的入口／具名引用文件範圍；規則定位已明確時省略>
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
@@ -321,14 +325,14 @@ PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及�
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>
-INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、已知共享資源限制；單卡可省略>
+INDEPENDENCE_AND_RESOURCE_SCOPE: <並行卡必填：與同批其他卡無 producer→consumer 等待、獨立 writer／輸出範圍、§2 第 7 項的實際互斥對象（CPU、記憶體、磁碟用量不列）；單卡可省略>
 EXISTING_EVIDENCE: <可重用的 exact locator 及它實際覆蓋的驗收；沒有填 NONE>
 COVERED_ITEMS: <已被現有證據支持的條件；沒有填 NONE>
 MISSING_ITEMS: <尚需完成的條件；沒有填 NONE>
 
 ## 範圍與授權
-ALLOWED_READS: <指定來源或有界查找範圍；須涵蓋本任務必要規則與輸入的讀取範圍>
-ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json 與 result.before_<N>.json 收據另行允許，Owner 指定只回覆對話時除外>
+ALLOWED_READS: <指定來源或有界查找範圍；不可省略。須涵蓋本任務必要規則與輸入，以及步驟與驗收必然需要的讀取（例：要比對前後狀態的 checkout 的 Git 狀態、要修改或檢查的原始碼 repo、PROJECT_RULES_REQUIRED 指定的規則檔）>
+ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。須涵蓋驗收與指定機制必然產生的附帶寫入（例：會檢查被改動文字或行為的既有測試、共用資源的鎖與執行紀錄、指定工具的輸出位置），且禁止事項不得排除 AC 需要修改的目標；列不出 exact path 就寫有界範圍。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json、result.before_<N>.json 與 final_reply.md 收據另行允許，Owner 指定只回覆對話時除外>
 RUNTIME_OUTPUT_ALLOWLIST: <真正適用的輸出根目錄；唯讀填 TRANSCRIPT_ONLY>
 PRESERVE: <既有 worktree、dirty／untracked 修改及必要產物>
 OWNER_AUTHORIZATION_EVIDENCE: <Worker 能取得的適用人類指示與 exact action／target；引用內容須放在本區塊內，不以「Owner 之前說過」取代，也不把 Planner 的授權句當成證據>
@@ -359,9 +363,10 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 - `TASK_ID`、`TASK_LANE`、`RESULT_OWNER`，以及本 Task 的實際完成／剩餘工作；不可將本 Task 的 `NONE` 推成 lane/project 結案。
 - 結果、已完成與未完成；逐項 AC 對應 PASS／FAIL／NOT RUN／BLOCKED／UNKNOWN 及證據。
 - 任何終局（含正常完成、STOP、驗收失敗、來源不符、授權不足）回覆前都先直接覆寫 PERSISTENT_EVIDENCE_ROOT/result.json；含 task_id、task_lifecycle_state（僅 IN_PROGRESS | BLOCKED | COMPLETED | ABORTED）、逐項 AC 結果、exact_remaining_work；BLOCKED 另含 current_blocker、unblock_condition。僅續接既有任務時先複製舊檔為 result.before_<N>.json；回覆列出收據路徑。
+- 每次回覆前（含正常完成、STOP、BLOCKED 與 `/goal` 自動續跑的每一段）把這次回覆全文直接覆寫到 PERSISTENT_EVIDENCE_ROOT/final_reply.md，供 Owner 原樣複製給 Planner。第一行寫 `貼回：<本 Packet 的 TARGET_CONVERSATION 原值>`（沒有此欄改寫 SOURCE_CONVERSATION，都沒有寫 UNKNOWN），接著 `TASK_ID` 與 `task_lifecycle_state`；再用白話寫結論：做了什麼、結果如何、有沒有問題或需要 Owner 決定的事；之後依本節逐項寫到目前為止的累計完整版，不只寫本輪變化。不寫入密碼、金鑰、token 或個人資料。回覆最後兩行依序是 `任務資料夾：<PERSISTENT_EVIDENCE_ROOT 的絕對路徑>` 與 `pbcopy < <final_reply.md 的絕對路徑>`。對話中的完整回報放在單一程式碼區塊，內容與 final_reply.md 逐字相同；程式碼區塊內的路徑點不開。區塊之後（區塊外）另寫兩行 Markdown 連結：「總結檔：[final_reply.md](<final_reply.md 絕對路徑>)」與「任務資料夾：[<TASK_ID>](<PERSISTENT_EVIDENCE_ROOT 絕對路徑>)」，Codex 桌面版會顯示成可點的連結；連結外面不要加反引號，連結裡也不要有反引號，不要用 file://。同一對話中的後續工作（包括採用 Worker 建議的下一步）：屬於既有 TASK_ID 的，照續行規則寫進該任務資料夾與 final_reply.md；不屬於任何任務的（例如彙整表、狀態矩陣），產出檔案放在本對話主任務的資料夾，並在主任務 final_reply.md 新增「後續追加」一節，每輪列出 Owner 原句、結果與產出檔案路徑。Owner 指定只回覆對話時不建立此檔。
 - 依 `SIGNAL_POLICY` 寫 `process_signal`：`ALWAYS` 開始建、重大異常更新、結束完成；`ON_INCIDENT` 僅本次實際 STOP／BLOCKED／ABORTED／驗收失敗／重大異常時寫，正常完成不寫，不補造開始前觀察。有 signal 時回覆附同內容的 `PROCESS_SIGNAL:` JSON 區塊，供無法讀本機 Result 的 Web Planner 判讀。
   - **條件式身份核對：**僅當本 Task Packet 明確要求產生 `PERSISTENT_EVIDENCE_ROOT/result.json`，且該 Result 將作為現有 Evidence Helper 的直接驗收或後續使用輸入時，Worker 交付前須在本地 Helper 可用環境執行一次唯讀 `evidence-summary` 查詢，並確認輸出 `identity_status: MATCH`。Result 必須有頂層小寫 `task_id`，且值與本 Packet 的 `TASK_ID` 完全相同；更新收據時保留既有 `task_lifecycle_state`、AC 與原始證據。使用已解析的實際值執行：`python3 -B <existing-helper-absolute-path> evidence-summary --repo <canonical-repository> --task-id <exact-task-id> --task-evidence-root <exact-task-evidence-root>`。尖括號只是模板佔位，Worker 須以已解析的實際值替換；不得要求使用者手動提供尚未確認存在的執行路徑。此查詢成功只表示 Packet 與 Result 可讀、Result 為有效 JSON 且 Task 身份相符；不代表任何 AC 已獨立驗證或 Task 首次完成成功。若 Web Planner 等環境沒有本地 Helper 能力，仍依既有文字契約交接，不因此設為 BLOCKED；普通 Task 不執行此查詢。
-- 實際載入的規則、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
+- 實際載入的規則（含檔案 SHA-256 與是否被 Git 追蹤）、changed paths、實際執行與重用的檢查結果；不列未觀察的通過數。
 - 實作任務回報實際 `IMPLEMENTATION_DEPTH` 與 `DEPTH_SOURCE`（`PLANNER_SUPPLIED`／`SKILL_FALLBACK`）；若由 Fable fallback 選定，簡述採用依據。非實作任務省略此項。
 - 適用時列實際 final HEAD／tree、artifact／receipt locator 與 commit／PR／merge 狀態。
 - RCA／剩餘風險與最小缺口；進度沿用原分母，不自行改 scope 以提高百分比。
@@ -411,7 +416,7 @@ Planner 宣告 Task 或 Project Goal 完成只記錄狀態，不會自動刪除 
 - **案例 A2**：研究已交付、只缺同版本聚焦測試收據 → 僅補必要收據；證據已覆蓋時不再派工。
 - **案例缺來源**：候選缺少承重 literal locator，另一候選來源已就緒 → 只產後者完整卡，缺口維持 `NOT_READY/UNKNOWN`，不偽造 placeholder 為 READY。
 - **案例 C→A**：C 對話可以產生 A 研究卡，但須寫 `TASK_LANE: A`、`RESULT_OWNER: A`；研究執行結果由 A 追蹤。
-- **案例資源衝突**：兩個計算任務各有獨立輸出，但共享一個獨占 heavy slot → 可分別交接，`SIMULTANEOUS_EXECUTION_FEASIBLE: NO`；不得聲稱能同時啟動。
+- **案例資源衝突**：兩個任務各有獨立輸出，但都要寫入同一個資料庫檔 → 可分別交接，`SIMULTANEOUS_EXECUTION_FEASIBLE: NO`；不得聲稱能同時啟動。兩個計算只是同時佔用 CPU 或記憶體則不算衝突，可同時啟動。
 - **案例無候選**：無可直接推進且來源已就緒的任務 → `NONE REQUIRED` 並指出是目標已完成或具體輸入缺口，不建新治理任務。
 - **案例共同阻塞**：兩張 C 卡都因同一連接器 `USER_NOT_LOGGED_IN` 停止 → 不重派兩張；只安排一個解除動作。取得解除證據後，兩張各自從 `result.json` 續接，只補缺少的 AC，不重傳檔案。
 - **案例授權不足**：安裝程式會覆寫整個 skill 目錄，授權只涵蓋少數檔案 → 該卡 NOT_READY 並列出缺少的授權，不發可執行卡。
@@ -435,12 +440,12 @@ Worker 任務完成後，依 RESULT_OWNER 保存研究結果、
 已完成且沒有剩餘工作的任務直接結案。
 不為交接新增重複文件、報告或審核節點。 
 
-請針對本次對話任務確認CTO任務是否已完成並顯示完成度的百分比，白話說明一下問題和RCA，需列出目前已完成和未完成的部分以及相對應的優化效果前後對比是什麼？已完成目標進度百分比？有沒有需要流程改善或者skill優化的地方？上一輪還沒回報的部分如果需要也請安排agent prompt來確認，然後給我下一輪可以並行和同時執行的任務prompts，prompts任務需要避開敏感文字以免agent後台被查出來，禁止條件式任務只需要可以並行任務。預設新agent交接，每一個prompt前面請註明最強模型(需要最小範圍和研究或探索成功率相關)/強模型(最小範圍的系統治理正確性相關)/中弱模型(所有其他任務)，交接的任務也需要註明剩餘任務需要的模型。關於重要的任務比如正確率和成功率相關的需要訂定詳細的worker回覆的驗收標準，以減少任務失敗。
+請針對本次對話任務確認CTO任務是否已完成並顯示完成度的百分比，白話說明一下問題和RCA，需列出目前已完成和未完成的部分以及相對應的優化效果前後對比是什麼？已完成目標進度百分比？有沒有需要流程改善或者skill優化的地方？上一輪還沒回報的部分如果需要也請安排agent prompt來確認，然後給我下一輪可以並行和同時執行的任務prompts，prompts任務需要避開敏感文字以免agent後台被查出來，禁止條件式任務只需要可以並行任務。預設新agent交接，每一個prompt前面請註明最強模型(需要最小範圍和研究或探索成功率相關)/強模型(最小範圍的系統治理正確性相關)/中弱模型(所有其他任務)，交接的任務也需要註明剩餘任務需要的模型；模型等級後面另外註明該任務大約執行時間與是否耗資源（高／中／低）。關於重要的任務比如正確率和成功率相關的需要訂定詳細的worker回覆的驗收標準，以減少任務失敗。
 務必遵循一個重點提高成功率或者正確率是唯一目標，務必以最小文件治理最大實作來進行，不要延伸無意義的檢核。
 統一使用你指定的 Markdown 程式碼區塊，方便滑動、整段選取及一鍵複製。
 每個 Prompt 會獨立呈現，之後會遵循：
 * 每個 Agent 獨立一個程式碼區塊，不混在一起。
-* 區塊外標示模型等級、任務名稱。
+* 區塊外標示模型等級、大約執行時間、資源用量（高／中／低）、任務名稱。
 * 區塊內提供完整 Prompt，不省略驗收標準。
 * CTO 分析、完成度及 RCA 放在 Prompt 前面，不影響整段複製。
 * 仍以最小文件治理、最大有效實作、提高正確性與成功率為核心。

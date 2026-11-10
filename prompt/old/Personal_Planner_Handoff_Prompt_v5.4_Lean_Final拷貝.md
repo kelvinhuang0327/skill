@@ -426,7 +426,6 @@ ROOT-CAUSE-FIRST EXECUTION:
 
 A failed acceptance, regression, parity mismatch, unexpected runtime result, or
 implementation defect is not by itself a STOP condition.
-<<<<<<< HEAD
 
 While the problem remains inside the authorized Goal, scope, runtime, dependency,
 safety and semantic envelope, the Worker should continue evidence-progressing
@@ -530,59 +529,8 @@ RUNTIME_WRITE_SURFACE_UNRESOLVED
 
 Do not discover the missing write surface by executing the production
 mutation first.
-=======
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
-While the problem remains inside the authorized Goal, scope, runtime, dependency,
-safety and semantic envelope, the Worker should continue evidence-progressing
-root-cause analysis:
-
-1. isolate the first observable divergence;
-2. form a falsifiable hypothesis;
-3. inspect or execute the smallest directly relevant evidence;
-4. confirm or eliminate the hypothesis;
-5. when root cause is known and a semantics-preserving repair remains inside
-   authorized scope, implement that repair and verify it;
-6. continue only while each iteration materially reduces uncertainty.
-
-"Bounded" means bounded by:
-
-- authorized scope;
-- safety;
-- authority;
-- capability;
-- evidence relevance;
-- proportionality;
-
-NOT by an arbitrary retry / attempt count.
-
-The Worker must not report BLOCKED merely because N attempts have failed.
-
-Terminal escalation occurs only when one of these is true:
-
-- root cause cannot be resolved with directly available and proportionate
-  evidence/capability;
-- two or more materially plausible causes remain and available evidence cannot
-  discriminate them;
-- root cause is known, but every valid repair requires an Owner semantic decision;
-- repair requires a new dependency/subsystem or materially expanded scope/risk;
-- authorization, safety, repository ownership or capability boundary prevents
-  further work.
-
-Do not turn this into an unbounded-debugging rule: if the next proposed action
-cannot materially reduce uncertainty or test a specific falsifiable hypothesis,
-it is not evidence-progressing RCA.
-
-只在以下情況 STOP：
-
-- wrong repository；
-- incompatible base/ref；
-- overlapping dirty ownership；
-- active concurrent mutation；
-- missing required capability；
-- explicit safety restriction。
-
-不要為一般 clean task 加入大量 hash、mtime、inode、process 或所有 worktree 盤點。
+---
 
 ### 5.2 Scope
 
@@ -591,7 +539,6 @@ acceptance 所必需，可納入並在回報列為 changed path；只有新 outc
 subsystem 或 materially expanded risk 才要求 Planner Delta。不得為了縮短文字
 而隱藏必需的 adjacent path。
 
-<<<<<<< HEAD
 Write paths 必須依 exact Packet path、適用 repository instructions 或既有
 canonical module/documentation convention 解析；不得另建 duplicate analysis
 folder、第二套 project hierarchy 或未授權的永久外部文件。無法唯一解析必要
@@ -599,8 +546,6 @@ write path 時，STOP: PROJECT_WRITE_PATH_AUTHORITY_UNRESOLVED。
 需要新增 external workspace 時，依 Fable workspace-containment 的 exact path
 與 cleanup disposition 授權；local commit authorization 不會擴張 write root。
 
-=======
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 ### 5.3 Runtime
 
 Packet 指定 runtime policy tier 與 known output roots。一般任務不建立未知
@@ -950,7 +895,6 @@ Planner §5.7 只負責 eligibility、排除項、Task B independence／existing
 one-deferred／one-recheck／no-Task-C 限制與上述可選 Packet values。詳細持久化欄位、
 執行順序、fresh-process reconciliation、scope-qualified writer evidence 與 resume
 mechanics 由 `/fable-method` 及 `references/task-checkpoint.md` 唯一管理。
-<<<<<<< HEAD
 
 ### 5.8 Canonical successor deduplication（修復舊來源或 publication conflict 前的分流）
 
@@ -962,8 +906,6 @@ mechanics 由 `/fable-method` 及 `references/task-checkpoint.md` 唯一管理�
 - 證據不足或無可確認 successor：不宣告完成，指出最小缺口或依授權繼續正常修復；同路徑、相似標題或單獨 CI 綠燈皆不足以證明等價。
 
 詳細判定規則、證據適用邊界（不搬移測試、不將 supersession 當作 PR MERGED、不刪除 exact deployed source）與授權不變性（不授權關 PR、push、merge、force-delete、preservation ref，不取代 runtime ownership），以 `/fable-method`（`references/operational-gates.md`）的 canonical contract 為準，Planner 不重複定義第二套規則。
-=======
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 
 ## 6. Judge boundary
 
@@ -1214,17 +1156,12 @@ REQUIRED_CHECKS: <COMMANDS | NONE>
 JUDGE_CONTINUITY: <NOT_APPLICABLE | INITIAL_JUDGE_PENDING_DEPTH_CORRECTION | DELTA_REJUDGE_REQUIRED>
 ~~~
 
-<<<<<<< HEAD
 Continuation 繼承原 worktree/root、canonical path convention 與 resource policy。
 UPDATED_ALLOWLIST 不會自行授權新 hierarchy、external workspace 或 concurrency
 escalation；必要改變必須由適用 exact Owner Delta 明列，並維持原 safety gates。
 
 The three JUDGE_CONTINUITY values are mutually exclusive:
 
-=======
-The three JUDGE_CONTINUITY values are mutually exclusive:
-
->>>>>>> 791db0c29cdbe2c681faaeaf4640994f3912dbe7
 - NOT_APPLICABLE: the task involves no Judge.
 - INITIAL_JUDGE_PENDING_DEPTH_CORRECTION: the authoritative initial Judge has
   never run, the implementation tree is unchanged, and the Delta only
