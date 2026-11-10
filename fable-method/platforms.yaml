@@ -43,9 +43,9 @@ skills:
       - id: task_checkpoint
         role: launcher
         source: fable-method/scripts/task_checkpoint.rb
-        source_commit: cadcd68ba44fc30b263a54386dfd5ab882b1367d
-        git_blob: 88734ed8dac16eaacdeb1821ebd5d38de40bc3b7
-        sha256: c3c6ff21a54ea2d3a2f01ac830cc9bca751b81034e13a106a1ad4c5841ea40f6
+        source_commit: 92d609211d8276f3c804a49eb454813462fcf8d7
+        git_blob: b3a81f904e27598e736e7daeb16bcef9512463d5
+        sha256: 63a185a7ef69f95414c62f365f4526be3c2c8353ea07d5666245b28a180a8359
         mode: "100755"
         destination: scripts/task_checkpoint.rb
         purpose: canonical_task_checkpoint_launcher
@@ -58,6 +58,15 @@ skills:
         mode: "100644"
         destination: scripts/paused_run_continuation.rb
         purpose: required_only_for_continue_paused_run_transition
+      - id: execution_evidence_fingerprint
+        role: required_companion
+        source: fable-method/scripts/execution_evidence_fingerprint.rb
+        source_commit: 92d609211d8276f3c804a49eb454813462fcf8d7
+        git_blob: d526b27ad562dc9c2ed96617ee975b6d5f8e9d85
+        sha256: 077ba702d55d8919be2ba3e25b7a4655adb1ec9b1dfba4221a047933db2c6249
+        mode: "100644"
+        destination: scripts/execution_evidence_fingerprint.rb
+        purpose: required_only_for_fingerprinted_run
       - id: artifact_controls
         role: supporting_helper
         source: fable-method/scripts/fable_artifact_controls.py

@@ -139,6 +139,14 @@ file counts. A single acceptance failure is not a trigger by itself.
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
   differences are report-only.
+- Derive execution receipts from one structured source. Keep a pre-run
+  fingerprint's exact canonical payload and every hashed input (branch,
+  HEAD/tree, status, per-file path/status/mode/SHA) beside the digest, computed
+  from that saved payload. Create generated path values once and reuse them
+  for validation, command argv, and the receipt. A reusable artifact that
+  calls mutable state `current` must include `observed_at` and source identity;
+  after relevant parallel changes, re-read before relying on it or label the
+  snapshot historical.
 - Local reversible edits, and a local commit when `COMMIT_AUTHORIZED: YES`,
   need nothing more.
 - When the Owner personally submits the Packet in this conversation (for

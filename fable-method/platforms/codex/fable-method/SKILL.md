@@ -138,6 +138,14 @@ file counts. A single acceptance failure is not a trigger by itself.
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
   differences are report-only.
+- Derive execution receipts from one structured source. Keep a pre-run
+  fingerprint's exact canonical payload and every hashed input (branch,
+  HEAD/tree, status, per-file path/status/mode/SHA) beside the digest, computed
+  from that saved payload. Create generated path values once and reuse them
+  for validation, command argv, and the receipt. A reusable artifact that
+  calls mutable state `current` must include `observed_at` and source identity;
+  after relevant parallel changes, re-read before relying on it or label the
+  snapshot historical.
 - Local reversible edits, and a local commit when `COMMIT_AUTHORIZED: YES`,
   need nothing more.
 - When the Owner personally submits the Packet in this conversation (for
@@ -362,10 +370,11 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 ## Codex Runtime Materialization
 
-- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `88734ed8dac16eaacdeb1821ebd5d38de40bc3b7` from commit `cadcd68ba44fc30b263a54386dfd5ab882b1367d`.
+- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `b3a81f904e27598e736e7daeb16bcef9512463d5` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
+- **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
 - **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `24ddc13f0df65ea499a22e0f5483046abf10ef609aab7113457cc58ed6d726fa`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
