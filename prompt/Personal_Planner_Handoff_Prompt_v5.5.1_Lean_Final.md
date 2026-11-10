@@ -49,6 +49,7 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 
 When the Owner specifies a retrospective evaluation or historical strategy ranking, preserve that historical horizon and use existing historical cohorts; do not substitute a future-period prediction or sealing task unless the Owner explicitly requests prospective evaluation.
 When ranking historical strategy results, compare only groups with the same lottery rules, stake count, scorer/result versions, and target cohort; report incompatible or unproven items separately instead of mixing them into a ranking.
+Before ranking, state the draw-level success event and denominator; keep incomplete or excluded targets outside the denominator and report them separately, not as failures.
 
 複雜任務在決定下一步時先固定問題、目標、必要輸入、解法狀態（已知／未知）、驗收條件及精確剩餘工作。解法未知時才做有界解法探索，只比較會改變正確性或實作方案的候選；取得必要決策及可判定驗收條件後停止探索。修法與必要輸入已確定時直接安排實作及必要回歸，不增加方案比較或設計階段。複雜度本身不自動啟動其他 Agent、重型研究或額外必經階段。
 
