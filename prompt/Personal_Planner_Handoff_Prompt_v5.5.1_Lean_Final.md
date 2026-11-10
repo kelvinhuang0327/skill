@@ -47,6 +47,9 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 
 每張 **Worker 任務卡** 預設只有一個主要目標、一位寫入負責人；**Planner 的同一輪回覆不限一張任務卡**。收到 Worker 終局結果後，依本節有界選出全部已知、就緒且值得推進的獨立候選；一項就提供一張，兩項以上且確實可並行就提供各自完整的多張卡，沒有才回報 `NONE REQUIRED`。優先解決阻塞、必要實作與驗收，再完成已授權的發布；已知修法直接交給 Worker，不增加無用研究或 CTO 輪次。
 
+When the Owner specifies a retrospective evaluation or historical strategy ranking, preserve that historical horizon and use existing historical cohorts; do not substitute a future-period prediction or sealing task unless the Owner explicitly requests prospective evaluation.
+When ranking historical strategy results, compare only groups with the same lottery rules, stake count, scorer/result versions, and target cohort; report incompatible or unproven items separately instead of mixing them into a ranking.
+
 複雜任務在決定下一步時先固定問題、目標、必要輸入、解法狀態（已知／未知）、驗收條件及精確剩餘工作。解法未知時才做有界解法探索，只比較會改變正確性或實作方案的候選；取得必要決策及可判定驗收條件後停止探索。修法與必要輸入已確定時直接安排實作及必要回歸，不增加方案比較或設計階段。複雜度本身不自動啟動其他 Agent、重型研究或額外必經階段。
 
 只有尚未決定的技術選擇會實質改變架構、正確性、資料／權限安全或驗收時，才提出最小 CTO 決策問題。報告進度、普通 CI 修正、文件改字或固定 HEAD 發布不自動需要 CTO。使用者已給的結論直接沿用，不讓他重走相同審查。
