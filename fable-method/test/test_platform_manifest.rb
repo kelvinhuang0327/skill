@@ -42,7 +42,7 @@ class PlatformManifestTest < Minitest::Test
     assert_equal 4, @model.platforms('fable-judge').length
     assert_equal '/Users/kelvin/.gemini/skills/fable-judge', @model.pair('fable-judge', 'gemini')['live_installation_path']
     assert_equal '/Users/kelvin/.gemini/config/skills/fable-judge', @model.pair('fable-judge', 'antigravity')['live_installation_path']
-    assert_equal %w[task_checkpoint paused_run_continuation artifact_controls], @model.pair('fable-method', 'codex').fetch('runtime_assets').map { |asset| asset['id'] }
+    assert_equal %w[task_checkpoint paused_run_continuation execution_evidence_fingerprint artifact_controls], @model.pair('fable-method', 'codex').fetch('runtime_assets').map { |asset| asset['id'] }
     @model.platforms('fable-method').reject { |platform| platform['name'] == 'codex' }.each do |platform|
       refute platform.key?('runtime_assets')
     end
@@ -55,24 +55,30 @@ class PlatformManifestTest < Minitest::Test
   end
 
   def test_codex_runtime_assets_and_materialized_bytes
-    launcher, companion, artifact_controls = @model.pair('fable-method', 'codex').fetch('runtime_assets')
-    assert_equal 'cadcd68ba44fc30b263a54386dfd5ab882b1367d', launcher['source_commit']
-    assert_equal '88734ed8dac16eaacdeb1821ebd5d38de40bc3b7', launcher['git_blob']
-    assert_equal 'c3c6ff21a54ea2d3a2f01ac830cc9bca751b81034e13a106a1ad4c5841ea40f6', launcher['sha256']
+    launcher, companion, fingerprint, artifact_controls = @model.pair('fable-method', 'codex').fetch('runtime_assets')
+    assert_equal '92d609211d8276f3c804a49eb454813462fcf8d7', launcher['source_commit']
+    assert_equal 'b3a81f904e27598e736e7daeb16bcef9512463d5', launcher['git_blob']
+    assert_equal '63a185a7ef69f95414c62f365f4526be3c2c8353ea07d5666245b28a180a8359', launcher['sha256']
     assert_equal 'e6f8581cdabe21f3683b8a5d8effb6855d98a041', companion['source_commit']
     assert_equal '91592132733be6b697bdbef667b97d9065c829c1', companion['git_blob']
     assert_equal 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0', companion['sha256']
-    assert_equal '24ddc13f0df65ea499a22e0f5483046abf10ef609aab7113457cc58ed6d726fa', artifact_controls['sha256']
+    assert_equal '92d609211d8276f3c804a49eb454813462fcf8d7', fingerprint['source_commit']
+    assert_equal 'd526b27ad562dc9c2ed96617ee975b6d5f8e9d85', fingerprint['git_blob']
+    assert_equal '077ba702d55d8919be2ba3e25b7a4655adb1ec9b1dfba4221a047933db2c6249', fingerprint['sha256']
+    assert_equal '161dca9922914fe4fe6a6c54a1ad0b6644bf2fbcdf7603812d63966646f93903', artifact_controls['sha256']
 
     rendered = @model.render(ROOT, 'fable-method', 'codex')
     launcher_bytes = File.binread(File.join(ROOT, launcher['source']))
     companion_bytes = File.binread(File.join(ROOT, companion['source']))
+    fingerprint_bytes = File.binread(File.join(ROOT, fingerprint['source']))
     artifact_controls_bytes = File.binread(File.join(ROOT, artifact_controls['source']))
     assert_equal launcher_bytes, rendered.fetch(launcher['destination'])
     assert_equal companion_bytes, rendered.fetch(companion['destination'])
+    assert_equal fingerprint_bytes, rendered.fetch(fingerprint['destination'])
     assert_equal artifact_controls_bytes, rendered.fetch(artifact_controls['destination'])
     assert_equal 0o755, File.stat(File.join(ROOT, launcher['source'])).mode & 0o777
     assert_equal 0o644, File.stat(File.join(ROOT, companion['source'])).mode & 0o777
+    assert_equal 0o644, File.stat(File.join(ROOT, fingerprint['source'])).mode & 0o777
     assert_equal 0o644, File.stat(File.join(ROOT, artifact_controls['source'])).mode & 0o777
     assert_match(/elsif mode == :continue_paused_run\s+require_relative ['"]paused_run_continuation['"]/, launcher_bytes)
     assert_includes rendered.fetch('SKILL.md'), "Git blob `#{launcher['git_blob']}`"
