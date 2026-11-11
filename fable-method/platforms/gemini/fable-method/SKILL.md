@@ -147,6 +147,16 @@ file counts. A single acceptance failure is not a trigger by itself.
   and its source semantics `UNKNOWN`; do not map or replay that identity. A
   strategy name, ticket count, present-day adapter, or partial golden output
   cannot substitute for source semantics.
+- When an exact source pin is absent locally, probe a remote only if the
+  Packet explicitly allows remote source lookup and pins one exact commit or
+  blob. Fetch only that object into an isolated disposable bare probe (for
+  Git, `git fetch --no-tags --no-write-fetch-head <allowed-remote>
+  <exact-object>`); do not fetch tags, branches, all refs, or history, and do
+  not change the destination project's refs. Record exact fetch result
+  separately from local presence; keep credential-bearing URLs and command
+  output out of evidence. If that exact fetch is unavailable, leave identity
+  unresolved and source semantics `UNKNOWN`; never use a nearby ref or proxy
+  evidence.
 - Read the exact target before editing. Stop on unexplained changes; do not
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
