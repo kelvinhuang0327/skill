@@ -139,6 +139,13 @@ file counts. A single acceptance failure is not a trigger by itself.
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
   differences are report-only.
+- When a task requires its final snapshot to prove a checkout's `HEAD`, index,
+  or working tree stayed unchanged, reserve that exact checkout from task start
+  through the final snapshot. The Owner and every agent must complete any
+  `commit`, `pull`, `switch`/`checkout`, staging, or other operation that would
+  change those states before the task starts; if such an operation becomes
+  necessary during the reservation, defer it until after the final snapshot or
+  run it in a different checkout.
 - Local reversible edits, and a local commit when `COMMIT_AUTHORIZED: YES`,
   need nothing more.
 - When the Owner personally submits the Packet in this conversation (for
