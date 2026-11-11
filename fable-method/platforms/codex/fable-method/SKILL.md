@@ -135,6 +135,17 @@ file counts. A single acceptance failure is not a trigger by itself.
   generated path list is non-empty before using it: an empty list must stop
   the command, not widen it to the whole repository. macOS `/bin/bash` is
   3.2 and has no `mapfile` or `readarray`.
+- Before long historical strategy/backfill work maps strategy semantics or
+  starts an expensive replay, resolve each Packet-named source pin (exact
+  commit, blob, or path at revision) against only the permitted repository
+  refs/object database. For Git, verify the exact commit/object and path (for
+  example, `git cat-file -e <commit>^{commit}`,
+  `git cat-file -e <commit>:<path>`, or
+  `git cat-file -e <blob>^{blob}`) and record the resolved commit/path/blob.
+  If the exact source is unavailable, leave that strategy identity unresolved
+  and its source semantics `UNKNOWN`; do not map or replay that identity. A
+  strategy name, ticket count, present-day adapter, or partial golden output
+  cannot substitute for source semantics.
 - Read the exact target before editing. Stop on unexplained changes; do not
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
