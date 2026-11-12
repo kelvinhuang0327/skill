@@ -290,6 +290,10 @@ header line, keep this receipt even if the Packet body does not mention it:
 - Before any evidence-summary identity query, finish writing a complete,
   readable `<root>/result.json`; do not claim canonical result validation
   while that file is missing.
+- When a Packet requires `task_folder_bytes`, finish writing every required
+  task receipt first. Then compute the task-folder total and files over 100 MB;
+  update the required size fields in `result.json` and `final_reply.md`,
+  recalculating until both records match the final files.
 - If the installed skill has `scripts/fable_artifact_controls.py` and the
   Packet permits repository-wide checkpoint and history inventory, run
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
