@@ -889,7 +889,17 @@ def summarize_task_evidence(
         if packet_bytes is not None:
             try:
                 packet_text = packet_bytes.decode("utf-8-sig")
-                packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text)
+                # A single trailing backslash is a Markdown hard line break that
+                # some Packet copy paths add to every line; it is not part of
+                # the identity. A double backslash stays and fails the match.
+                packet_ids = [
+                    value[:-1]
+                    if value.endswith("\\") and not value.endswith("\\\\")
+                    else value
+                    for value in re.findall(
+                        r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text
+                    )
+                ]
                 packet_ids.extend(
                     value for value in _packet_next_line_values(packet_text, "TASK_ID")
                     if TASK_ID_RE.fullmatch(value) is not None
