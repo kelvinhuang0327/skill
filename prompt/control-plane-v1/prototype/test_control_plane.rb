@@ -12,6 +12,40 @@ require "yaml"
 
 require_relative "control_plane"
 
+module LegacyPromptIntegrity
+  module_function
+
+  def errors(prompts)
+    return ["no legacy prompt identities configured"] if prompts.empty?
+
+    missing = prompts.each_with_object([]) do |(name, identity), memo|
+      path = Pathname.new(identity.fetch(:path))
+      memo << "missing legacy prompt #{name}: #{path}" unless path.file?
+    end
+    return missing unless missing.empty?
+
+    prompts.each_with_object([]) do |(name, identity), memo|
+      path = Pathname.new(identity.fetch(:path))
+      raw = File.binread(path)
+      actual_bytes = raw.bytesize
+      actual_lines = raw.count("\n")
+      actual_sha256 = Digest::SHA256.hexdigest(raw)
+
+      unless actual_bytes == identity.fetch(:bytes)
+        memo << "legacy prompt #{name} byte count mismatch: expected #{identity.fetch(:bytes)}, got #{actual_bytes}: #{path}"
+      end
+      unless actual_lines == identity.fetch(:lines)
+        memo << "legacy prompt #{name} line count mismatch: expected #{identity.fetch(:lines)}, got #{actual_lines}: #{path}"
+      end
+      unless actual_sha256 == identity.fetch(:sha256)
+        memo << "legacy prompt #{name} SHA-256 mismatch: expected #{identity.fetch(:sha256)}, got #{actual_sha256}: #{path}"
+      end
+    rescue SystemCallError => error
+      memo << "unreadable legacy prompt #{name}: #{path} (#{error.class}: #{error.message})"
+    end
+  end
+end
+
 class ControlPlanePrototypeTest < Minitest::Test
   ROOT = ControlPlanePrototype::ROOT
   FIXTURES = ROOT.join("prototype/fixtures")
@@ -672,15 +706,39 @@ class ControlPlanePrototypeTest < Minitest::Test
     assert_includes cto, "0A 標 `NOT_RUN`"
   end
 
-  def test_legacy_prompt_identities_match_the_authorized_pre_task_baseline
-    LEGACY_PROMPTS.each do |name, identity|
-      path = identity.fetch(:path)
-      assert path.file?, "missing legacy prompt #{name}: #{path}"
-      raw = File.binread(path)
-      assert_equal identity.fetch(:bytes), raw.bytesize, "#{name} byte count"
-      assert_equal identity.fetch(:lines), raw.count("\n"), "#{name} line count"
-      assert_equal identity.fetch(:sha256), Digest::SHA256.hexdigest(raw), "#{name} SHA-256"
+  def test_legacy_prompt_prerequisites_report_all_missing_paths_and_fail_closed
+    Dir.mktmpdir("control-plane-legacy-missing-") do |tmpdir|
+      prompts = LEGACY_PROMPTS.to_h do |name, identity|
+        missing_path = Pathname.new(tmpdir).join(identity.fetch(:path).basename)
+        [name, identity.merge(path: missing_path)]
+      end
+      output, error, status = run_legacy_prompt_fixture(tmpdir, prompts)
+
+      refute status.success?
+      assert_empty output
+      prompts.each do |name, identity|
+        assert_includes error, "missing legacy prompt #{name}: #{identity.fetch(:path)}"
+      end
+      assert_equal prompts.length, error.lines.grep(/\Amissing legacy prompt /).length
+      refute_includes error, "mismatch"
     end
+  end
+
+  def test_legacy_prompt_byte_count_mismatch_fails_closed
+    assert_legacy_prompt_identity_mismatch(:bytes, 1, "byte count mismatch")
+  end
+
+  def test_legacy_prompt_line_count_mismatch_fails_closed
+    assert_legacy_prompt_identity_mismatch(:lines, 1, "line count mismatch")
+  end
+
+  def test_legacy_prompt_sha256_mismatch_fails_closed
+    assert_legacy_prompt_identity_mismatch(:sha256, "0" * 64, "SHA-256 mismatch")
+  end
+
+  def test_legacy_prompt_identities_match_the_authorized_pre_task_baseline
+    errors = LegacyPromptIntegrity.errors(LEGACY_PROMPTS)
+    assert_empty errors, errors.join("\n")
   end
 
   def test_legacy_major_section_mapping_has_exactly_one_allowed_classification_per_section
@@ -770,6 +828,10 @@ class ControlPlanePrototypeTest < Minitest::Test
       ]
       first, first_error, first_status = Open3.capture3(*command)
       second, second_error, second_status = Open3.capture3(*command)
+      first = valid_utf8_subprocess_output(first, "first Worker stdout")
+      first_error = valid_utf8_subprocess_output(first_error, "first Worker stderr")
+      second = valid_utf8_subprocess_output(second, "second Worker stdout")
+      second_error = valid_utf8_subprocess_output(second_error, "second Worker stderr")
       assert first_status.success?, first_error
       assert second_status.success?, second_error
       assert_equal first.b, second.b
@@ -793,6 +855,58 @@ class ControlPlanePrototypeTest < Minitest::Test
   end
 
   private
+
+  def assert_legacy_prompt_identity_mismatch(field, replacement, expected_message)
+    Dir.mktmpdir("control-plane-legacy-mismatch-") do |tmpdir|
+      path = Pathname.new(tmpdir).join("legacy-fixture.md")
+      raw = "fixture line one\nfixture line two\n".b
+      File.binwrite(path, raw)
+      identity = legacy_fixture_identity(path, raw)
+      identity[field] = field == :sha256 ? replacement : identity.fetch(field) + replacement
+      output, error, status = run_legacy_prompt_fixture(tmpdir, "fixture" => identity)
+
+      refute status.success?
+      assert_empty output
+      assert_includes error, expected_message
+      ({ bytes: "byte count mismatch", lines: "line count mismatch", sha256: "SHA-256 mismatch" }
+        .reject { |candidate, _message| candidate == field }
+        .each_value { |message| refute_includes error, message })
+    end
+  end
+
+  def legacy_fixture_identity(path, raw)
+    {
+      path: path,
+      bytes: raw.bytesize,
+      lines: raw.count("\n"),
+      sha256: Digest::SHA256.hexdigest(raw)
+    }
+  end
+
+  def run_legacy_prompt_fixture(tmpdir, prompts)
+    fixture_path = Pathname.new(tmpdir).join("legacy-prompts.yaml")
+    serialized = prompts.to_h do |name, identity|
+      [name, identity.merge(path: identity.fetch(:path).to_s).transform_keys(&:to_s)]
+    end
+    File.write(fixture_path, YAML.dump("prompts" => serialized), mode: "w:UTF-8")
+    output, error, status = Open3.capture3(
+      RbConfig.ruby,
+      ROOT.join("prototype/test_control_plane.rb").to_s,
+      "--legacy-prompt-fixture",
+      fixture_path.to_s
+    )
+    [
+      valid_utf8_subprocess_output(output, "legacy fixture stdout"),
+      valid_utf8_subprocess_output(error, "legacy fixture stderr"),
+      status
+    ]
+  end
+
+  def valid_utf8_subprocess_output(raw, label)
+    output = raw.b.force_encoding(Encoding::UTF_8)
+    assert output.valid_encoding?, "#{label} is not valid UTF-8"
+    output
+  end
 
   def validate_with_byte_equal_expected(role, generated)
     Dir.mktmpdir("control-plane-byte-equal-") do |tmpdir|
@@ -917,4 +1031,24 @@ class ControlPlanePrototypeTest < Minitest::Test
       memo[relative] = Digest::SHA256.file(path).hexdigest
     end
   end
+end
+
+if ARGV.first == "--legacy-prompt-fixture"
+  fixture = YAML.safe_load(File.read(ARGV.fetch(1), encoding: "UTF-8"))
+  prompts = fixture.fetch("prompts").to_h do |name, identity|
+    [
+      name,
+      {
+        path: Pathname.new(identity.fetch("path")),
+        bytes: Integer(identity.fetch("bytes")),
+        lines: Integer(identity.fetch("lines")),
+        sha256: identity.fetch("sha256")
+      }
+    ]
+  end
+  errors = LegacyPromptIntegrity.errors(prompts)
+  $stderr.binmode
+  errors.each { |error| $stderr.puts(error) }
+  $stderr.flush
+  exit!(errors.empty? ? 0 : 1)
 end
