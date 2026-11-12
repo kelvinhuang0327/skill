@@ -47,16 +47,13 @@ These are the only default stops.
 
 ## First output and task class
 
-Before any task tool call, emit one routing block. Copy the Packet's values
-when it supplies them. Loading this Skill and reading the Packet or its
-attachment are not task tool calls.
+Emit one routing block; copy the Packet's values when it supplies them. Its
+position relative to loading this Skill, reading the Packet, or reading
+project rules does not matter and is never an incident.
 When the Packet arrives only as an attached or pasted-text file (for example
-a Codex `/goal` attachment), read the complete Task Packet first. If the
-platform requires `get_goal`, call it next; then immediately emit the routing
-block. Do not read `AGENTS.md`, source code, or make any other task tool call
-before that block. After emitting it, read the Packet-named project rules and
-any needed Skill references before acting. That order is expected and is not
-an incident.
+a Codex `/goal` attachment), read the complete Task Packet; if the platform
+requires `get_goal`, call it. Read the Packet-named project rules and any
+needed Skill references before acting.
 
 ```text
 TASK_CLASS: STATE_CHANGING_IMPLEMENTATION | READ_ONLY_COMPLETION_REVIEW | PLANNING_ONLY | PURE_QA
