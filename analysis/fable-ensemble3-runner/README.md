@@ -30,7 +30,7 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
 | 檔案 | 作用 |
 |---|---|
 | `execution_profile.py` | 建立並檢查執行設定檔；`check` 在任何生成之前阻擋缺欄位、雜湊不符、過期或含衝突標記的指令包、題庫／收據／協議互相不一致、封存來源漂移 |
-| `exploration_runner.py` | 正式探索執行器：`run`、`resume`、`replay`、`check`；帳本、崩潰復原、重試規則、報告 |
+| `exploration_runner.py` | 正式探索執行器：`run`、`resume`（僅 SIMULATION）、`close`、`replay`、`check`；帳本、崩潰復原、重試規則、報告 |
 | `probe_2b.py` | 階段 2B 的探針（A–D 四步、最多 7 個請求、零重試）：`register`、`run`、`recover`、`report` |
 | `simulated_transport.py` | 離線的 Responses 端點替身：確定性答案、可注入故障、伺服器端請求紀錄 |
 | `_lab.py` | 找出封存實驗室並確認每個模組都是從那裡載入的 |
@@ -47,12 +47,23 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
 3. 成本未知就計上限，絕不計零；成本高於上限就計實際金額、停止整個執行。
 4. 只有「證明沒有進入生成」的失敗，或明確的「未處理」回應（429／503），才重試一次；生成請求送出後的逾時與不確定錯誤一律不重送。
 5. 身分或能力違規（模型、服務層級不符）、被拒絕的請求、非預期錯誤都會**停止**執行：已完成的格子保留、不評分，也不能續跑。
+   停止的結算已寫入、`HALTED` 尚未寫入時被中斷：LIVE 執行只能以 `close` 結案（規則 7），SIMULATION 執行仍會續跑（見「SIMULATION 續跑的已知限制」）。
 6. 每一整輪（含重試保留）要嘛完整預留、要嘛不開始；正式執行少於三輪不得開始，LIVE 正式執行必須五輪全部預留。
-7. 已存在的執行目錄不會被重啟；`resume` 只續跑被中斷的執行，並且必須與原本的身分完全一致（含 runner 程式碼的雜湊）。
+7. 已存在的執行目錄不會被重啟（`run` 對非空目錄一律 `OUT_DIR_NOT_EMPTY`）；中斷的 LIVE 實驗要在**新的**目錄重新開始，舊目錄以 `close` 結案留作證據。
+   **綁定模式為 LIVE 的執行永不續跑**：CLI `resume --mode LIVE`、CLI `resume --mode SIMULATION` 指向 LIVE 目錄、`Runner.resume()`（不論 Runner
+   本身的模式；LIVE 的 Runner 也不續跑 SIMULATION 執行）都在寫入任何位元組之前拒絕（`RESUME_FORBIDDEN_FOR_LIVE:use close`），零請求、目錄不變。
+   中斷的 LIVE 執行**只能**用 `close` 結案。`close` 與 resume 共用同一個 gate、同一組拒絕與同一段恢復前段（缺失事實回補成 reconciled 紀錄、
+   持久的超額回應以實際成本記帳、不確定的已開始呼叫以上限記帳且絕不重送），再寫一筆 `CLOSE` 稽核紀錄，然後以 `_finalize` 結案為 `HALTED`：原因
+   `INTERRUPTED`，帳本上有超額（本次恢復發現，或先前被中斷的 close／執行已記下）時為 `ATTEMPT_CAP_OVERRUN`；報告不計分，`closed.stop_settlements`
+   列出日誌中的停止類結算（REJECTED／CAPABILITY／PERSISTENCE／OTHER）。`close` 沒有任何通往 adapter、transport、金鑰或核准檔的路徑，結構上不可能
+   送出請求；它拒絕終局、已認證、鎖被占用、gate 拒絕的執行，以及含有 write ledger 無法列入之項目的目錄（`WRITE_LEDGER_UNLISTABLE`，寫入任何位元組
+   之前），拒絕時目錄不變。`close` 在任何寫入點被殺：狀態仍為 RUNNING 時再 `close` 一次即完成；`HALTED` 已寫入（report 或 write ledger 尚未寫）時，
+   那次 close 的決定已落地，再 `close` 會以終局拒絕（目錄不變），write ledger 由寫入帳目的入口補上。SIMULATION 執行仍可 `resume`，並且必須與原本的
+   身分完全一致（含 runner 程式碼的雜湊）；`close` 用同一個身分檢查，命令列的 close 以已綁定的 manifest 決定模式。
 8. 收據模式不符、狀態未知、成本或狀態讀不出來、輸出與 adapter 說法不一致，都算「付了錢但不可用」，停止執行。
-9. 帳本在寫入「已停止」之前被中斷，續跑時以 `LEDGER_CONFLICT` 結束，不會留下一個永遠無法關閉的殭屍執行。
+9. 帳本在寫入「已停止」之前被中斷，續跑時以 `LEDGER_CONFLICT` 結束，不會留下一個永遠無法關閉的殭屍執行。LIVE 執行不續跑：`close` 以 `ATTEMPT_CAP_OVERRUN` 結案（超額已在帳本上）。
 10. 核准檔綁在設定檔（或探針的註冊檔）的雜湊上，而它們都釘住了 runner 的五個程式檔：核准涵蓋的是「會跑的程式碼」，不只是「會讀的資料」。
-11. 所有讀取 run 狀態的入口（inspect、resume、replay、報告、write ledger、CLI 的 resume／replay／check）都先經過同一個
+11. 所有讀取 run 狀態的入口（inspect、resume、close、replay、報告、write ledger、CLI 的 resume／close／replay／check）都先經過同一個
     `inspect_run`：manifest、state、ledger 與日誌須可解析、形狀有效且相互一致。是否放行只取決於 manifest、state、ledger 與
     日誌中的**具體事實紀錄**（`ROUND_RESERVED`、`START`、`SETTLED`）。
     - 每一筆具體紀錄都要對得上帳本（輪次已預留、嘗試已開始、結算內容等於帳本收據）、不得重複，也不得出現在它所依賴的事實之前：
@@ -68,8 +79,8 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
       `kind: RECOVER_UNCERTAIN_NO_RELAUNCH`），最後才寫 `RESUME`，然後才可能有新請求。
       回補途中被殺：已寫的那幾筆就是具體紀錄，剩下的由下一次 resume 補完（順序保證每一筆都在它依賴的事實之後）；
       回補完成但 `RESUME` 未寫：沒有影響；復原已寫入帳本但紀錄未寫：下一次 resume 以回補補上；連續多次崩潰同理，缺失數只會減少。
-    帳本不存在只在持久空日誌且 state 為 RUNNING 的第一次存檔前允許初始化。缺失、損壞或尾端撕裂的日誌一律拒絕。
-12. 守門階段被拒絕的入口（上列 8 個）不寫任何檔案，包含鎖的 PID，也不送出任何請求。`_lock` 只 flock；通過所有檢查才寫 PID。
+    帳本不存在只在日誌只有它的 `RUN_OPENED` 綁定紀錄、state 為 RUNNING 的第一次存檔前允許初始化。缺失、損壞或尾端撕裂的日誌一律拒絕。
+12. 守門階段被拒絕的入口（上列各入口與 close）不寫任何檔案，包含鎖的 PID，也不送出任何請求。`_lock` 只 flock；通過所有檢查才寫 PID。
     已送出請求的呼叫仍可能在最後收尾被拒絕；BLOCKED 的 `generation_calls` 回報本次呼叫實際嘗試送出的生成請求數，不抹成 0。
 13. SIMULATION transport 必須明確標記 `is_simulated = True`；Runner 與 Probe 在任何檔案寫入前檢查。
     指令、題庫 manifest 與 fixture 都從同一次讀取的位元組雜湊並消費，送出的指令另核對設定 pin。
@@ -89,25 +100,49 @@ Planner 工作包 2A（執行設定與身分檢查）、2B-PREP（探測腳本�
     發布後、清除暫存名之前被殺留下的第二個連結，只有在同目錄、名稱為 `write_ledger.json.<32 位小寫十六進位>.tmp`、
     是一般檔案且與 write ledger 的裝置及 inode 相同時才豁免。這只辨認 write ledger 本身的第二個連結，不證明由發布流程建立。
     同內容的複本、符號連結、子目錄裡的 hard link、錯誤長度或大寫的檔名都不豁免。
+    **清單完整（R4，D4-5）。** 寫入與核對 write ledger 都遞迴列舉 `out_dir` 下**每一個目錄項目**、不跟隨符號連結，只以**頂層路徑**排除
+    `write_ledger.json` 本身（它也必須是一般檔案）與上述發布殘留。其餘任何項目（子目錄裡的檔案、巢狀的 `write_ledger.json`、符號連結、目錄、
+    FIFO、其他特殊檔、已列檔案的另一個名稱）都必須是列出的一般檔案且雜湊相符，否則拒絕（`WRITE_LEDGER_UNLISTED:<路徑>`、
+    `WRITE_LEDGER_NOT_A_REGULAR_FILE:<路徑>`、`WRITE_LEDGER_MISMATCH:<路徑>`）；目錄最後才檢查，所以子目錄裡的檔案先被點名。寫入時任何非一般檔案的
+    項目都拒絕（`WRITE_LEDGER_UNLISTABLE:<路徑>`，帶判定）；runner 不建立子目錄、符號連結或特殊檔。
     把已認證的執行的狀態改回 RUNNING：唯讀 gate 帶旗標 `WRITE_LEDGER_EXISTS_NOT_RECERTIFIED`；`resume` 以 `RUN_IS_CERTIFIED`
     拒絕，帶同一判定、零新請求、目錄不變。收尾仍不重寫既有 write ledger，作為第二道防線。
+    **回退偵測（R4，D4-4）。** `report.json` 只在終局狀態寫入之後才產生，所以沒有 write ledger 時「`report.json` 存在而狀態為 RUNNING」在 gate
+    裡一律拒絕（`STATE_ROLLBACK_DETECTED`），所有模式、所有入口，零請求、目錄不變；有 write ledger 時照上一段的既有規則。
+17. **模式綁定在兩個檔案（R4，D4-2）。** 執行建立時，日誌 `attempts.jsonl` 以第一筆紀錄 `RUN_OPENED`（`mode` 與 `run_manifest.json` 位元組的
+    `manifest_sha256`）原子地建立（暫存檔再 rename：要嘛完整、要嘛不存在），之後沒有任何入口再寫這筆紀錄。共用 gate 要求它讀取的第一筆紀錄是
+    `RUN_OPENED`、其 sha256 等於目前 manifest 位元組的 sha256、mode 與 manifest 一致，且沒有第二筆；否則每個入口都拒絕（`RUN_BINDING_MISSING`、
+    `RUN_BINDING_INVALID`、`RUN_BINDING_MANIFEST_MISMATCH`、`RUN_BINDING_MODE_MISMATCH`、`RUN_BINDING_NOT_FIRST`）。稽核註記（`RESUME`、`CLOSE`）
+    放在它之前也不改變判定，與它們在其他位置一樣（規則 11）。所以只改一個檔案（manifest 的 mode 或任何位元組、刪除或改寫 `RUN_OPENED`、回退
+    `run_state.json`）都不能讓 LIVE 執行變成可續跑。建立順序的崩潰窗口：manifest 與狀態已寫、日誌尚未建立（可能留下 `attempts.jsonl.<hex>.tmp`）
+    時被殺 → **不可續跑，`close` 也以具名原因拒絕**（`ATTEMPTS_MISSING_OR_UNREADABLE`）：那時還沒有帳本，任何預留與請求都不可能已發生；綁定紀錄只由
+    建立執行時寫一次，事後補寫等於替當下的 manifest 背書。目錄保留為證據。
 
 | 入口 | 類別 | 帶出的完整性欄位 |
 |---|---|---|
 | `inspect_run` | 唯讀 | `integrity`、`certificate`（ABSENT／VERIFIED／PRESENT_WHILE_RUNNING） |
 | `replay_run` | 唯讀（含重建 report） | `integrity`、`certificate`；COMPLETE 時重建的 `report.integrity` |
 | `exploration_runner.py check --out` | 唯讀 | `run_integrity`、`run_certificate`；`status` PASS／FLAGGED／BLOCKED，結束碼 0／4／2 |
-| `exploration_runner.py replay` | 唯讀 | `integrity`、`certificate`；結束碼 0（CLEAN）／4（FLAGGED）／2 |
-| `Runner.start`／`run` | 寫入（建立執行） | 回傳與命令列的 `integrity`；`report.json`、`write_ledger.json` 的 `integrity` |
-| `Runner.resume`／`resume` | 寫入；已認證執行一律拒絕 | 回傳與命令列的 `integrity`（收尾後）；拒絕時 `RunBlocked.integrity`／命令列 `integrity` |
-| `Runner._finalize`（report 與 write ledger，run／resume 的最後一步） | 寫入（只對 RUNNING 收尾一次） | `report.json` 與回傳的 `integrity`；對已結束的執行拒絕（`RUN_IS_<狀態>`，帶判定）且不寫 |
-| `Runner._write_accounting`（write ledger） | 寫入（一次） | `write_ledger.json` 的 `integrity`；拒絕時帶判定 |
+| `exploration_runner.py replay` | 唯讀（含重建 report） | `integrity`、`certificate`；結束碼 0（CLEAN）／4（FLAGGED）／2 |
+| `Runner.start`／`run` | 寫入（建立執行；非空目錄一律拒絕） | 回傳與命令列的 `integrity`；`report.json`、`write_ledger.json` 的 `integrity` |
+| `Runner.resume`／`resume` | 寫入，**僅 SIMULATION**；LIVE 一律 `RESUME_FORBIDDEN_FOR_LIVE`；已認證執行一律拒絕 | 回傳與命令列的 `integrity`（收尾後）；拒絕時 `RunBlocked.integrity`／命令列 `integrity` |
+| `Runner.close`／`close` | 寫入（任何模式的中斷執行；不送請求、不需要金鑰或核准檔） | 回傳與命令列的 `integrity`；`report.json`（含 `closed`）、`write_ledger.json`；拒絕時帶判定 |
+| `Runner._write_accounting`（寫入帳目） | 寫入（一次） | `write_ledger.json` 的 `integrity`；拒絕時帶判定 |
+| `Runner._finalize`（report 與 write ledger） | 不是獨立入口：run／resume／close 的最後一步（只對 RUNNING 收尾一次） | `report.json` 與回傳的 `integrity`；對已結束的執行拒絕（`RUN_IS_<狀態>`，帶判定）且不寫 |
+
+report 只由 `_finalize` 寫入；唯讀入口只讀它或從帳本重建它。
 
 ## 日誌與帳本的信任邊界（照實列出）
 
 gate 只比對執行目錄裡的檔案，沒有外部錨點。它防的是崩潰與單一檔案的損壞或回退，不是認證。
 
 **能辨認**（具名拒絕、伺服器端零請求、執行目錄逐位元組不變）：
+
+- （R4）manifest 的任何一個位元組被改或被刪；`RUN_OPENED` 被刪、改 mode 或 sha256、移到其他紀錄之後、重複：每個入口都拒絕。
+  綁定模式為 LIVE 的執行，不論哪一個單一檔案被改成什麼，都沒有入口會再送出請求：resume 一律拒絕，close 不送請求。
+- （R4）沒有 write ledger 的執行在 report 之後把狀態改回 RUNNING：每個入口拒絕（`STATE_ROLLBACK_DETECTED`）。
+- （R4）已認證執行目錄下任何未列入的項目（任何深度、任何種類，包括巢狀的 `write_ledger.json`、符號連結、目錄、FIFO），或列入的項目
+  變成非一般檔案，或 write ledger 本身變成符號連結：每個入口拒絕。
 
 - 日誌遺失、讀不出、中間有壞行、尾端撕裂。
 - 日誌領先帳本：記了帳本沒有的輪次、嘗試或結算，結算內容與帳本收據不同，或記了超額而帳本沒有。帳本被換成較早但本身有效的快照，
@@ -122,6 +157,12 @@ gate 只比對執行目錄裡的檔案，沒有外部錨點。它防的是崩潰
   write ledger 本身的、符合規則 16 的第二個連結是唯一豁免。已認證的執行即使狀態被改成 RUNNING，也不能 resume。
 
 **不能辨認**：
+
+- （R4）manifest 與 `RUN_OPENED` 被協同改寫成互相一致（例如兩者一起把 mode 改成 SIMULATION）：無法辨認。SIMULATION 只用模擬 transport，
+  不會花錢，報告標為 `SIMULATION_NOT_A_RESULT`。
+- （R4）`RUN_OPENED` 中 gate 不讀的欄位（`t`）被改，或稽核註記被放到它前面：不影響判定。
+- （R4）把 report 刪掉並同時把狀態改回 RUNNING（兩個檔案），或刪掉 write ledger 再改狀態：與停止窗口無法區分。LIVE 仍不可續跑，只能 close；
+  SIMULATION 會續跑。單獨一個懸空的 `write_ledger.json` 符號連結等同沒有 write ledger（與刪除相同）。
 
 - 帳本與日誌被協同改寫成互相一致（例如兩者一起回退到較早的一致狀態，或一起截短）。
 - 日誌被改成與帳本一致的偽造具體紀錄：刪掉真紀錄再寫上內容相符的替代（標不標 `reconciled` 都一樣），與真正的回補無法區分。
@@ -153,7 +194,8 @@ python3 execution_profile.py check PROFILE.json [--mode SIMULATION|LIVE] [--deep
 # 執行器
 python3 exploration_runner.py check  --profile PROFILE.json [--mode LIVE] [--out DIR]
 python3 exploration_runner.py run    --profile PROFILE.json --out DIR --mode SIMULATION [--allow-formal-simulation]
-python3 exploration_runner.py resume --profile PROFILE.json --out DIR --mode SIMULATION
+python3 exploration_runner.py resume --profile PROFILE.json --out DIR --mode SIMULATION              # LIVE 執行永不續跑
+python3 exploration_runner.py close  --profile PROFILE.json --out DIR [--budget B]                 # 任何模式的中斷執行 → HALTED，不送請求
 python3 exploration_runner.py replay --out DIR
 python3 exploration_runner.py run    --profile PROFILE.json --out DIR --mode LIVE --approval-file F   # 條件齊全前一律被擋
 
@@ -165,7 +207,7 @@ python3 probe_2b.py recover  --out DIR
 python3 probe_2b.py report   --out DIR
 ```
 
-結束碼：`0` 完成、`2` 被擋、`3` 執行或探針停止、`4`（`check --out`、`replay`）通過但帶完整性旗標，不是乾淨的結果。
+結束碼：`0` 完成、`2` 被擋、`3` 執行或探針停止（`close` 成功時也是 `3`：執行現在是 HALTED）、`4`（`check --out`、`replay`）通過但帶完整性旗標，不是乾淨的結果。
 執行器的 BLOCKED 輸出以 `generation_calls` 記本次呼叫已嘗試送出的生成請求數（不含 input-token 計數請求）；守門前拒絕為 0，收尾拒絕可以大於 0。
 
 LIVE 的守門條件由命令列入口強制執行：Owner 簽署並綁定到這份設定檔（或註冊檔）的核准、環境裡已有 `OPENAI_API_KEY`、
@@ -193,7 +235,23 @@ python3 -B mutation_runner.py --workers 2           # 全部變異體；可用 -
   原本的 `test_J` 另外以 `-X pycache_prefix`（優先於環境變數與 Apple 的使用者快取）再跑一次兩個入口。
 - 變異驗證沿用已驗證的 R2 判準：變異後的來源要能編譯、能匯入，指定測試要在測試模組內以**斷言**失敗；
   崩潰、逾時或由被測程式自己丟出的錯誤不算殺死。
-- 確切的測試數、變異體數與封存樹上的執行紀錄見證據根目錄的 `runner-impl/`。
+- R4（`R4*Tests`）：`R4OracleTests` 用一個只依 R4 Packet 寫成的極簡 oracle（不呼叫產品的 gate），對 runner 自己建立的 LIVE 與 SIMULATION
+  執行（六個停止位置）做窮舉與隨機（種子 `20261006:<基底>`，每基底 16 例）的單檔竄改，比對每一個入口的決定與不變量（LIVE 不送請求、拒絕不改
+  位元組、唯讀不寫）；R2／R3 oracle 另加綁定規則。`R4LiveMatrixTests`［K］、`R4CloseMatrixTests`［K］用真的子行程與真的 SIGKILL；LIVE 子行程
+  封鎖網路、只在自己的環境裡放假金鑰，adapter 的 `_post` 換成模擬器，不是真實 LIVE。`R4RollbackTests`、`R4InventoryTests` 是回退與清單矩陣，
+  `R4GuardTests` 是各守門條件的快速測試（變異體指定的測試）。
+- 確切的測試數、變異體數與封存樹上的執行紀錄見證據根目錄的 `runner-impl/`（R4 為 `runner-impl-r4/`）。
+
+## SIMULATION 續跑的已知限制（照實列出；經 Owner 核定只適用於 SIMULATION）
+
+SIMULATION 不花錢，結果一律標為 `SIMULATION_NOT_A_RESULT`。下列情況 SIMULATION 的 `resume` **沒有**防住，不得聲稱已防住：
+
+- 自然停止窗口（R3 F3）：停止類結算已寫入、`HALTED` 尚未寫入時被中斷，`resume` 會繼續送出新的（模擬）請求並可能以 COMPLETE 結束。
+- 停止類結算紀錄被單筆刪除：帳本只記結算的狀態與成本，回補的紀錄是 `RECONCILED_FROM_LEDGER`，原本的停止種類（REJECTED 等）無法從帳本復原，
+  `close` 的 `stop_settlements` 也就列不出它。
+- 被中斷的 SIMULATION `close` 仍可被 `resume`：`CLOSE` 是稽核註記，gate 不讀它。LIVE 執行不受影響（永不續跑）。
+- （R4 oracle 在未修改的 43f6cc3 上發現，早於 R4）帳本中 gate 不核對的值（例如已結算格子的 `verified_run.disposition`）被單筆改成題目選項
+  以外的值時，SIMULATION `resume` 會送出模擬請求，然後在收尾計分時丟出例外；執行留在 RUNNING。`replay` 對同一目錄以 `REPLAY_INVALID` 拒絕。
 
 ## 已知限制（照實列出）
 
