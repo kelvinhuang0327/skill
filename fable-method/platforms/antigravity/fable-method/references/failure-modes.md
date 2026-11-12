@@ -37,6 +37,16 @@ correction is applied, rerun the real check and retain its actual output. Keep
 an `ATTEMPT_LEDGER` for failures, retries, timeouts, terminations, overwritten
 or deleted artifacts, and superseded evidence.
 
+When one candidate has CI results from more than one event (for example `push`
+and `pull_request`, or a pre-merge PR and post-merge `main`), keep each event's
+result separate and attribute each failure in the order above. For every run,
+record the event, source HEAD, actual checkout HEAD, checkout role, and Git
+tree. Matching trees show equivalent content; they do not make the events
+identical. A PASS from one event never hides a FAIL or timeout from another, and
+each required pre-merge and post-merge result stays as its own evidence.
+Exact-head verification still follows its own contract; a matching tree never
+substitutes for an exact-head run.
+
 Identical blind retries and speculative patches are not evidence progress.
 Evidence-progressing RCA has no arbitrary numeric ceiling, but stop when scope,
 safety, authority, capability, proportionality, or discriminating evidence is

@@ -9,6 +9,7 @@
 - [Remediation limit](#remediation-limit)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
+  - [Non-Git artifact route](#non-git-artifact-route)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -254,6 +255,83 @@ Final-tree identity is Worker-owned: the Planner supplies Judge mode/depth but
 must not predict or prefill final HEAD/tree values. The Worker records the
 observed final HEAD/tree after implementation, and the Judge evaluates exactly
 that identity read-only.
+
+### Non-Git artifact route
+
+When the judged output is a generated artifact under a non-Git source root (see
+[operational gates](operational-gates.md) on non-Git source roots), the handoff
+replaces the repository, branch, HEAD, and tree fields with a manifest-based
+snapshot identity. The Worker supplies:
+
+- `ARTIFACT_ROOT`: the exact absolute canonical artifact root, repeated
+  unchanged in both snapshots. Each manifest records `ROOT_EXISTS` from a
+  no-follow check, `ROOT_ENTRY_TYPE`, `ROOT_MODE` when present, and
+  `ROOT_CHILDREN_ENUMERATED`. An absent root has `ROOT_EXISTS: false`, no entry
+  type or mode, and no entries; an existing empty directory has
+  `ROOT_EXISTS: true`, `ROOT_ENTRY_TYPE: DIRECTORY`, its directory mode, and an
+  empty entry list. Only `ENOENT` establishes an absent root; any other root
+  inspection error rejects the scan. Do not treat these states as equal.
+- `BASELINE_MANIFEST` and `FINAL_MANIFEST`: each is a deterministic UTF-8
+  manifest captured before the first write and after the last. Each records
+  `MANIFEST_SCHEMA_VERSION: 1` and `MANIFEST_STATUS: COMPLETE` only when the
+  root and every descendant have been completely inventoried. `ENTRIES`
+  contains every descendant directory and regular file, including empty
+  directories. Each entry has a normalized root-relative `RELATIVE_PATH`, an
+  `ENTRY_TYPE` of `DIRECTORY` or `REGULAR_FILE`, and POSIX permission and
+  special-bit `MODE` (`st_mode & 07777`) in fixed-width octal. Directory entries
+  also say `CHILDREN_ENUMERATED: true`; each regular-file entry has
+  `SIZE_BYTES` and `SHA256`. No entry may be omitted because it is empty,
+  irrelevant, unreadable, or inconvenient.
+- `BASELINE_MANIFEST_SHA256` and `FINAL_MANIFEST_SHA256`: SHA-256 hashes of the
+  exact saved canonical manifest bytes, excluding these detached hash fields.
+- `ARTIFACT_SHA256`: the path and SHA-256 of each relevant artifact, taken from
+  the final manifest;
+- `MANIFEST_DELTA`: the added, changed, and removed paths between the two
+  manifests, computed by comparing the complete entry sets and all entry
+  fields (including type, mode, size, and file hash), plus exact root path,
+  root existence, type, mode, and child-enumeration status. Sort `ENTRIES` by
+  normalized relative-path UTF-8 bytes and serialize as canonical UTF-8 JSON
+  with a fixed schema, field order, and no insignificant whitespace before
+  hashing. The Judge compares the complete baseline and final manifests;
+  comparing only relevant artifacts is insufficient.
+- `WRITE_LEDGER`: this operation's write, retained, and deletion ledger,
+  including any artifact created and later deleted;
+- `ACCEPTANCE_CRITERIA`: the specific checks the Judge applies to each relevant
+  artifact, each with its command or inspection method.
+
+For path identity, encode each root-relative component as valid UTF-8 in
+Unicode NFC and join components with `/`. Reject absolute paths, empty, `.` or
+`..` components, backslashes, invalid encodings, paths that escape the root,
+and any duplicate normalized path. A normalization collision is a rejected
+manifest, even when the original names differ. Use `lstat` or
+`fstatat(..., AT_SYMLINK_NOFOLLOW)` on every entry; open and enumerate each
+directory without following links, and open regular files with no-follow
+semantics (`openat(..., O_NOFOLLOW)` or an equivalent), then verify the opened
+object with `fstat` before reading it. The root itself must be checked without
+following it and must be a real directory when present.
+
+Fail closed on a root or descendant symbolic link; nested Git repository,
+`.git` directory or pointer, or submodule; FIFO, socket, device, or any other
+special file; normalization collision or invalid path; and every enumeration,
+metadata, or read error that prevents a complete inventory. Detect nested Git
+metadata from entry names and no-follow types before descending into it or
+opening its contents; reject bare-repository markers as well. For a rejected
+scan, record `MANIFEST_STATUS: REJECTED` and each unsafe candidate path (raw
+path if it cannot be normalized), observed type/mode when available, and
+rejection reason in a diagnostic. Do not publish a complete manifest, a
+manifest hash, or snapshot identity for that scan. Never follow a link or read
+the linked target, a `.git` pointer, or other rejected content. Any uncertainty
+about completeness is rejection, not a silently omitted entry.
+
+A complete manifest proves identity only for the filesystem snapshot observed
+by that scan. It is not Git provenance and does not prove that no other
+activity occurred during execution or between the baseline and final scans.
+Do not write a commit or tree value for a non-Git root, and do not derive one
+from a manifest hash. If the artifact cannot be reproduced, or a required
+manifest, hash, or ledger entry is missing, state `UNVERIFIABLE` or `UNKNOWN`
+with the exact missing item rather than filling the gap. This route does not
+change Judge launch authority, depth selection, or verdict standards; the Judge
+still derives its own trigger and depth from the Packet and evidence.
 
 ## Verdict and lifecycle boundaries
 
