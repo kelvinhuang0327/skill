@@ -127,6 +127,10 @@ file counts. A single acceptance failure is not a trigger by itself.
   path that the Packet, the project rules, or this skill names. Any other
   place, such as `/tmp` or a tool's default temporary directory, is out of
   scope; point tools that default there at one of those paths.
+- When the repository or Packet specifies a Python interpreter, use that exact
+  interpreter for every Python command, including one-line helpers and receipt
+  utilities. For disk-space checks, prefer shell `df`; do not invoke system
+  `python` or `python3` as a shortcut.
   Python bytecode counts too: when Python imports or runs code from a
   folder outside your write scope, run it with `-B` or with
   `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` appears there.
@@ -135,10 +139,46 @@ file counts. A single acceptance failure is not a trigger by itself.
   generated path list is non-empty before using it: an empty list must stop
   the command, not widen it to the whole repository. macOS `/bin/bash` is
   3.2 and has no `mapfile` or `readarray`.
+- Before long historical strategy/backfill work maps strategy semantics or
+  starts an expensive replay, resolve each Packet-named source pin (exact
+  commit, blob, or path at revision) against only the permitted repository
+  refs/object database. For Git, verify the exact commit/object and path (for
+  example, `git cat-file -e <commit>^{commit}`,
+  `git cat-file -e <commit>:<path>`, or
+  `git cat-file -e <blob>^{blob}`) and record the resolved commit/path/blob.
+  If the exact source is unavailable, leave that strategy identity unresolved
+  and its source semantics `UNKNOWN`; do not map or replay that identity. A
+  strategy name, ticket count, present-day adapter, or partial golden output
+  cannot substitute for source semantics.
+- When an exact source pin is absent locally, probe a remote only if the
+  Packet explicitly allows remote source lookup and pins one exact commit or
+  blob. Fetch only that object into an isolated disposable bare probe (for
+  Git, `git fetch --no-tags --no-write-fetch-head <allowed-remote>
+  <exact-object>`); do not fetch tags, branches, all refs, or history, and do
+  not change the destination project's refs. Record exact fetch result
+  separately from local presence; keep credential-bearing URLs and command
+  output out of evidence. If that exact fetch is unavailable, leave identity
+  unresolved and source semantics `UNKNOWN`; never use a nearby ref or proxy
+  evidence.
 - Read the exact target before editing. Stop on unexplained changes; do not
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
   differences are report-only.
+- When a task requires its final snapshot to prove a checkout's `HEAD`, index,
+  or working tree stayed unchanged, reserve that exact checkout from task start
+  through the final snapshot. The Owner and every agent must complete any
+  `commit`, `pull`, `switch`/`checkout`, staging, or other operation that would
+  change those states before the task starts; if such an operation becomes
+  necessary during the reservation, defer it until after the final snapshot or
+  run it in a different checkout.
+- Derive execution receipts from one structured source. Keep a pre-run
+  fingerprint's exact canonical payload and every hashed input (branch,
+  HEAD/tree, status, per-file path/status/mode/SHA) beside the digest, computed
+  from that saved payload. Create generated path values once and reuse them
+  for validation, command argv, and the receipt. A reusable artifact that
+  calls mutable state `current` must include `observed_at` and source identity;
+  after relevant parallel changes, re-read before relying on it or label the
+  snapshot historical.
 - Local reversible edits, and a local commit when `COMMIT_AUTHORIZED: YES`,
   need nothing more.
 - When the Owner personally submits the Packet in this conversation (for
@@ -249,6 +289,10 @@ header line, keep this receipt even if the Packet body does not mention it:
 - Before any evidence-summary identity query, finish writing a complete,
   readable `<root>/result.json`; do not claim canonical result validation
   while that file is missing.
+- When a Packet requires `task_folder_bytes`, finish writing every required
+  task receipt first. Then compute the task-folder total and files over 100 MB;
+  update the required size fields in `result.json` and `final_reply.md`,
+  recalculating until both records match the final files.
 - If the installed skill has `scripts/fable_artifact_controls.py` and the
   Packet permits repository-wide checkpoint and history inventory, run
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
