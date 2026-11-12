@@ -609,6 +609,8 @@ guard_runtime_helper_preservation() {
 readonly APPROVED_OLD_CODEX_LAUNCHER_BLOB='00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
 readonly APPROVED_NEW_CODEX_LAUNCHER_BLOB='c201d6b683d084014add2631a5ef5d7fcd5c8f69'
 readonly APPROVED_NEXT_CODEX_LAUNCHER_BLOB='0851b2fa877cb3f9692eb0ef84b543caa9088ccf'
+readonly APPROVED_PREVIOUS_CODEX_LAUNCHER_BLOB='88734ed8dac16eaacdeb1821ebd5d38de40bc3b7'
+readonly APPROVED_CANONICAL_CODEX_LAUNCHER_BLOB='97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
 readonly APPROVED_CODEX_COMPANION_BLOB='91592132733be6b697bdbef667b97d9065c829c1'
 
 # Accept only the reviewed directed upgrade pairs; independent old/new allowlists
@@ -616,7 +618,8 @@ readonly APPROVED_CODEX_COMPANION_BLOB='91592132733be6b697bdbef667b97d9065c829c1
 is_approved_codex_runtime_pair() {
   local old="$1" new="$2"
   [[ "$old:$new" == "$APPROVED_OLD_CODEX_LAUNCHER_BLOB:$APPROVED_NEW_CODEX_LAUNCHER_BLOB" \
-    || "$old:$new" == "$APPROVED_NEW_CODEX_LAUNCHER_BLOB:$APPROVED_NEXT_CODEX_LAUNCHER_BLOB" ]]
+    || "$old:$new" == "$APPROVED_NEW_CODEX_LAUNCHER_BLOB:$APPROVED_NEXT_CODEX_LAUNCHER_BLOB" \
+    || "$old:$new" == "$APPROVED_PREVIOUS_CODEX_LAUNCHER_BLOB:$APPROVED_CANONICAL_CODEX_LAUNCHER_BLOB" ]]
 }
 
 # Computes Git blob SHA1 hash for a file.

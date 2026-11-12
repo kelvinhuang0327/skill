@@ -13,8 +13,11 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
   APPROVED_OLD_LAUNCHER_BLOB = '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
   APPROVED_NEW_LAUNCHER_BLOB = 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
   APPROVED_NEXT_LAUNCHER_BLOB = '0851b2fa877cb3f9692eb0ef84b543caa9088ccf'
+  APPROVED_R115_OLD_LAUNCHER_BLOB = '88734ed8dac16eaacdeb1821ebd5d38de40bc3b7'
+  APPROVED_R116_NEW_LAUNCHER_BLOB = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
   APPROVED_COMPANION_BLOB = '91592132733be6b697bdbef667b97d9065c829c1'
   APPROVED_NEXT_LAUNCHER_SHA256 = '2e3dc83f1d23953044fb487b40af63c95027c0446a82e385d6987df11c361484'
+  APPROVED_R116_NEW_LAUNCHER_SHA256 = '9f2ebf5522fde5bd504689cf51bbd104697dd3cfd2e12f0f7bae7f5eccb2e966'
   # Last canonical commit whose Codex materialization pins APPROVED_NEXT_LAUNCHER_BLOB.
   APPROVED_NEXT_SOURCE_COMMIT = '4f75a9103010f683c6c8aabd7ed0b81f0dee992d'
 
@@ -459,6 +462,9 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     if blob == APPROVED_NEXT_LAUNCHER_BLOB
       actual_sha256 = Digest::SHA256.hexdigest(bytes)
       raise "New launcher SHA-256 mismatch: #{actual_sha256}" unless actual_sha256 == APPROVED_NEXT_LAUNCHER_SHA256
+    elsif blob == APPROVED_R116_NEW_LAUNCHER_BLOB
+      actual_sha256 = Digest::SHA256.hexdigest(bytes)
+      raise "R116 launcher SHA-256 mismatch: #{actual_sha256}" unless actual_sha256 == APPROVED_R116_NEW_LAUNCHER_SHA256
     end
 
     bytes
@@ -598,6 +604,79 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
     _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
     assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_r115_to_r116_codex_runtime_pair_is_reviewed_and_upgrades_exact_launcher
+    live_dir = File.join(@scratch, 'live_r115_codex')
+    src_dir = File.join(@scratch, 'source_r116_codex')
+    create_live_runtime_skill(live_dir, launcher_blob: APPROVED_R115_OLD_LAUNCHER_BLOB)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_R116_NEW_LAUNCHER_BLOB)
+    live_fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    # Ordinary activation remains fail-closed for this exact reviewed transition.
+    _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'ACTIVATION_RUNTIME_HELPER_MISMATCH'
+    assert_equal live_fingerprint_before, capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', APPROVED_R115_OLD_LAUNCHER_BLOB, APPROVED_R116_NEW_LAUNCHER_BLOB
+    )
+    assert_equal 0, status.exitstatus, "Expected only the reviewed R115-to-R116 pair to upgrade. Stderr: #{stderr}"
+
+    post_launcher = File.join(live_dir, 'scripts/task_checkpoint.rb')
+    post_companion = File.join(live_dir, 'scripts/paused_run_continuation.rb')
+    assert_equal APPROVED_R116_NEW_LAUNCHER_BLOB, git_blob_for_file(post_launcher)
+    assert_equal APPROVED_R116_NEW_LAUNCHER_SHA256, Digest::SHA256.file(post_launcher).hexdigest
+    assert_equal 0755, File.stat(post_launcher).mode & 0777
+    assert_includes File.read(File.join(live_dir, 'SKILL.md')), APPROVED_R116_NEW_LAUNCHER_BLOB
+    assert_equal APPROVED_COMPANION_BLOB, git_blob_for_file(post_companion)
+    assert_equal 0644, File.stat(post_companion).mode & 0777
+    assert_equal File.binread(File.join(src_dir, 'scripts/paused_run_continuation.rb')), File.binread(post_companion)
+
+    _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
+    assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_r116_runtime_pair_rejects_unknown_reversed_and_cross_pairs_before_write
+    live_dir = File.join(@scratch, 'live_r115_codex')
+    src_dir = File.join(@scratch, 'source_r116_codex')
+    create_live_runtime_skill(live_dir, launcher_blob: APPROVED_R115_OLD_LAUNCHER_BLOB)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_R116_NEW_LAUNCHER_BLOB)
+    live_fingerprint_before = capture_tree_fingerprint(live_dir)
+    unapproved_pairs = [
+      ['1111111111111111111111111111111111111111', APPROVED_R116_NEW_LAUNCHER_BLOB],
+      [APPROVED_R115_OLD_LAUNCHER_BLOB, '2222222222222222222222222222222222222222'],
+      [APPROVED_R116_NEW_LAUNCHER_BLOB, APPROVED_R115_OLD_LAUNCHER_BLOB],
+      [APPROVED_OLD_LAUNCHER_BLOB, APPROVED_R116_NEW_LAUNCHER_BLOB]
+    ]
+
+    unapproved_pairs.each do |old_blob, new_blob|
+      _stdout, stderr, status = run_upgrade(src_dir, live_dir, 'codex', old_blob, new_blob)
+      assert_equal 2, status.exitstatus
+      assert_includes stderr, 'runtime pair ('
+      assert_equal live_fingerprint_before, capture_tree_fingerprint(live_dir)
+    end
+  end
+
+  def test_r116_reviewed_pair_rejects_changed_live_or_source_helper_before_write
+    [ :live, :source ].each do |target_kind|
+      live_dir = File.join(@scratch, "live_r116_changed_#{target_kind}")
+      src_dir = File.join(@scratch, "source_r116_changed_#{target_kind}")
+      altered_bytes = "#!/usr/bin/env ruby\n# altered #{target_kind} helper identity\n"
+      create_live_runtime_skill(live_dir, launcher_blob: APPROVED_R115_OLD_LAUNCHER_BLOB,
+                                overrides: target_kind == :live ? { launcher_bytes: altered_bytes } : {})
+      create_new_source_materialization(src_dir, launcher_blob: APPROVED_R116_NEW_LAUNCHER_BLOB,
+                                        overrides: target_kind == :source ? { launcher_bytes: altered_bytes } : {})
+      live_fingerprint_before = capture_tree_fingerprint(live_dir)
+
+      _stdout, stderr, status = run_upgrade(
+        src_dir, live_dir, 'codex', APPROVED_R115_OLD_LAUNCHER_BLOB, APPROVED_R116_NEW_LAUNCHER_BLOB
+      )
+      assert_equal 2, status.exitstatus, "Changed #{target_kind} helper should be rejected. Stderr: #{stderr}"
+      assert_includes stderr, "#{target_kind} launcher blob"
+      assert_equal live_fingerprint_before, capture_tree_fingerprint(live_dir)
+    end
   end
 
   def test_runtime_pair_allowlist_rejects_an_unapproved_cross_pair
