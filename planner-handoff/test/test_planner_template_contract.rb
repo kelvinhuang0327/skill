@@ -215,6 +215,35 @@ class PlannerTemplateContractTest < Minitest::Test
     end
   end
 
+  def test_historical_ranking_guidance_uses_calendar_dates_and_qualifies_portfolio_rates
+    name = 'reference template'
+    guidance = section_between(
+      read_template(name, TEMPLATES.fetch(name), 'H1'),
+      /^### 歷史回測與策略排行封包$/,
+      /^### Worker 結案與專案目標續接$/,
+      "#{name}: H1"
+    )
+
+    assert_match(/曆年.{0,35}日期欄位.{0,50}target_draw_date|target_draw_date.{0,50}曆年/im,
+                 guidance, 'H1 must tie calendar-year grouping to the source date field')
+    assert_match(/target_draw_date/, guidance, 'H1 must name the source date field')
+    assert_match(/target_draw_id.{0,30}(?:開獎)?識別/m, guidance, 'H1 must reserve draw ID for identity')
+    assert_match(/不以 ID 前綴.{0,20}推算年份/m, guidance, 'H1 must reject year inference from draw ID prefixes')
+    assert_match(/(?:計分結果|outcome).{0,35}(?:分母|denominator)|(?:分母|denominator).{0,35}(?:計分結果|outcome)/im,
+                 guidance, 'H1 must define the outcome and denominator')
+    assert_match(/票券數|票數|ticket count/i, guidance, 'H1 must report ticket exposure')
+    assert_match(/總成本|成本.*exposure|cost exposure/i, guidance, 'H1 must report cost exposure')
+    rate_sentence = guidance.split(/[。！？.!?]/).find do |sentence|
+      sentence.match?(/portfolio.*成功率/i) && sentence.match?(/未標準化|unnormalized/i)
+    end
+    refute_nil(rate_sentence, 'H1 must state the unnormalized condition in the portfolio-rate guidance')
+    assert_match(/資料不可得|資料缺失|unavailable/i, rate_sentence.to_s,
+                 'H1 must tie the unnormalized label to unavailable exposure')
+    assert_match(/(?:避免|不得|不應|不能).{0,60}(?:宣稱|作|比較).{0,40}(?:經濟優越|經濟|可比排名|comparable)/im,
+                 rate_sentence.to_s,
+                 'H1 must caveat unnormalized rates against economic or comparable-success claims')
+  end
+
   private
 
   def read_template(name, path, rule)
