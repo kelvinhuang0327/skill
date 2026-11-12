@@ -215,6 +215,69 @@ class PlannerTemplateContractTest < Minitest::Test
     end
   end
 
+  def test_t5_required_verification_does_not_promote_static_review_to_runtime_acceptance
+    name = 'prompt template'
+    prompt = read_template(name, TEMPLATES.fetch(name), 'T5')
+    section = section_between(prompt, /^## 強制驗收標準$/, /^## Worker 必要回覆$/, "#{name}: T5")
+    verification_rules = section.lines.select { |line| line.match?(/^- REQUIRED_VERIFICATION[:：]/) }
+
+    assert_equal(1, verification_rules.length, "#{name}: T5 must contain exactly one REQUIRED_VERIFICATION row")
+    assert_includes(
+      verification_rules.first.to_s,
+      'STATE_CHANGING_IMPLEMENTATION 必須列出最窄 acceptance command(s)',
+      "#{name}: T5 must require a narrow runtime acceptance command"
+    )
+    assert_includes(
+      verification_rules.first.to_s,
+      '`STATICALLY_ACCEPTED_RUNTIME_UNVERIFIED`',
+      "#{name}: T5 must mark runtime checks that were not run"
+    )
+    assert_includes(
+      verification_rules.first.to_s,
+      'static review 不可代替 runtime acceptance PASS',
+      "#{name}: T5 must keep static review separate from runtime acceptance"
+    )
+
+    fields = {
+      'TASK_CLASS' => 'STATE_CHANGING_IMPLEMENTATION',
+      'WORKER_ROUTE' => 'STANDARD',
+      'JUDGE_MODE' => 'NOT_APPLICABLE',
+      'IMPLEMENTATION_DEPTH' => 'NORMAL'
+    }
+    runtime_command = 'ruby -Itest planner-handoff/test/test_planner_template_contract.rb --name /test_t5_required_verification_does_not_promote_static_review_to_runtime_acceptance/'
+    samples = [
+      [
+        'runtime acceptance command',
+        packet_for(fields) + "REQUIRED_VERIFICATION: `#{runtime_command}`\n",
+        runtime_command
+      ],
+      [
+        'runtime not run',
+        packet_for(fields) + "REQUIRED_VERIFICATION: static review PASS; runtime NOT RUN; STATICALLY_ACCEPTED_RUNTIME_UNVERIFIED\n",
+        nil
+      ]
+    ]
+
+    samples.each do |sample_name, packet, expected_command|
+      verification = packet.lines.find { |line| line.start_with?('REQUIRED_VERIFICATION:') }.to_s
+      stdout, stderr, status = run_validator(packet)
+      assert(
+        status.success? && stdout.lines.first&.strip == 'ROUTING_STRUCTURE_PASS' &&
+          stdout.include?('SEMANTIC_LIMITATIONS: This checks explicit routing structure only.') &&
+          !stdout.include?('RUNTIME_ACCEPTANCE_PASS'),
+        "#{sample_name}: explicit_contract.rb must not report routing validation as runtime acceptance; stdout=#{stdout.inspect} stderr=#{stderr.inspect} exit=#{status.exitstatus}"
+      )
+
+      if expected_command
+        assert_includes(verification, expected_command, "#{sample_name}: REQUIRED_VERIFICATION must preserve the exact command")
+      else
+        assert_includes(verification, 'runtime NOT RUN', "#{sample_name}: runtime must remain explicitly unverified")
+        assert_includes(verification, 'STATICALLY_ACCEPTED_RUNTIME_UNVERIFIED', "#{sample_name}: static review must not imply runtime acceptance")
+        refute_match(/runtime acceptance\s*:\s*PASS/i, verification, "#{sample_name}: static review alone cannot be a runtime pass")
+      end
+    end
+  end
+
   private
 
   def read_template(name, path, rule)
