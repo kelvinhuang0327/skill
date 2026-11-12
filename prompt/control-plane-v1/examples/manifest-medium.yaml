@@ -1,0 +1,119 @@
+# Example — MEDIUM / SINGLE_PROMPT / REUSABLE(normal implementation;no DB)
+# status: DRAFT_FOR_OWNER_REVIEW
+# 非 durable file;示範用。PENDING_OWNER_TOKEN 只是 Planner placeholder。
+schema_version: 1
+
+control_plane:
+  version: "1.1.0-draft.1"
+  schema_version: 1
+  source_path: <SHARED_CONTROL_PLANE_PATH>
+
+project_attachment:
+  profile_path: .ai/agent-profile.yaml
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  missing_context_policy: entry_check
+  profile_sha256_or_version: UNKNOWN
+
+task:
+  id: EX-MEDIUM-1
+  name: implement-and-test-example-feature
+  type: feature
+  risk_class: MEDIUM
+  routing_path: FAST
+  source_decision: ""
+  created_by: planner
+  created_at: "2026-07-17T00:00:00+08:00"
+
+goal: Implement one bounded source change and its focused unit test without DB access.
+steps:
+  - Verify the attachment, current HEAD, clean reusable worktree, and task branch.
+  - Modify only the allowlisted source and test files.
+  - Run the focused test and complete the authorized PR lifecycle.
+success_criteria:
+  - The focused test passes at the final current HEAD.
+  - Changed paths equal the allowlist and no DB, deployment, or memory write occurs.
+
+repo:
+  project_path: <REPO_PATH>
+  base_branch: main
+  base_commit: <ORIGIN_MAIN_AT_PLANNING>
+  task_branch: task/example-medium-1
+
+worktree:
+  mode: REUSABLE
+  reattach: false
+  path: <PROJECT_PARENT>/<PROJECT_NAME>-agent
+  pr_ref: ""
+
+scope:
+  allowed_files:
+    - src/example_feature.py
+    - tests/test_example_feature.py
+  protected_paths:
+    - .ai/ai-memory/MEMORY_LOG.md
+  forbidden_subsystems: [DB, data, deployment, registry, memory-write]
+  pins:
+    - {path: .ai/ai-memory/MEMORY_LOG.md, type: invariant}
+    - {path: src/example_feature.py, type: before_after}
+    - {path: tests/test_example_feature.py, type: before_after}
+
+policies:
+  db: none
+  runtime: tmp_only
+  external_side_effects: none
+  external_list: []
+  pr: draft
+  merge: after_ci_and_review
+  cleanup: standard_lifecycle
+  cleanup_reason: ""
+
+tests:
+  - name: focused-unit
+    cmd: "pytest tests/test_example_feature.py -q"
+    required: true
+    side_effects_allowed: tmp_only
+
+memory:
+  read:
+    mode: relevant
+    selectors: ["task_id:EX-MEDIUM-1", "branch:task/example-medium-1", "risk_domain:source_change"]
+    max_entries: 5
+  write:
+    mode: forbidden
+    allowed_path: ""
+    purpose: ""
+    entry_schema: ""
+
+context:
+  live_state_required: true
+  head_binding_required: true
+  stale_evidence_policy: mark_stale
+
+authorization:
+  class: SINGLE_PROMPT
+  token: PENDING_OWNER_TOKEN
+  scope: EX-MEDIUM-1
+  high_risk_reason: ""
+
+review:
+  required: true
+  mode: fixed_head
+  independent: true
+
+evidence:
+  head_sha_binding: true
+  required: [git_status_before_after, changed_path_list, test_output_with_head_sha]
+
+active_task_projection:
+  enabled: true
+  output_path: 00-Plan/roadmap/active_task.md
+  manifest_sha256_required: true
+
+status:
+  worker_final: NOT_RUN
+  review_verdict: NOT_RUN
+  lifecycle_state: S0
