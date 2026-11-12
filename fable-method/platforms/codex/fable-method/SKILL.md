@@ -413,7 +413,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `161dca9922914fe4fe6a6c54a1ad0b6644bf2fbcdf7603812d63966646f93903`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `5f049582c5ca27e6ac7d563ed3727693d08c2b8d96e5341186f7bbaf3d4ef72e`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 
