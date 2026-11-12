@@ -161,6 +161,12 @@ file counts. A single acceptance failure is not a trigger by itself.
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
   differences are report-only.
+- When a task requires no writes, a `dry-run` label or a successful exit
+  alone does not prove a command is read-only. Use a documented read-only
+  observation, or confirm the command has an authoritative no-write contract
+  before treating it as read-only. If target metadata changes and attribution
+  is unclear, keep attribution `UNKNOWN`; do not infer the command caused the
+  change or perform another write to clean it up.
 - When a task requires its final snapshot to prove a checkout's `HEAD`, index,
   or working tree stayed unchanged, reserve that exact checkout from task start
   through the final snapshot. The Owner and every agent must complete any
