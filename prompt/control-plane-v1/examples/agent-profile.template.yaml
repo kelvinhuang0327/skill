@@ -1,0 +1,44 @@
+# <repo>/.ai/agent-profile.yaml — repo-local Project Attachment profile template
+# status: DRAFT_FOR_OWNER_REVIEW
+# compiled_from: control_plane 1.1.0-draft.1(example;非 durable file)
+# 只承載專案身分與額外限制;不得複製或覆寫 Shared Core policy。
+
+project:
+  name: ""                        # project identity
+  canonical_repo: ""              # absolute canonical repo path
+  canonical_branch: "main"
+
+control_plane:
+  source_path: ""                 # absolute Shared Control Plane root
+  version: "1.1.0-draft.1"
+  schema_version: 1
+
+project_attachment:
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  memory_log_path: .ai/ai-memory/MEMORY_LOG.md
+
+risk_domain_overrides: []         # 只可上調 risk,不得下調 Shared Core 分級
+protected_paths: []               # repo-specific invariants
+
+restrictions:
+  db: []                          # 例:[read_only, no_migration, no_backfill]
+  data: []                        # 例:[data_directory_read_only]
+  runtime: []                     # 例:[no_production_runtime, logs_not_source]
+
+test_aliases:
+  focused_unit: ""                # repo-specific command only;不得放寬 side-effect policy
+  smoke: ""
+
+worktree_defaults:                # 僅路徑預設;不得重定義 lifecycle 或 routing
+  reusable_path: ""
+  ephemeral_root: ""
+
+publication_restrictions: []      # repo-specific restrictions;只能增加限制
+
+# 禁止 top-level keys / definitions(出現即無效並記 [Risk]):
+# evidence vocabulary;authorization matrix;routing rules;worktree lifecycle;
+# common final classifications;Memory Contract。這些只引用 AGENT_CORE / ROUTING。

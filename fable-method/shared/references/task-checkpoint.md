@@ -290,6 +290,14 @@ identity is unchanged. If the Packet makes whole-container identity
 authoritative, that identity remains binding. This is not a global rule that
 DB/container identity never matters.
 
+Execution/runtime identity is separate from load-bearing input identity.
+Before resuming persisted computation, require the recorded runtime/source
+identity to match the exact runtime and source bytes that will execute. If
+code bytes differ, preserve the partial run and start a new run under a newly
+computed identity; never override or reuse the old execution version or
+source SHA. If the identity cannot be established or compared, stop before
+continuing.
+
 `EVALUATION_COMPLETE_UNSEALED` is a conditional evidence milestone for an
 expensive evaluation whose main computation completed but sealing/final
 aggregation/closure did not. On takeover, if compatible durable evidence

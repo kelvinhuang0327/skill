@@ -1,0 +1,235 @@
+cases:
+  - name: handoff_attempts_authorization
+    role: handoff
+    capsule: ROLE_CONTRACT
+    find: '- 簽發、填入或暗示 Owner authorization token'
+    replace: '- 可簽發、填入或代轉 Owner authorization token'
+    expected_error: E_ROLE_HANDOFF_AUTHORIZATION_FORBIDDEN
+
+  - name: handoff_attempts_complete_worker_prompt
+    role: handoff
+    capsule: ROLE_CONTRACT
+    find: '- 產生完整 Worker prompt 或 task manifest'
+    replace: '- 產生完整 Worker prompt 並建立 task manifest'
+    expected_error: E_ROLE_HANDOFF_WORKER_RENDER_FORBIDDEN
+
+  - name: ceo_attempts_implementation
+    role: ceo
+    capsule: ROLE_CONTRACT
+    find: '- 實作、merge / push、DB、deployment、registry、cleanup'
+    replace: '- 實作並執行 merge / push、DB、deployment、registry、cleanup'
+    expected_error: E_ROLE_CEO_IMPLEMENTATION_FORBIDDEN
+
+  - name: ceo_attempts_manifest_compilation
+    role: ceo
+    capsule: ROLE_CONTRACT
+    find: '- 產生完整 Worker prompt 或 manifest'
+    replace: '- 產生完整 Worker prompt 並編譯 manifest'
+    expected_error: E_ROLE_CEO_MANIFEST_FORBIDDEN
+
+  - name: cto_attempts_authorization
+    role: cto
+    capsule: AUTH_ESCALATION_MIN
+    find: '- Handoff Reporter / CTO / CEO / Reviewer 不得簽發、填入或代轉 token。'
+    replace: '- CTO 可簽發、填入或代轉 Owner token。'
+    expected_error: E_ROLE_CTO_AUTHORIZATION_FORBIDDEN
+
+  - name: cto_attempts_planner_duties
+    role: cto
+    capsule: ROLE_CONTRACT
+    find: '- 產生完整 Worker prompt 或 manifest'
+    replace: '- 產生完整 Worker prompt 並建立 final manifest'
+    expected_error: E_ROLE_CTO_PLANNER_DUTY_FORBIDDEN
+
+  - name: planner_fabricates_owner_token
+    role: planner
+    capsule: ROLE_CONTRACT
+    find: '- 填入真實 token(只能 `PENDING_OWNER_TOKEN` / `SEPARATE_MESSAGE_REQUIRED`)'
+    replace: '- 填入真實 Owner token `AUTHORIZE_FABRICATED`'
+    expected_error: E_ROLE_PLANNER_FABRICATED_OWNER_TOKEN
+
+  - name: role_diverges_in_evidence_vocabulary
+    role: ceo
+    capsule: EVIDENCE_MIN
+    find: '| `[Confirmed]` | 本輪有直接證據:'
+    replace: '| `[Verified]` | 本輪有直接證據:'
+    expected_error: E_SHARED_EVIDENCE_DIVERGENCE
+
+  - name: role_diverges_in_risk_classification
+    role: cto
+    capsule: AUTH_ESCALATION_MIN
+    find: '**LOW**(無 repo mutation、無 DB、無外部副作用):'
+    replace: '**LOW_OR_HIGH**(無 repo mutation、無 DB、無外部副作用):'
+    expected_error: E_SHARED_RISK_DIVERGENCE
+
+  - name: role_diverges_in_lifecycle_semantics
+    role: planner
+    capsule: WORKTREE_COMPILER
+    find: '- **I1** 無 STANDALONE 授權,永不 force:'
+    replace: '- **I1** 無 STANDALONE 授權也可 force:'
+    expected_error: E_SHARED_LIFECYCLE_DIVERGENCE
+
+  - name: historical_pass_is_treated_as_current
+    role: planner
+    capsule: EVIDENCE_MIN
+    find: '歷史測試結果只能作為背景,不能作為當輪驗證。'
+    replace: '歷史測試結果可直接作為當輪 PASS。'
+    expected_error: E_STALE_HISTORICAL_PASS
+
+  - name: memory_is_treated_as_live_evidence
+    role: ceo
+    capsule: PRECEDENCE_MIN
+    find: 'Memory、handoff 或歷史 report **不得覆蓋 live evidence**。'
+    replace: 'Memory、handoff 或歷史 report **可以覆蓋 live evidence**。'
+    expected_error: E_MEMORY_LIVE_EVIDENCE_SUBSTITUTION
+
+  - name: handoff_memory_missing_confirmed_facts
+    role: handoff
+    capsule: MEMORY_CANDIDATE_MIN
+    find: '`confirmed_facts`'
+    replace: '`confirmed_items`'
+    expected_error: ROLE_HANDOFF_MEMORY_CORE_V1_INCOMPLETE
+
+  - name: handoff_memory_missing_unresolved_risks
+    role: handoff
+    capsule: MEMORY_CANDIDATE_MIN
+    find: '`unresolved_risks`'
+    replace: '`resolved_risks_only`'
+    expected_error: ROLE_HANDOFF_MEMORY_CORE_V1_INCOMPLETE
+
+  - name: handoff_memory_missing_supersession_semantics
+    role: handoff
+    capsule: MEMORY_CANDIDATE_MIN
+    find: '10. 新 memory 不得修改舊事實;修正一律用 append-only superseding entry(新條目 `supersedes: <舊 id>`;舊條目視為 `superseded_by` 標記)。'
+    replace: '10. 新 memory 可原地修改舊事實。'
+    expected_error: ROLE_HANDOFF_MEMORY_CORE_V1_INCOMPLETE
+
+  - name: handoff_memory_write_boundary_missing
+    role: handoff
+    capsule: ROLE_CONTRACT
+    find: '- **寫入 MEMORY_LOG 或任何檔案**(只能提出 candidate entry)'
+    replace: '- **可寫入 MEMORY_LOG 或任何檔案**(直接保存 candidate entry)'
+    expected_error: ROLE_HANDOFF_MEMORY_WRITE_BOUNDARY_MISSING
+
+  - name: planner_p3_manifest_precedence_missing
+    role: planner
+    capsule: WORKER_COMPILER
+    find: '**以 manifest 為準**'
+    replace: '**以 projection 為準**'
+    expected_error: ROLE_PLANNER_ACTIVE_TASK_P3_INCOMPLETE
+
+  - name: planner_p3_reprojection_comparison_missing
+    role: planner
+    capsule: WORKER_COMPILER
+    find: '自 manifest 重新投影 → 與現存 view 逐字 diff'
+    replace: '直接接受現存 view'
+    expected_error: ROLE_PLANNER_ACTIVE_TASK_P3_INCOMPLETE
+
+  - name: planner_p3_generated_banner_missing
+    role: planner
+    capsule: WORKER_COMPILER
+    find: '<!-- AUTO-GENERATED COMPATIBILITY VIEW — DO NOT EDIT -->'
+    replace: '<!-- compatibility view -->'
+    expected_error: ROLE_PLANNER_ACTIVE_TASK_P3_INCOMPLETE
+
+  - name: planner_p3_rewrite_regeneration_missing
+    role: planner
+    capsule: WORKER_COMPILER
+    find: '重寫 view 並記錄事件'
+    replace: '保留 stale view'
+    expected_error: ROLE_PLANNER_ACTIVE_TASK_P3_INCOMPLETE
+
+  - name: planner_p3_dangling_truncated_section
+    role: planner
+    capsule: WORKER_COMPILER
+    find: |-
+      - **P3 Drift detection**:
+        - 檢查點:Planner 每次編譯時;Independent Reviewer 於 review 時。
+        - 方法:自 manifest 重新投影 → 與現存 view 逐字 diff;有差 → `DRIFT [Risk]`,**以 manifest 為準**,重寫 view 並記錄事件。
+        - banner 缺失或 `manifest_sha256` 與 manifest 實際 hash 不符 → 視為被手動編輯 → `DRIFT`。
+    replace: '- **P3 Drift detection**:'
+    expected_error: ROLE_PLANNER_ACTIVE_TASK_P3_INCOMPLETE
+
+  - name: auth_metadata_observation_overclassified_high
+    role: ceo
+    capsule: AUTH_ESCALATION_MIN
+    find: '- metadata-only OBSERVATION catalog 變更 = **MEDIUM**,不是 HIGH。'
+    replace: '- metadata-only OBSERVATION catalog 變更 = **HIGH**,不是 MEDIUM。'
+    expected_error: ROLE_AUTH_METADATA_BOUNDARY_MISSING
+
+  - name: auth_executable_activation_underclassified_medium
+    role: cto
+    capsule: AUTH_ESCALATION_MIN
+    find: '- 只有加入 executable generation registry、ONLINE promotion 或 production activation,才屬 HIGH registry mutation。'
+    replace: '- executable generation registry、ONLINE promotion 或 production activation 只屬 MEDIUM。'
+    expected_error: ROLE_AUTH_EXECUTABLE_ACTIVATION_BOUNDARY_MISSING
+
+  - name: cto_attachment_discovery_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '1. **ATTACHMENT_DISCOVERY**'
+    replace: '1. **ATTACHMENT_LOOKUP_OPTIONAL**'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_project_profile_context_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '.ai/ai-context/PROJECT_PROFILE.md'
+    replace: '.ai/ai-context/PROFILE_OMITTED.md'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_project_context_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '.ai/ai-context/PROJECT_CONTEXT.md'
+    replace: '.ai/ai-context/CONTEXT_OMITTED.md'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_runbook_context_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '.ai/ai-context/RUNBOOK.md'
+    replace: '.ai/ai-context/RUNBOOK_OMITTED.md'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_memory_log_context_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '.ai/ai-memory/MEMORY_LOG.md'
+    replace: '.ai/ai-memory/MEMORY_OMITTED.md'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_optional_agent_profile_missing_from_discovery
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '檢查 `.ai/`、`.ai/agent-profile.yaml` 與四個必要檔案:'
+    replace: '只檢查 `.ai/` 與四個必要檔案:'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_entry_check_downgrade_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: 'ENTRY_CHECK / BOOTSTRAP_READINESS'
+    replace: 'ROUTINE_IMPLEMENTATION'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_repo_audit_nonfabrication_missing
+    role: cto
+    capsule: ROLE_CONTRACT
+    find: 'supplied/tool-observed evidence,不得宣稱 independent repo audit'
+    replace: 'supplied evidence 即可宣稱 independent repo audit'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_version_schema_mismatch_stop_missing
+    role: cto
+    capsule: ATTACHMENT_MIN
+    find: '三者均 **STOP**,不得以其他版本或專案 attachment 充當。'
+    replace: '三者皆可套用其他版本繼續。'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE
+
+  - name: cto_missing_attachment_not_run_downgrade_missing
+    role: cto
+    capsule: ROLE_CONTRACT
+    find: '0A 標 `NOT_RUN`'
+    replace: '0A 預填 `PASS`'
+    expected_error: ROLE_CTO_ATTACHMENT_DISCOVERY_INCOMPLETE

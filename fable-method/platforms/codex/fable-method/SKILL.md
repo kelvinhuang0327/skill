@@ -46,16 +46,13 @@ These are the only default stops.
 
 ## First output and task class
 
-Before any task tool call, emit one routing block. Copy the Packet's values
-when it supplies them. Loading this Skill and reading the Packet or its
-attachment are not task tool calls.
+Emit one routing block; copy the Packet's values when it supplies them. Its
+position relative to loading this Skill, reading the Packet, or reading
+project rules does not matter and is never an incident.
 When the Packet arrives only as an attached or pasted-text file (for example
-a Codex `/goal` attachment), read the complete Task Packet first. If the
-platform requires `get_goal`, call it next; then immediately emit the routing
-block. Do not read `AGENTS.md`, source code, or make any other task tool call
-before that block. After emitting it, read the Packet-named project rules and
-any needed Skill references before acting. That order is expected and is not
-an incident.
+a Codex `/goal` attachment), read the complete Task Packet; if the platform
+requires `get_goal`, call it. Read the Packet-named project rules and any
+needed Skill references before acting.
 
 ```text
 TASK_CLASS: STATE_CHANGING_IMPLEMENTATION | READ_ONLY_COMPLETION_REVIEW | PLANNING_ONLY | PURE_QA
@@ -127,6 +124,10 @@ file counts. A single acceptance failure is not a trigger by itself.
   path that the Packet, the project rules, or this skill names. Any other
   place, such as `/tmp` or a tool's default temporary directory, is out of
   scope; point tools that default there at one of those paths.
+- When the repository or Packet specifies a Python interpreter, use that exact
+  interpreter for every Python command, including one-line helpers and receipt
+  utilities. For disk-space checks, prefer shell `df`; do not invoke system
+  `python` or `python3` as a shortcut.
   Python bytecode counts too: when Python imports or runs code from a
   folder outside your write scope, run it with `-B` or with
   `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` appears there.
@@ -135,6 +136,27 @@ file counts. A single acceptance failure is not a trigger by itself.
   generated path list is non-empty before using it: an empty list must stop
   the command, not widen it to the whole repository. macOS `/bin/bash` is
   3.2 and has no `mapfile` or `readarray`.
+- Before long historical strategy/backfill work maps strategy semantics or
+  starts an expensive replay, resolve each Packet-named source pin (exact
+  commit, blob, or path at revision) against only the permitted repository
+  refs/object database. For Git, verify the exact commit/object and path (for
+  example, `git cat-file -e <commit>^{commit}`,
+  `git cat-file -e <commit>:<path>`, or
+  `git cat-file -e <blob>^{blob}`) and record the resolved commit/path/blob.
+  If the exact source is unavailable, leave that strategy identity unresolved
+  and its source semantics `UNKNOWN`; do not map or replay that identity. A
+  strategy name, ticket count, present-day adapter, or partial golden output
+  cannot substitute for source semantics.
+- When an exact source pin is absent locally, probe a remote only if the
+  Packet explicitly allows remote source lookup and pins one exact commit or
+  blob. Fetch only that object into an isolated disposable bare probe (for
+  Git, `git fetch --no-tags --no-write-fetch-head <allowed-remote>
+  <exact-object>`); do not fetch tags, branches, all refs, or history, and do
+  not change the destination project's refs. Record exact fetch result
+  separately from local presence; keep credential-bearing URLs and command
+  output out of evidence. If that exact fetch is unavailable, leave identity
+  unresolved and source semantics `UNKNOWN`; never use a nearby ref or proxy
+  evidence.
 - Read the exact target before editing. Stop on unexplained changes; do not
   use cwd as authority, overwrite owner work, or reset, restore, stash, or
   clean unrelated state. Unrelated out-of-scope dirt or harmless environment
@@ -264,6 +286,10 @@ header line, keep this receipt even if the Packet body does not mention it:
 - Before any evidence-summary identity query, finish writing a complete,
   readable `<root>/result.json`; do not claim canonical result validation
   while that file is missing.
+- When a Packet requires `task_folder_bytes`, finish writing every required
+  task receipt first. Then compute the task-folder total and files over 100 MB;
+  update the required size fields in `result.json` and `final_reply.md`,
+  recalculating until both records match the final files.
 - If the installed skill has `scripts/fable_artifact_controls.py` and the
   Packet permits repository-wide checkpoint and history inventory, run
   `evidence-summary --repo <repo> --task-id <TASK_ID> --task-evidence-root <root>`
@@ -382,7 +408,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 ## Codex Runtime Materialization
 
-- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `b3a81f904e27598e736e7daeb16bcef9512463d5` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
+- **Source-owned Script:** `fable-method/scripts/task_checkpoint.rb` is pinned to Git blob `97a1c6661e3e111669acde523e2e12b7b2bfe1b2` from commit `67c00cee639835269a4f2cdc313b8c710c7ed9c3`.
 - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `scripts/task_checkpoint.rb` with the manifest-declared executable mode.
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.

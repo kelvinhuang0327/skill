@@ -43,9 +43,9 @@ skills:
       - id: task_checkpoint
         role: launcher
         source: fable-method/scripts/task_checkpoint.rb
-        source_commit: 92d609211d8276f3c804a49eb454813462fcf8d7
-        git_blob: b3a81f904e27598e736e7daeb16bcef9512463d5
-        sha256: 63a185a7ef69f95414c62f365f4526be3c2c8353ea07d5666245b28a180a8359
+        source_commit: 67c00cee639835269a4f2cdc313b8c710c7ed9c3
+        git_blob: 97a1c6661e3e111669acde523e2e12b7b2bfe1b2
+        sha256: 9f2ebf5522fde5bd504689cf51bbd104697dd3cfd2e12f0f7bae7f5eccb2e966
         mode: "100755"
         destination: scripts/task_checkpoint.rb
         purpose: canonical_task_checkpoint_launcher

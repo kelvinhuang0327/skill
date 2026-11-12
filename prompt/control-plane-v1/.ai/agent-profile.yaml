@@ -1,0 +1,56 @@
+# Repo-local Project Attachment profile for control-plane-v1.
+# This file binds project identity and additional restrictions; it does not redefine Shared Core rules.
+
+project:
+  name: control-plane-v1
+  canonical_repo: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+  canonical_branch: main
+  local_only: true
+  status: 1.1.0-draft.1
+
+control_plane:
+  source_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+  version: 1.1.0-draft.1
+  schema_version: 1
+
+project_attachment:
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  memory_log_path: .ai/ai-memory/MEMORY_LOG.md
+
+risk_domain_overrides:
+  - control_plane_policy_changes_require_strategic_review
+  - activation_and_legacy_replacement_require_separate_owner_decision
+
+protected_paths:
+  - AGENT_CORE.md
+  - ROLE_PROFILES.md
+  - ROUTING_AND_LIFECYCLE.md
+  - TASK_MANIFEST.schema.yaml
+  - WORKER_TASK_TEMPLATE.md
+
+restrictions:
+  db: [forbidden]
+  data: [forbidden]
+  runtime: [project_runtime_forbidden]
+  network: [forbidden]
+  git: [remote_creation_forbidden, push_forbidden]
+  activation: [pilot_activation_forbidden, control_plane_activation_forbidden, legacy_replacement_forbidden]
+  memory: [default_write_forbidden_no_continuing_authorization]
+
+test_aliases:
+  full_suite: LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/test_control_plane.rb
+  manifest_lint: LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/control_plane.rb lint pilot1/self-hosted/manifest-low.yaml --project-root /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1 --source-label pilot1/self-hosted/manifest-low.yaml
+
+worktree_defaults:
+  reusable_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1-agent
+  ephemeral_root: ""
+
+publication_restrictions:
+  - remote_creation_forbidden
+  - push_forbidden
+  - github_repository_forbidden
+  - pull_request_forbidden

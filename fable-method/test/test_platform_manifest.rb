@@ -56,9 +56,9 @@ class PlatformManifestTest < Minitest::Test
 
   def test_codex_runtime_assets_and_materialized_bytes
     launcher, companion, fingerprint, artifact_controls = @model.pair('fable-method', 'codex').fetch('runtime_assets')
-    assert_equal '92d609211d8276f3c804a49eb454813462fcf8d7', launcher['source_commit']
-    assert_equal 'b3a81f904e27598e736e7daeb16bcef9512463d5', launcher['git_blob']
-    assert_equal '63a185a7ef69f95414c62f365f4526be3c2c8353ea07d5666245b28a180a8359', launcher['sha256']
+    assert_equal '67c00cee639835269a4f2cdc313b8c710c7ed9c3', launcher['source_commit']
+    assert_equal '97a1c6661e3e111669acde523e2e12b7b2bfe1b2', launcher['git_blob']
+    assert_equal '9f2ebf5522fde5bd504689cf51bbd104697dd3cfd2e12f0f7bae7f5eccb2e966', launcher['sha256']
     assert_equal 'e6f8581cdabe21f3683b8a5d8effb6855d98a041', companion['source_commit']
     assert_equal '91592132733be6b697bdbef667b97d9065c829c1', companion['git_blob']
     assert_equal 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0', companion['sha256']
