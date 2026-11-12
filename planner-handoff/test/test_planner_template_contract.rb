@@ -308,6 +308,32 @@ class PlannerTemplateContractTest < Minitest::Test
                  'H1 must caveat unnormalized rates against economic or comparable-success claims')
   end
 
+  def test_historical_ranking_guidance_uses_chronological_holdout_and_marks_reuse_exploratory
+    name = 'reference template'
+    guidance = section_between(
+      read_template(name, TEMPLATES.fetch(name), 'H2'),
+      /^### 歷史回測與策略排行封包$/,
+      /^### Worker 結案與專案目標續接$/,
+      "#{name}: H2"
+    )
+
+    assert_match(
+      /`target_draw_date`.{0,20}實際日期排序.{0,40}較早.{0,20}(?:開發|選擇).{0,80}較晚.{0,100}不以 draw-id 前綴判斷先後/im,
+      guidance,
+      'H2 must order earlier selection and later draws by actual target dates, not draw ID prefixes'
+    )
+    assert_match(
+      /較晚.{0,40}未參與任何選擇的資料作保留評估.{0,50}rolling-origin 證據/im,
+      guidance,
+      'H2 must require untouched later evaluation or rolling-origin evidence'
+    )
+    assert_match(
+      /若評估期 outcomes 曾影響上述選擇.{0,60}只能標為探索性.{0,40}不得宣稱樣本外確認/im,
+      guidance,
+      'H2 must label evaluation-history reuse for selection exploratory and bar confirmatory claims'
+    )
+  end
+
   private
 
   def read_template(name, path, rule)
