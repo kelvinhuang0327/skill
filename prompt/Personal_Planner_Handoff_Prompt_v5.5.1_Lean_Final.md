@@ -354,7 +354,7 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 ## 強制驗收標準
 - AC1：<觀察對象、固定輸入／版本、通過標準、證據位置>
 - AC2：<另一項必要條件；沒有就刪除>
-- REQUIRED_VERIFICATION：<本任務需要的觀察或檢查方式；已確認存在的命令才填命令；未核實的命令須由 Worker 先在指定範圍內解析，不得猜測>
+- REQUIRED_VERIFICATION：<本任務需要的觀察或檢查方式；STATE_CHANGING_IMPLEMENTATION 必須列出最窄 acceptance command(s)；已確認存在的命令才填命令，未核實的命令須由 Worker 先在指定範圍內解析，不得猜測。runtime checks 若被禁止或未執行，完成狀態須明列 `STATICALLY_ACCEPTED_RUNTIME_UNVERIFIED`；static review 不可代替 runtime acceptance PASS>
 - <重要正確性任務加入邊界案例、容差／RNG 語義、否證標準及證據限制>
 - 所有 changed paths 與實際副作用在授權範圍內；不把 UNKNOWN／NOT RUN 算通過。
 - <發布任務另列 exact PR／target、EXPECTED_HEAD_SHA 及 required postcondition>
