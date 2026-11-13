@@ -35,6 +35,20 @@ class SkillAuthoringIntegrityTest < Minitest::Test
     assert_includes stdout, 'skill=fable-judge'
   end
 
+  def test_cumulative_reports_reconcile_task_step_evidence
+    shared = ROOT.join('fable-method/shared/references/reporting.md')
+    materials = [shared] + %w[claude gemini antigravity codex].map do |platform|
+      ROOT.join("fable-method/platforms/#{platform}/fable-method/references/reporting.md")
+    end
+
+    materials.each do |path|
+      contents = File.read(path)
+      assert_includes contents, 'When task-local step outputs exist, derive cumulative action and no-action'
+      assert_includes contents, 'alone cannot establish whether an action occurred.'
+      assert_includes contents, '`REUSED_EXACT_TREE_EVIDENCE`'
+    end
+  end
+
   def test_cli_unknown_argument
     _, stderr, status = Open3.capture3('ruby', SCRIPT, '--bogus')
     assert_equal 2, status.exitstatus
