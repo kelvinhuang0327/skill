@@ -493,6 +493,11 @@ the only extra descriptor passed by this boundary.
 The foreground CLI owns the execution record with its own PID while it
 supervises the upstream process. Its only new-execution route is:
 
+Run this CLI as an awaited foreground process; do not background or detach
+it. It is the process that persists the terminal capture and completes the
+execution record, and an upstream child can outlive it while retaining the
+task lock if the wrapper is lost.
+
 ```text
 ExecutionRecord.acquire!
 → DurableCommandCapture.run_and_capture(argv, ...)

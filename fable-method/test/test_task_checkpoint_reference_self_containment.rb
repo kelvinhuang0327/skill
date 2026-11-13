@@ -44,6 +44,17 @@ class TaskCheckpointReferenceSelfContainmentTest < Minitest::Test
     end
   end
 
+  def test_protected_cli_stays_attached_to_its_durable_capture_owner
+    reference = File.read(File.join(FABLE_ROOT, 'shared', 'references', 'task-checkpoint.md'), encoding: 'UTF-8')
+
+    assert_contract(/Run this CLI as an awaited foreground process; do not background or detach\s+it\./,
+                    reference, 'the protected CLI must remain attached to its Worker')
+    assert_contract(/persists the terminal capture and completes the\s+execution record/,
+                    reference, 'the foreground CLI owns terminal evidence')
+    assert_contract(/upstream child can outlive it while retaining the\s+task lock/,
+                    reference, 'the handoff must state the wrapper-loss behavior')
+  end
+
   def test_platform_materializations_match_the_canonical_build
     manifest = Fable::PlatformManifest.load(File.join(FABLE_ROOT, 'platforms.yaml'))
     assert manifest.sync(ROOT, 'fable-method', write: false)
