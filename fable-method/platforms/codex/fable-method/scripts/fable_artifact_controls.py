@@ -2245,6 +2245,19 @@ def close_temporary_worktree(
     ):
         raise ControlError("worktree has no active preauthorization for this task and exact path")
 
+    merge_target_ref = authorization.get("merge_target_ref") or base
+    if (
+        not isinstance(merge_target_ref, str)
+        or not merge_target_ref
+        or merge_target_ref.startswith("-")
+        or "\n" in merge_target_ref
+        or "\r" in merge_target_ref
+    ):
+        raise ControlError("worktree preauthorization has an invalid merge target ref")
+    merge_target = git(repo, "rev-parse", "--verify", f"{merge_target_ref}^{{commit}}", check=False)
+    if merge_target.returncode != 0:
+        raise ControlError("worktree preauthorization merge target does not resolve to a commit")
+
     if auto_close_authorized is False:
         raise ControlError("automatic close denied; auto_close_authorized is False")
 
@@ -2266,7 +2279,7 @@ def close_temporary_worktree(
         raise ControlError("automatic close denied; unresolved gates: " + ", ".join(explicit_denials))
 
     allowed_caches = authorization.get("allowed_rebuildable_caches") or []
-    before = _worktree_snapshot(repo, target, base, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
+    before = _worktree_snapshot(repo, target, merge_target_ref, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
     if before[1] != authorization.get("branch"):
         raise ControlError("worktree branch differs from its preauthorized branch")
     _check_execution_claims(repo, target)
@@ -2278,9 +2291,9 @@ def close_temporary_worktree(
     _check_fable_executions(repo, target, task_id)
     _assert_scheduler_unbound(target)
     _check_no_open_files(target)
-    after = _worktree_snapshot(repo, target, base, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
+    after = _worktree_snapshot(repo, target, merge_target_ref, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
     if before[:4] != after[:4]:
-        raise ControlError("worktree or base changed during the safety checks")
+        raise ControlError("worktree or merge target changed during the safety checks")
 
     # Consume the authorization atomically before the destructive operation.
     # A changed or missing marker stops here with the worktree still present.
@@ -2319,6 +2332,7 @@ def close_temporary_worktree(
         "branch": before[1],
         "branch_tip_preserved": branch_tip,
         "base": base,
+        "merge_target_ref": merge_target_ref,
         "merge_type": before[4]["type"],
         "merge_target_commit": before[4]["target_commit"],
         "evidence": evidence,
