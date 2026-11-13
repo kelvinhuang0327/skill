@@ -619,6 +619,59 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
         self.check(entry.get_calls == ["status"], "CASE16 declared entry uses its exact status field")
         print("CASE16: PASS")
 
+    def test_reported_acceptance_case17_blank_separated_ac_list_is_complete(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case17-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            packet = (
+                f"TASK_ID: {TASK_ID}\n\n"
+                "IMPLEMENTATION AND ACCEPTANCE\n"
+                "- AC01\n\n"
+                "- AC02\n"
+            )
+            (root / "packet.md").write_text(packet, encoding="utf-8")
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC02": {
+                    "AC01": {"status": "PASS"},
+                    "AC02": {"status": "PASS"},
+                },
+            })
+
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "REPORTED", "CASE17 separated AC items remain unambiguous")
+            self.check(
+                summary["reported_acceptance"]["reported_passes"] == ["AC01", "AC02"],
+                "CASE17 the complete separated list authorizes both explicit PASS claims",
+            )
+        print("CASE17: PASS")
+
+    def test_reported_acceptance_case18_intervening_prose_rejects_partial_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case18-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            packet = (
+                f"TASK_ID: {TASK_ID}\n\n"
+                "IMPLEMENTATION AND ACCEPTANCE\n"
+                "- AC01\n\n"
+                "This prose makes the remaining AC list ambiguous.\n"
+                "- AC02\n"
+            )
+            (root / "packet.md").write_text(packet, encoding="utf-8")
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC02": {
+                    "AC01": {"status": "PASS"},
+                    "AC02": {"status": "PASS"},
+                },
+            })
+
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE18 ambiguous content is not accepted")
+            self.check(
+                summary["reported_acceptance"]["reported_passes"] == [],
+                "CASE18 ambiguous content yields no partial PASS claims",
+            )
+        print("CASE18: PASS")
+
     def write_process_packet(self, root: Path, headers: str = "") -> bytes:
         content = f"TASK_ID: {TASK_ID}\n{headers}".encode("utf-8")
         (root / "packet.md").write_bytes(content)

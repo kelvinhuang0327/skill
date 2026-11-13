@@ -668,9 +668,12 @@ def _packet_acceptance_ids(packet_text: str | None) -> tuple[str, ...] | None:
     ids: list[str] = []
     for line in lines[headers[0] + 1:]:
         if not line.strip():
-            if ids:
-                break
             continue
+        if re.fullmatch(
+            r"[ \t]*(?:#{1,6}[ \t]+.+|[A-Z][A-Z0-9 /_-]*:?)[ \t]*",
+            line,
+        ):
+            break
         match = re.fullmatch(
             r"[ \t]*(?:[-*]|\d+[.)])[ \t]+(AC\d{2,})(?:[ \t]*:[ \t]*.*)?[ \t]*",
             line,
