@@ -707,7 +707,12 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             self.check(summary["result"]["lifecycle_status"] == "COMPLETED", "PS01 legacy lifecycle value is retained")
             self.check(evidence.get("status") == "EVALUATED", "PS01 process evidence is evaluated")
             self.check(evidence.get("lifecycle_state_check") == "CANONICAL", "PS01 canonical lifecycle is recognized")
-            self.check(evidence.get("packet_header") == {"signal_policy": "ABSENT", "continues_from": "NONE"}, "PS01 packet headers are summarized")
+            self.check(evidence.get("packet_header") == {
+                "signal_policy": "ABSENT",
+                "continues_from": "NONE",
+                "publication_bound": "ABSENT",
+                "judge_mode": "ABSENT",
+            }, "PS01 packet headers are summarized")
             self.check(evidence.get("prior_result_receipts") == 0, "PS01 no prior receipts are counted")
             self.check(evidence.get("signal") == {"status": "ABSENT"}, "PS01 signal is absent")
             self.check(evidence.get("independently_validated") is False, "PS01 process evidence is not independent validation")
@@ -823,6 +828,125 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
                 self.check(summary["result"]["lifecycle_status"] == legacy_value, f"PS08 lifecycle scenario {index} keeps legacy value")
                 self.check(summary.get("process_evidence", {}).get("lifecycle_state_check") == expected, f"PS08 lifecycle scenario {index} is classified")
         print("PS08: PASS")
+
+    def test_process_evidence_requires_write_ledger_for_publication_or_fresh_judge(self) -> None:
+        expected_categories = {
+            "FILES_WRITTEN_DURING_TASK",
+            "FILES_RETAINED_AT_END",
+            "FILES_DELETED_BEFORE_END",
+            "TASK_CREATED_FILES_RETAINED",
+            "TASK_CREATED_FILES_DELETED",
+            "PRE_EXISTING_FILES_RETAINED_UNCHANGED",
+            "PRE_EXISTING_FILES_MODIFIED_AND_RATIFIED",
+            "FILES_MODIFIED_DURING_TASK",
+            "REPOSITORY_FILES_MODIFIED",
+            "TOOLCHAIN_RUNTIME_OUTPUTS_CREATED",
+            "TOOLCHAIN_RUNTIME_OUTPUTS_MODIFIED",
+            "PRE_EXISTING_RUNTIME_OUTPUTS_RETAINED_UNCHANGED",
+            "WORKTREE_MATERIALIZATION_CREATED",
+            "WORKTREE_MATERIALIZATION_UPDATED",
+            "WORKTREE_MATERIALIZATION_REMOVED",
+            "GIT_NETWORK_METADATA_WRITES",
+            "GIT_WORKTREE_METADATA_WRITES",
+            "HARNESS_GIT_METADATA_WRITES",
+        }
+        valid_ledger = {category: [] for category in expected_categories}
+
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ledger-") as temporary:
+            parent = Path(temporary).resolve()
+
+            def summarize(case: str, headers: str, fields: dict[str, Any]) -> dict[str, Any]:
+                root = self.task_root(parent / case)
+                self.write_process_packet(root, headers)
+                self.write_process_result(root, fields)
+                return self.process_evidence(root).get("filesystem_write_ledger", {})
+
+            common_signal = {"process_signal": {"trigger": "HIGH_IMPACT"}}
+            publication_missing = summarize(
+                "publication-missing",
+                "PUBLICATION_BOUND: YES\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {"task_lifecycle_state": "COMPLETED", **common_signal},
+            )
+            self.check(publication_missing.get("status") == "INVALID", "WL01 publication-bound completion rejects a missing ledger")
+            self.check(publication_missing.get("required_by") == ["PUBLICATION_BOUND"], "WL01 requirement source is explicit")
+
+            judge_missing = summarize(
+                "judge-missing",
+                "PUBLICATION_BOUND: NO\nJUDGE_MODE: FRESH_CONTEXT\nSIGNAL_POLICY: ALWAYS\n",
+                {"task_lifecycle_state": "COMPLETED", **common_signal},
+            )
+            self.check(judge_missing.get("status") == "INVALID", "WL02 fresh-judge completion rejects a missing ledger")
+            self.check(judge_missing.get("required_by") == ["JUDGE_MODE:FRESH_CONTEXT"], "WL02 judge requirement source is explicit")
+
+            judge_malformed = summarize(
+                "judge-malformed",
+                "PUBLICATION_BOUND: NO\nJUDGE_MODE: FRESH_CONTEXT\nSIGNAL_POLICY: ALWAYS\n",
+                {
+                    "task_lifecycle_state": "COMPLETED",
+                    **common_signal,
+                    "filesystem_write_ledger": {"FILES_WRITTEN_DURING_TASK": "NONE"},
+                },
+            )
+            self.check(judge_malformed.get("status") == "INVALID", "WL03 fresh-judge completion rejects a malformed ledger")
+            self.check("FILES_WRITTEN_DURING_TASK" in judge_malformed.get("invalid_categories", []), "WL03 malformed category is identified")
+            self.check(bool(judge_malformed.get("missing_categories")), "WL03 omitted mandatory categories are identified")
+
+            publication_malformed = summarize(
+                "publication-malformed",
+                "PUBLICATION_BOUND: YES\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {
+                    "task_lifecycle_state": "COMPLETED",
+                    **common_signal,
+                    "filesystem_write_ledger": {"FILES_WRITTEN_DURING_TASK": [""]},
+                },
+            )
+            self.check(publication_malformed.get("status") == "INVALID", "WL04 publication-bound completion rejects a malformed ledger")
+            self.check("FILES_WRITTEN_DURING_TASK" in publication_malformed.get("invalid_categories", []), "WL04 malformed publication category is identified")
+
+            publication_complete = summarize(
+                "publication-complete",
+                "PUBLICATION_BOUND: YES\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {
+                    "task_lifecycle_state": "COMPLETED",
+                    **common_signal,
+                    "filesystem_write_ledger": valid_ledger,
+                },
+            )
+            self.check(publication_complete.get("status") == "COMPLETE", "WL05 all mandatory categories complete the ledger gate")
+
+            ordinary_no = summarize(
+                "ordinary-no",
+                "PUBLICATION_BOUND: NO\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {"task_lifecycle_state": "COMPLETED", **common_signal},
+            )
+            self.check(ordinary_no.get("status") == "NOT_REQUIRED", "WL06 PUBLICATION_BOUND NO preserves ordinary completion")
+
+            ordinary_absent = summarize(
+                "ordinary-absent",
+                "JUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {"task_lifecycle_state": "COMPLETED", **common_signal},
+            )
+            self.check(ordinary_absent.get("status") == "NOT_REQUIRED", "WL07 absent legacy publication marker preserves ordinary completion")
+
+            publication_ambiguous = summarize(
+                "publication-ambiguous",
+                "PUBLICATION_BOUND: MAYBE\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {"task_lifecycle_state": "COMPLETED", **common_signal},
+            )
+            self.check(publication_ambiguous.get("status") == "UNKNOWN", "WL08 an ambiguous marker is not treated as mandatory publication")
+
+            publication_in_progress = summarize(
+                "publication-in-progress",
+                "PUBLICATION_BOUND: YES\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
+                {"task_lifecycle_state": "IN_PROGRESS", **common_signal},
+            )
+            self.check(publication_in_progress.get("status") == "NOT_DUE", "WL09 an in-progress receipt is not prematurely rejected")
+
+            self.check(
+                set(getattr(HELPER, "FILESYSTEM_WRITE_LEDGER_CATEGORIES", ())) == expected_categories,
+                "WL10 helper schema matches all mandatory reporting categories",
+            )
+        print("WL01-WL10: PASS")
 
     def test_process_evidence_ps09_packet_headers_are_parsed_strictly(self) -> None:
         scenarios = [

@@ -37,6 +37,27 @@ SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 SPACE_OPERATIONS = frozenset({
     "ordinary", "research-worktree", "high-disk-task", "read-only-diagnostic", "authorized-reclaim",
 })
+FILESYSTEM_WRITE_LEDGER_CATEGORIES = (
+    "FILES_WRITTEN_DURING_TASK",
+    "FILES_RETAINED_AT_END",
+    "FILES_DELETED_BEFORE_END",
+    "TASK_CREATED_FILES_RETAINED",
+    "TASK_CREATED_FILES_DELETED",
+    "PRE_EXISTING_FILES_RETAINED_UNCHANGED",
+    "PRE_EXISTING_FILES_MODIFIED_AND_RATIFIED",
+    "FILES_MODIFIED_DURING_TASK",
+    "REPOSITORY_FILES_MODIFIED",
+    "TOOLCHAIN_RUNTIME_OUTPUTS_CREATED",
+    "TOOLCHAIN_RUNTIME_OUTPUTS_MODIFIED",
+    "PRE_EXISTING_RUNTIME_OUTPUTS_RETAINED_UNCHANGED",
+    "WORKTREE_MATERIALIZATION_CREATED",
+    "WORKTREE_MATERIALIZATION_UPDATED",
+    "WORKTREE_MATERIALIZATION_REMOVED",
+    "GIT_NETWORK_METADATA_WRITES",
+    "GIT_WORKTREE_METADATA_WRITES",
+    "HARNESS_GIT_METADATA_WRITES",
+)
+TERMINAL_LIFECYCLE_STATES = frozenset({"COMPLETED", "BLOCKED", "ABORTED"})
 
 
 class ControlError(RuntimeError):
@@ -853,6 +874,91 @@ def _packet_header_value(packet_text: str | None, name: str) -> str:
     return task_id
 
 
+def _packet_enum_header_value(
+    packet_text: str | None,
+    name: str,
+    allowed_values: frozenset[str],
+) -> str:
+    """Read one exact field from the Packet's leading header block."""
+    if packet_text is None:
+        return "ABSENT"
+
+    header_lines: list[str] = []
+    for line in packet_text.splitlines():
+        if not line.strip() or re.match(r"^[ \t]*#{1,6}[ \t]+", line):
+            break
+        header_lines.append(line)
+
+    pattern = re.compile(rf"^[ \t]*{re.escape(name)}:[ \t]*(.*?)[ \t]*$")
+    matches = [match.group(1) for line in header_lines if (match := pattern.fullmatch(line))]
+    if not matches:
+        return "ABSENT"
+    if len(matches) != 1 or matches[0] not in allowed_values:
+        return "MALFORMED"
+    return matches[0]
+
+
+def _filesystem_write_ledger_summary(
+    result_data: Mapping[str, Any],
+    lifecycle: Any,
+    publication_bound: str,
+    judge_mode: str,
+) -> dict[str, Any]:
+    required_by: list[str] = []
+    if publication_bound == "YES":
+        required_by.append("PUBLICATION_BOUND")
+    if judge_mode == "FRESH_CONTEXT":
+        required_by.append("JUDGE_MODE:FRESH_CONTEXT")
+
+    if not required_by:
+        status = "UNKNOWN" if "MALFORMED" in {publication_bound, judge_mode} else "NOT_REQUIRED"
+        return {
+            "status": status,
+            "required_by": [],
+            "missing_categories": [],
+            "invalid_categories": [],
+            "unexpected_categories": [],
+        }
+
+    if lifecycle not in TERMINAL_LIFECYCLE_STATES:
+        return {
+            "status": "NOT_DUE",
+            "required_by": required_by,
+            "missing_categories": [],
+            "invalid_categories": [],
+            "unexpected_categories": [],
+        }
+
+    ledger = result_data.get("filesystem_write_ledger")
+    if not isinstance(ledger, Mapping):
+        return {
+            "status": "INVALID",
+            "required_by": required_by,
+            "missing_categories": list(FILESYSTEM_WRITE_LEDGER_CATEGORIES),
+            "invalid_categories": [],
+            "unexpected_categories": [],
+        }
+
+    expected = set(FILESYSTEM_WRITE_LEDGER_CATEGORIES)
+    actual = set(ledger)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    invalid = sorted(
+        category
+        for category in expected & actual
+        if not isinstance(ledger[category], list)
+        or any(not isinstance(entry, str) or not entry.strip() for entry in ledger[category])
+    )
+    valid = not missing and not unexpected and not invalid
+    return {
+        "status": "COMPLETE" if valid else "INVALID",
+        "required_by": required_by,
+        "missing_categories": missing,
+        "invalid_categories": invalid,
+        "unexpected_categories": unexpected,
+    }
+
+
 def _process_evidence_summary(
     directory_fd: int | None,
     identity_status: str,
@@ -891,6 +997,14 @@ def _process_evidence_summary(
     else:
         lifecycle_check = "NON_CANONICAL"
     signal_policy = _packet_header_value(packet_text, "SIGNAL_POLICY")
+    publication_bound = _packet_enum_header_value(
+        packet_text, "PUBLICATION_BOUND", frozenset({"YES", "NO"})
+    )
+    judge_mode = _packet_enum_header_value(
+        packet_text,
+        "JUDGE_MODE",
+        frozenset({"FRESH_CONTEXT", "SELF_CHECK_ONLY", "NOT_APPLICABLE"}),
+    )
     signal = {"status": "ABSENT"}
     if "process_signal" not in result_data and signal_policy == "ALWAYS":
         signal = {
@@ -913,9 +1027,14 @@ def _process_evidence_summary(
         "packet_header": {
             "signal_policy": signal_policy,
             "continues_from": _packet_header_value(packet_text, "CONTINUES_FROM"),
+            "publication_bound": publication_bound,
+            "judge_mode": judge_mode,
         },
         "prior_result_receipts": receipt_count,
         "signal": signal,
+        "filesystem_write_ledger": _filesystem_write_ledger_summary(
+            result_data, lifecycle, publication_bound, judge_mode,
+        ),
     }
 
 
