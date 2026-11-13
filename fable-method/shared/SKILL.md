@@ -255,6 +255,10 @@ NOT RUN / BLOCKED: <checks not run and why>
 RISKS: <remaining unknowns or caveats>
 ```
 
+When the Task Packet numbers acceptance criteria, final reporting must identify each
+item number and its disposition, or explicitly identify scope/no-write items as
+observed. Do not rely on an unverified aggregate count.
+
 `DEPTH_SOURCE` is `PLANNER_SUPPLIED` when the Packet set the depth, else
 `SKILL_FALLBACK`. Add `ENHANCED_EVIDENCE` for `ENHANCED` work and a `PENDING:`
 line for anything boundary 1 held back. Never claim publication, deployment,

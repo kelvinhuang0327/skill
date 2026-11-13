@@ -25,6 +25,12 @@ class CompletenessCountRuleTest < Minitest::Test
     'If no expected size can be'
   ].freeze
 
+  ACCEPTANCE_REPORTING_RULE = <<~RULE_TEXT.chomp
+    When the Task Packet numbers acceptance criteria, final reporting must identify each
+    item number and its disposition, or explicitly identify scope/no-write items as
+    observed. Do not rely on an unverified aggregate count.
+  RULE_TEXT
+
   def test_expected_and_produced_count_rule_appears_once_in_verification
     SKILLS.each do |relative_path|
       skill = File.read(File.join(ROOT, relative_path))
@@ -44,4 +50,22 @@ class CompletenessCountRuleTest < Minitest::Test
       end
     end
   end
+
+  def test_numbered_acceptance_reporting_rule_covers_report_in_every_materialization
+    expected = ACCEPTANCE_REPORTING_RULE.gsub(/\s+/, ' ')
+    pattern = Regexp.new(Regexp.escape(expected))
+    SKILLS.each do |relative_path|
+      skill = File.read(File.join(ROOT, relative_path))
+      report = skill.index("## Report\n")
+      receipt = skill.index("### Task receipt\n", report || 0)
+
+      refute_nil report, "#{relative_path} is missing ## Report"
+      refute_nil receipt, "#{relative_path} is missing ### Task receipt"
+      assert_operator report, :<, receipt, relative_path
+      section = skill[report...receipt].gsub(/\s+/, ' ')
+      assert_equal 1, section.scan(pattern).length,
+                   "#{relative_path} must state the numbered acceptance reporting rule exactly once"
+    end
+  end
+
 end

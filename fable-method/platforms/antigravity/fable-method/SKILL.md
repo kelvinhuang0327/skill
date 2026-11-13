@@ -72,6 +72,16 @@ IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
 JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 ```
 
+New Task Packets also include the single-line header `PUBLICATION_BOUND: YES | NO`.
+Set it to `YES` when completion depends on a commit, push, pull request, merge,
+or other external publication, and `NO` otherwise. This field declares task
+scope, not permission: `COMMIT_AUTHORIZED`, `PUSH_AUTHORIZED`, or another
+action authorization alone does not make a task publication-bound. Legacy
+Packets may omit the field; omission is not treated as `YES` by the evidence
+helper. A present but malformed `PUBLICATION_BOUND` or `JUDGE_MODE` enum is
+invalid Packet metadata and blocks terminal receipt validation; it is not
+treated as an absent field.
+
 `IMPLEMENTATION_DEPTH` applies only to `STATE_CHANGING_IMPLEMENTATION`.
 `PLANNING_ONLY` and `PURE_QA` change nothing and have no route. Planning and
 pure QA never dispatch a Judge. Use `READ_ONLY_COMPLETION_REVIEW` for
@@ -256,6 +266,10 @@ NOT RUN / BLOCKED: <checks not run and why>
 RISKS: <remaining unknowns or caveats>
 ```
 
+When the Task Packet numbers acceptance criteria, final reporting must identify each
+item number and its disposition, or explicitly identify scope/no-write items as
+observed. Do not rely on an unverified aggregate count.
+
 `DEPTH_SOURCE` is `PLANNER_SUPPLIED` when the Packet set the depth, else
 `SKILL_FALLBACK`. Add `ENHANCED_EVIDENCE` for `ENHANCED` work and a `PENDING:`
 line for anything boundary 1 held back. Never claim publication, deployment,
@@ -289,11 +303,27 @@ header line, keep this receipt even if the Packet body does not mention it:
   `ENV`, `PROJECT`, `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or
   `UNKNOWN`. Omit what was not measured. Repeat the block in the reply as
   `PROCESS_SIGNAL:`.
-- Before showing tool output from a structured receipt, determine whether it
+- For a terminal `task_lifecycle_state`, a Packet with
+  `PUBLICATION_BOUND: YES` or `JUDGE_MODE: FRESH_CONTEXT` must include a
+  top-level `filesystem_write_ledger` object in `result.json`. It contains all
+  18 categories listed in [reporting](references/reporting.md)
+  as arrays of path/effect strings; use an empty array for an empty category.
+  `evidence-summary` reports the ledger as `COMPLETE` only when every category
+  is present and correctly shaped. For these required Packets, require
+  `process_evidence.filesystem_write_ledger.status: COMPLETE` before reporting
+  a terminal outcome. For `IN_PROGRESS`, the ledger is `NOT_DUE`. `NO` or a
+  legacy absent marker does not require a ledger unless
+  `JUDGE_MODE: FRESH_CONTEXT` applies. A malformed publication or Judge enum
+  reports `INVALID` with `invalid_header_fields` and blocks terminal receipt
+  validation.
+- Before parsing or inspecting a structured receipt, define an explicit
+  per-file field allowlist from the Packet. Read structured files only through
+  that allowlist; never enumerate keys, inspect shape/schema, or perform broad
+  field/schema discovery. Before showing tool output, determine whether it
   contains per-run or payload-bearing fields. Never `cat` or dump the full
-  document or rows; parse only an explicit field allowlist and report
-  aggregated counts, statuses, or hashes. If a safe allowlist cannot be
-  established, stop and mark the task `BLOCKED` without reproducing values.
+  document or rows; report aggregated counts, statuses, or hashes. If a safe
+  allowlist cannot be established, stop and mark the task `BLOCKED` without
+  reproducing values.
 - Before any evidence-summary identity query, finish writing a complete,
   readable `<root>/result.json`; do not claim canonical result validation
   while that file is missing.
