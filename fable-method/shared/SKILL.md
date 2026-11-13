@@ -67,7 +67,9 @@ or other external publication, and `NO` otherwise. This field declares task
 scope, not permission: `COMMIT_AUTHORIZED`, `PUSH_AUTHORIZED`, or another
 action authorization alone does not make a task publication-bound. Legacy
 Packets may omit the field; omission is not treated as `YES` by the evidence
-helper.
+helper. A present but malformed `PUBLICATION_BOUND` or `JUDGE_MODE` enum is
+invalid Packet metadata and blocks terminal receipt validation; it is not
+treated as an absent field.
 
 `IMPLEMENTATION_DEPTH` applies only to `STATE_CHANGING_IMPLEMENTATION`.
 `PLANNING_ONLY` and `PURE_QA` change nothing and have no route. Planning and
@@ -296,7 +298,9 @@ header line, keep this receipt even if the Packet body does not mention it:
   `process_evidence.filesystem_write_ledger.status: COMPLETE` before reporting
   a terminal outcome. For `IN_PROGRESS`, the ledger is `NOT_DUE`. `NO` or a
   legacy absent marker does not require a ledger unless
-  `JUDGE_MODE: FRESH_CONTEXT` applies.
+  `JUDGE_MODE: FRESH_CONTEXT` applies. A malformed publication or Judge enum
+  reports `INVALID` with `invalid_header_fields` and blocks terminal receipt
+  validation.
 - Before parsing or inspecting a structured receipt, define an explicit
   per-file field allowlist from the Packet. Read structured files only through
   that allowlist; never enumerate keys, inspect shape/schema, or perform broad

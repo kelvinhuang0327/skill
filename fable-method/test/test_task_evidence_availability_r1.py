@@ -933,7 +933,11 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
                 "PUBLICATION_BOUND: MAYBE\nJUDGE_MODE: NOT_APPLICABLE\nSIGNAL_POLICY: ALWAYS\n",
                 {"task_lifecycle_state": "COMPLETED", **common_signal},
             )
-            self.check(publication_ambiguous.get("status") == "UNKNOWN", "WL08 an ambiguous marker is not treated as mandatory publication")
+            self.check(publication_ambiguous.get("status") == "INVALID", "WL08 a malformed publication marker blocks receipt completion")
+            self.check(
+                publication_ambiguous.get("invalid_header_fields") == ["PUBLICATION_BOUND"],
+                "WL08 the malformed header is identified without treating legacy absence as YES",
+            )
 
             publication_in_progress = summarize(
                 "publication-in-progress",

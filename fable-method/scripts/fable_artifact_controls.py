@@ -910,14 +910,29 @@ def _filesystem_write_ledger_summary(
     if judge_mode == "FRESH_CONTEXT":
         required_by.append("JUDGE_MODE:FRESH_CONTEXT")
 
-    if not required_by:
-        status = "UNKNOWN" if "MALFORMED" in {publication_bound, judge_mode} else "NOT_REQUIRED"
+    invalid_header_fields = []
+    if publication_bound == "MALFORMED":
+        invalid_header_fields.append("PUBLICATION_BOUND")
+    if judge_mode == "MALFORMED":
+        invalid_header_fields.append("JUDGE_MODE")
+    if invalid_header_fields:
         return {
-            "status": status,
+            "status": "INVALID",
+            "required_by": required_by,
+            "missing_categories": [],
+            "invalid_categories": [],
+            "unexpected_categories": [],
+            "invalid_header_fields": invalid_header_fields,
+        }
+
+    if not required_by:
+        return {
+            "status": "NOT_REQUIRED",
             "required_by": [],
             "missing_categories": [],
             "invalid_categories": [],
             "unexpected_categories": [],
+            "invalid_header_fields": [],
         }
 
     if lifecycle not in TERMINAL_LIFECYCLE_STATES:
@@ -927,6 +942,7 @@ def _filesystem_write_ledger_summary(
             "missing_categories": [],
             "invalid_categories": [],
             "unexpected_categories": [],
+            "invalid_header_fields": [],
         }
 
     ledger = result_data.get("filesystem_write_ledger")
@@ -937,6 +953,7 @@ def _filesystem_write_ledger_summary(
             "missing_categories": list(FILESYSTEM_WRITE_LEDGER_CATEGORIES),
             "invalid_categories": [],
             "unexpected_categories": [],
+            "invalid_header_fields": [],
         }
 
     expected = set(FILESYSTEM_WRITE_LEDGER_CATEGORIES)
@@ -956,6 +973,7 @@ def _filesystem_write_ledger_summary(
         "missing_categories": missing,
         "invalid_categories": invalid,
         "unexpected_categories": unexpected,
+        "invalid_header_fields": [],
     }
 
 
