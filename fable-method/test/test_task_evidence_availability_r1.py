@@ -37,10 +37,22 @@ class FocusedTestCase(unittest.TestCase):
         root.mkdir(parents=True)
         return root
 
-    def write_packet(self, root: Path, task_id: str = TASK_ID) -> bytes:
-        content = f"TASK_ID: {task_id}\nTASK_LANE: C\n".encode("utf-8")
+    def write_packet(
+        self,
+        root: Path,
+        task_id: str = TASK_ID,
+        acceptance_ids: list[str] | None = None,
+    ) -> bytes:
+        content = f"TASK_ID: {task_id}\nTASK_LANE: C\n"
+        if acceptance_ids:
+            content += "\nIMPLEMENTATION AND ACCEPTANCE\n"
+            content += "".join(f"- {criterion}\n" for criterion in acceptance_ids)
+        content = content.encode("utf-8")
         (root / "packet.md").write_bytes(content)
         return content
+
+    def acceptance_ids(self, endpoint: int) -> list[str]:
+        return [f"AC{number:02d}" for number in range(1, endpoint + 1)]
 
     def write_result(self, root: Path, result: dict[str, Any] | None = None) -> bytes:
         if result is None:
@@ -62,7 +74,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_case01_matching_packet_and_result_are_identified(self) -> None:
         with tempfile.TemporaryDirectory(prefix="task-evidence-case01-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            packet = self.write_packet(root)
+            packet = self.write_packet(root, acceptance_ids=self.acceptance_ids(15))
             result = self.write_result(root, {
                 "task_id": TASK_ID,
                 "task_local_status": "COMPLETE",
@@ -328,7 +340,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case01_variable_ac12_block(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case01-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(12))
             acceptance = {
                 f"AC{number:02d}": {"status": "PASS" if number in {1, 12} else "FAIL"}
                 for number in range(1, 13)
@@ -343,7 +355,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case02_legacy_ac15_compatibility(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case02-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(15))
             acceptance = {
                 f"AC{number:02d}": {"status": "PASS" if number == 15 else "FAIL"}
                 for number in range(1, 16)
@@ -357,7 +369,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case03_uppercase_ac16_string_entries(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case03-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(16))
             acceptance = {
                 f"AC{number:02d}": ("PASS: verified by worker" if number == 16 else "FAIL: not met")
                 for number in range(1, 17)
@@ -371,7 +383,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case04_block_without_passes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case04-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(12))
             acceptance = {
                 f"AC{number:02d}": {"status": "FAIL", "evidence": "not met"}
                 for number in range(1, 13)
@@ -399,11 +411,11 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case06_conflicting_blocks_are_not_merged(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case06-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(12))
             self.write_result(root, {
                 "task_id": TASK_ID,
                 "AC01_TO_AC12": {"AC01": {"status": "PASS"}},
-                "AC01_TO_AC16": {"AC02": {"status": "PASS"}},
+                "ac01_to_ac12": {"AC02": {"status": "PASS"}},
             })
             summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
             self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE06 conflicting declarations remain UNKNOWN")
@@ -413,7 +425,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case07_mismatched_task_id_is_untrusted(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case07-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(12))
             self.write_result(root, {
                 "task_id": "OTHER_TASK",
                 "AC01_TO_AC12": {"AC01": {"status": "PASS"}},
@@ -428,7 +440,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case08_invalid_and_duplicate_json_are_untrusted(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case08-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(12))
             result_path = root / "result.json"
             result_path.write_text('{"task_id":', encoding="utf-8")
             malformed = HELPER.summarize_task_evidence(str(root), TASK_ID)
@@ -492,7 +504,7 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
     def test_reported_acceptance_case12_repeated_reads_are_stable_and_read_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="reported-acceptance-case12-") as temporary:
             root = self.task_root(Path(temporary).resolve())
-            self.write_packet(root)
+            self.write_packet(root, acceptance_ids=self.acceptance_ids(12))
             self.write_result(root, {
                 "task_id": TASK_ID,
                 "AC01_TO_AC12": {"AC01": {"status": "PASS"}},
@@ -502,9 +514,110 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
             second = HELPER.summarize_task_evidence(str(root), TASK_ID)
             after = {path.name: path.read_bytes() for path in root.iterdir()}
             self.check(first == second, "CASE12 repeated parsing produces identical summaries")
+            self.check(first["reported_acceptance"]["reported_passes"] == ["AC01"], "CASE12 declared PASS remains visible")
             self.check(before == after, "CASE12 source receipt files are unchanged")
             self.check(set(after) == {"packet.md", "result.json"}, "CASE12 parser creates no files")
         print("CASE12: PASS")
+
+    def test_reported_acceptance_case13_ambiguous_packet_allowlist_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case13-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            packet = (
+                f"TASK_ID: {TASK_ID}\n\n"
+                "ACCEPTANCE CRITERIA\n- AC01\n\n"
+                "ACCEPTANCE CRITERIA\n- AC01\n"
+            ).encode("utf-8")
+            (root / "packet.md").write_bytes(packet)
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC01": {"AC01": {"status": "PASS"}},
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE13 ambiguous Packet list is not used")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE13 ambiguous Packet list reports no PASS claims")
+        print("CASE13: PASS")
+
+    def test_reported_acceptance_case14_mismatched_packet_has_no_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case14-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_packet(root, task_id="OTHER_TASK", acceptance_ids=["AC01"])
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC01": {"AC01": {"status": "PASS"}},
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["identity_status"] == "INVALID", "CASE14 mismatched Packet identity is invalid")
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE14 mismatched Packet cannot authorize claims")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE14 mismatched Packet reports no PASS claims")
+        print("CASE14: PASS")
+
+    def test_reported_acceptance_case15_numbered_packet_items_are_not_ac_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="reported-acceptance-case15-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            packet = (
+                f"TASK_ID: {TASK_ID}\n\n"
+                "IMPLEMENTATION AND ACCEPTANCE\n"
+                "1. First criterion\n"
+                "2. Second criterion\n"
+            ).encode("utf-8")
+            (root / "packet.md").write_bytes(packet)
+            self.write_result(root, {
+                "task_id": TASK_ID,
+                "AC01_TO_AC02": {"AC01": {"status": "PASS"}},
+            })
+            summary = HELPER.summarize_task_evidence(str(root), TASK_ID)
+            self.check(summary["reported_acceptance"]["status"] == "UNKNOWN", "CASE15 numbered prose is not an AC allowlist")
+            self.check(summary["reported_acceptance"]["reported_passes"] == [], "CASE15 no explicit AC IDs yields no claims")
+        print("CASE15: PASS")
+
+    def test_reported_acceptance_case16_reads_only_allowlisted_mapping_fields(self) -> None:
+        class GetOnlyMapping(dict[str, Any]):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.get_calls: list[str] = []
+
+            def get(self, key: str, default: Any = None) -> Any:
+                self.get_calls.append(key)
+                return dict.get(self, key, default)
+
+            def __iter__(self):
+                raise AssertionError("mapping iteration is forbidden")
+
+            def items(self):
+                raise AssertionError("mapping items() is forbidden")
+
+            def keys(self):
+                raise AssertionError("mapping keys() is forbidden")
+
+            def __contains__(self, key: object) -> bool:
+                raise AssertionError("mapping membership probes are forbidden")
+
+        entry = GetOnlyMapping({"status": "PASS"})
+        acceptance = GetOnlyMapping({
+            "AC01": entry,
+            "AC02": "FAIL",
+            "AC99": {"status": "PASS"},
+        })
+        receipt = GetOnlyMapping({
+            "ac01_to_ac02": acceptance,
+            "arbitrary_acceptance": {"AC99": {"status": "PASS"}},
+        })
+        packet_ids = HELPER._packet_acceptance_ids(
+            "IMPLEMENTATION AND ACCEPTANCE\n- AC01\n- AC02\n"
+        )
+
+        reported = HELPER._reported_acceptance_passes(receipt, packet_ids)
+        self.check(reported == ["AC01"], "CASE16 only declared allowlisted PASS is reported")
+        self.check(
+            receipt.get_calls == ["ac01_to_ac02", "AC01_TO_AC02"],
+            "CASE16 receipt root receives only exact block lookups",
+        )
+        self.check(
+            acceptance.get_calls == ["AC01", "AC02"],
+            "CASE16 nested block receives only allowlisted AC lookups",
+        )
+        self.check(entry.get_calls == ["status"], "CASE16 declared entry uses its exact status field")
+        print("CASE16: PASS")
 
     def write_process_packet(self, root: Path, headers: str = "") -> bytes:
         content = f"TASK_ID: {TASK_ID}\n{headers}".encode("utf-8")

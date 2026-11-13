@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -647,52 +648,92 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _reported_acceptance_passes(result_data: dict[str, Any]) -> list[str]:
-    """Read PASS claims only from one explicit, structurally valid AC block."""
-    candidates: list[tuple[str, Any, int]] = []
-    for field, value in result_data.items():
-        if not isinstance(field, str):
-            continue
-        match = re.fullmatch(r"(?i:ac01_to_ac)(\d+)", field)
-        if match is None:
-            continue
-        endpoint = int(match.group(1))
-        if endpoint < 1 or match.group(1) != f"{endpoint:02d}":
-            return []
-        candidates.append((field, value, endpoint))
+def _packet_acceptance_ids(packet_text: str | None) -> tuple[str, ...] | None:
+    """Return AC IDs only from one explicit, unambiguous Packet list."""
+    if packet_text is None:
+        return None
 
-    # Multiple declarations can disagree. Do not merge them or select one.
-    if len(candidates) != 1:
+    lines = packet_text.splitlines()
+    headers = [
+        index for index, line in enumerate(lines)
+        if re.fullmatch(
+            r"[ \t]*(?:ACCEPTANCE CRITERIA|IMPLEMENTATION AND ACCEPTANCE)[ \t]*:?[ \t]*",
+            line,
+            re.IGNORECASE,
+        )
+    ]
+    if len(headers) != 1:
+        return None
+
+    ids: list[str] = []
+    for line in lines[headers[0] + 1:]:
+        if not line.strip():
+            if ids:
+                break
+            continue
+        match = re.fullmatch(
+            r"[ \t]*(?:[-*]|\d+[.)])[ \t]+(AC\d{2,})(?:[ \t]*:[ \t]*.*)?[ \t]*",
+            line,
+        )
+        if match is None:
+            return None
+        criterion = match.group(1)
+        number = int(criterion[2:])
+        if number < 1 or criterion != f"AC{number:02d}" or criterion in ids:
+            return None
+        ids.append(criterion)
+
+    if not ids:
+        return None
+    return tuple(sorted(ids, key=lambda criterion: int(criterion[2:])))
+
+
+_MISSING_ACCEPTANCE_FIELD = object()
+
+
+def _reported_acceptance_passes(
+    result_data: Mapping[str, Any],
+    allowed_ac_ids: tuple[str, ...] | None,
+) -> list[str]:
+    """Read worker PASS claims through exact Packet-allowlisted lookups only."""
+    if not allowed_ac_ids:
         return []
 
-    _, acceptance, endpoint = candidates[0]
-    if not isinstance(acceptance, dict) or not acceptance:
+    endpoint = max(int(criterion[2:]) for criterion in allowed_ac_ids)
+    lower_field = f"ac01_to_ac{endpoint:02d}"
+    upper_field = f"AC01_TO_AC{endpoint:02d}"
+    lower_acceptance = result_data.get(lower_field, _MISSING_ACCEPTANCE_FIELD)
+    upper_acceptance = result_data.get(upper_field, _MISSING_ACCEPTANCE_FIELD)
+    if (
+        lower_acceptance is not _MISSING_ACCEPTANCE_FIELD
+        and upper_acceptance is not _MISSING_ACCEPTANCE_FIELD
+    ):
+        return []
+
+    acceptance = (
+        lower_acceptance
+        if lower_acceptance is not _MISSING_ACCEPTANCE_FIELD
+        else upper_acceptance
+    )
+    if acceptance is _MISSING_ACCEPTANCE_FIELD or not isinstance(acceptance, Mapping):
         return []
 
     reported_passes: list[str] = []
-    seen_ac = False
-    for field, value in acceptance.items():
-        if not isinstance(field, str):
-            return []
-        match = re.fullmatch(r"AC(\d+)", field)
-        if match is None:
-            return []
-        number = int(match.group(1))
-        if not 1 <= number <= endpoint or field != f"AC{number:02d}":
-            return []
-        if not isinstance(value, (dict, str)):
-            return []
-        seen_ac = True
-
-        if isinstance(value, dict):
+    for criterion in allowed_ac_ids:
+        value = acceptance.get(criterion, _MISSING_ACCEPTANCE_FIELD)
+        if value is _MISSING_ACCEPTANCE_FIELD:
+            continue
+        if isinstance(value, Mapping):
             is_pass = value.get("status") == "PASS"
-        else:
+        elif isinstance(value, str):
             declaration = value.strip()
             is_pass = declaration == "PASS" or declaration.startswith("PASS:")
+        else:
+            return []
         if is_pass:
-            reported_passes.append(field)
+            reported_passes.append(criterion)
 
-    return sorted(reported_passes) if seen_ac else []
+    return reported_passes
 
 
 def _process_signal_invalid_reasons(signal: Any) -> list[str]:
@@ -916,6 +957,8 @@ def summarize_task_evidence(
                 packet["status"] = "INVALID"
                 packet["parse_status"] = "INVALID_TASK_ID"
 
+        packet_ac_ids = _packet_acceptance_ids(packet_text)
+
         result_data: dict[str, Any] | None = None
         if result_bytes is not None:
             try:
@@ -969,8 +1012,12 @@ def summarize_task_evidence(
             )
 
         reported_ac_passes: list[str] = []
-        if result_data is not None and result["status"] == "PRESENT":
-            reported_ac_passes = _reported_acceptance_passes(result_data)
+        if (
+            result_data is not None
+            and result["status"] == "PRESENT"
+            and identity_status == "MATCH"
+        ):
+            reported_ac_passes = _reported_acceptance_passes(result_data, packet_ac_ids)
 
         summary = {
             "task_id": expected_task_id,
