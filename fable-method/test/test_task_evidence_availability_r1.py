@@ -952,6 +952,25 @@ class TaskEvidenceAvailabilityTest(FocusedTestCase):
                 self.check(bool(signal.get("invalid_reasons")), f"PS15 non-object variant {index} has a reason")
         print("PS15: PASS")
 
+    def test_process_evidence_ps16_always_policy_requires_signal(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="process-evidence-ps16-") as temporary:
+            root = self.task_root(Path(temporary).resolve())
+            self.write_process_packet(root, "SIGNAL_POLICY: ALWAYS\n")
+            self.write_process_result(root, {"task_lifecycle_state": "COMPLETED"})
+
+            evidence = self.process_evidence(root)
+            signal = evidence.get("signal", {})
+            self.check(
+                evidence.get("packet_header", {}).get("signal_policy") == "ALWAYS",
+                "PS16 ALWAYS policy is recognized",
+            )
+            self.check(signal.get("status") == "INVALID", "PS16 missing ALWAYS signal is not accepted")
+            self.check(
+                "process_signal: required by SIGNAL_POLICY ALWAYS" in signal.get("invalid_reasons", []),
+                "PS16 missing required signal has an actionable reason",
+            )
+        print("PS16: PASS")
+
     def test_process_evidence_nl01_next_line_task_id_matches(self) -> None:
         with tempfile.TemporaryDirectory(prefix="process-evidence-nl01-") as temporary:
             root = self.task_root(Path(temporary).resolve())

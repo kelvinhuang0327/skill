@@ -890,8 +890,14 @@ def _process_evidence_summary(
         lifecycle_check = "CANONICAL"
     else:
         lifecycle_check = "NON_CANONICAL"
+    signal_policy = _packet_header_value(packet_text, "SIGNAL_POLICY")
     signal = {"status": "ABSENT"}
-    if "process_signal" in result_data:
+    if "process_signal" not in result_data and signal_policy == "ALWAYS":
+        signal = {
+            "status": "INVALID",
+            "invalid_reasons": ["process_signal: required by SIGNAL_POLICY ALWAYS"],
+        }
+    elif "process_signal" in result_data:
         process_signal = result_data["process_signal"]
         invalid_reasons = _process_signal_invalid_reasons(process_signal)
         signal = (
@@ -905,7 +911,7 @@ def _process_evidence_summary(
         "independently_validated": False,
         "lifecycle_state_check": lifecycle_check,
         "packet_header": {
-            "signal_policy": _packet_header_value(packet_text, "SIGNAL_POLICY"),
+            "signal_policy": signal_policy,
             "continues_from": _packet_header_value(packet_text, "CONTINUES_FROM"),
         },
         "prior_result_receipts": receipt_count,
