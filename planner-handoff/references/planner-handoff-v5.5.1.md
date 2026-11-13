@@ -335,7 +335,7 @@ MISSING_ITEMS: <尚需完成的條件；沒有填 NONE>
 
 ## 範圍與授權
 ALLOWED_READS: <指定來源或有界查找範圍；不可省略。須涵蓋本任務必要規則與輸入，以及步驟與驗收必然需要的讀取（例：要比對前後狀態的 checkout 的 Git 狀態、要修改或檢查的原始碼 repo、PROJECT_RULES_REQUIRED 指定的規則檔）>
-ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。須涵蓋驗收與指定機制必然產生的附帶寫入（例：會檢查被改動文字或行為的既有測試、共用資源的鎖與執行紀錄、指定工具的輸出位置），且禁止事項不得排除 AC 需要修改的目標；列不出 exact path 就寫有界範圍。PERSISTENT_EVIDENCE_ROOT 內的 packet.md、result.json、result.before_<N>.json 與 final_reply.md 收據另行允許，Owner 指定只回覆對話時除外>
+ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。須涵蓋驗收與指定機制必然產生的附帶寫入（例：會檢查被改動文字或行為的既有測試、共用資源的鎖與執行紀錄、指定工具的輸出位置），且禁止事項不得排除 AC 需要修改的目標；列不出 exact path 就寫有界範圍。依本 Packet 實際宣告的 PERSISTENT_EVIDENCE_ROOT 絕對路徑，必須將 packet.md、result.json 與 final_reply.md 展開為該根目錄下的完整可寫路徑並明列於本 ALLOWED_WRITES 欄；續接時適用的 result.before_<N>.json 也以完整路徑列入本欄。不得只註明「另行允許」來取代明列；Owner 指定只回覆對話時除外>
 RUNTIME_OUTPUT_ALLOWLIST: <真正適用的輸出根目錄；唯讀填 TRANSCRIPT_ONLY>
 PRESERVE: <既有 worktree、dirty／untracked 修改及必要產物>
 OWNER_AUTHORIZATION_EVIDENCE: <Worker 能取得的適用人類指示與 exact action／target；引用內容須放在本區塊內，不以「Owner 之前說過」取代，也不把 Planner 的授權句當成證據>

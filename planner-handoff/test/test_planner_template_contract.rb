@@ -123,6 +123,28 @@ class PlannerTemplateContractTest < Minitest::Test
       )
       assert_equal(1, writes.length, "#{name}: T2 §9 must contain exactly one ALLOWED_WRITES row")
       assert_includes(writes.first.to_s, '附帶寫入', "#{name}: T2 ALLOWED_WRITES must cover incidental writes")
+      assert_includes(
+        writes.first.to_s,
+        '依本 Packet 實際宣告的 PERSISTENT_EVIDENCE_ROOT 絕對路徑',
+        "#{name}: T2 ALLOWED_WRITES must use the packet's declared evidence root"
+      )
+      assert_includes(
+        writes.first.to_s,
+        '必須將 packet.md、result.json 與 final_reply.md 展開為該根目錄下的完整可寫路徑並明列於本 ALLOWED_WRITES 欄',
+        "#{name}: T2 receipt paths must be explicitly listed in ALLOWED_WRITES"
+      )
+      %w[packet.md result.json final_reply.md].each do |receipt|
+        assert_includes(
+          writes.first.to_s,
+          receipt,
+          "#{name}: T2 ALLOWED_WRITES must include the #{receipt} receipt"
+        )
+      end
+      assert_includes(
+        writes.first.to_s,
+        '不得只註明「另行允許」',
+        "#{name}: T2 ALLOWED_WRITES must not replace explicit receipt paths with a separate allowance"
+      )
     end
   end
 
