@@ -286,6 +286,8 @@ Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜R
 
 填寫 `PUBLICATION_BOUND: YES | NO`：任務完成依賴 commit、push、PR、merge 或其他外部發布時填 YES，否則填 NO。這是任務範圍標記；單有 `COMMIT_AUTHORIZED`、`PUSH_AUTHORIZED` 或其他動作授權不代表 YES。
 
+派工說明放在程式碼區塊外，不納入 Packet；程式碼區塊內的 Packet 正文必須從 `TASK_ID:` 開始。
+
 區塊外標題：`【模型等級｜約 <預估執行時間>｜資源 <高／中／低>】Agent A — 具體任務名稱`（例：`【強模型｜約 20–40 分鐘｜資源 低】Agent A — 模板規則修正`）
 
 ```text

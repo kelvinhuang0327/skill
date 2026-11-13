@@ -109,6 +109,28 @@ class PlannerTemplateContractTest < Minitest::Test
     )
   end
 
+  def test_t1_packet_body_starts_at_task_id_and_dispatch_notes_stay_outside
+    TEMPLATES.each do |name, path|
+      section = section_between(
+        read_template(name, path, 'T1 packet boundary'),
+        /^## 9\b/,
+        /^## 10\b/,
+        "#{name}: T1 packet boundary"
+      )
+      packet_fence = section.match(/^```text\n(?<packet>.*?)^```/m)
+
+      refute_nil(packet_fence, "#{name}: T1 must contain the §9 packet block")
+      next unless packet_fence
+
+      assert_includes(
+        section[0...packet_fence.begin(0)],
+        '派工說明放在程式碼區塊外，不納入 Packet；程式碼區塊內的 Packet 正文必須從 `TASK_ID:` 開始。',
+        "#{name}: T1 dispatch notes must stay outside the packet"
+      )
+      assert_match(/\ATASK_ID:/, packet_fence[:packet], "#{name}: T1 packet body must begin with TASK_ID:")
+    end
+  end
+
   def test_t2_allowed_scope_rules_are_present_once_inside_section_9
     TEMPLATES.each do |name, path|
       section = section_between(read_template(name, path, 'T2'), /^## 9\b/, /^## 10\b/, "#{name}: T2")
