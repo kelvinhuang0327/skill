@@ -29,6 +29,7 @@ class PlannerTemplateContractTest < Minitest::Test
     WORKER_ROUTE
     JUDGE_MODE
     IMPLEMENTATION_DEPTH
+    PUBLICATION_BOUND
     IMPLEMENTATION_DEPTH_REASON
     SIGNAL_POLICY
     CONTINUES_FROM
@@ -163,6 +164,35 @@ class PlannerTemplateContractTest < Minitest::Test
         positions.compact.sort,
         positions.compact,
         "#{name}: T3 §9 fields must be ordered #{PACKET_FIELD_ORDER.join(', ')}"
+      )
+    end
+  end
+
+  def test_t3_publication_bound_header_distinguishes_scope_from_authorization
+    TEMPLATES.each do |name, path|
+      section = section_between(
+        read_template(name, path, 'T3 publication bound'),
+        /^## 9\b/,
+        /^## 10\b/,
+        "#{name}: T3 publication bound"
+      )
+      rows = section.lines.select { |line| line.match?(/^PUBLICATION_BOUND:/) }
+
+      assert_equal(1, rows.length, "#{name}: T3 publication bound must appear exactly once in §9")
+      assert_equal(
+        'PUBLICATION_BOUND: <YES | NO>',
+        rows.first&.strip,
+        "#{name}: T3 publication bound must expose the two marker values"
+      )
+      assert_includes(
+        section,
+        '任務完成依賴 commit、push、PR、merge 或其他外部發布時填 YES，否則填 NO',
+        "#{name}: T3 publication bound must identify when YES and NO apply"
+      )
+      assert_includes(
+        section,
+        '單有 `COMMIT_AUTHORIZED`、`PUSH_AUTHORIZED` 或其他動作授權不代表 YES',
+        "#{name}: T3 publication bound must distinguish action authorization from publication scope"
       )
     end
   end
@@ -383,6 +413,8 @@ class PlannerTemplateContractTest < Minitest::Test
         lines << "#{field}: #{fields.fetch(field)}"
       elsif field == 'IMPLEMENTATION_DEPTH_REASON' && fields.key?('IMPLEMENTATION_DEPTH')
         lines << 'IMPLEMENTATION_DEPTH_REASON: test case'
+      elsif field == 'PUBLICATION_BOUND'
+        lines << 'PUBLICATION_BOUND: NO'
       elsif field == 'SIGNAL_POLICY'
         lines << 'SIGNAL_POLICY: ALWAYS'
       elsif field == 'CONTINUES_FROM'

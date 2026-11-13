@@ -284,6 +284,8 @@ Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜R
 
 以下是供 Planner 填寫的骨架，**不是已授權、可立即執行的 Packet**。生成真正任務時，所有必要值必須已解析；§1 明確允許的 Worker 環境前置解析除外。可選欄位不適用就刪除。`PENDING` 的必要授權或未就緒上游輸入只能回報缺口，不能發 ready-to-run Prompt。Planner 不預填未來執行結果，也不把整份 Planner 文件或其 skill 的讀取當成 Worker 前置條件。
 
+填寫 `PUBLICATION_BOUND: YES | NO`：任務完成依賴 commit、push、PR、merge 或其他外部發布時填 YES，否則填 NO。這是任務範圍標記；單有 `COMMIT_AUTHORIZED`、`PUSH_AUTHORIZED` 或其他動作授權不代表 YES。
+
 區塊外標題：`【模型等級｜約 <預估執行時間>｜資源 <高／中／低>】Agent A — 具體任務名稱`（例：`【強模型｜約 20–40 分鐘｜資源 低】Agent A — 模板規則修正`）
 
 ```text
@@ -302,6 +304,7 @@ TASK_CLASS: <canonical value>
 WORKER_ROUTE: <canonical value>
 JUDGE_MODE: <canonical value>
 IMPLEMENTATION_DEPTH: <NORMAL | ENHANCED；僅實作任務填寫，證據不足時省略並交由 Fable fallback>
+PUBLICATION_BOUND: <YES | NO>
 IMPLEMENTATION_DEPTH_REASON: <一句具體判斷理由；若深度省略，說明為何交由 Fable 判斷；非實作任務省略>
 SIGNAL_POLICY: ALWAYS | ON_INCIDENT（Planner 填；高難度、研究、關鍵正確性或 CONTINUES_FROM 非 NONE 時 ALWAYS，其他 ON_INCIDENT）
 CONTINUES_FROM: <NONE | 前一 TASK_ID><空白><其收據路徑>（Planner 填、Worker 不改；前任務 BLOCKED、ABORTED 或驗收未過而重派必填，不論沿用原 TASK_ID 或新 TASK_ID；成功後新研究或全新任務填 NONE）
