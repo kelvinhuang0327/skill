@@ -278,11 +278,14 @@ header line, keep this receipt even if the Packet body does not mention it:
   `ENV`, `PROJECT`, `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or
   `UNKNOWN`. Omit what was not measured. Repeat the block in the reply as
   `PROCESS_SIGNAL:`.
-- Before showing tool output from a structured receipt, determine whether it
-  contains per-run or payload-bearing fields. Never `cat` or dump the full
-  document or rows; parse only an explicit field allowlist and report
-  aggregated counts, statuses, or hashes. If a safe allowlist cannot be
-  established, stop and mark the task `BLOCKED` without reproducing values.
+- Before inspecting or showing tool output from a structured receipt,
+  determine whether it contains per-run or payload-bearing fields. Identify
+  the exact fields required for the current verification and parse only those
+  through an explicit allowlist of required fields. Never print or reproduce
+  the whole receipt, including a full `result.json`, to verify a task. Report
+  only allowlisted fields or aggregated counts, statuses, or hashes. If no
+  safe allowlist can be established, stop and mark the task `BLOCKED` without
+  reproducing values.
 - Before any evidence-summary identity query, finish writing a complete,
   readable `<root>/result.json`; do not claim canonical result validation
   while that file is missing.

@@ -30,7 +30,12 @@ class TaskReceiptRuleTest < Minitest::Test
     '`attempt`',
     '`/goal `',
     'is not an incident',
-    'evidence-summary'
+    'evidence-summary',
+    'exact fields required for the current verification',
+    'explicit allowlist of required fields',
+    'Never print or reproduce',
+    'whole receipt, including a full `result.json`',
+    'to verify a task.'
   ].freeze
 
   def test_task_receipt_rule_is_present_between_report_and_packet_triggers
@@ -49,7 +54,7 @@ class TaskReceiptRuleTest < Minitest::Test
       assert_equal receipt, skill.rindex("### Task receipt\n"), relative_path
 
       REQUIRED_TEXT.each do |text|
-        assert_includes skill, text, "#{relative_path} is missing #{text.inspect}"
+        assert skill.include?(text), "#{relative_path} is missing #{text.inspect}"
       end
     end
   end
