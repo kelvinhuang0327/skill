@@ -162,6 +162,42 @@ class PlannerTemplateContractTest < Minitest::Test
     end
   end
 
+  def test_t8_external_workspace_packets_require_resolved_creation_path_and_cleanup_authority
+    TEMPLATES.each do |name, path|
+      prompt = read_template(name, path, 'T8')
+      section = section_between(prompt, /^## 3\b/, /^## 4\b/, "#{name}: T8 §3")
+      packet = section_between(prompt, /^## 9\b/, /^## 10\b/, "#{name}: T8 §9")
+
+      %w[CREATE_EXTERNAL_WORKSPACE EXACT_ABSOLUTE_PATH CLEANUP_DISPOSITION].each do |field|
+        rows = packet.lines.select { |line| line.start_with?("#{field}:") }
+        assert_equal(1, rows.length, "#{name}: T8 §9 must contain #{field} exactly once")
+        assert_includes(section, "`#{field}`", "#{name}: T8 §3 must require #{field} for workspace decisions")
+      end
+
+      create_row = packet.lines.find { |line| line.start_with?('CREATE_EXTERNAL_WORKSPACE:') }.to_s
+      path_row = packet.lines.find { |line| line.start_with?('EXACT_ABSOLUTE_PATH:') }.to_s
+      cleanup_row = packet.lines.find { |line| line.start_with?('CLEANUP_DISPOSITION:') }.to_s
+      assert_includes(create_row, 'YES | NO', "#{name}: T8 creation field must resolve to YES or NO")
+      assert_includes(create_row, '每份可執行 Packet 必填', "#{name}: T8 creation decision must not be omitted")
+      assert_includes(path_row, '完整絕對路徑', "#{name}: T8 external workspace needs an exact absolute path")
+      assert_includes(path_row, 'NO 時填 NONE', "#{name}: T8 no-creation case must explicitly resolve the path field")
+      %w[RETAIN ARCHIVE REMOVE].each do |disposition|
+        assert_includes(cleanup_row, disposition, "#{name}: T8 cleanup field must allow #{disposition}")
+      end
+      assert_includes(cleanup_row, '決策時點', "#{name}: T8 cleanup disposition must name its decision point")
+      assert_includes(cleanup_row, 'OWNER_AUTHORIZATION_EVIDENCE', "#{name}: T8 cleanup disposition must cite Owner authority")
+      assert_includes(cleanup_row, 'NO 時填 NONE', "#{name}: T8 no-creation case must explicitly resolve cleanup")
+
+      assert_includes(section, '三個欄位任一缺漏', "#{name}: T8 missing workspace fields must block readiness")
+      assert_includes(section, '`NOT_READY`', "#{name}: T8 incomplete workspace decisions must be NOT_READY")
+      assert_includes(section, '`PENDING`', "#{name}: T8 pending workspace values must block readiness")
+      assert_includes(section, '路徑必須是已解析的絕對路徑', "#{name}: T8 unresolved/non-absolute paths must block readiness")
+      assert_includes(section, 'disposition 的決策時點及 Owner 指示也必須解析', "#{name}: T8 unresolved cleanup authority must block readiness")
+      assert_includes(section, 'CREATE_EXTERNAL_WORKSPACE: YES', "#{name}: T8 external creation must require YES")
+      assert_includes(section, '若填 `NO`', "#{name}: T8 no-creation case must be explicit")
+    end
+  end
+
   def test_t3_packet_fields_appear_once_in_canonical_order
     TEMPLATES.each do |name, path|
       section = section_between(read_template(name, path, 'T3'), /^## 9\b/, /^## 10\b/, "#{name}: T3")

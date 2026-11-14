@@ -106,7 +106,8 @@ When ranking historical strategy results, compare only groups with the same lott
 - Git 任務提供 source authority、已觀察 base HEAD／tree、branch 與 worktree。非 Git 任務提供確切 artifact／工作根目錄，不強造 Git 身份。
 - **SHA-256 固定值**：可執行 Worker Packet 含 SHA-256 時，值必須是長度恰為 64 個十六進位字元的字串；65 字元值不合格。若來源值已存在於本次可讀的可信輸出，直接依該來源逐字核對並複製，不依記憶重新輸入；若具備實際來源檔案的讀取能力，仍依既有來源身份規則核對，格式正確不代表身份已吻合。格式不符或已知來源身份不符時，候選保持 `NOT_READY`，不得把該值放入 `READY` Packet。此格式要求只套用於明確標示為 SHA-256 的身份；Git blob 等其他雜湊身份仍依各自原有格式與定義處理。
 - 保存 scope 外的 dirty／untracked 檔案。重疊寫入的所有權不清或有 active writer 才構成阻塞；無關 dirty 狀態不是停止整個任務的理由。
-- 優先重用已授權的既有 worktree。不擅自 reset、restore、stash、clean、force、刪除或另建 workspace。新工作根目錄需要 exact path 與 disposition。
+- 優先重用已授權的既有 worktree。不擅自 reset、restore、stash、clean、force、刪除或另建 workspace。每份可執行 Packet 都必須明確填寫 `CREATE_EXTERNAL_WORKSPACE`、`EXACT_ABSOLUTE_PATH` 與 `CLEANUP_DISPOSITION`：若沿用既有工作區或不建立新工作區，填 `NO`、`NONE`、`NONE`；若要在目前 repo/worktree 外新建 Git worktree 或 sibling 工作根目錄，填 `YES`、完整絕對路徑，以及 `RETAIN`、`ARCHIVE` 或 `REMOVE` 的 disposition。`YES` 必須有 Owner 對精確建立操作與目標路徑的授權；disposition 必須列明決策時點，並引用 `OWNER_AUTHORIZATION_EVIDENCE` 中對應的 Owner 指示；`ARCHIVE` 另列精確絕對目的路徑。`REMOVE` 仍須遵守既有 Fable cleanup gate，這些欄位不自行授予清理權限。
+- 任何可執行 Packet 若三個欄位任一缺漏或仍是 placeholder／`UNKNOWN`／`PENDING`，候選標為 `NOT_READY`，不得產生可執行 Packet。若 `CREATE_EXTERNAL_WORKSPACE: YES`，路徑必須是已解析的絕對路徑，並有 Owner 對精確建立操作與目標的授權；disposition 的決策時點及 Owner 指示也必須解析。若填 `NO`，任務不得建立新工作區，另外兩欄都必須填 `NONE`。
 - 只有明確採用新建 temporary-task Git worktree 的實作任務，才在建立前記錄 Owner 對該 worktree lifecycle 的事前授權、用途、正式合併目標 ref 與 worktree 外的持久成果根目錄；依 §9 填寫 `WORKTREE_CLOSE_POLICY`、`MERGE_TARGET_REF`、`PERSISTENT_EVIDENCE_ROOT`。`AUTO_CLOSE_AFTER_MERGE` 僅表示 Owner 已在建立前授權該新暫存 worktree 可於正式合併後交由 Fable 執行既有兩階段安全收尾。普通研究、唯讀與封存任務不要求前兩個欄位；`PERSISTENT_EVIDENCE_ROOT` 依下方「成果存放於固定資料夾」一律適用。
 - Allowed writes 使用 exact paths 或可驗收的有界範圍。滿足驗收必要的 adjacent paths 依 Fable 規則處理；新產品結果、無關子系統或風險擴張才要求 Delta。
 - 可逆本地工作依使用者要求及可執行 Packet 的授權執行。commit、push、Draft PR、Ready、merge、部署、刪除、DB 寫入與對外訊息逐項辨識；不得由其中一項推出其他權限。
@@ -315,6 +316,9 @@ CURRENT_BASE_HEAD: <已觀察／Owner 固定的值；普通實作未知時省略
 CURRENT_BASE_TREE: <已觀察值；普通實作未知或非 Git 時省略>
 WORKTREE_MODE: <依本任務選定的 mode；不適用時省略>
 WORKTREE_PATH: <本輪指定路徑；不適用時省略>
+CREATE_EXTERNAL_WORKSPACE: <YES | NO；每份可執行 Packet 必填；YES 僅限 Owner 已授權在目前 repo/worktree 外新建工作區>
+EXACT_ABSOLUTE_PATH: <YES 時填新工作區的完整絕對路徑；NO 時填 NONE>
+CLEANUP_DISPOSITION: <YES 時填 RETAIN | ARCHIVE | REMOVE、明確決策時點與 OWNER_AUTHORIZATION_EVIDENCE 的對應；ARCHIVE 另填目的絕對路徑；NO 時填 NONE>
 WORKTREE_CLOSE_POLICY: <PRESERVE | AUTO_CLOSE_AFTER_MERGE；僅新建 temporary-task Git worktree 適用>
 MERGE_TARGET_REF: <正式合併的 exact durable ref；新建 temporary-task worktree 必填>
 PERSISTENT_EVIDENCE_ROOT: <本機固定結果資料夾 exact path，不得放在會隨任務 worktree 刪除的位置；專案規則（例如 AGENTS.md）有指定時依專案規則，否則預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/（YYYYMMDD 為 Packet 產生日；續接沿用原資料夾）；保存正式成果、packet.md 與 result.json>
