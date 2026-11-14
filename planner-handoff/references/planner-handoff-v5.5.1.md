@@ -37,7 +37,7 @@ Web Planner 沒有本機工具時，以 Owner 提供的專案識別、Worker 回
 4. 既有驗證證據、未完成項目、已查過的來源、阻塞點及下一個能推進結果的動作。
 5. 已授權動作的來源及範圍；未授權的發布、記憶寫入或刪除不得由 Planner 補成 YES。
 
-在每份交接中提供 `PROJECT_RULES_REQUIRED`：已知規則使用確切路徑、section／symbol 或必要短摘錄；已確認沒有額外規則才填 `NONE`。Web Planner 尚未得知規則定位時，可填 task-specific 的 `RESOLVE_AT_WORKER_START`，同時指定唯一專案根目錄與限定解析範圍：Worker 在寫入前讀取該專案適用的原生入口指示，以及已知或由入口引用的相關 RUNBOOK／spec，回報解析結果。這不是 Fable 的新 enum，也不表示缺少的上游 artifact 已 READY。不得掃描所有文件、worktree 或使用者目錄。額外 supporting spec 只提供一個已解析的 locator；任務必要輸入另外逐項列出，不藏在 authority chain 裡。
+在每份交接中提供 `PROJECT_RULES_REQUIRED`：已知規則使用確切路徑、section／symbol 或必要短摘錄；已確認沒有額外規則才填 `NONE`。Web Planner 尚未得知規則定位時，可填 task-specific 的 `RESOLVE_AT_WORKER_START`，同時指定唯一專案根目錄與限定解析範圍：Worker 在寫入前讀取該專案適用的原生入口指示，以及已知或由入口引用的相關 RUNBOOK／spec，回報解析結果。這不是 Fable 的新 enum，也不表示缺少的上游 artifact 已 READY。不得掃描所有文件、worktree 或使用者目錄。有界證據任務不得以 `RESOLVE_AT_WORKER_START` 代替路徑清單；`PROJECT_RULES_PATHS` 或 `ALLOWED_READ_PATHS` 未解析時，先補齊定位，否則標為 `NOT_READY` 並不產生可執行 Packet。額外 supporting spec 只提供一個已解析的 locator；任務必要輸入另外逐項列出，不藏在 authority chain 裡。
 
 Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到的版本／section；該項只能證明已載入。規則檔須是版本庫已追蹤、且與本次派工基準一致的檔；回報時一併寫該檔的 SHA-256 與是否被 Git 追蹤，未追蹤或與基準不同要明確標示，不得把它當成已載入的權威版本。是否遵守仍須由 changed paths、必要檢查及實際交付判斷。無法讀到會影響正確性或授權的必要規則時，該任務停止執行並回報確切缺口，不編造內容。
 
@@ -322,9 +322,12 @@ WORKTREE_CLOSE_POLICY: <PRESERVE | AUTO_CLOSE_AFTER_MERGE；僅新建 temporary-
 MERGE_TARGET_REF: <正式合併的 exact durable ref；新建 temporary-task worktree 必填>
 PERSISTENT_EVIDENCE_ROOT: <本機固定結果資料夾 exact path，不得放在會隨任務 worktree 刪除的位置；專案規則（例如 AGENTS.md）有指定時依專案規則，否則預設 /Users/kelvin/VibeCoding-WorkSpace/.task-data/<YYYYMMDD>/<TASK_ID>/（YYYYMMDD 為 Packet 產生日；續接沿用原資料夾）；保存正式成果、packet.md 與 result.json>
 PROJECT_RULES_REQUIRED: <已知規則的 exact paths + 必要 sections／短摘錄；已確認無額外規則填 NONE 並說明依據；定位未知填 RESOLVE_AT_WORKER_START 並填下列欄位>
+PROJECT_RULES_PATHS: <有界證據任務必填：exact literal 規則檔路徑清單；確認無額外適用規則才填 NONE；不得填 RESOLVE_AT_WORKER_START>
+ALLOWED_READ_PATHS: <有界證據任務必填且不可為空：exact literal 檔案路徑清單，涵蓋必要規則、證據、輸入及驗收讀取；不可用目錄、glob 或更大 root 代替>
 PROJECT_RULES_RESOLUTION_SCOPE: <定位未知時，填唯一專案根目錄及允許讀取的入口／具名引用文件範圍；規則定位已明確時省略>
 規則讀取要求：完成必要的身份與規則定位解析後，在執行本任務目標操作前，先讀取上述必要專案規則。
 定位未知時，只解析指定專案內適用的原生入口指示，以及入口或本任務具名引用的直接相關 RUNBOOK／spec；不得跨專案廣泛掃描。
+有界證據任務中，`ALLOWED_READ_PATHS` 必須包含 `PROJECT_RULES_PATHS` 所列路徑；Worker 直接開啟清單指定的 exact paths，不得搜尋更大範圍來發現或補全路徑。
 簡短回報實際載入的路徑與適用段落。必要規則缺失、不可讀或有影響授權／正確性的衝突時，停止該任務並回報缺口，不自行編造規則或把 UNKNOWN 當成 NONE。
 REQUIRED_INPUTS: <逐項 literal locator、版本／身份及已就緒依據；多層版本逐層列出並標明驗收層；cross-lane consumer 未就緒不得填 ready-to-run>
 TERMINAL_EVIDENCE_LOCATOR: <僅在消費終局外部證據且承重時填 exact literal locator；否則填 NONE>

@@ -126,6 +126,42 @@ class PlannerTemplateContractTest < Minitest::Test
     end
   end
 
+  def test_t6_bounded_evidence_packets_require_exact_rule_and_read_path_lists
+    TEMPLATES.each do |name, path|
+      section = section_between(read_template(name, path, 'T6'), /^## 9\b/, /^## 10\b/, "#{name}: T6")
+      rules = section.lines.select { |line| line.start_with?('PROJECT_RULES_PATHS:') }
+      reads = section.lines.select { |line| line.start_with?('ALLOWED_READ_PATHS:') }
+
+      assert_equal(1, rules.length, "#{name}: T6 §9 must contain PROJECT_RULES_PATHS exactly once")
+      assert_includes(rules.first.to_s, '有界證據任務必填', "#{name}: T6 rule paths must be required for bounded evidence")
+      assert_includes(rules.first.to_s, 'exact literal', "#{name}: T6 rule paths must be exact literals")
+      assert_includes(rules.first.to_s, '不得填 RESOLVE_AT_WORKER_START', "#{name}: T6 rule paths cannot be deferred to the Worker")
+
+      assert_equal(1, reads.length, "#{name}: T6 §9 must contain ALLOWED_READ_PATHS exactly once")
+      assert_includes(reads.first.to_s, '有界證據任務必填且不可為空', "#{name}: T6 read paths must be non-empty for bounded evidence")
+      assert_includes(reads.first.to_s, 'exact literal 檔案路徑清單', "#{name}: T6 read paths must enumerate exact files")
+      assert_includes(reads.first.to_s, '不可用目錄、glob 或更大 root 代替', "#{name}: T6 read paths cannot widen to directories or roots")
+      assert_includes(section, '`ALLOWED_READ_PATHS` 必須包含 `PROJECT_RULES_PATHS`', "#{name}: T6 allowed reads must include listed project rules")
+      assert_includes(section, 'Worker 直接開啟清單指定的 exact paths', "#{name}: T6 Workers must open listed paths directly")
+      assert_includes(section, '不得搜尋更大範圍來發現或補全路徑', "#{name}: T6 Workers must not search wider to discover paths")
+    end
+  end
+
+  def test_t7_missing_bounded_evidence_path_lists_are_not_ready
+    TEMPLATES.each do |name, path|
+      prompt = read_template(name, path, 'T7')
+      section = section_between(prompt, /^## 9\b/, /^## 10\b/, "#{name}: T7")
+
+      assert_includes(
+        prompt,
+        '有界證據任務不得以 `RESOLVE_AT_WORKER_START` 代替路徑清單；`PROJECT_RULES_PATHS` 或 `ALLOWED_READ_PATHS` 未解析時，先補齊定位，否則標為 `NOT_READY` 並不產生可執行 Packet。',
+        "#{name}: T7 unresolved path lists must prevent an executable packet"
+      )
+      assert_includes(section, 'PROJECT_RULES_PATHS: <有界證據任務必填', "#{name}: T7 project rule paths must not be omitted")
+      assert_includes(section, 'ALLOWED_READ_PATHS: <有界證據任務必填且不可為空', "#{name}: T7 read path lists must not be omitted or empty")
+    end
+  end
+
   def test_t3_packet_fields_appear_once_in_canonical_order
     TEMPLATES.each do |name, path|
       section = section_between(read_template(name, path, 'T3'), /^## 9\b/, /^## 10\b/, "#{name}: T3")
