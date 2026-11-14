@@ -134,6 +134,12 @@ file counts. A single acceptance failure is not a trigger by itself.
   path that the Packet, the project rules, or this skill names. Any other
   place, such as `/tmp` or a tool's default temporary directory, is out of
   scope; point tools that default there at one of those paths.
+- Before any test command, read applicable `AGENTS.md` and
+  `AGENTS.override.md` files from the repository root through each test target
+  directory. Follow their required interpreter or virtual environment and
+  test scratch/temp policy, including pytest cache and `--basetemp` rules; do
+  not substitute system Python or pytest's default temporary directory when
+  project rules specify other settings.
 - When the repository or Packet specifies a Python interpreter, use that exact
   interpreter for every Python command, including one-line helpers and receipt
   utilities. For disk-space checks, prefer shell `df`; do not invoke system
