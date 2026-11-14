@@ -33,6 +33,7 @@ Web Planner 沒有本機工具時，以 Owner 提供的專案識別、Worker 回
 
 1. 一個主要目標、原始驗收、目前階段及使用者的保留／禁止事項。
 2. 指定 repository／非 Git 工作根目錄、source ref、worktree 及必要 artifact locator。不得把 cwd 當成 authority；pinned source 不得被本地 checkout 靜默取代。
+   GitHub 來源查找若由本機 repository 發起，先從已設定的 remote URL 確認 exact owner/repo，再搜尋；不得以本機目錄 basename 推定遠端 repository 身份。
 3. 與任務直接相關的專案入口指示，以及指定 RUNBOOK／spec 的必要段落。沒有 `.ai/` 的專案不因此產生 blocker，也不自動新增治理檔。
 4. 既有驗證證據、未完成項目、已查過的來源、阻塞點及下一個能推進結果的動作。
 5. 已授權動作的來源及範圍；未授權的發布、記憶寫入或刪除不得由 Planner 補成 YES。
