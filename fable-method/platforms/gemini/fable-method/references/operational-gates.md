@@ -468,6 +468,20 @@ boundary 1). Under `PROJECT_PROFILE: FORMAL_SECURE`, [Authorization evidence
 and conversation boundary](#authorization-evidence-and-conversation-boundary)
 above also governs its provenance.
 
+When publishing a new task branch, set its upstream to the same-named branch
+on `origin` with an explicit refspec:
+
+```sh
+git push --set-upstream origin HEAD:refs/heads/<task-branch>
+```
+
+Replace `<task-branch>` with the current local task branch name. A push without
+`--set-upstream` can publish the remote branch while leaving an upstream
+inherited from the base branch. After publication, confirm
+`git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'` returns
+`origin/<task-branch>` and `git status --short --branch` compares against that
+same ref.
+
 `FORCE_FALLBACK_AUTHORIZED: YES` takes effect only for the exact fallback the
 Packet names, and only while every gate below still holds live: the lineage
 or lifecycle verdict it depended on is unchanged, the target's tip is
