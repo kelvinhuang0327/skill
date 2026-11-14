@@ -126,6 +126,22 @@ A mandatory Judge trigger is an explicit request: the Packet routes
 Owner asks for a Judge. Fable never creates a Judge from risk categories or
 file counts. A single acceptance failure is not a trigger by itself.
 
+## Pre-execution TASK_ID guard
+
+Before executing a Packet classified as `STATE_CHANGING_IMPLEMENTATION`,
+check whether it requires a canonical Fable receipt: it names
+`PERSISTENT_EVIDENCE_ROOT` or includes a `SIGNAL_POLICY` header. If either
+receipt trigger is present, require a non-empty, explicit `TASK_ID` header
+before execution. When `TASK_ID` is missing or blank, stop before execution
+and before any mutation. Do not infer or synthesize an ID, and do not create
+or claim the canonical receipt. Report `BLOCKED_MISSING_TASK_ID` and request
+a corrected Packet with an explicit `TASK_ID`.
+
+This guard applies only to state-changing Packets that require a canonical
+Fable receipt. Keep pure questions (`PURE_QA`), planning-only work
+(`PLANNING_ONLY`), read-only completion reviews
+(`READ_ONLY_COMPLETION_REVIEW`), and the compact flow without a Packet usable.
+
 ## Execution
 
 - Keep writes inside the Packet's allowed scope. Adjacent files count only
