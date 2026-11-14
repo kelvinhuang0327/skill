@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,27 @@ SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 SPACE_OPERATIONS = frozenset({
     "ordinary", "research-worktree", "high-disk-task", "read-only-diagnostic", "authorized-reclaim",
 })
+FILESYSTEM_WRITE_LEDGER_CATEGORIES = (
+    "FILES_WRITTEN_DURING_TASK",
+    "FILES_RETAINED_AT_END",
+    "FILES_DELETED_BEFORE_END",
+    "TASK_CREATED_FILES_RETAINED",
+    "TASK_CREATED_FILES_DELETED",
+    "PRE_EXISTING_FILES_RETAINED_UNCHANGED",
+    "PRE_EXISTING_FILES_MODIFIED_AND_RATIFIED",
+    "FILES_MODIFIED_DURING_TASK",
+    "REPOSITORY_FILES_MODIFIED",
+    "TOOLCHAIN_RUNTIME_OUTPUTS_CREATED",
+    "TOOLCHAIN_RUNTIME_OUTPUTS_MODIFIED",
+    "PRE_EXISTING_RUNTIME_OUTPUTS_RETAINED_UNCHANGED",
+    "WORKTREE_MATERIALIZATION_CREATED",
+    "WORKTREE_MATERIALIZATION_UPDATED",
+    "WORKTREE_MATERIALIZATION_REMOVED",
+    "GIT_NETWORK_METADATA_WRITES",
+    "GIT_WORKTREE_METADATA_WRITES",
+    "HARNESS_GIT_METADATA_WRITES",
+)
+TERMINAL_LIFECYCLE_STATES = frozenset({"COMPLETED", "BLOCKED", "ABORTED"})
 
 
 class ControlError(RuntimeError):
@@ -647,52 +669,95 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _reported_acceptance_passes(result_data: dict[str, Any]) -> list[str]:
-    """Read PASS claims only from one explicit, structurally valid AC block."""
-    candidates: list[tuple[str, Any, int]] = []
-    for field, value in result_data.items():
-        if not isinstance(field, str):
-            continue
-        match = re.fullmatch(r"(?i:ac01_to_ac)(\d+)", field)
-        if match is None:
-            continue
-        endpoint = int(match.group(1))
-        if endpoint < 1 or match.group(1) != f"{endpoint:02d}":
-            return []
-        candidates.append((field, value, endpoint))
+def _packet_acceptance_ids(packet_text: str | None) -> tuple[str, ...] | None:
+    """Return AC IDs only from one explicit, unambiguous Packet list."""
+    if packet_text is None:
+        return None
 
-    # Multiple declarations can disagree. Do not merge them or select one.
-    if len(candidates) != 1:
+    lines = packet_text.splitlines()
+    headers = [
+        index for index, line in enumerate(lines)
+        if re.fullmatch(
+            r"[ \t]*(?:ACCEPTANCE CRITERIA|IMPLEMENTATION AND ACCEPTANCE)[ \t]*:?[ \t]*",
+            line,
+            re.IGNORECASE,
+        )
+    ]
+    if len(headers) != 1:
+        return None
+
+    ids: list[str] = []
+    for line in lines[headers[0] + 1:]:
+        if not line.strip():
+            continue
+        if re.fullmatch(
+            r"[ \t]*(?:#{1,6}[ \t]+.+|[A-Z][A-Z0-9 /_-]*:?)[ \t]*",
+            line,
+        ):
+            break
+        match = re.fullmatch(
+            r"[ \t]*(?:[-*]|\d+[.)])[ \t]+(AC\d{2,})(?:[ \t]*:[ \t]*.*)?[ \t]*",
+            line,
+        )
+        if match is None:
+            return None
+        criterion = match.group(1)
+        number = int(criterion[2:])
+        if number < 1 or criterion != f"AC{number:02d}" or criterion in ids:
+            return None
+        ids.append(criterion)
+
+    if not ids:
+        return None
+    return tuple(sorted(ids, key=lambda criterion: int(criterion[2:])))
+
+
+_MISSING_ACCEPTANCE_FIELD = object()
+
+
+def _reported_acceptance_passes(
+    result_data: Mapping[str, Any],
+    allowed_ac_ids: tuple[str, ...] | None,
+) -> list[str]:
+    """Read worker PASS claims through exact Packet-allowlisted lookups only."""
+    if not allowed_ac_ids:
         return []
 
-    _, acceptance, endpoint = candidates[0]
-    if not isinstance(acceptance, dict) or not acceptance:
+    endpoint = max(int(criterion[2:]) for criterion in allowed_ac_ids)
+    lower_field = f"ac01_to_ac{endpoint:02d}"
+    upper_field = f"AC01_TO_AC{endpoint:02d}"
+    lower_acceptance = result_data.get(lower_field, _MISSING_ACCEPTANCE_FIELD)
+    upper_acceptance = result_data.get(upper_field, _MISSING_ACCEPTANCE_FIELD)
+    if (
+        lower_acceptance is not _MISSING_ACCEPTANCE_FIELD
+        and upper_acceptance is not _MISSING_ACCEPTANCE_FIELD
+    ):
+        return []
+
+    acceptance = (
+        lower_acceptance
+        if lower_acceptance is not _MISSING_ACCEPTANCE_FIELD
+        else upper_acceptance
+    )
+    if acceptance is _MISSING_ACCEPTANCE_FIELD or not isinstance(acceptance, Mapping):
         return []
 
     reported_passes: list[str] = []
-    seen_ac = False
-    for field, value in acceptance.items():
-        if not isinstance(field, str):
-            return []
-        match = re.fullmatch(r"AC(\d+)", field)
-        if match is None:
-            return []
-        number = int(match.group(1))
-        if not 1 <= number <= endpoint or field != f"AC{number:02d}":
-            return []
-        if not isinstance(value, (dict, str)):
-            return []
-        seen_ac = True
-
-        if isinstance(value, dict):
+    for criterion in allowed_ac_ids:
+        value = acceptance.get(criterion, _MISSING_ACCEPTANCE_FIELD)
+        if value is _MISSING_ACCEPTANCE_FIELD:
+            continue
+        if isinstance(value, Mapping):
             is_pass = value.get("status") == "PASS"
-        else:
+        elif isinstance(value, str):
             declaration = value.strip()
             is_pass = declaration == "PASS" or declaration.startswith("PASS:")
+        else:
+            return []
         if is_pass:
-            reported_passes.append(field)
+            reported_passes.append(criterion)
 
-    return sorted(reported_passes) if seen_ac else []
+    return reported_passes
 
 
 def _process_signal_invalid_reasons(signal: Any) -> list[str]:
@@ -809,6 +874,109 @@ def _packet_header_value(packet_text: str | None, name: str) -> str:
     return task_id
 
 
+def _packet_enum_header_value(
+    packet_text: str | None,
+    name: str,
+    allowed_values: frozenset[str],
+) -> str:
+    """Read one exact field from the Packet's leading header block."""
+    if packet_text is None:
+        return "ABSENT"
+
+    header_lines: list[str] = []
+    for line in packet_text.splitlines():
+        if not line.strip() or re.match(r"^[ \t]*#{1,6}[ \t]+", line):
+            break
+        header_lines.append(line)
+
+    pattern = re.compile(rf"^[ \t]*{re.escape(name)}:[ \t]*(.*?)[ \t]*$")
+    matches = [match.group(1) for line in header_lines if (match := pattern.fullmatch(line))]
+    if not matches:
+        return "ABSENT"
+    if len(matches) != 1 or matches[0] not in allowed_values:
+        return "MALFORMED"
+    return matches[0]
+
+
+def _filesystem_write_ledger_summary(
+    result_data: Mapping[str, Any],
+    lifecycle: Any,
+    publication_bound: str,
+    judge_mode: str,
+) -> dict[str, Any]:
+    required_by: list[str] = []
+    if publication_bound == "YES":
+        required_by.append("PUBLICATION_BOUND")
+    if judge_mode == "FRESH_CONTEXT":
+        required_by.append("JUDGE_MODE:FRESH_CONTEXT")
+
+    invalid_header_fields = []
+    if publication_bound == "MALFORMED":
+        invalid_header_fields.append("PUBLICATION_BOUND")
+    if judge_mode == "MALFORMED":
+        invalid_header_fields.append("JUDGE_MODE")
+    if invalid_header_fields:
+        return {
+            "status": "INVALID",
+            "required_by": required_by,
+            "missing_categories": [],
+            "invalid_categories": [],
+            "unexpected_categories": [],
+            "invalid_header_fields": invalid_header_fields,
+        }
+
+    if not required_by:
+        return {
+            "status": "NOT_REQUIRED",
+            "required_by": [],
+            "missing_categories": [],
+            "invalid_categories": [],
+            "unexpected_categories": [],
+            "invalid_header_fields": [],
+        }
+
+    if lifecycle not in TERMINAL_LIFECYCLE_STATES:
+        return {
+            "status": "NOT_DUE",
+            "required_by": required_by,
+            "missing_categories": [],
+            "invalid_categories": [],
+            "unexpected_categories": [],
+            "invalid_header_fields": [],
+        }
+
+    ledger = result_data.get("filesystem_write_ledger")
+    if not isinstance(ledger, Mapping):
+        return {
+            "status": "INVALID",
+            "required_by": required_by,
+            "missing_categories": list(FILESYSTEM_WRITE_LEDGER_CATEGORIES),
+            "invalid_categories": [],
+            "unexpected_categories": [],
+            "invalid_header_fields": [],
+        }
+
+    expected = set(FILESYSTEM_WRITE_LEDGER_CATEGORIES)
+    actual = set(ledger)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    invalid = sorted(
+        category
+        for category in expected & actual
+        if not isinstance(ledger[category], list)
+        or any(not isinstance(entry, str) or not entry.strip() for entry in ledger[category])
+    )
+    valid = not missing and not unexpected and not invalid
+    return {
+        "status": "COMPLETE" if valid else "INVALID",
+        "required_by": required_by,
+        "missing_categories": missing,
+        "invalid_categories": invalid,
+        "unexpected_categories": unexpected,
+        "invalid_header_fields": [],
+    }
+
+
 def _process_evidence_summary(
     directory_fd: int | None,
     identity_status: str,
@@ -846,8 +1014,22 @@ def _process_evidence_summary(
         lifecycle_check = "CANONICAL"
     else:
         lifecycle_check = "NON_CANONICAL"
+    signal_policy = _packet_header_value(packet_text, "SIGNAL_POLICY")
+    publication_bound = _packet_enum_header_value(
+        packet_text, "PUBLICATION_BOUND", frozenset({"YES", "NO"})
+    )
+    judge_mode = _packet_enum_header_value(
+        packet_text,
+        "JUDGE_MODE",
+        frozenset({"FRESH_CONTEXT", "SELF_CHECK_ONLY", "NOT_APPLICABLE"}),
+    )
     signal = {"status": "ABSENT"}
-    if "process_signal" in result_data:
+    if "process_signal" not in result_data and signal_policy == "ALWAYS":
+        signal = {
+            "status": "INVALID",
+            "invalid_reasons": ["process_signal: required by SIGNAL_POLICY ALWAYS"],
+        }
+    elif "process_signal" in result_data:
         process_signal = result_data["process_signal"]
         invalid_reasons = _process_signal_invalid_reasons(process_signal)
         signal = (
@@ -861,11 +1043,16 @@ def _process_evidence_summary(
         "independently_validated": False,
         "lifecycle_state_check": lifecycle_check,
         "packet_header": {
-            "signal_policy": _packet_header_value(packet_text, "SIGNAL_POLICY"),
+            "signal_policy": signal_policy,
             "continues_from": _packet_header_value(packet_text, "CONTINUES_FROM"),
+            "publication_bound": publication_bound,
+            "judge_mode": judge_mode,
         },
         "prior_result_receipts": receipt_count,
         "signal": signal,
+        "filesystem_write_ledger": _filesystem_write_ledger_summary(
+            result_data, lifecycle, publication_bound, judge_mode,
+        ),
     }
 
 
@@ -915,6 +1102,8 @@ def summarize_task_evidence(
             else:
                 packet["status"] = "INVALID"
                 packet["parse_status"] = "INVALID_TASK_ID"
+
+        packet_ac_ids = _packet_acceptance_ids(packet_text)
 
         result_data: dict[str, Any] | None = None
         if result_bytes is not None:
@@ -969,8 +1158,12 @@ def summarize_task_evidence(
             )
 
         reported_ac_passes: list[str] = []
-        if result_data is not None and result["status"] == "PRESENT":
-            reported_ac_passes = _reported_acceptance_passes(result_data)
+        if (
+            result_data is not None
+            and result["status"] == "PRESENT"
+            and identity_status == "MATCH"
+        ):
+            reported_ac_passes = _reported_acceptance_passes(result_data, packet_ac_ids)
 
         summary = {
             "task_id": expected_task_id,

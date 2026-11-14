@@ -55,12 +55,15 @@ class TaskReceiptRuleTest < Minitest::Test
   end
 
   def test_structured_receipt_allowlist_precedes_parsing_and_shape_inspection
-    skill_path = File.join(ROOT, SKILLS.first)
-    skill = File.read(skill_path)
+    SKILLS.each do |relative_path|
+      skill_path = File.join(ROOT, relative_path)
+      skill = File.read(skill_path)
 
-    assert_match(
-      /Before parsing or inspecting a structured receipt, define an explicit\s+per-file field allowlist from the Packet\. Read structured files only through\s+that allowlist; never enumerate keys, inspect shape\/schema, or perform broad\s+field\/schema discovery\./,
-      skill
-    )
+      assert_match(
+        /Before parsing or inspecting a structured receipt, define an explicit\s+per-file field allowlist from the Packet\. Read structured files only through\s+that allowlist; never enumerate keys, inspect shape\/schema, or perform broad\s+field\/schema discovery\./,
+        skill,
+        relative_path
+      )
+    end
   end
 end

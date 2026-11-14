@@ -61,6 +61,16 @@ IMPLEMENTATION_DEPTH: NORMAL | ENHANCED
 JUDGE_MODE: FRESH_CONTEXT | SELF_CHECK_ONLY | NOT_APPLICABLE
 ```
 
+New Task Packets also include the single-line header `PUBLICATION_BOUND: YES | NO`.
+Set it to `YES` when completion depends on a commit, push, pull request, merge,
+or other external publication, and `NO` otherwise. This field declares task
+scope, not permission: `COMMIT_AUTHORIZED`, `PUSH_AUTHORIZED`, or another
+action authorization alone does not make a task publication-bound. Legacy
+Packets may omit the field; omission is not treated as `YES` by the evidence
+helper. A present but malformed `PUBLICATION_BOUND` or `JUDGE_MODE` enum is
+invalid Packet metadata and blocks terminal receipt validation; it is not
+treated as an absent field.
+
 `IMPLEMENTATION_DEPTH` applies only to `STATE_CHANGING_IMPLEMENTATION`.
 `PLANNING_ONLY` and `PURE_QA` change nothing and have no route. Planning and
 pure QA never dispatch a Judge. Use `READ_ONLY_COMPLETION_REVIEW` for
@@ -278,11 +288,27 @@ header line, keep this receipt even if the Packet body does not mention it:
   `ENV`, `PROJECT`, `AUTH`, `UNNECESSARY_WORK`, `PERFORMANCE`, `NONE`, or
   `UNKNOWN`. Omit what was not measured. Repeat the block in the reply as
   `PROCESS_SIGNAL:`.
-- Before showing tool output from a structured receipt, determine whether it
+- For a terminal `task_lifecycle_state`, a Packet with
+  `PUBLICATION_BOUND: YES` or `JUDGE_MODE: FRESH_CONTEXT` must include a
+  top-level `filesystem_write_ledger` object in `result.json`. It contains all
+  18 categories listed in [reporting](references/reporting.md)
+  as arrays of path/effect strings; use an empty array for an empty category.
+  `evidence-summary` reports the ledger as `COMPLETE` only when every category
+  is present and correctly shaped. For these required Packets, require
+  `process_evidence.filesystem_write_ledger.status: COMPLETE` before reporting
+  a terminal outcome. For `IN_PROGRESS`, the ledger is `NOT_DUE`. `NO` or a
+  legacy absent marker does not require a ledger unless
+  `JUDGE_MODE: FRESH_CONTEXT` applies. A malformed publication or Judge enum
+  reports `INVALID` with `invalid_header_fields` and blocks terminal receipt
+  validation.
+- Before parsing or inspecting a structured receipt, define an explicit
+  per-file field allowlist from the Packet. Read structured files only through
+  that allowlist; never enumerate keys, inspect shape/schema, or perform broad
+  field/schema discovery. Before showing tool output, determine whether it
   contains per-run or payload-bearing fields. Never `cat` or dump the full
-  document or rows; parse only an explicit field allowlist and report
-  aggregated counts, statuses, or hashes. If a safe allowlist cannot be
-  established, stop and mark the task `BLOCKED` without reproducing values.
+  document or rows; report aggregated counts, statuses, or hashes. If a safe
+  allowlist cannot be established, stop and mark the task `BLOCKED` without
+  reproducing values.
 - Before any evidence-summary identity query, finish writing a complete,
   readable `<root>/result.json`; do not claim canonical result validation
   while that file is missing.
@@ -413,7 +439,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `39632d8c05667884320151c41a085ffa52154eb5b5b52dc0473adcb52eddf4f2`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `8abc639530938dbea8f985e660f0f2a3b4e7833f8387431bbd65fa431dd6458a`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 
