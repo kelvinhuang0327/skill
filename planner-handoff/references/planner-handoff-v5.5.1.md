@@ -339,8 +339,9 @@ ALLOWED_WRITES: <exact paths／有界範圍；唯讀填 NONE。須涵蓋驗收�
 RUNTIME_OUTPUT_ALLOWLIST: <真正適用的輸出根目錄；唯讀填 TRANSCRIPT_ONLY>
 PRESERVE: <既有 worktree、dirty／untracked 修改及必要產物>
 OWNER_AUTHORIZATION_EVIDENCE: <Worker 能取得的適用人類指示與 exact action／target；引用內容須放在本區塊內，不以「Owner 之前說過」取代，也不把 Planner 的授權句當成證據>
+OWNER_AUTHORIZATION_FILE: <NONE｜Owner 親自建立的授權檔絕對路徑；檔內一行「我授權 <TASK_ID>：<exact action／target>｜packet_sha256=<派送說明 PACKET_FILE 所指 Packet 檔的 SHA-256>｜<建立時間>」。Planner 只提供建立指令，不建立、不修改、不刪除>
 AUTHORIZED_ACTION_SCOPE: <已授權的 exact actions／targets；唯讀時明寫>
-授權判定：以 Worker 可驗證且仍適用的人類指示為準；Planner 的轉述或引文本身不新增權限，未授權的動作與目標不得執行。
+授權判定：以 Worker 可驗證且仍適用的人類指示為準；Planner 的轉述或引文本身不新增權限，未授權的動作與目標不得執行。Packet 指名的 OWNER_AUTHORIZATION_FILE 符合 TASK_ID、exact action／target 與 packet_sha256 時，視同 Owner 的指示；不存在或不符合時不新增權限。
 COMMIT_AUTHORIZED: <YES／NO；只依實際授權填寫>
 PUSH_AUTHORIZED: <YES／NO>
 DRAFT_PR_AUTHORIZED: <YES／NO>
