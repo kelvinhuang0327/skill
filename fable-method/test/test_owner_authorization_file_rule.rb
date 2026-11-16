@@ -18,6 +18,8 @@ class OwnerAuthorizationFileRuleTest < Minitest::Test
     'packet_sha256',
     'PACKET_FILE',
     '`authorization-check`',
+    'run right before the action',
+    'without that command',
     'authorizes nothing',
     'Never create, edit, or delete an authorization file'
   ].freeze

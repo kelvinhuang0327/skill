@@ -50,9 +50,10 @@ These are the only default stops.
    `OWNER_AUTHORIZATION_FILE` also counts, only when a line in it names
    this `TASK_ID`, the exact action and target, and a `packet_sha256`
    equal to the SHA-256 of the Packet file at the dispatch's `PACKET_FILE`
-   path. If the installed helper offers `authorization-check`, decide with
-   it. A missing or non-matching file authorizes nothing. Never create,
-   edit, or delete an authorization file.
+   path. Decide with the installed helper's `authorization-check`, run
+   right before the action; without that command, or without `MATCH`, the
+   file authorizes nothing. Never create, edit, or delete an authorization
+   file.
    Without them, report `PENDING: <action> - awaiting your authorization`
    and finish the rest.
 2. Never overwrite, reset, stash, clean, or discard someone else's

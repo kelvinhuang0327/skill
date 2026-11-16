@@ -131,6 +131,8 @@ class PlannerTemplateContractTest < Minitest::Test
                       "#{name}: T6 authorization file row must require append-only scope changes")
       assert_includes(authorization_file_row, '撤回',
                       "#{name}: T6 authorization file row must explain authorization withdrawal")
+      assert_includes(authorization_file_row, '已完成的動作不回滾',
+                      "#{name}: T6 authorization file row must clarify completed work is not rolled back")
       assert_includes(authorization_file_row, '信任式紀錄',
                       "#{name}: T6 authorization file row must disclose its trust model")
 

@@ -56,6 +56,15 @@ class OwnerAuthorizationCheckTests(unittest.TestCase):
         )
         return completed, json.loads(completed.stdout)
 
+    def assert_uncovered_scope(self, content: str) -> None:
+        self.authorization_path.write_text(
+            self.authorization_line(TASK_ID, content, self.packet_sha256), encoding="utf-8"
+        )
+        completed, result = self.run_check()
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(result["status"], "NO_MATCH")
+        self.assertEqual(result["reason"], "ACTION_OR_TARGET_NOT_COVERED")
+
     def test_valid_authorization_matches(self) -> None:
         content = f"{ACTION} on {TARGET}"
         self.authorization_path.write_text(
@@ -117,20 +126,43 @@ class OwnerAuthorizationCheckTests(unittest.TestCase):
         self.assertEqual(result["status"], "MATCH")
         self.assertEqual(result["matched_line"], 2)
 
-    def test_uncovered_action_or_target_does_not_match(self) -> None:
-        contents = (
-            f"a different operation on {TARGET}",
-            f"{ACTION} on another target",
+    def test_action_mismatch_does_not_match(self) -> None:
+        self.assert_uncovered_scope(f"a different operation on {TARGET}")
+
+    def test_target_mismatch_does_not_match(self) -> None:
+        self.assert_uncovered_scope(f"{ACTION} on another target")
+
+    def test_scope_cannot_be_spliced_across_two_lines(self) -> None:
+        first_line = self.authorization_line(
+            TASK_ID, f"{ACTION} on an unrelated target", self.packet_sha256
         )
-        for content in contents:
-            with self.subTest(content=content):
-                self.authorization_path.write_text(
-                    self.authorization_line(TASK_ID, content, self.packet_sha256), encoding="utf-8"
-                )
-                completed, result = self.run_check()
-                self.assertEqual(completed.returncode, 2)
-                self.assertEqual(result["status"], "NO_MATCH")
-                self.assertEqual(result["reason"], "ACTION_OR_TARGET_NOT_COVERED")
+        second_line = self.authorization_line(
+            TASK_ID, f"a different operation on {TARGET}", self.packet_sha256
+        )
+        self.authorization_path.write_text(f"{first_line}\n{second_line}\n", encoding="utf-8")
+
+        completed, result = self.run_check()
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(result["status"], "NO_MATCH")
+        self.assertEqual(result["reason"], "ACTION_OR_TARGET_NOT_COVERED")
+
+    def test_recheck_after_authorization_file_deletion_does_not_match(self) -> None:
+        content = f"{ACTION} on {TARGET}"
+        self.authorization_path.write_text(
+            self.authorization_line(TASK_ID, content, self.packet_sha256), encoding="utf-8"
+        )
+
+        first_completed, first_result = self.run_check()
+        self.assertEqual(first_completed.returncode, 0, first_completed.stderr)
+        self.assertEqual(first_result["status"], "MATCH")
+
+        self.authorization_path.unlink()
+        second_completed, second_result = self.run_check()
+
+        self.assertEqual(second_completed.returncode, 2)
+        self.assertEqual(second_result["status"], "NO_MATCH")
+        self.assertEqual(second_result["reason"], "FILE_MISSING")
 
     def test_authorization_and_packet_files_are_unchanged(self) -> None:
         content = f"{ACTION} on {TARGET}"
