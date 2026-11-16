@@ -57,6 +57,32 @@ class TrailingBackslashTaskIdTests(unittest.TestCase):
                 self.assertEqual(evidence["identity_status"], "MATCH")
                 self.assertEqual(evidence["packet"]["task_id"], TASK_ID)
 
+    def test_escaped_headers_and_multiline_identity(self) -> None:
+        (self.root / "result.json").write_text(json.dumps({
+            "task_id": TASK_ID, "task_lifecycle_state": "COMPLETED",
+            "process_signal": {"trigger": "HIGH_IMPACT"},
+        }))
+        packet = ("TASK_ID:\\\n\\\n" + TASK_ID + "\\\n"
+                  "SIGNAL_POLICY: ALWAYS\\\nCONTINUES_FROM: NONE\\\n"
+                  "\\## Body\\\n").encode()
+        evidence = self.summary(packet)
+        self.assertEqual(evidence["identity_status"], "MATCH")
+        process = evidence["process_evidence"]
+        self.assertEqual(process["lifecycle_state_check"], "CANONICAL")
+        self.assertEqual(process["signal"]["status"], "REPORTED")
+        self.assertEqual(process["packet_header"], {
+            "signal_policy": "ALWAYS", "continues_from": "NONE"})
+        self.assertEqual((self.root / "packet.md").read_bytes(), packet)
+
+    def test_malformed_duplicate_and_heading_boundary_fail_closed(self) -> None:
+        cases = [
+            b"TASK_ID: ESCAPED_TASK_R1\\\nTASK_ID:\\\nINVALID!\\\n",
+            b"TASK_ID:\\\n\\## Body\\\nESCAPED_TASK_R1\\\n",
+        ]
+        for packet in cases:
+            with self.subTest(packet=packet):
+                self.assertEqual(self.summary(packet)["identity_status"], "INVALID")
+
     def test_other_identities_still_fail_closed(self) -> None:
         cases = {
             "double_backslash": b"TASK_ID: ESCAPED_TASK_R1\\\\\n",
