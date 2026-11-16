@@ -35,6 +35,14 @@ These are the only default stops.
    irreversible, destructive, production, deployment, or other high-risk
    action requires direct Owner authorization for the exact action and
    target. The Owner's words in the Packet or in this conversation count.
+   An Owner authorization file that the Packet names in
+   `OWNER_AUTHORIZATION_FILE` also counts, only when a line in it names
+   this `TASK_ID`, the exact action and target, and a `packet_sha256`
+   equal to the SHA-256 of the Packet file at the dispatch's `PACKET_FILE`
+   path. Decide with the installed helper's `authorization-check`, run
+   right before the action; without that command, or without `MATCH`, the
+   file authorizes nothing. Never create, edit, or delete an authorization
+   file.
    Without them, report `PENDING: <action> - awaiting your authorization`
    and finish the rest.
 2. Never overwrite, reset, stash, clean, or discard someone else's
@@ -413,7 +421,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `a981f885d749d4e7ebdde0de66e800bf151835a8345dd2052dbd6372fc700ff0`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `7ce72ddabc02092ae1ff345548c248c4a2ae474a38ea5f15f53a87d7ee731168`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

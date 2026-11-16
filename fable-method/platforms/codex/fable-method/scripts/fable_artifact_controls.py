@@ -1814,6 +1814,67 @@ def _verify_evidence_manifest(value: str, worktree: Path) -> dict[str, Any]:
     return {"manifest": str(manifest_path), "files": verified}
 
 
+def check_owner_authorization(
+    authorization_file: str,
+    task_id: str,
+    packet_file: str,
+    action: str,
+    target: str,
+) -> dict[str, Any]:
+    authorization_path = Path(authorization_file)
+    packet_path = Path(packet_file)
+    packet_sha256 = (
+        hashlib.sha256(packet_path.read_bytes()).hexdigest() if packet_path.is_file() else None
+    )
+
+    def no_match(reason: str) -> dict[str, Any]:
+        return {
+            "status": "NO_MATCH",
+            "reason": reason,
+            "matched_line": None,
+            "packet_sha256": packet_sha256,
+        }
+
+    if not authorization_path.is_file():
+        return no_match("FILE_MISSING")
+    if packet_sha256 is None:
+        return no_match("PACKET_FILE_MISSING")
+
+    task_prefix = f"我授權 {task_id}："
+    task_lines: list[tuple[int, str]] = []
+    for line_number, line in enumerate(
+        authorization_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if line.strip() and line.startswith(task_prefix):
+            task_lines.append((line_number, line[len(task_prefix):]))
+
+    if not task_lines:
+        return no_match("NO_LINE_FOR_TASK_ID")
+
+    matching_fingerprint_lines: list[tuple[int, str]] = []
+    for line_number, body in task_lines:
+        fields = body.split("｜")
+        if len(fields) != 3 or not fields[1].startswith("packet_sha256="):
+            continue
+        fingerprint = fields[1][len("packet_sha256="):]
+        if SHA_RE.fullmatch(fingerprint) is not None and fingerprint == packet_sha256:
+            matching_fingerprint_lines.append((line_number, fields[0]))
+
+    if not matching_fingerprint_lines:
+        return no_match("PACKET_SHA256_MISMATCH")
+
+    for line_number, authorization_content in matching_fingerprint_lines:
+        if action in authorization_content and target in authorization_content:
+            return {
+                "status": "MATCH",
+                "reason": None,
+                "matched_line": line_number,
+                "packet_sha256": packet_sha256,
+            }
+
+    return no_match("ACTION_OR_TARGET_NOT_COVERED")
+
+
 def _get_ancestor_pids() -> set[int]:
     pids = {os.getpid()}
     curr = os.getpid()
@@ -2899,6 +2960,12 @@ def main() -> int:
         "--continuation-id",
         help="expected continuation directory name and result continuation_id",
     )
+    authorization = sub.add_parser("authorization-check")
+    authorization.add_argument("--file", required=True)
+    authorization.add_argument("--task-id", required=True)
+    authorization.add_argument("--packet-file", required=True)
+    authorization.add_argument("--action", dest="authorized_action", required=True)
+    authorization.add_argument("--target", required=True)
     scratch = sub.add_parser("validate-test-scratch")
     scratch.add_argument("--repo", required=True)
     scratch.add_argument("--path", required=True)
@@ -2938,6 +3005,10 @@ def main() -> int:
     run.add_argument("command", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
+    if args.action == "authorization-check" and (
+        not args.task_id.strip() or not args.authorized_action.strip() or not args.target.strip()
+    ):
+        parser.error("--task-id, --action and --target must not be empty")
     try:
         if args.action == "space-check":
             result = check_space(args.path, args.operation, args.phase)
@@ -2981,6 +3052,12 @@ def main() -> int:
                 }
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
+        if args.action == "authorization-check":
+            result = check_owner_authorization(
+                args.file, args.task_id, args.packet_file, args.authorized_action, args.target
+            )
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result["status"] == "MATCH" else 2
         if args.action == "validate-test-scratch":
             result = validate_test_scratch(args.repo, args.path, args.approved_root)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
