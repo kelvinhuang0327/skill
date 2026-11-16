@@ -759,6 +759,19 @@ def _process_signal_invalid_reasons(signal: Any) -> list[str]:
     return sorted(set(invalid))
 
 
+def _normalize_packet_lines_for_parsing(packet_text: str) -> str:
+    """Interpret attachment line-break escapes without altering packet bytes."""
+    lines = []
+    for line in packet_text.splitlines():
+        line = line.rstrip(" \t")
+        if line.endswith("\\"):
+            line = line[:-1].rstrip(" \t")
+        if re.match(r"^\\#{1,6}[ \t]+", line):
+            line = line[1:]
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _packet_next_line_values(packet_text: str, name: str) -> list[str]:
     """Read empty header fields without crossing a heading or another field."""
     header_lines: list[str] = []
@@ -888,25 +901,16 @@ def summarize_task_evidence(
         packet_text: str | None = None
         if packet_bytes is not None:
             try:
-                packet_text = packet_bytes.decode("utf-8-sig")
-                # A single trailing backslash is a Markdown hard line break that
-                # some Packet copy paths add to every line; it is not part of
-                # the identity. A double backslash stays and fails the match.
-                packet_ids = [
-                    value[:-1]
-                    if value.endswith("\\") and not value.endswith("\\\\")
-                    else value
-                    for value in re.findall(
-                        r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text
-                    )
-                ]
+                packet_text = _normalize_packet_lines_for_parsing(
+                    packet_bytes.decode("utf-8-sig")
+                )
+                packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*$", packet_text)
                 packet_ids.extend(
-                    value for value in _packet_next_line_values(packet_text, "TASK_ID")
-                    if TASK_ID_RE.fullmatch(value) is not None
+                    _packet_next_line_values(packet_text, "TASK_ID")
                 )
             except UnicodeDecodeError:
                 packet_ids = []
-            if len(packet_ids) == 1:
+            if len(packet_ids) == 1 and TASK_ID_RE.fullmatch(packet_ids[0]) is not None:
                 packet["task_id"] = packet_ids[0]
                 packet["parse_status"] = "VALID_TASK_ID"
                 if packet_ids[0] != expected_task_id:

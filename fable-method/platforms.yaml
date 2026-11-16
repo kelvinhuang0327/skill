@@ -70,7 +70,7 @@ skills:
       - id: artifact_controls
         role: supporting_helper
         source: fable-method/scripts/fable_artifact_controls.py
-        sha256: 0741c788d13ddf8ea10e608c6dd79768174c71a575279e6a72811990838117f4
+        sha256: 7ce72ddabc02092ae1ff345548c248c4a2ae474a38ea5f15f53a87d7ee731168
         mode: "100644"
         destination: scripts/fable_artifact_controls.py
         purpose: local_codex_artifact_logs_and_worktree_lifecycle
