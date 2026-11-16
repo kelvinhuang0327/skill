@@ -331,6 +331,43 @@ def test_ac04_squash_merge_and_invalid_evidence() -> None:
         assert wt2.is_dir()
 
 
+def test_ac10_close_checks_recorded_merge_target_not_creation_base() -> None:
+    """A temporary worktree may be created from one branch and merged into another."""
+    with canonical_temp_dir() as td:
+        root = Path(td).resolve(strict=True)
+        repo, manifest, _ = create_fixture_repo(root)
+
+        run_git(repo, "switch", "-c", "release")
+        (repo / "release.txt").write_text("release-only commit\n", encoding="utf-8")
+        run_git(repo, "add", "release.txt")
+        run_git(repo, "commit", "-m", "release-only change")
+        run_git(repo, "switch", "main")
+
+        wt = root / "wt-separate-merge-target"
+        helper.create_research_worktree(
+            str(repo), str(wt), "main", "feature/separate-merge-target",
+            "TASK_SEPARATE_MERGE_TARGET", "temporary-task",
+            close_policy="AUTO_CLOSE_AFTER_MERGE",
+            merge_target_ref="release",
+        )
+        (wt / "feature.txt").write_text("feature merged into release\n", encoding="utf-8")
+        run_git(wt, "add", "feature.txt")
+        run_git(wt, "commit", "-m", "feature change")
+
+        run_git(repo, "switch", "release")
+        run_git(repo, "merge", "--no-edit", "feature/separate-merge-target")
+
+        closed = helper.close_temporary_worktree(
+            str(repo), str(wt), "main", str(manifest), "TASK_SEPARATE_MERGE_TARGET"
+        )
+        assert closed["status"] == "AUTO_CLOSED"
+        assert closed["base"] == "main"
+        assert closed["merge_target_ref"] == "release"
+        assert closed["merge_type"] == "NORMAL_MERGE"
+        assert not wt.exists()
+        assert closed["branch_deleted"] is False
+
+
 def test_ac05_dirty_locked_and_active_preserved() -> None:
     """AC05: Dirty, locked, active claim, or active execution worktrees are preserved."""
     with canonical_temp_dir() as td:
@@ -569,6 +606,7 @@ def main() -> int:
         ("AC07: fsmonitor avoidance & active process check", test_ac07_fsmonitor_and_active_processes),
         ("AC08: Race condition & duplicate close safety", test_ac08_race_and_duplicate_safety),
         ("AC09: Historical worktree & canonical repo preservation", test_ac09_historical_and_main_repo_preserved),
+        ("AC10: Close against recorded merge target", test_ac10_close_checks_recorded_merge_target_not_creation_base),
     ]
 
     passed = 0
