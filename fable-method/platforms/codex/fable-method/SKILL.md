@@ -36,11 +36,12 @@ These are the only default stops.
    action requires direct Owner authorization for the exact action and
    target. The Owner's words in the Packet or in this conversation count.
    An Owner authorization file that the Packet names in
-   `OWNER_AUTHORIZATION_FILE` also counts, only when its line names this
-   `TASK_ID`, the exact action and target, and a `packet_sha256` equal to
-   the SHA-256 of the Packet file at the dispatch's `PACKET_FILE` path. A
-   missing or non-matching file authorizes nothing. Never create, edit, or
-   delete an authorization file.
+   `OWNER_AUTHORIZATION_FILE` also counts, only when a line in it names
+   this `TASK_ID`, the exact action and target, and a `packet_sha256`
+   equal to the SHA-256 of the Packet file at the dispatch's `PACKET_FILE`
+   path. If the installed helper offers `authorization-check`, decide with
+   it. A missing or non-matching file authorizes nothing. Never create,
+   edit, or delete an authorization file.
    Without them, report `PENDING: <action> - awaiting your authorization`
    and finish the rest.
 2. Never overwrite, reset, stash, clean, or discard someone else's
@@ -419,7 +420,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `5f049582c5ca27e6ac7d563ed3727693d08c2b8d96e5341186f7bbaf3d4ef72e`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `0741c788d13ddf8ea10e608c6dd79768174c71a575279e6a72811990838117f4`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

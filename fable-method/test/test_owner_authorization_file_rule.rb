@@ -13,9 +13,11 @@ class OwnerAuthorizationFileRuleTest < Minitest::Test
   ].freeze
   REQUIRED_TEXT = [
     'OWNER_AUTHORIZATION_FILE',
+    'a line in it names',
     'TASK_ID',
     'packet_sha256',
     'PACKET_FILE',
+    '`authorization-check`',
     'authorizes nothing',
     'Never create, edit, or delete an authorization file'
   ].freeze

@@ -47,11 +47,12 @@ These are the only default stops.
    action requires direct Owner authorization for the exact action and
    target. The Owner's words in the Packet or in this conversation count.
    An Owner authorization file that the Packet names in
-   `OWNER_AUTHORIZATION_FILE` also counts, only when its line names this
-   `TASK_ID`, the exact action and target, and a `packet_sha256` equal to
-   the SHA-256 of the Packet file at the dispatch's `PACKET_FILE` path. A
-   missing or non-matching file authorizes nothing. Never create, edit, or
-   delete an authorization file.
+   `OWNER_AUTHORIZATION_FILE` also counts, only when a line in it names
+   this `TASK_ID`, the exact action and target, and a `packet_sha256`
+   equal to the SHA-256 of the Packet file at the dispatch's `PACKET_FILE`
+   path. If the installed helper offers `authorization-check`, decide with
+   it. A missing or non-matching file authorizes nothing. Never create,
+   edit, or delete an authorization file.
    Without them, report `PENDING: <action> - awaiting your authorization`
    and finish the rest.
 2. Never overwrite, reset, stash, clean, or discard someone else's

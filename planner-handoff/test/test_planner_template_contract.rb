@@ -127,6 +127,12 @@ class PlannerTemplateContractTest < Minitest::Test
       assert_includes(authorization_file_row, 'PACKET_FILE', "#{name}: T6 authorization file row needs PACKET_FILE")
       assert_includes(authorization_file_row, '不建立、不修改、不刪除',
                       "#{name}: T6 authorization file row must prohibit agent changes")
+      assert_includes(authorization_file_row, '只追加不覆寫',
+                      "#{name}: T6 authorization file row must require append-only scope changes")
+      assert_includes(authorization_file_row, '撤回',
+                      "#{name}: T6 authorization file row must explain authorization withdrawal")
+      assert_includes(authorization_file_row, '信任式紀錄',
+                      "#{name}: T6 authorization file row must disclose its trust model")
 
       authorization_decisions = lines.select { |line| line.start_with?('授權判定：') }
       assert_equal(1, authorization_decisions.length, "#{name}: T6 §9 must contain one 授權判定 row")
