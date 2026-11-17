@@ -600,6 +600,50 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
   end
 
+  def test_installed_to_master_codex_launcher_pair_upgrades_exact_launcher_and_preserves_companion
+    live_dir = File.join(@scratch, 'live_88734_codex')
+    src_dir = File.join(@scratch, 'source_97a1_codex')
+    installed_blob = '88734ed8dac16eaacdeb1821ebd5d38de40bc3b7'
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    create_live_runtime_skill(live_dir, launcher_blob: installed_blob)
+    create_new_source_materialization(src_dir, launcher_blob: released_blob)
+
+    stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', installed_blob, released_blob
+    )
+    assert_equal 0, status.exitstatus, "Expected installed-to-master pair to upgrade. Stderr: #{stderr}"
+
+    post_launcher = File.join(live_dir, 'scripts/task_checkpoint.rb')
+    post_companion = File.join(live_dir, 'scripts/paused_run_continuation.rb')
+    assert_equal released_blob, git_blob_for_file(post_launcher)
+    assert_equal 0755, File.stat(post_launcher).mode & 0777
+    assert_includes File.read(File.join(live_dir, 'SKILL.md')), released_blob
+    assert_equal APPROVED_COMPANION_BLOB, git_blob_for_file(post_companion)
+    assert_equal 0644, File.stat(post_companion).mode & 0777
+
+    _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
+    assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_master_to_installed_codex_launcher_pair_is_rejected_without_mutation
+    live_dir = File.join(@scratch, 'live_97a1_codex')
+    src_dir = File.join(@scratch, 'source_88734_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+    installed_blob = '88734ed8dac16eaacdeb1821ebd5d38de40bc3b7'
+
+    create_live_runtime_skill(live_dir, launcher_blob: released_blob)
+    create_new_source_materialization(src_dir, launcher_blob: installed_blob)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', released_blob, installed_blob
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'runtime pair ('
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
   def test_runtime_pair_allowlist_rejects_an_unapproved_cross_pair
     live_dir = File.join(@scratch, 'live_00e2_codex')
     src_dir = File.join(@scratch, 'source_0851_codex')
