@@ -96,6 +96,21 @@ class PlannerTemplateContractTest < Minitest::Test
     }
   ].freeze
 
+  def test_worker_rules_and_closeout_contract_in_both_templates
+    TEMPLATES.each do |name, path|
+      text = read_template(name, path, 'worker rules and closeout')
+      ['自己的 cwd／context', '實際讀取適用的 `AGENTS.md`', '讀取內容 SHA-256',
+       '是否 Git tracked', '精確來源 ref 或指定檔', '同名主 checkout 檔',
+       '缺少或不符時重讀指定版本', '非必要缺檔不設全域擋點',
+       '同一 run 的 Worker 原始 `result.json`、`final_reply.md`',
+       '可取得的最後事件', '收據已寫但事件停滯', '缺收據或事件讀不到時標 `UNKNOWN`',
+       '靜默不等於沒有收據', 'Planner 不覆寫 Worker 原始收據',
+       '合法 Worker continuation', '`planner_addendum.md`'].each do |requirement|
+        assert_includes text, requirement, name
+      end
+    end
+  end
+
   def test_t1_packet_template_section_matches_between_both_templates
     sections = TEMPLATES.map do |name, path|
       [name, section_between(read_template(name, path, 'T1'), /^## 9\b/, /^## 10\b/, "#{name}: T1")]

@@ -20,6 +20,18 @@ Every Worker is a fresh agent. The Task Packet, plus the project rules it
 names, is the complete input: read it fully, then execute. Treat the facts and
 decisions it states as given.
 
+At task entry, resolve applicable `AGENTS.md` in the Worker's own cwd and
+context within the Packet's allowed scope; actually read each applicable file
+before work. Report the resolved absolute path, SHA-256 of the bytes read, and
+whether Git tracks it in that checkout. Compare that evidence with the Packet's
+exact expected file or source ref when supplied; a Planner's copy, including a
+same-named main checkout file, is not evidence of what this Worker read. If
+missing or different, read the specified version if available and report the
+mismatch and what was actually read. Stop only if a rule necessary for this
+task's correctness or authorization cannot be obtained under the existing
+hard boundaries. A nonessential missing `AGENTS.md` is not a global blocker.
+This explicit read confirmation does not prove platform auto-injection.
+
 By default, do not search earlier agents' transcripts or history, re-check
 another agent's identity, session, or continuity, rebuild the Planner's
 analysis, write checkpoints, deferred queues, ledgers, or duplicate receipts,

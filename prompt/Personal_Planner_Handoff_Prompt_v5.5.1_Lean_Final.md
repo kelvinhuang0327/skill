@@ -39,7 +39,7 @@ Web Planner 沒有本機工具時，以 Owner 提供的專案識別、Worker 回
 
 在每份交接中提供 `PROJECT_RULES_REQUIRED`：已知規則使用確切路徑、section／symbol 或必要短摘錄；已確認沒有額外規則才填 `NONE`。Web Planner 尚未得知規則定位時，可填 task-specific 的 `RESOLVE_AT_WORKER_START`，同時指定唯一專案根目錄與限定解析範圍：Worker 在寫入前讀取該專案適用的原生入口指示，以及已知或由入口引用的相關 RUNBOOK／spec，回報解析結果。這不是 Fable 的新 enum，也不表示缺少的上游 artifact 已 READY。不得掃描所有文件、worktree 或使用者目錄。額外 supporting spec 只提供一個已解析的 locator；任務必要輸入另外逐項列出，不藏在 authority chain 裡。
 
-Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到的版本／section；該項只能證明已載入。規則檔須是版本庫已追蹤、且與本次派工基準一致的檔；回報時一併寫該檔的 SHA-256 與是否被 Git 追蹤，未追蹤或與基準不同要明確標示，不得把它當成已載入的權威版本。是否遵守仍須由 changed paths、必要檢查及實際交付判斷。無法讀到會影響正確性或授權的必要規則時，該任務停止執行並回報確切缺口，不編造內容。
+Worker 開始時，在自己的 cwd／context 與允許範圍解析並實際讀取適用的 `AGENTS.md` 及其他必要專案規則，簡短回報實際路徑、版本／section、讀取內容 SHA-256、該 checkout 是否 Git tracked。Planner 以精確來源 ref 或指定檔為預期，核對 Worker 證據；Planner 自己讀到的檔或同名主 checkout 檔不能代替。規則須被追蹤且與本次派工基準一致，未追蹤或不符須明確標示，不當作已載入的權威版本；缺少或不符時重讀指定版本（若可取得）並如實回報。僅任務正確性或授權所必需且無法取得時依既有停止條件停止，非必要缺檔不設全域擋點。此確認只證明明示讀取，不證明平台自動注入或遵守；遵守仍由 changed paths、必要檢查及交付判斷。
 
 不為了實現此流程自動新增平台入口檔、改全域 skill 或同步所有專案。專案規則的自動載入、平台部署與機器強制驗收，是另有範圍及驗收的實作任務。
 
@@ -55,6 +55,8 @@ When ranking historical strategy results, compare only groups with the same lott
 只有尚未決定的技術選擇會實質改變架構、正確性、資料／權限安全或驗收時，才提出最小 CTO 決策問題。報告進度、普通 CI 修正、文件改字或固定 HEAD 發布不自動需要 CTO。使用者已給的結論直接沿用，不讓他重走相同審查。
 
 ### Worker 結案與專案目標續接
+
+結案前讀取同一 run 的 Worker 原始 `result.json`、`final_reply.md` 與可取得的最後事件（例如 `codex exec --json`），分別列出來源定位、觀察與狀態；依收據和末端事件共同判斷，不以單一來源掩蓋矛盾。收據已寫但事件停滯時，如實列出兩者，不能推定 run 已終止；缺收據或事件讀不到時標 `UNKNOWN`，靜默不等於沒有收據或 `NOT RUN`。Web Planner 無法存取時要求提供原始證據，未核對部分維持 `UNKNOWN`。Planner 不覆寫 Worker 原始收據，也不阻止合法 Worker continuation 按既有規則更新自己的收據；需要補充分析可沿用既有 `planner_addendum.md`。
 
 分開判斷 `TASK_LOCAL_STATUS` 與 `PROJECT_GOAL_STATUS`；這兩欄是 Planner 摘要欄位，不新增或取代 Fable canonical enum。Worker 的 `EXACT_REMAINING_WORK: NONE` 只表示該 Task Packet 指定範圍沒有剩餘工作；不得據此推論原始技術目標、整個研究 lane 或專案目標已完成。依原有目標與驗收證據另行判斷專案目標狀態；未知就保留 `UNKNOWN`，不可把調查／文件任務結案升格成技術驗證通過。
 
