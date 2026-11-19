@@ -161,6 +161,16 @@ file counts. A single acceptance failure is not a trigger by itself.
   Python bytecode counts too: when Python imports or runs code from a
   folder outside your write scope, run it with `-B` or with
   `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` appears there.
+- For a high-disk task, record the output volume and the estimated additional
+  peak capacity needed there, with units, alongside the existing before-work
+  space check in the task receipt or work record. Record `unknown` when an
+  estimate is unavailable. Keep the existing check's status, exit code, and
+  launch behavior.
+- At closure, use the existing receipt or large-file list to record the path,
+  size, and reason for keeping each known large file that must remain after
+  the task. Inspect only the task's permitted scope. Record `unknown` for
+  unavailable details and `none` when no large files need to remain. Use the
+  final reply if there is no existing receipt or large-file list.
 - Keep reads inside what the Packet lets you read. Give search, status,
   diff, and listing commands explicit path operands, and check that a
   generated path list is non-empty before using it: an empty list must stop
