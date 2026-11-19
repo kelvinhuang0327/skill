@@ -111,6 +111,18 @@ class PlannerTemplateContractTest < Minitest::Test
     end
   end
 
+  def test_dispatch_requires_receipts_only_for_durable_deliverables
+    TEMPLATES.each do |name, path|
+      text = read_template(name, path, 'dispatch receipts')
+      section = section_between(text, /^## 8\b/, /^## 9\b/, name)
+      rule = section.lines.grep(/精簡或直接派工/).join
+
+      assert_match(/程式變更、研究報告或回測結果.*PERSISTENT_EVIDENCE_ROOT.*實際絕對路徑/, rule, name)
+      assert_match(/該目錄下的 `packet\.md` 與 `result\.json`/, rule, name)
+      assert_match(/純問答.*沒有持久交付物.*省略成果根目錄、收據步驟與 `SIGNAL_POLICY`/, rule, name)
+    end
+  end
+
   def test_t1_packet_template_section_matches_between_both_templates
     sections = TEMPLATES.map do |name, path|
       [name, section_between(read_template(name, path, 'T1'), /^## 9\b/, /^## 10\b/, "#{name}: T1")]

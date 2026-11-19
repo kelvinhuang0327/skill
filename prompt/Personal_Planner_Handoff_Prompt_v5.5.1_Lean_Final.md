@@ -109,7 +109,7 @@ When ranking historical strategy results, compare only groups with the same lott
 - **SHA-256 固定值**：可執行 Worker Packet 含 SHA-256 時，值必須是長度恰為 64 個十六進位字元的字串；65 字元值不合格。若來源值已存在於本次可讀的可信輸出，直接依該來源逐字核對並複製，不依記憶重新輸入；若具備實際來源檔案的讀取能力，仍依既有來源身份規則核對，格式正確不代表身份已吻合。格式不符或已知來源身份不符時，候選保持 `NOT_READY`，不得把該值放入 `READY` Packet。此格式要求只套用於明確標示為 SHA-256 的身份；Git blob 等其他雜湊身份仍依各自原有格式與定義處理。
 - 保存 scope 外的 dirty／untracked 檔案。重疊寫入的所有權不清或有 active writer 才構成阻塞；無關 dirty 狀態不是停止整個任務的理由。
 - 優先重用已授權的既有 worktree。不擅自 reset、restore、stash、clean、force、刪除或另建 workspace。新工作根目錄需要 exact path 與 disposition。
-- 只有明確採用新建 temporary-task Git worktree 的實作任務，才在建立前記錄 Owner 對該 worktree lifecycle 的事前授權、用途、正式合併目標 ref 與 worktree 外的持久成果根目錄；依 §9 填寫 `WORKTREE_CLOSE_POLICY`、`MERGE_TARGET_REF`、`PERSISTENT_EVIDENCE_ROOT`。`AUTO_CLOSE_AFTER_MERGE` 僅表示 Owner 已在建立前授權該新暫存 worktree 可於正式合併後交由 Fable 執行既有兩階段安全收尾。普通研究、唯讀與封存任務不要求前兩個欄位；`PERSISTENT_EVIDENCE_ROOT` 依下方「成果存放於固定資料夾」一律適用。
+- 只有明確採用新建 temporary-task Git worktree 的實作任務，才在建立前記錄 Owner 對該 worktree lifecycle 的事前授權、用途、正式合併目標 ref 與 worktree 外的持久成果根目錄；依 §9 填寫 `WORKTREE_CLOSE_POLICY`、`MERGE_TARGET_REF`、`PERSISTENT_EVIDENCE_ROOT`。`AUTO_CLOSE_AFTER_MERGE` 僅表示 Owner 已在建立前授權該新暫存 worktree 可於正式合併後交由 Fable 執行既有兩階段安全收尾。普通研究、唯讀與封存任務不要求前兩個欄位；有持久交付物時依下方「成果存放於固定資料夾」填寫路徑。
 - Allowed writes 使用 exact paths 或可驗收的有界範圍。滿足驗收必要的 adjacent paths 依 Fable 規則處理；新產品結果、無關子系統或風險擴張才要求 Delta。
 - 可逆本地工作依使用者要求及可執行 Packet 的授權執行。commit、push、Draft PR、Ready、merge、部署、刪除、DB 寫入與對外訊息逐項辨識；不得由其中一項推出其他權限。
 - 相同且仍適用的使用者授權不重問。使用者可在同一則訊息提供 exact action／target 授權及 Packet，不要求額外 auth-only 訊息。Assistant 產生的授權句、token 或跨對話引用不自行形成授權；交接給新 Worker 時需保留平台可驗證的人類授權來源。
@@ -276,6 +276,8 @@ Worker 終局或下一輪派工請求的簡表至少含 `TASK_ID｜TASK_LANE｜R
 每位 Agent 的模型等級、預估執行時間、資源用量與名稱放在區塊外（格式見 §9 的區塊外標題）。預估執行時間是 Worker 從開始到最終回報的大約時間，含計算與測試（例：約 15–30 分鐘、約 2–4 小時）；資源用量只看該任務本身：低＝讀取、改文件或少量程式、幾分鐘內跑完的測試；中＝完整測試套件、單核數十分鐘的計算或數 GiB 以內的寫入；高＝多核平行或超過約 1 小時的計算、數 GiB 以上記憶體或大量磁碟寫入。這兩項只供 Owner 安排，不是 gate，不得據此阻擋、排隊或限制並行。每份完整 Prompt 使用**各自單獨的 Markdown `text` 程式碼區塊**。一個區塊只放一位 Agent 的全部可執行上下文（模型、任務歸屬、確切輸入、規則、授權界線、AC、回報、禁止事項）。**CTO 分析／完成度／RCA 一律放在 Prompts 前方**；不要使用 WritingBlock、合併多位 Agent、把必要驗收留在區塊外，或用「同上一張卡」代替必要內容。預設 `/fable-method` 使用 canonical 小寫名稱。
 
 每份 Worker Packet（含並行卡、精簡發布任務及 Continuation）都必須在自己的程式碼區塊內保留四項內容：**必要專案規則如何讀取、已授權的動作與範圍、可判定的驗收標準、禁止事項與停止邊界**。可以簡短，但不可因「同上一份」「沿用 A 任務」或「參照 Planner 某節」而省略。適用規則已確認不存在時寫明 `NONE` 的依據；Web Planner 不知道定位時，須把有界解析範圍及寫入前讀取要求直接寫進該份 Packet。交付前逐份檢查這四項；任一缺少就先補齊，不把半份任務交給 Worker 自行還原。
+
+精簡或直接派工也依交付物填寫：需保留程式變更、研究報告或回測結果等成果時，在 Packet 的 `PERSISTENT_EVIDENCE_ROOT` 欄填入依 §3 解析的實際絕對路徑，並列出該目錄下的 `packet.md` 與 `result.json`。純問答（例如解釋回測公式）或其他沒有持久交付物的任務，省略成果根目錄、收據步驟與 `SIGNAL_POLICY`。
 
 不得輸出憑證、私鑰或非必要個資；保留任務的真實含義、授權與驗收。不得用暗語、改名或刪除關鍵限制來規避平台監督。
 
