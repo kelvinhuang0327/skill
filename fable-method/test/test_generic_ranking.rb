@@ -440,4 +440,110 @@ class GenericRankingTest < Minitest::Test
     assert_equal 'B_BEFORE_A', comparison['relation']
     assert_equal 'WEIGHTED_SCORE', comparison['reason']
   end
+
+  # Reading the output with a token recorder checks both the spelling and JSON
+  # type. A Float or BigDecimal parser would itself lose this regression.
+  JsonNumberToken = Struct.new(:literal)
+  TINY = '1e-9999999999999999999999'
+
+  def cli_decimals(action, contract, candidates, tokens)
+    payload = JSON.generate('contract' => contract, 'candidates' => candidates)
+    tokens.each { |marker, literal| payload = payload.gsub(JSON.generate(marker), literal) }
+    out, err, status = Open3.capture3(RbConfig.ruby, SCRIPT, action, stdin_data: payload)
+    assert status.success?, err
+    JSON.parse(out, decimal_class: JsonNumberToken)
+  end
+
+  def zero_and_tiny(action)
+    contract = weighted
+    contract['dimensions'] = contract['dimensions'].take(1)
+    cli_decimals(action, contract, [candidate('a', accuracy: 0), candidate('z', accuracy: 'tiny')],
+                 'tiny' => TINY)
+  end
+
+  def test_cli_rank_preserves_underflowing_decimal
+    ranking = zero_and_tiny('rank')
+    assert_equal %w[z a], ids(ranking)
+    assert_empty ranking['ties']
+    winner = ranking['ordered'].first
+    assert_equal JsonNumberToken.new(TINY), winner.dig('candidate', 'metrics', 'accuracy', 'value')
+    assert_equal JsonNumberToken.new(TINY), winner.dig('dimensions', 0, 'value')
+    assert_equal TINY, winner['score_exact']
+  end
+
+  def test_cli_compare_preserves_underflowing_decimal
+    decision = zero_and_tiny('compare')
+    assert_equal 'B_BEFORE_A', decision['relation']
+    assert_equal 'WEIGHTED_SCORE', decision['reason']
+    assert_equal false, decision['primary_tie']
+    assert_empty decision['tie_break']
+    assert_equal JsonNumberToken.new(TINY), decision.dig('dimensions', 0, 'b_value')
+    assert_equal TINY, decision.dig('scores', 'b_exact')
+  end
+
+  def test_cli_orders_huge_signed_exponents_and_ties_equivalent_spellings
+    power = '9999999999999999999999'
+    values = {
+      'large' => 'large_token', 'equal' => "+10.10e#{power.to_i - 1}", 'higher' => 'higher_token',
+      'tiny' => 'tiny_token', 'zero' => 'zero_token', 'integer_zero' => 0,
+      'negative_tiny' => "-#{TINY}", 'negative_large' => 'negative_token'
+    }
+    tokens = { 'large_token' => "1.01E+#{power}", 'higher_token' => "1.011e#{power}",
+               'zero_token' => "-0.00e#{power}", 'tiny_token' => TINY, 'negative_token' => "-1e#{power}" }
+    contract = lexicographic(dimensions: [{ 'id' => 'accuracy', 'direction' => 'HIGHER_IS_BETTER' }])
+    rows = values.map { |id, value| candidate(id, accuracy: value) }
+    ranking = cli_decimals('rank', contract, rows, tokens)
+    assert_equal %w[higher equal large tiny integer_zero zero negative_tiny negative_large], ids(ranking)
+    assert_equal [%w[equal large], %w[integer_zero zero]], ranking['ties'].map { |tie| tie['candidate_ids'] }
+    ranking['ordered'].each do |row|
+      input = values.fetch(row.dig('candidate', 'candidate_id'))
+      expected = tokens.key?(input) ? JsonNumberToken.new(tokens[input]) : input
+      assert_equal expected, row.dig('candidate', 'metrics', 'accuracy', 'value')
+    end
+  end
+
+  def test_equivalent_json_numbers_preserve_candidate_and_universe_identity
+    contract = weighted(accuracy_weight: 1, latency_weight: 0)
+    contract['universe'] = UNIVERSE.merge('version' => 1)
+    plain = candidate('same', accuracy: 'short', universe: contract['universe'])
+    padded = candidate('same', accuracy: 'long', universe: UNIVERSE.merge('version' => 'version_token'))
+    long = "0.1#{'0' * 5000}"
+    result = cli_decimals('compare', contract, [plain, padded],
+                          'short' => '1e-1', 'long' => long, 'version_token' => '1.00')
+    assert_equal 'TIE', result['relation']
+    assert_equal '1/10', result.dig('scores', 'b_exact')
+    assert_equal JsonNumberToken.new(long), result.dig('dimensions', 0, 'b_value')
+  end
+
+  def test_sparse_weighted_contributions_cancel_exactly_and_round_at_half_units
+    contract = weighted(latency_max: 1)
+    rows = [candidate('a', accuracy: 0, latency: 0), candidate('y', accuracy: 'tiny', latency: 'tiny'),
+            candidate('z', accuracy: 'tiny', latency: 0)]
+    ranking = cli_decimals('rank', contract, rows, 'tiny' => TINY)
+    assert_equal %w[z a y], ids(ranking)
+    assert_equal [%w[a y]], ranking['ties'].map { |tie| tie['candidate_ids'] }
+    assert_equal ['0.5'] * 3, ranking['ordered'].map { |row| row['score'] }
+    assert_equal ["(1+#{TINY})/2", '1/2', '1/2'], ranking['ordered'].map { |row| row['score_exact'] }
+
+    rows = [candidate('a', accuracy: '1e-12', latency: 'tiny'), candidate('b', accuracy: '1e-12', latency: 0)]
+    decision = cli_decimals('compare', contract, rows, 'tiny' => TINY)
+    assert_equal 'B_BEFORE_A', decision['relation']
+    assert_equal '0.5', decision.dig('scores', 'a')
+    assert_equal '0.500000000001', decision.dig('scores', 'b')
+  end
+
+  def test_weighted_order_with_huge_weight_and_normalization_span
+    # Write H for 10**9999999999999999999999. With common denominator
+    # (H+1)**2 the scores are 2H+1, 2H and 4H respectively.
+    contract = weighted(accuracy_weight: 'huge', latency_weight: 1)
+    contract['dimensions'][0]['normalization'] = { 'min' => -1, 'max' => 'huge' }
+    rows = [candidate('a', accuracy: 0, latency: 0), candidate('b', accuracy: 1, latency: 100),
+            candidate('z', accuracy: 3, latency: 100), candidate('outside', accuracy: 'too_large')]
+    huge = '1E+9999999999999999999999'
+    ranking = cli_decimals('rank', contract, rows, 'huge' => huge, 'too_large' => '2e9999999999999999999999')
+    assert_equal %w[z a b], ids(ranking)
+    assert_empty ranking['ties']
+    assert_equal 'OUT_OF_NORMALIZATION_RANGE', ranking.dig('not_comparable', 0, 'issues', 0, 'code')
+    assert_equal JsonNumberToken.new(huge), ranking.dig('contract', 'dimensions', 0, 'weight')
+  end
 end
