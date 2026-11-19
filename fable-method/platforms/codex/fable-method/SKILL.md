@@ -19,6 +19,18 @@ Every Worker is a fresh agent. The Task Packet, plus the project rules it
 names, is the complete input: read it fully, then execute. Treat the facts and
 decisions it states as given.
 
+At task entry, resolve applicable `AGENTS.md` in the Worker's own cwd and
+context within the Packet's allowed scope; actually read each applicable file
+before work. Report the resolved absolute path, SHA-256 of the bytes read, and
+whether Git tracks it in that checkout. Compare that evidence with the Packet's
+exact expected file or source ref when supplied; a Planner's copy, including a
+same-named main checkout file, is not evidence of what this Worker read. If
+missing or different, read the specified version if available and report the
+mismatch and what was actually read. Stop only if a rule necessary for this
+task's correctness or authorization cannot be obtained under the existing
+hard boundaries. A nonessential missing `AGENTS.md` is not a global blocker.
+This explicit read confirmation does not prove platform auto-injection.
+
 By default, do not search earlier agents' transcripts or history, re-check
 another agent's identity, session, or continuity, rebuild the Planner's
 analysis, write checkpoints, deferred queues, ledgers, or duplicate receipts,
@@ -35,6 +47,14 @@ These are the only default stops.
    irreversible, destructive, production, deployment, or other high-risk
    action requires direct Owner authorization for the exact action and
    target. The Owner's words in the Packet or in this conversation count.
+   An Owner authorization file that the Packet names in
+   `OWNER_AUTHORIZATION_FILE` also counts, only when a line in it names
+   this `TASK_ID`, the exact action and target, and a `packet_sha256`
+   equal to the SHA-256 of the Packet file at the dispatch's `PACKET_FILE`
+   path. Decide with the installed helper's `authorization-check`, run
+   right before the action; without that command, or without `MATCH`, the
+   file authorizes nothing. Never create, edit, or delete an authorization
+   file.
    Without them, report `PENDING: <action> - awaiting your authorization`
    and finish the rest.
 2. Never overwrite, reset, stash, clean, or discard someone else's
@@ -131,6 +151,16 @@ file counts. A single acceptance failure is not a trigger by itself.
   Python bytecode counts too: when Python imports or runs code from a
   folder outside your write scope, run it with `-B` or with
   `PYTHONDONTWRITEBYTECODE=1` so no `__pycache__` appears there.
+- For a high-disk task, record the output volume and the estimated additional
+  peak capacity needed there, with units, alongside the existing before-work
+  space check in the task receipt or work record. Record `unknown` when an
+  estimate is unavailable. Keep the existing check's status, exit code, and
+  launch behavior.
+- At closure, use the existing receipt or large-file list to record the path,
+  size, and reason for keeping each known large file that must remain after
+  the task. Inspect only the task's permitted scope. Record `unknown` for
+  unavailable details and `none` when no large files need to remain. Use the
+  final reply if there is no existing receipt or large-file list.
 - Keep reads inside what the Packet lets you read. Give search, status,
   diff, and listing commands explicit path operands, and check that a
   generated path list is non-empty before using it: an empty list must stop
@@ -413,7 +443,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `5f049582c5ca27e6ac7d563ed3727693d08c2b8d96e5341186f7bbaf3d4ef72e`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `d56739ab975264f868f6edbd9d69ba599e319cb45e0ec21d8bc7159e94176045`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

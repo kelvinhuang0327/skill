@@ -33,6 +33,19 @@ class TaskReceiptRuleTest < Minitest::Test
     'evidence-summary'
   ].freeze
 
+  def test_worker_rule_read_contract_in_every_generated_entry
+    SKILLS.each do |relative_path|
+      skill = File.read(File.join(ROOT, relative_path)).gsub(/\s+/, ' ')
+      ["Worker's own cwd and context", 'actually read each applicable file',
+       'SHA-256 of the bytes read', 'whether Git tracks it',
+       'exact expected file or source ref', 'same-named main checkout file',
+       'read the specified version if available', 'nonessential missing `AGENTS.md`',
+       'does not prove platform auto-injection'].each do |requirement|
+        assert_includes skill, requirement, relative_path
+      end
+    end
+  end
+
   def test_task_receipt_rule_is_present_between_report_and_packet_triggers
     SKILLS.each do |relative_path|
       path = File.join(ROOT, relative_path)

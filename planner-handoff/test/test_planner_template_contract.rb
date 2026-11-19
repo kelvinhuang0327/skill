@@ -96,6 +96,21 @@ class PlannerTemplateContractTest < Minitest::Test
     }
   ].freeze
 
+  def test_worker_rules_and_closeout_contract_in_both_templates
+    TEMPLATES.each do |name, path|
+      text = read_template(name, path, 'worker rules and closeout')
+      ['自己的 cwd／context', '實際讀取適用的 `AGENTS.md`', '讀取內容 SHA-256',
+       '是否 Git tracked', '精確來源 ref 或指定檔', '同名主 checkout 檔',
+       '缺少或不符時重讀指定版本', '非必要缺檔不設全域擋點',
+       '同一 run 的 Worker 原始 `result.json`、`final_reply.md`',
+       '可取得的最後事件', '收據已寫但事件停滯', '缺收據或事件讀不到時標 `UNKNOWN`',
+       '靜默不等於沒有收據', 'Planner 不覆寫 Worker 原始收據',
+       '合法 Worker continuation', '`planner_addendum.md`'].each do |requirement|
+        assert_includes text, requirement, name
+      end
+    end
+  end
+
   def test_t1_packet_template_section_matches_between_both_templates
     sections = TEMPLATES.map do |name, path|
       [name, section_between(read_template(name, path, 'T1'), /^## 9\b/, /^## 10\b/, "#{name}: T1")]
@@ -106,6 +121,44 @@ class PlannerTemplateContractTest < Minitest::Test
       sections.fetch('prompt template'),
       'prompt template and reference template: T1 §9 packet template must match byte-for-byte through the start of §10'
     )
+  end
+
+  def test_owner_authorization_file_field_and_rule_are_present_in_section_9
+    TEMPLATES.each do |name, path|
+      section = section_between(read_template(name, path, 'T6'), /^## 9\b/, /^## 10\b/, "#{name}: T6")
+      lines = section.lines
+      evidence_rows = lines.select { |line| line.start_with?('OWNER_AUTHORIZATION_EVIDENCE:') }
+      authorization_file_rows = lines.select { |line| line.start_with?('OWNER_AUTHORIZATION_FILE: <') }
+
+      assert_equal(1, evidence_rows.length, "#{name}: T6 §9 must contain one OWNER_AUTHORIZATION_EVIDENCE row")
+      assert_equal(1, authorization_file_rows.length, "#{name}: T6 §9 must contain one OWNER_AUTHORIZATION_FILE row")
+      evidence_index = lines.index(evidence_rows.first)
+      authorization_file_index = lines.index(authorization_file_rows.first)
+      assert_equal(evidence_index + 1, authorization_file_index,
+                   "#{name}: T6 OWNER_AUTHORIZATION_FILE must immediately follow OWNER_AUTHORIZATION_EVIDENCE")
+
+      authorization_file_row = authorization_file_rows.first.to_s
+      assert_includes(authorization_file_row, 'packet_sha256', "#{name}: T6 authorization file row needs packet_sha256")
+      assert_includes(authorization_file_row, 'PACKET_FILE', "#{name}: T6 authorization file row needs PACKET_FILE")
+      assert_includes(authorization_file_row, '不建立、不修改、不刪除',
+                      "#{name}: T6 authorization file row must prohibit agent changes")
+      assert_includes(authorization_file_row, '只追加不覆寫',
+                      "#{name}: T6 authorization file row must require append-only scope changes")
+      assert_includes(authorization_file_row, '撤回',
+                      "#{name}: T6 authorization file row must explain authorization withdrawal")
+      assert_includes(authorization_file_row, '已完成的動作不回滾',
+                      "#{name}: T6 authorization file row must clarify completed work is not rolled back")
+      assert_includes(authorization_file_row, '信任式紀錄',
+                      "#{name}: T6 authorization file row must disclose its trust model")
+
+      authorization_decisions = lines.select { |line| line.start_with?('授權判定：') }
+      assert_equal(1, authorization_decisions.length, "#{name}: T6 §9 must contain one 授權判定 row")
+      authorization_decision = authorization_decisions.first.to_s
+      assert_includes(authorization_decision, 'OWNER_AUTHORIZATION_FILE',
+                      "#{name}: T6 authorization decision must mention OWNER_AUTHORIZATION_FILE")
+      assert_includes(authorization_decision, '不新增權限',
+                      "#{name}: T6 authorization decision must deny new authority on mismatch")
+    end
   end
 
   def test_t2_allowed_scope_rules_are_present_once_inside_section_9

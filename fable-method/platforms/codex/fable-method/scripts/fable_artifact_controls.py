@@ -759,6 +759,19 @@ def _process_signal_invalid_reasons(signal: Any) -> list[str]:
     return sorted(set(invalid))
 
 
+def _normalize_packet_lines_for_parsing(packet_text: str) -> str:
+    """Interpret attachment line-break escapes without altering packet bytes."""
+    lines = []
+    for line in packet_text.splitlines():
+        line = line.rstrip(" \t")
+        if line.endswith("\\"):
+            line = line[:-1].rstrip(" \t")
+        if re.match(r"^\\#{1,6}[ \t]+", line):
+            line = line[1:]
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _packet_next_line_values(packet_text: str, name: str) -> list[str]:
     """Read empty header fields without crossing a heading or another field."""
     header_lines: list[str] = []
@@ -888,25 +901,16 @@ def summarize_task_evidence(
         packet_text: str | None = None
         if packet_bytes is not None:
             try:
-                packet_text = packet_bytes.decode("utf-8-sig")
-                # A single trailing backslash is a Markdown hard line break that
-                # some Packet copy paths add to every line; it is not part of
-                # the identity. A double backslash stays and fails the match.
-                packet_ids = [
-                    value[:-1]
-                    if value.endswith("\\") and not value.endswith("\\\\")
-                    else value
-                    for value in re.findall(
-                        r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*\r?$", packet_text
-                    )
-                ]
+                packet_text = _normalize_packet_lines_for_parsing(
+                    packet_bytes.decode("utf-8-sig")
+                )
+                packet_ids = re.findall(r"(?m)^TASK_ID:[ \t]*([^\s]+)[ \t]*$", packet_text)
                 packet_ids.extend(
-                    value for value in _packet_next_line_values(packet_text, "TASK_ID")
-                    if TASK_ID_RE.fullmatch(value) is not None
+                    _packet_next_line_values(packet_text, "TASK_ID")
                 )
             except UnicodeDecodeError:
                 packet_ids = []
-            if len(packet_ids) == 1:
+            if len(packet_ids) == 1 and TASK_ID_RE.fullmatch(packet_ids[0]) is not None:
                 packet["task_id"] = packet_ids[0]
                 packet["parse_status"] = "VALID_TASK_ID"
                 if packet_ids[0] != expected_task_id:
@@ -1810,6 +1814,67 @@ def _verify_evidence_manifest(value: str, worktree: Path) -> dict[str, Any]:
     return {"manifest": str(manifest_path), "files": verified}
 
 
+def check_owner_authorization(
+    authorization_file: str,
+    task_id: str,
+    packet_file: str,
+    action: str,
+    target: str,
+) -> dict[str, Any]:
+    authorization_path = Path(authorization_file)
+    packet_path = Path(packet_file)
+    packet_sha256 = (
+        hashlib.sha256(packet_path.read_bytes()).hexdigest() if packet_path.is_file() else None
+    )
+
+    def no_match(reason: str) -> dict[str, Any]:
+        return {
+            "status": "NO_MATCH",
+            "reason": reason,
+            "matched_line": None,
+            "packet_sha256": packet_sha256,
+        }
+
+    if not authorization_path.is_file():
+        return no_match("FILE_MISSING")
+    if packet_sha256 is None:
+        return no_match("PACKET_FILE_MISSING")
+
+    task_prefix = f"我授權 {task_id}："
+    task_lines: list[tuple[int, str]] = []
+    for line_number, line in enumerate(
+        authorization_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if line.strip() and line.startswith(task_prefix):
+            task_lines.append((line_number, line[len(task_prefix):]))
+
+    if not task_lines:
+        return no_match("NO_LINE_FOR_TASK_ID")
+
+    matching_fingerprint_lines: list[tuple[int, str]] = []
+    for line_number, body in task_lines:
+        fields = body.split("｜")
+        if len(fields) != 3 or not fields[1].startswith("packet_sha256="):
+            continue
+        fingerprint = fields[1][len("packet_sha256="):]
+        if SHA_RE.fullmatch(fingerprint) is not None and fingerprint == packet_sha256:
+            matching_fingerprint_lines.append((line_number, fields[0]))
+
+    if not matching_fingerprint_lines:
+        return no_match("PACKET_SHA256_MISMATCH")
+
+    for line_number, authorization_content in matching_fingerprint_lines:
+        if action in authorization_content and target in authorization_content:
+            return {
+                "status": "MATCH",
+                "reason": None,
+                "matched_line": line_number,
+                "packet_sha256": packet_sha256,
+            }
+
+    return no_match("ACTION_OR_TARGET_NOT_COVERED")
+
+
 def _get_ancestor_pids() -> set[int]:
     pids = {os.getpid()}
     curr = os.getpid()
@@ -2245,6 +2310,19 @@ def close_temporary_worktree(
     ):
         raise ControlError("worktree has no active preauthorization for this task and exact path")
 
+    merge_target_ref = authorization.get("merge_target_ref") or base
+    if (
+        not isinstance(merge_target_ref, str)
+        or not merge_target_ref
+        or merge_target_ref.startswith("-")
+        or "\n" in merge_target_ref
+        or "\r" in merge_target_ref
+    ):
+        raise ControlError("worktree preauthorization has an invalid merge target ref")
+    merge_target = git(repo, "rev-parse", "--verify", f"{merge_target_ref}^{{commit}}", check=False)
+    if merge_target.returncode != 0:
+        raise ControlError("worktree preauthorization merge target does not resolve to a commit")
+
     if auto_close_authorized is False:
         raise ControlError("automatic close denied; auto_close_authorized is False")
 
@@ -2266,7 +2344,7 @@ def close_temporary_worktree(
         raise ControlError("automatic close denied; unresolved gates: " + ", ".join(explicit_denials))
 
     allowed_caches = authorization.get("allowed_rebuildable_caches") or []
-    before = _worktree_snapshot(repo, target, base, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
+    before = _worktree_snapshot(repo, target, merge_target_ref, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
     if before[1] != authorization.get("branch"):
         raise ControlError("worktree branch differs from its preauthorized branch")
     _check_execution_claims(repo, target)
@@ -2278,9 +2356,9 @@ def close_temporary_worktree(
     _check_fable_executions(repo, target, task_id)
     _assert_scheduler_unbound(target)
     _check_no_open_files(target)
-    after = _worktree_snapshot(repo, target, base, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
+    after = _worktree_snapshot(repo, target, merge_target_ref, allowed_rebuildable_caches=allowed_caches, task_id=task_id)
     if before[:4] != after[:4]:
-        raise ControlError("worktree or base changed during the safety checks")
+        raise ControlError("worktree or merge target changed during the safety checks")
 
     # Consume the authorization atomically before the destructive operation.
     # A changed or missing marker stops here with the worktree still present.
@@ -2319,6 +2397,7 @@ def close_temporary_worktree(
         "branch": before[1],
         "branch_tip_preserved": branch_tip,
         "base": base,
+        "merge_target_ref": merge_target_ref,
         "merge_type": before[4]["type"],
         "merge_target_commit": before[4]["target_commit"],
         "evidence": evidence,
@@ -2895,6 +2974,12 @@ def main() -> int:
         "--continuation-id",
         help="expected continuation directory name and result continuation_id",
     )
+    authorization = sub.add_parser("authorization-check")
+    authorization.add_argument("--file", required=True)
+    authorization.add_argument("--task-id", required=True)
+    authorization.add_argument("--packet-file", required=True)
+    authorization.add_argument("--action", dest="authorized_action", required=True)
+    authorization.add_argument("--target", required=True)
     scratch = sub.add_parser("validate-test-scratch")
     scratch.add_argument("--repo", required=True)
     scratch.add_argument("--path", required=True)
@@ -2934,6 +3019,10 @@ def main() -> int:
     run.add_argument("command", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
+    if args.action == "authorization-check" and (
+        not args.task_id.strip() or not args.authorized_action.strip() or not args.target.strip()
+    ):
+        parser.error("--task-id, --action and --target must not be empty")
     try:
         if args.action == "space-check":
             result = check_space(args.path, args.operation, args.phase)
@@ -2977,6 +3066,12 @@ def main() -> int:
                 }
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
+        if args.action == "authorization-check":
+            result = check_owner_authorization(
+                args.file, args.task_id, args.packet_file, args.authorized_action, args.target
+            )
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if result["status"] == "MATCH" else 2
         if args.action == "validate-test-scratch":
             result = validate_test_scratch(args.repo, args.path, args.approved_root)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True))
