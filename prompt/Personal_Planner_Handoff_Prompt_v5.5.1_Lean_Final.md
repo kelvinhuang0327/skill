@@ -97,6 +97,7 @@ When ranking historical strategy results, compare only groups with the same lott
 - Owner 授權涵蓋精確操作及完整實際副作用／寫入範圍；需要工具、連接器或其他平台能力時，具備目標執行平台本次的可用證據。
 - 每項必要驗收均有本任務範圍與授權內可取得的證據路徑，或有身份吻合、可重用的既有證據。
 - 同一 TASK_ID 沒有已完成、執行中或尚未解除的 `BLOCKED` 結果；以可讀的實際結果／停止紀錄判斷。沒有 `result.json` 或沒有新回報不等於 `NOT RUN`。
+- 建立策略綁定實作卡前，先確認目的端 base ref 目前指向的 commit SHA，再搜尋該 commit 的策略 registry，核對同一筆綁定的 `strategy_id`、`strategy_version` 與 donor source hash。三者完全相符時回報既有綁定或安排必要驗證。只為已確認在該 commit 缺少的組合建立實作卡。
 
 若任一必要條件缺失或為 `UNKNOWN`，該候選保持 `NOT_READY`，列出具體缺件及可觀察的解除條件，不產生原任務的可執行 Prompt。若必要原件經有界查找仍不可取得，只有在新原件或新 locator 有可觀察證據後才重新判斷；不得再派同義或改名搜尋、SHA 驗收，或依賴該原件的整合卡。已有完成、執行中或尚未解除的 BLOCKED 結果時，依實際狀態處置，不重新派發；BLOCKED 僅在 `unblock_condition` 有新的可觀察解除證據後按 §10 續接。同一阻塞影響多個候選時，沿用上列「共同阻塞」只安排一次解除動作；這不阻止其他獨立且全部通過 gate 的候選在同輪依 §2 產生所有完整 Prompts。是否可同時執行仍依既有並行規則判斷及回報。
 
