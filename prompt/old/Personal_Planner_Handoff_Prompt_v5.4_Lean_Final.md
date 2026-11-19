@@ -478,12 +478,73 @@ it is not evidence-progressing RCA.
 
 不要為一般 clean task 加入大量 hash、mtime、inode、process 或所有 worktree 盤點。
 
+### 5.1A Runtime write-surface preflight
+
+For that same real production/runtime mutation, reuse the canonical Fable
+capability tri-state and the same-harness probe in operational-gates.md:
+
+CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
+
+`ALLOWED` requires direct evidence from the exact harness/wrapper/launcher chain
+that will invoke the mutation. `UNKNOWN` and `BLOCKED` never permit execution;
+stop before mutation without substituting another execution path. Capability
+is separate from the exact direct Owner authorization in §4.3: neither an
+`ALLOWED` probe nor a resolved write surface grants authorization.
+
+Distinct from capability preflight:
+
+~~~text
+CAPABILITY PREFLIGHT: Can the harness execute the real action?
+WRITE-SURFACE PREFLIGHT: What load-bearing durable/runtime writes will that action cause?
+~~~
+
+Applies only when the task performs a real production/runtime mutation and the
+exact write surface materially determines authorization, production safety,
+data safety, or rollback semantics. Does not apply to ordinary local unit
+tests, read-only reviews, pure QA, documentation-only tasks, or routine local
+implementation where runtime write authorization is irrelevant.
+
+Before the applicable exact direct Owner authorization in §4.3 is requested
+or consumed, resolve the exact runtime entrypoint's load-bearing writes and
+include the complete relevant write surface in the authorization synthesis:
+
+RUNTIME_WRITE_SURFACE_REQUIRED: YES | NO
+EXACT_RUNTIME_ENTRYPOINT: <exact | NOT_APPLICABLE>
+DIRECT_WRITES: <exact | NOT_APPLICABLE>
+TRANSITIVE_AUTOMATIC_WRITES: <exact | NONE>
+AUTHORIZED_RUNTIME_WRITE_SURFACE: <union of load-bearing direct + transitive writes | NOT_APPLICABLE>
+RUNTIME_WRITE_SURFACE_STATUS: RESOLVED | UNRESOLVED | NOT_APPLICABLE
+
+Bounded discovery only: inspect the directly invoked persistence/output chain
+required to identify load-bearing writes. Do not require repo-wide call-graph
+analysis, a broad architecture audit, tracing every temporary/internal write,
+or a new write registry. Only authorization- or safety-relevant durable/
+runtime writes are load-bearing.
+
+若 RUNTIME_WRITE_SURFACE_REQUIRED = YES 且 mutation 前無法讓
+RUNTIME_WRITE_SURFACE_STATUS 達到 RESOLVED：
+
+STOP:
+RUNTIME_WRITE_SURFACE_UNRESOLVED
+
+Do not discover the missing write surface by executing the production
+mutation first.
+
+---
+
 ### 5.2 Scope
 
 列出 exact expected paths。若 adjacent source/test/config path 是滿足 stated
 acceptance 所必需，可納入並在回報列為 changed path；只有新 outcome、unrelated
 subsystem 或 materially expanded risk 才要求 Planner Delta。不得為了縮短文字
 而隱藏必需的 adjacent path。
+
+Write paths 必須依 exact Packet path、適用 repository instructions 或既有
+canonical module/documentation convention 解析；不得另建 duplicate analysis
+folder、第二套 project hierarchy 或未授權的永久外部文件。無法唯一解析必要
+write path 時，STOP: PROJECT_WRITE_PATH_AUTHORITY_UNRESOLVED。
+需要新增 external workspace 時，依 Fable workspace-containment 的 exact path
+與 cleanup disposition 授權；local commit authorization 不會擴張 write root。
 
 ### 5.3 Runtime
 
@@ -835,6 +896,17 @@ one-deferred／one-recheck／no-Task-C 限制與上述可選 Packet values。詳
 執行順序、fresh-process reconciliation、scope-qualified writer evidence 與 resume
 mechanics 由 `/fable-method` 及 `references/task-checkpoint.md` 唯一管理。
 
+### 5.8 Canonical successor deduplication（修復舊來源或 publication conflict 前的分流）
+
+僅在準備修復舊來源、處理 publication conflict 或已有直接相關 successor 線索時，才執行此分流；一般任務不進行全域 successor 搜尋。
+
+在發起重複 source remediation 前，先以 canonical source 與本任務 acceptance 判定是否已被 canonical successor 覆蓋：
+- 完整取代：若必要交付與 acceptance 全部被可達之 successor 覆蓋且驗證證據適用，記錄 `SUPERSEDED_BY_CANONICAL`，停止重複 source remediation；
+- 部分取代：明列 covered / missing，只將授權範圍內的 missing delta 納入下一輪任務；
+- 證據不足或無可確認 successor：不宣告完成，指出最小缺口或依授權繼續正常修復；同路徑、相似標題或單獨 CI 綠燈皆不足以證明等價。
+
+詳細判定規則、證據適用邊界（不搬移測試、不將 supersession 當作 PR MERGED、不刪除 exact deployed source）與授權不變性（不授權關 PR、push、merge、force-delete、preservation ref，不取代 runtime ownership），以 `/fable-method`（`references/operational-gates.md`）的 canonical contract 為準，Planner 不重複定義第二套規則。
+
 ## 6. Judge boundary
 
 不需 Judge 的 routine local task 不要因為 Worker skill 裡存在 Judge 規則就建立
@@ -1084,6 +1156,10 @@ REQUIRED_CHECKS: <COMMANDS | NONE>
 JUDGE_CONTINUITY: <NOT_APPLICABLE | INITIAL_JUDGE_PENDING_DEPTH_CORRECTION | DELTA_REJUDGE_REQUIRED>
 ~~~
 
+Continuation 繼承原 worktree/root、canonical path convention 與 resource policy。
+UPDATED_ALLOWLIST 不會自行授權新 hierarchy、external workspace 或 concurrency
+escalation；必要改變必須由適用 exact Owner Delta 明列，並維持原 safety gates。
+
 The three JUDGE_CONTINUITY values are mutually exclusive:
 
 - NOT_APPLICABLE: the task involves no Judge.
@@ -1263,6 +1339,7 @@ CTO_TEMPLATE_NOT_MISTAKEN_FOR_CTO_CONCLUSION: YES
 CANONICAL_REMOTE_AUTHORITY_PRECEDENCE_RESPECTED: YES
 REUSED_EVIDENCE_DIFF_APPLIED_IF_EXACT_TREE: YES
 CROSS_LANE_LOCATOR_PRESENT_IF_DEPENDENT: YES
+CANONICAL_SUCCESSOR_DEDUP_APPLIED_IF_REMEDIATION: YES
 INPUT_COMPLETENESS_VALIDATED_IF_DEPENDENT: YES
 AUTHORITY_TYPING_DISTINGUISHED_IF_DEPENDENT: YES
 ~~~

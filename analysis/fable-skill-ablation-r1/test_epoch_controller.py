@@ -281,6 +281,65 @@ def build_valid_manifest(
 
 
 class ExternalLockTests(unittest.TestCase):
+    def test_24_repeated_acquire_preserves_the_process_owned_lock(self) -> None:
+            script = """
+    import os
+    import subprocess
+    import sys
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, sys.argv[1])
+    import epoch_controller as c
+
+    lock_path, other_path = sys.argv[2:]
+    held = c.EpochLock(lock_path)
+    held.acquire()
+    before = os.fstat(c.LOCK_FD)
+    for attempt in (held, c.EpochLock(lock_path), c.EpochLock(other_path)):
+        try:
+            attempt.acquire()
+        except c.EpochLockFailure as exc:
+            print(str(exc))
+        else:
+            raise AssertionError("repeated acquire succeeded")
+        after = os.fstat(c.LOCK_FD)
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert not os.path.exists(other_path)
+    contender = subprocess.run(
+        [sys.executable, c.__file__, "--lock-path", lock_path, "--probe-lock-only"],
+        capture_output=True, text=True, timeout=10, close_fds=True,
+    )
+    assert contender.returncode == c.EXIT_OWNER_BUSY, contender.stderr
+    assert contender.stderr.strip() == c.OWNER_BUSY
+    print("REPEATED_ACQUIRE_LOCK_PRESERVED")
+    """
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                lock_path = root / "epoch.lock"
+                other_path = root / "other.lock"
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        str(CONTROLLER_PATH.parent),
+                        str(lock_path),
+                        str(other_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    close_fds=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("lock_already_acquired", result.stdout)
+                self.assertEqual(result.stdout.count("process_lock_already_acquired"), 2)
+                self.assertIn("REPEATED_ACQUIRE_LOCK_PRESERVED", result.stdout)
+                self.assertFalse(other_path.exists())
+                inode = lock_path.stat().st_ino
+                successor = run_controller(lock_path, "--probe-lock-only")
+                self.assertEqual(successor.returncode, 0, successor.stderr)
+                self.assertEqual(lock_path.stat().st_ino, inode)
+
     def test_01_contention_precedes_manifest_read_and_authority_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1010,12 +1069,122 @@ class RecoveryGateTests(unittest.TestCase):
                 reconcile(live_processes=(record,), roots=(Path("/offline/epoch"),))
 
 
+def build_complete_manifest() -> tuple[dict[str, Any], bytes]:
+    spec = importlib.util.spec_from_file_location(
+        "controller_compiler_fixture_inputs", Path(__file__).with_name("test_build_epoch_manifest.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    manifest = build_epoch_manifest.build_manifest(module.EPOCH_ID, **module.complete_inputs())
+    return manifest, build_epoch_manifest.serialize_manifest(manifest)
+
+
 class ManifestAuthorityTests(unittest.TestCase):
+    def test_28_manifest_hash_and_parse_use_one_opened_inode_after_lock(self) -> None:
+            script = """
+    import os
+    import sys
+    from pathlib import Path
+    from unittest import mock
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, sys.argv[1])
+    import epoch_controller as c
+
+    lock_path, manifest_path, replacement_path, expected = sys.argv[2:]
+    original = Path(manifest_path).read_bytes()
+    original_stat = Path(manifest_path).stat()
+    opened = []
+    read_identities = []
+    hash_inputs = []
+    parse_inputs = []
+    native_open = c.os.open
+    native_read = c.os.read
+    native_hash = c.hashlib.sha256
+    native_validate = c._usd.validate_manifest_bytes
+
+    def observed_open(path, flags, *args, **kwargs):
+        if os.fspath(path) == manifest_path:
+            assert c._PROCESS_LOCK_ACQUIRED
+            os.fstat(c.LOCK_FD)
+            assert flags & os.O_NOFOLLOW
+        descriptor = native_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == manifest_path:
+            metadata = os.fstat(descriptor)
+            opened.append((descriptor, metadata.st_dev, metadata.st_ino))
+        return descriptor
+
+    def observed_read(descriptor, size):
+        if opened and descriptor == opened[0][0]:
+            metadata = os.fstat(descriptor)
+            read_identities.append((metadata.st_dev, metadata.st_ino))
+        return native_read(descriptor, size)
+
+    def replace_path_during_hash(raw):
+        if raw == original:
+            hash_inputs.append(raw)
+            if Path(replacement_path).exists():
+                Path(replacement_path).replace(manifest_path)
+        return native_hash(raw)
+
+    def observed_parse(raw, *args, **kwargs):
+        parse_inputs.append(raw)
+        return native_validate(raw, *args, **kwargs)
+
+    with (
+        mock.patch.object(c.os, "open", side_effect=observed_open),
+        mock.patch.object(c.os, "read", side_effect=observed_read),
+        mock.patch.object(c.hashlib, "sha256", side_effect=replace_path_during_hash),
+        mock.patch.object(c._usd, "validate_manifest_bytes", side_effect=observed_parse),
+        mock.patch.object(c, "sha256_file", side_effect=AssertionError("path reread")),
+    ):
+        status = c.main([
+            "--lock-path", lock_path,
+            "--manifest", manifest_path,
+            "--expected-manifest-sha256", expected,
+        ])
+    assert status == 0, status
+    assert len(opened) == 1, opened
+    assert opened[0][1:] == (original_stat.st_dev, original_stat.st_ino)
+    assert read_identities and all(item == opened[0][1:] for item in read_identities)
+    assert hash_inputs == [original], hash_inputs
+    assert parse_inputs == [original], parse_inputs
+    print("SINGLE_INODE_MANIFEST_VERIFIED")
+    """
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest_path = root / "manifest.json"
+                replacement_path = root / "replacement.json"
+                _, original = build_complete_manifest()
+                replacement = b'{"unexpected":true}\n'
+                manifest_path.write_bytes(original)
+                replacement_path.write_bytes(replacement)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        script,
+                        str(CONTROLLER_PATH.parent),
+                        str(root / "epoch.lock"),
+                        str(manifest_path),
+                        str(replacement_path),
+                        hashlib.sha256(original).hexdigest(),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    close_fds=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('"authority_verified":true', result.stdout)
+                self.assertIn("SINGLE_INODE_MANIFEST_VERIFIED", result.stdout)
+                self.assertEqual(manifest_path.read_bytes(), replacement)
+
     def test_load_manifest_after_lock_returns_the_canonically_validated_manifest(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            manifest, data = build_valid_manifest(EPOCH_ID)
+            manifest, data = build_complete_manifest()
             path = Path(temporary) / "manifest.json"
             path.write_bytes(data)
             loaded = controller.load_manifest_after_lock(path)
@@ -1028,7 +1197,7 @@ class ManifestAuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest = root / "manifest.json"
-            _, raw = build_valid_manifest(EPOCH_ID)
+            _, raw = build_complete_manifest()
             manifest.write_bytes(raw)
             valid = run_controller(
                 root / "epoch.lock",
@@ -1062,6 +1231,18 @@ class ManifestAuthorityTests(unittest.TestCase):
                     self.assertEqual(result.returncode, controller.EXIT_CONTRACT_FAILURE)
                     self.assertNotIn('"authority_verified":true', result.stdout)
 
+    def test_generic_json_with_matching_digest_is_not_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "manifest.json"
+            for raw in (b'{"safe":true}\n', b'{"epoch":"offline","value":1}\n'):
+                with self.subTest(raw=raw):
+                    path.write_bytes(raw)
+                    result = run_controller(root / "lock", "--manifest", str(path),
+                        "--expected-manifest-sha256", hashlib.sha256(raw).hexdigest())
+                    self.assertEqual(result.returncode, controller.EXIT_CONTRACT_FAILURE)
+                    self.assertNotIn('"authority_verified":true', result.stdout)
+
     def test_manifest_failing_canonical_schema_validation_is_rejected(self) -> None:
         """A structurally-tampered manifest is rejected by the canonical
         compiler even though it is well-formed JSON with a matching hash --
@@ -1070,7 +1251,7 @@ class ManifestAuthorityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            manifest, _ = build_valid_manifest(EPOCH_ID)
+            manifest, _ = build_complete_manifest()
             tampered = dict(manifest)
             tampered["schema"] = "SOME_OTHER_SCHEMA/v1"
             tampered_bytes = (
@@ -1095,7 +1276,7 @@ class ManifestAuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "manifest.json"
-            _, raw = build_valid_manifest(EPOCH_ID)
+            _, raw = build_complete_manifest()
             target.write_bytes(raw)
             symlink = root / "symlink.json"
             symlink.symlink_to(target)
@@ -1115,7 +1296,7 @@ class ManifestAuthorityTests(unittest.TestCase):
     def test_31_manifest_modified_during_descriptor_read_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "manifest.json"
-            _, raw = build_valid_manifest(EPOCH_ID)
+            _, raw = build_complete_manifest()
             path.write_bytes(raw)
             replacement = b'{"changed":true,"longer":true}\n'
             native_read = controller.os.read

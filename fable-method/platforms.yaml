@@ -1,5 +1,5 @@
 ---
-schema_version: 2
+schema_version: 3
 repository_root: "/Users/kelvin/VibeCoding-WorkSpace/skill"
 materialized_root: fable-method/platforms
 skills:
@@ -36,8 +36,44 @@ skills:
     platforms:
     - name: codex
       frontmatter_source: fable-method/shared/platforms/codex/frontmatter.md
-      adapter_sources: []
+      adapter_sources:
+      - fable-method/shared/platforms/codex/adapter.md
       reference_overrides: []
+      runtime_assets:
+      - id: task_checkpoint
+        role: launcher
+        source: fable-method/scripts/task_checkpoint.rb
+        source_commit: 67c00cee639835269a4f2cdc313b8c710c7ed9c3
+        git_blob: 97a1c6661e3e111669acde523e2e12b7b2bfe1b2
+        sha256: 9f2ebf5522fde5bd504689cf51bbd104697dd3cfd2e12f0f7bae7f5eccb2e966
+        mode: "100755"
+        destination: scripts/task_checkpoint.rb
+        purpose: canonical_task_checkpoint_launcher
+      - id: paused_run_continuation
+        role: required_companion
+        source: fable-method/scripts/paused_run_continuation.rb
+        source_commit: e6f8581cdabe21f3683b8a5d8effb6855d98a041
+        git_blob: 91592132733be6b697bdbef667b97d9065c829c1
+        sha256: f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0
+        mode: "100644"
+        destination: scripts/paused_run_continuation.rb
+        purpose: required_only_for_continue_paused_run_transition
+      - id: execution_evidence_fingerprint
+        role: required_companion
+        source: fable-method/scripts/execution_evidence_fingerprint.rb
+        source_commit: 92d609211d8276f3c804a49eb454813462fcf8d7
+        git_blob: d526b27ad562dc9c2ed96617ee975b6d5f8e9d85
+        sha256: 077ba702d55d8919be2ba3e25b7a4655adb1ec9b1dfba4221a047933db2c6249
+        mode: "100644"
+        destination: scripts/execution_evidence_fingerprint.rb
+        purpose: required_only_for_fingerprinted_run
+      - id: artifact_controls
+        role: supporting_helper
+        source: fable-method/scripts/fable_artifact_controls.py
+        sha256: d56739ab975264f868f6edbd9d69ba599e319cb45e0ec21d8bc7159e94176045
+        mode: "100644"
+        destination: scripts/fable_artifact_controls.py
+        purpose: local_codex_artifact_logs_and_worktree_lifecycle
       materialized_destination: fable-method/platforms/codex/fable-method
       live_installation_path: "/Users/kelvin/.codex/skills/fable-method"
       live_installation_role: deployment_metadata_only

@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require_relative 'support/contract_fixtures'
 
 class PlannerV54RoutingRegressionTest < Minitest::Test
+  include ContractFixtures
   REPOSITORY_ROOT = File.expand_path('../..', __dir__)
   FIXTURE_COUNT = 12
   DEFERRED_RESOURCE_CASES = {
@@ -60,12 +62,16 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       'Scope 外的 unrelated dirty path、compatible descendant 或',
       'harmless environment difference 記錄後繼續；managed overlapping dirty ownership'
     )
-    assert_fable(
-      'descendant, unrelated outside-scope dirty path, or harmless environment',
-      'difference is evidence to report, not a stop.',
-      'Preserve unrelated owner changes.',
-      'Never reset, restore, stash, or clean unrelated/Owner work.'
-    )
+    gates = linked_reference(FABLE, 'operational-gates.md')
+    assert_guarded_contract(FABLE, [
+      'Stop on unexplained changes;',
+      'do not use cwd as authority, overwrite owner work, or reset, restore, stash, or clean unrelated state.',
+      'Unrelated out-of-scope dirt or harmless environment differences are report-only.'
+    ], weakenings: {'report-only.' => 'a reason to reset owner files.'})
+    assert_guarded_contract(gates, [
+      'A compatible descendant, unrelated out-of-scope dirt, or harmless environment difference is report-only.',
+      'The preflight STOP conditions are wrong repository, incompatible base/ref, overlapping dirty ownership, active concurrent mutation, missing required capability, or an explicit safety restriction.'
+    ], weakenings: {'overlapping dirty ownership,' => ''})
   end
 
   # Expected: STOP_WITH_EVIDENCE rather than taking over managed dirty work.
@@ -75,13 +81,12 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '不得默認接管。',
       '- overlapping dirty ownership；'
     )
-    assert_fable(
-      'Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.',
-      'Any unresolved front-door gate blocks direct FAST entry and follows existing',
-      'fail-closed or escalation behavior.',
-      'If write ownership remains unresolved, stop before edit, verification, or',
-      'ownership mutation.'
-    )
+    # The front-door write-ownership kernel was replaced by hard boundaries 2
+    # and 4: overlapping active work is still never taken over.
+    assert_guarded_contract(FABLE, [
+      "Never overwrite, reset, stash, clean, or discard someone else's uncommitted or active work.",
+      'Stop only on material conflicts involving explicit authorization, required inputs, or risk of overwriting active work.'
+    ], weakenings: {'risk of overwriting active work.' => 'a failing test.'})
   end
 
   # Expected: an unrelated repository-wide failure is not automatically the
@@ -97,11 +102,19 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '- Focused and affected regressions by default.',
       '- Add full suite, Judge, browser, DB invariance, evidence or lifecycle cleanup only when applicable.'
     )
-    assert_fable(
-      'command exit statuses and',
-      'raw summaries, runtime evidence, filesystem ledger, unknowns, failed attempts,',
-      'and final-tree identity.'
-    )
+    handoff = linked_reference(FABLE, 'judge-handoff.md')
+    reporting = linked_reference(FABLE, 'reporting.md')
+    assert_guarded_contract(handoff, [
+      'Include commands, exit statuses, and raw summaries',
+      'all unknowns and failed attempts;',
+      'the complete filesystem write/retained/deleted ledger.'
+    ], weakenings: {'all unknowns and failed attempts;' => 'only successful attempts;'})
+    assert_guarded_contract(reporting, [
+      'Earlier failures, aborts, timeouts, and terminations remain in the attempt and filesystem ledgers.',
+      'Every `VERIFIED` claim must trace to an observed command or runtime result.',
+      'NOT RUN / BLOCKED: <checks not run and why>'
+    ])
+    assert_guarded_contract(FABLE, ['Run the named acceptance and only directly relevant surrounding checks.'])
   end
 
   # Expected: explicit direct Owner authorization plus the higher-risk CTO/Judge
@@ -115,7 +128,7 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
     )
     assert_cto(
       'DB／data claim是load-bearing → read-only DB identity／schema／count；',
-      '高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得以 single-prompt token 打包，必須標記需要 standalone Owner authorization。'
+      '高風險動作（production DB write／migration／deploy／force delete／secrets／external publication）不得由 CTO-generated token 自行授權；必須標記需要 exact action/target 的 direct Owner authorization。'
     )
   end
 
@@ -175,12 +188,17 @@ class PlannerV54RoutingRegressionTest < Minitest::Test
       '不能取代它，同一 Worker conversation 中仍適用的 prior authorization 可依 §4.3',
       '重用。'
     )
-    assert_fable(
-      'Push, publication, deployment, remote changes, PR',
-      'creation or merge, destructive operations, credentials, secrets, production',
-      'writes, migrations, external messages, and unrelated products require',
-      'explicit direct Owner authorization.'
-    )
+    gates = linked_reference(FABLE, 'operational-gates.md')
+    assert_guarded_contract(FABLE, [
+      'an outward-facing, irreversible, destructive, production, deployment, or other high-risk action requires direct Owner authorization for the exact action and target.'
+    ], weakenings: {'requires direct Owner authorization' => 'requires assistant approval'})
+    assert_guarded_contract(PLANNER, [
+      'High-risk authorization 的 provenance 是 direct-message requirement，不是 two-message requirement。',
+      'SEPARATE_AUTHORIZATION_ONLY_MESSAGE_REQUIRED: NO',
+      'authorization for a different action or target。'
+    ])
+    assert_includes gates, 'OWNER_DIRECT_PACKET_AUTHORIZATION'
+    refute_match(/Before standalone authorization/, PLANNER)
   end
 
   # Expected: exactly one primary next task.
@@ -852,5 +870,114 @@ class PlannerReportingVocabularyTest < Minitest::Test
     snippets.each do |snippet|
       assert_includes section, snippet, "#{heading} no longer contains #{snippet.inspect}"
     end
+  end
+end
+
+class PlannerRuntimeWriteSurfacePreflightTest < Minitest::Test
+  include ContractFixtures
+  REPOSITORY_ROOT = File.expand_path('../..', __dir__)
+  PLANNER = File.read(
+    File.join(REPOSITORY_ROOT, 'prompt/Personal_Planner_Handoff_Prompt_v5.4_Lean_Final.md'),
+    encoding: 'UTF-8'
+  )
+
+  # Model of the Planner runtime write-surface synthesis rule: the authorized
+  # surface is the union of load-bearing direct + transitive writes, and is
+  # only ever RESOLVED once both are known.
+  def synthesize_runtime_write_surface(direct_writes:, transitive_writes:, resolved:)
+    return { status: :UNRESOLVED, authorized_surface: nil } unless resolved
+
+    { status: :RESOLVED, authorized_surface: (direct_writes + transitive_writes).uniq }
+  end
+
+  # Model of the trigger boundary: only a real production/runtime mutation
+  # receives the gate.
+  def runtime_write_surface_required?(task_type)
+    task_type == :production_runtime_mutation
+  end
+
+  # 1+2 — B649 shape: direct writes alone omit the automatic reporting
+  # rebuilds the scheduler entrypoint actually triggers; the authorized
+  # surface must be the union, not direct writes alone.
+  def test_transitive_writes_required_in_authorized_surface
+    direct = ['prediction persistence store']
+    transitive = %w[performance.jsonl research-summary.json head_to_head.jsonl]
+
+    full = synthesize_runtime_write_surface(direct_writes: direct, transitive_writes: transitive, resolved: true)
+    direct_only = synthesize_runtime_write_surface(direct_writes: direct, transitive_writes: [], resolved: true)
+
+    assert_equal direct + transitive, full[:authorized_surface]
+    transitive.each { |w| refute_includes direct_only[:authorized_surface], w }
+
+    assert_includes PLANNER, 'DIRECT_WRITES: <exact | NOT_APPLICABLE>'
+    assert_includes PLANNER, 'TRANSITIVE_AUTOMATIC_WRITES: <exact | NONE>'
+    assert_includes PLANNER, 'AUTHORIZED_RUNTIME_WRITE_SURFACE: <union of load-bearing direct + transitive writes | NOT_APPLICABLE>'
+  end
+
+  # 3 — bounded exact-entrypoint tracing is required, not a repo-wide audit.
+  def test_bounded_entrypoint_trace_not_repo_wide_audit
+    assert_includes PLANNER, 'Bounded discovery only: inspect the directly invoked persistence/output chain'
+    assert_includes PLANNER, 'Do not require repo-wide call-graph'
+    assert_includes PLANNER, 'analysis, a broad architecture audit, tracing every temporary/internal write,'
+    assert_includes PLANNER, 'or a new write registry.'
+  end
+
+  # 4 — an unresolved load-bearing write surface stops before mutation, and
+  # the missing surface must not be discovered by executing the mutation.
+  def test_unresolved_write_surface_stops_before_mutation
+    result = synthesize_runtime_write_surface(direct_writes: ['x'], transitive_writes: [], resolved: false)
+    assert_equal :UNRESOLVED, result[:status]
+    assert_nil result[:authorized_surface]
+
+    assert_includes PLANNER, "STOP:\nRUNTIME_WRITE_SURFACE_UNRESOLVED"
+    assert_includes PLANNER, 'Do not discover the missing write surface by executing the production'
+  end
+
+  # 5 — ordinary local/read-only/QA/documentation tasks do not receive this
+  # extra gate.
+  def test_ordinary_local_and_read_only_tasks_unburdened
+    refute runtime_write_surface_required?(:ordinary_local_unit_test)
+    refute runtime_write_surface_required?(:read_only_review)
+    refute runtime_write_surface_required?(:pure_qa)
+    refute runtime_write_surface_required?(:documentation_only)
+    assert runtime_write_surface_required?(:production_runtime_mutation)
+
+    assert_includes PLANNER, 'Does not apply to ordinary local unit'
+    assert_includes PLANNER, 'tests, read-only reviews, pure QA, documentation-only tasks, or routine local'
+    assert_includes PLANNER, 'implementation where runtime write authorization is irrelevant.'
+  end
+
+  # 6 — existing execution-capability preflight semantics are unchanged, and
+  # the two preflights remain explicitly distinct.
+  def test_execution_capability_preflight_preserved_and_distinct
+    preflight = PLANNER.split('### 5.1A Runtime write-surface preflight', 2).last.split('### 5.2', 2).first
+    assert_includes preflight, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
+    assert_includes preflight, '`UNKNOWN` and `BLOCKED` never permit execution;'
+    assert_includes preflight, 'neither an'
+    assert_includes preflight, '`ALLOWED` probe nor a resolved write surface grants authorization.'
+    refute_includes preflight, 'EXECUTION_CAPABILITY_STATUS'
+    refute_includes preflight, 'standalone authorization'
+    assert_guarded_contract(preflight, [
+      'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED',
+      '`ALLOWED` requires direct evidence from the exact harness/wrapper/launcher chain that will invoke the mutation.',
+      '`UNKNOWN` and `BLOCKED` never permit execution;',
+      'stop before mutation without substituting another execution path.',
+      'Capability is separate from the exact direct Owner authorization in §4.3:',
+      '`ALLOWED` probe nor a resolved write surface grants authorization.'
+    ], weakenings: {'`UNKNOWN` and `BLOCKED` never permit execution;' => '`UNKNOWN` permits execution;'})
+    assert_includes PLANNER, 'CAPABILITY PREFLIGHT: Can the harness execute the real action?'
+    assert_includes PLANNER, 'WRITE-SURFACE PREFLIGHT: What load-bearing durable/runtime writes will that action cause?'
+  end
+
+  # 7 — no new Planner version and no second authority framework; the rule
+  # lives as a subsection of the existing §5 Packet-specific gates.
+  def test_no_new_planner_version_or_second_authority
+    assert_includes PLANNER, '### 5.1A Runtime write-surface preflight'
+    assert_includes PLANNER, '# Personal Planner Handoff Prompt — Implementation-First v5.4 Lean Final'
+    refute_includes PLANNER, 'Implementation-First v5.5'
+    refute_includes PLANNER, 'RUNTIME_WRITE_SURFACE_AUTHORITY'
+    refute_includes PLANNER, 'WRITE_SURFACE_REGISTRY'
+    assert_includes PLANNER, 'v5.4 is the successor'
+    assert_includes PLANNER, 'second authority layer.'
   end
 end

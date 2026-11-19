@@ -1,0 +1,170 @@
+# Prepared LOW read-only self-hosted Pilot 1 manifest. Pilot execution is not authorized by this file.
+schema_version: 1
+
+control_plane:
+  version: 1.1.0-draft.1
+  schema_version: 1
+  source_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+
+project_attachment:
+  profile_path: .ai/agent-profile.yaml
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  missing_context_policy: stop
+  profile_sha256_or_version: 63c37623f3eeb5b1eab44c8f8cb29a8635c663b8b1948f2cb8505a6aedb7bdb2
+
+task:
+  id: CONTROL_PLANE_V1_PILOT1_SELF_HOSTED_READ_ONLY_ATTACHMENT
+  name: self-hosted-read-only-project-attachment-check
+  type: entry_check
+  risk_class: LOW
+  routing_path: FAST
+  source_decision: CONTROL_PLANE_V1_LOCAL_INTEGRATION_AND_PILOT1_PREPARATION_R1
+  created_by: planner
+  created_at: "2026-07-18T13:45:58+08:00"
+
+goal: Verify the control-plane-v1 Project Attachment, version/schema resolution, live Git state, bounded project memory, manifest resolution, and evidence precedence in one strictly read-only handoff.
+steps:
+  - Discover only the canonical control-plane-v1 repository, its Git metadata, the five repo-local attachment files, the five durable sources, this manifest, and generated role prompts when needed.
+  - Resolve the repo-local profile against control plane version 1.1.0-draft.1 and manifest schema version 1 before loading project context.
+  - Perform Phase 0A by observing live local Git state without creating, switching, updating, or deleting any ref, branch, worktree, index entry, or file.
+  - Perform Phase 0B by reading the four required context and memory files, selecting only manifest-matched memory entries within the declared budget.
+  - Resolve this manifest as the task source, keep active_task projection disabled, and apply live-state-over-historical-fact precedence without writing any projection or memory.
+  - Produce one read-only handoff containing attachment status, version/schema result, live-state snapshot, bounded selections, precedence decision, evidence states, no-mutation proof, and Pilot classification.
+success_criteria:
+  - Attachment discovery and version/schema resolution report explicit PASS, FAIL, NOT_RUN, UNKNOWN, STALE, or OUTDATED states bound to the observed head.
+  - Phase 0A and Phase 0B report the actual Git snapshot and the bounded context and memory selection without cross-project reads.
+  - The handoff records the precedence decision and a before/after no-mutation proof.
+  - No file, Git ref, branch, worktree, index, memory entry, active_task projection, DB, data, runtime, network, remote, push, PR, activation, or legacy prompt is changed.
+  - Pilot classification is reported for this one task only.
+
+repo:
+  project_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+  base_branch: main
+  base_commit: 7d646b3f2d7978c92cb1b69a69033260b500295f
+  task_branch: ""
+
+worktree:
+  mode: NOT_APPLICABLE
+  reattach: false
+  path: ""
+  pr_ref: ""
+
+scope:
+  allowed_files: []
+  protected_paths:
+    - AGENT_CORE.md
+    - ROLE_PROFILES.md
+    - ROUTING_AND_LIFECYCLE.md
+    - TASK_MANIFEST.schema.yaml
+    - WORKER_TASK_TEMPLATE.md
+  forbidden_subsystems:
+    - repository-write
+    - git-mutation
+    - branch-or-worktree-creation
+    - remote-push-or-pr
+    - pilot-activation
+    - DB
+    - data
+    - runtime
+    - network
+    - legacy-prompt-replacement
+    - memory-write
+    - active-task-write
+  pins:
+    - path: AGENT_CORE.md
+      type: invariant
+    - path: ROLE_PROFILES.md
+      type: invariant
+    - path: ROUTING_AND_LIFECYCLE.md
+      type: invariant
+    - path: TASK_MANIFEST.schema.yaml
+      type: invariant
+    - path: WORKER_TASK_TEMPLATE.md
+      type: invariant
+
+policies:
+  db: none
+  runtime: none
+  external_side_effects: none
+  external_list: []
+  pr: none
+  merge: none
+  cleanup: standard_lifecycle
+  cleanup_reason: ""
+
+tests:
+  - name: attachment-file-inventory
+    cmd: test -f .ai/agent-profile.yaml && test -f .ai/ai-context/PROJECT_PROFILE.md && test -f .ai/ai-context/PROJECT_CONTEXT.md && test -f .ai/ai-context/RUNBOOK.md && test -f .ai/ai-memory/MEMORY_LOG.md
+    required: true
+    side_effects_allowed: none
+  - name: live-git-observation
+    cmd: git -C /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1 status --porcelain=v2 --branch
+    required: true
+    side_effects_allowed: none
+  - name: manifest-schema
+    cmd: LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/control_plane.rb validate-schema pilot1/self-hosted/manifest-low.yaml
+    required: true
+    side_effects_allowed: none
+  - name: manifest-lint-l1-l22
+    cmd: LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/control_plane.rb lint pilot1/self-hosted/manifest-low.yaml --project-root /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1 --source-label pilot1/self-hosted/manifest-low.yaml
+    required: true
+    side_effects_allowed: none
+  - name: no-repository-diff
+    cmd: git -C /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1 diff --exit-code && git -C /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1 diff --cached --exit-code
+    required: true
+    side_effects_allowed: none
+
+memory:
+  read:
+    mode: relevant
+    selectors:
+      - task_id:CONTROL_PLANE_V1_PILOT1_SELF_HOSTED_READ_ONLY_ATTACHMENT
+      - risk_domain:control_plane_project_attachment
+      - keyword:Pilot_1
+    max_entries: 3
+  write:
+    mode: forbidden
+    allowed_path: ""
+    purpose: ""
+    entry_schema: ""
+
+context:
+  live_state_required: true
+  head_binding_required: true
+  stale_evidence_policy: mark_stale
+
+authorization:
+  class: NONE
+  token: NOT_REQUIRED
+  scope: CONTROL_PLANE_V1_PILOT1_SELF_HOSTED_READ_ONLY_ATTACHMENT
+  high_risk_reason: ""
+
+review:
+  required: false
+  mode: fixed_head
+  independent: true
+
+evidence:
+  head_sha_binding: true
+  required:
+    - attachment_status
+    - control_plane_version_and_schema_result
+    - git_status_before_after
+    - bounded_context_and_memory_selection
+    - precedence_decision
+    - no_mutation_proof
+    - pilot_classification
+
+active_task_projection:
+  enabled: false
+  output_path: ""
+  manifest_sha256_required: false
+
+status:
+  worker_final: NOT_RUN
+  review_verdict: NOT_RUN
+  lifecycle_state: S0

@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require 'open3'
+require 'rbconfig'
+require 'tempfile'
 require_relative '../scripts/explicit_contract'
 
 # Fail-closed binding for five explicit /fable-method Worker contract
@@ -8,9 +11,47 @@ require_relative '../scripts/explicit_contract'
 class ExplicitContractFailClosedTest < Minitest::Test
   Parser = Fable::ExplicitContract
 
+  def test_canonical_successor_dedup_contract
+    clauses = [
+      'Use this evaluation branch only when preparing to remediate an older source, resolving a publication conflict, or when direct clues of a potential successor already exist; do not add global successor discovery to ordinary tasks.',
+      'Evaluation authority is strictly bounded by canonical source and the current task acceptance; inspect only known candidates, directly related changes, and direct dependencies.',
+      'When all required deliverables and acceptance criteria are completely covered by a successor reachable in canonical source, and required verification evidence applies, record `SUPERSEDED_BY_CANONICAL` and stop duplicate source remediation.',
+      'Enumerate covered and missing acceptance items explicitly; continue only with the authorized missing delta inside the current scope.',
+      'If evidence is incomplete or no confirmable successor exists, do not declare completion; identify the minimum gap or continue authorized source remediation.',
+      'Matching paths, similar commit titles, or an isolated green CI run alone do not prove equivalence.',
+      'Prior candidate test results must never be relabeled as a successor PASS.',
+      '`SUPERSEDED_BY_CANONICAL` must never be reported as old PR MERGED.',
+      'Content equivalence must never be used to delete an exact deployed source that still requires preservation.',
+      'Determining canonical supersession does NOT authorize closing PRs, pushing, merging, force-deleting, or creating preservation refs;',
+      'nor does it supersede active runtime ownership, standalone destructive authorization, or existing safety gates.'
+    ]
+    weakenings = {
+      '; do not add global successor discovery to ordinary tasks.' => '; add global successor discovery to all tasks.',
+      'strictly bounded by canonical source and the current task acceptance' => 'expanded to arbitrary repositories and speculative tasks',
+      'record `SUPERSEDED_BY_CANONICAL` and stop duplicate source remediation.' => 'record `SUPERSEDED_BY_CANONICAL` and repeat source remediation anyway.',
+      'completely covered by a successor reachable in canonical source' => 'partially covered by an unreachable branch',
+      'continue only with the authorized missing delta inside the current scope.' => 'remediate all covered and missing items regardless of scope.',
+      'do not declare completion; identify the minimum gap or continue authorized source remediation.' => 'declare completion immediately without identifying gaps.',
+      'alone do not prove equivalence.' => 'alone prove equivalence.',
+      'must never be relabeled as a successor PASS.' => 'may be relabeled as a successor PASS.',
+      'must never be reported as old PR MERGED.' => 'may be reported as old PR MERGED.',
+      'must never be used to delete an exact deployed source that still requires preservation.' => 'permits deleting an exact deployed source.',
+      'does NOT authorize closing PRs, pushing, merging, force-deleting, or creating preservation refs;' => 'authorizes closing PRs, pushing, merging, force-deleting, and creating preservation refs;',
+      'nor does it supersede active runtime ownership, standalone destructive authorization, or existing safety gates.' => 'and supersedes active runtime ownership and safety gates.'
+    }
+    assert_canonical_contract_controls(
+      'references/operational-gates.md',
+      'Canonical successor and source remediation dedup',
+      clauses,
+      weakenings
+    )
+  end
+
   def test_parser_reads_live_canonical_files
     paths = Parser.live_paths
     assert_equal File.expand_path('../shared/SKILL.md', __dir__), paths[:skill]
+    assert_equal File.expand_path('../shared/references/implementation-depth.md', __dir__),
+                 paths[:implementation_depth]
     assert_equal File.expand_path('../shared/references/reporting.md', __dir__), paths[:reporting]
     assert_equal File.expand_path('../shared/references/operational-gates.md', __dir__),
                  paths[:operational_gates]
@@ -267,8 +308,188 @@ class ExplicitContractFailClosedTest < Minitest::Test
   def test_canonical_route_and_task_class_enums_reject_unknown_values
     assert Parser.enum_accepted?('WORKER_ROUTE', 'STANDARD_JUDGED')
     assert Parser.enum_accepted?('TASK_CLASS', 'STATE_CHANGING_IMPLEMENTATION')
+    assert Parser.enum_accepted?('IMPLEMENTATION_DEPTH', 'ENHANCED')
     refute Parser.enum_accepted?('WORKER_ROUTE', 'AUTO')
     refute Parser.enum_accepted?('TASK_CLASS', 'WHATEVER')
+  end
+
+  def test_case01_pure_qa_fast_is_invalid
+    result = Parser.check_routing_packet(routing_packet('PURE_QA', 'FAST'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case02_planning_only_standard_is_invalid
+    result = Parser.check_routing_packet(routing_packet('PLANNING_ONLY', 'STANDARD'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case03_read_only_review_fast_is_invalid
+    result = Parser.check_routing_packet(routing_packet('READ_ONLY_COMPLETION_REVIEW', 'FAST'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case04_fast_normal_implementation_is_structurally_valid
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'FAST', 'NORMAL'))
+    assert_equal 'ROUTING_STRUCTURE_PASS', result[:status]
+  end
+
+  def test_case05_fast_enhanced_implementation_is_invalid
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'FAST', 'ENHANCED'))
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_case06_standard_normal_implementation_is_structurally_valid
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'NORMAL'))
+    assert_equal 'ROUTING_STRUCTURE_PASS', result[:status]
+  end
+
+  def test_case07_standard_enhanced_is_valid_without_claiming_depth_necessity
+    result = Parser.check_routing_packet(routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'ENHANCED'))
+    assert_equal 'ROUTING_STRUCTURE_PASS', result[:status]
+    assert_includes Parser::ROUTING_PACKET_LIMITATIONS, 'whether ENHANCED depth was necessary'
+  end
+
+  def test_case08_judged_routes_accept_canonical_judge_modes
+    [
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', 'NORMAL', 'FRESH_CONTEXT'),
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'LOOP_JUDGED', 'ENHANCED', 'SELF_CHECK_ONLY')
+    ].each do |packet|
+      assert_equal 'ROUTING_STRUCTURE_PASS', Parser.check_routing_packet(packet)[:status]
+    end
+  end
+
+  def test_case09_missing_required_route_field_is_insufficient
+    packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    result = Parser.check_routing_packet(packet)
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS', result[:status]
+  end
+
+  def test_case10_cli_reads_only_primary_routing_block
+    packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      WORKER_ROUTE: STANDARD
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+
+      Historical example from another task:
+      TASK_CLASS: PURE_QA
+      WORKER_ROUTE: FAST
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    stdout, stderr, status = run_routing_packet_cli(packet)
+    assert status.success?, stderr
+    assert_includes stdout, 'ROUTING_STRUCTURE_PASS'
+    assert_includes stdout, 'SEMANTIC_LIMITATIONS:'
+
+    incomplete_packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      JUDGE_MODE: NOT_APPLICABLE
+
+      Historical example from another task:
+      WORKER_ROUTE: FAST
+      IMPLEMENTATION_DEPTH: NORMAL
+    PACKET
+    stdout, stderr, status = run_routing_packet_cli(incomplete_packet)
+    assert_equal 2, status.exitstatus, stderr
+    assert_includes stdout, 'INSUFFICIENT_PACKET_FIELDS'
+  end
+
+  def test_judged_route_cannot_be_paired_with_not_applicable_judge_mode
+    result = Parser.check_routing_packet(
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', 'NORMAL', 'NOT_APPLICABLE')
+    )
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_unknown_route_value_is_invalid
+    result = Parser.check_routing_packet(
+      routing_packet('STATE_CHANGING_IMPLEMENTATION', 'AUTO', 'NORMAL')
+    )
+    assert_equal 'ROUTING_STRUCTURE_INVALID', result[:status]
+  end
+
+  def test_primary_routing_block_does_not_merge_across_blank_lines
+    packet = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+
+      WORKER_ROUTE: STANDARD
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS', Parser.check_routing_packet(packet)[:status]
+  end
+
+  def test_depth_fallback_alignment_cases_01_to_10
+    case01 = routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD')
+    case01_result = Parser.check_routing_packet(case01)
+    assert_equal 'ROUTING_STRUCTURE_PASS', case01_result[:status], 'CASE01'
+    refute case01_result[:fields].key?('IMPLEMENTATION_DEPTH'),
+           'CASE01 must leave actual depth selection to the Worker'
+
+    cases = {
+      'CASE02' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'NORMAL'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE03' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD', 'ENHANCED'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE04' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'FAST', 'ENHANCED'),
+        'ROUTING_STRUCTURE_INVALID'
+      ],
+      'CASE05' => [
+        routing_packet('PURE_QA', 'FAST'),
+        'ROUTING_STRUCTURE_INVALID'
+      ],
+      'CASE06' => [
+        routing_packet('PURE_QA', 'NOT_APPLICABLE'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE08' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', nil, 'FRESH_CONTEXT'),
+        'ROUTING_STRUCTURE_PASS'
+      ],
+      'CASE09' => [
+        routing_packet('STATE_CHANGING_IMPLEMENTATION', 'STANDARD_JUDGED', nil, 'NOT_APPLICABLE'),
+        'ROUTING_STRUCTURE_INVALID'
+      ]
+    }
+    cases.each do |case_id, (packet, expected)|
+      assert_equal expected, Parser.check_routing_packet(packet)[:status], case_id
+    end
+
+    missing_task_class = "WORKER_ROUTE: STANDARD\nJUDGE_MODE: NOT_APPLICABLE"
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS',
+                 Parser.check_routing_packet(missing_task_class)[:status], 'CASE07 missing TASK_CLASS'
+
+    missing_worker_route = "TASK_CLASS: STATE_CHANGING_IMPLEMENTATION\nJUDGE_MODE: NOT_APPLICABLE"
+    assert_equal 'INSUFFICIENT_PACKET_FIELDS',
+                 Parser.check_routing_packet(missing_worker_route)[:status], 'CASE07 missing WORKER_ROUTE'
+
+    case10 = <<~PACKET
+      TASK_CLASS: STATE_CHANGING_IMPLEMENTATION
+      WORKER_ROUTE: STANDARD
+      IMPLEMENTATION_DEPTH: NORMAL
+      JUDGE_MODE: NOT_APPLICABLE
+
+      Quoted packet example:
+      TASK_CLASS: PURE_QA
+      WORKER_ROUTE: FAST
+      JUDGE_MODE: NOT_APPLICABLE
+    PACKET
+    case10_result = Parser.check_routing_packet(case10)
+    assert_equal 'ROUTING_STRUCTURE_PASS', case10_result[:status], 'CASE10'
+    assert_equal 'STATE_CHANGING_IMPLEMENTATION', case10_result[:fields]['TASK_CLASS'],
+                 'CASE10 must retain the primary routing block'
+
+    assert_includes Parser::ROUTING_PACKET_LIMITATIONS, 'whether ENHANCED depth was necessary',
+                    'CASE03 must not claim ENHANCED was necessary'
   end
 
   def test_canonical_implementation_depth_provenance_contract
@@ -490,22 +711,16 @@ class ExplicitContractFailClosedTest < Minitest::Test
     assert_canonical_contract_controls('references/operational-gates.md', 'Git action tiers', clauses, weakenings)
   end
 
-  def test_shared_front_door_skips_git_tier_load_only_for_resolved_local_commit
-    clauses = [
-      'Consult [operational gates](references/operational-gates.md#git-action-tiers) before any Git lifecycle action except an ordinary local commit on an already-resolved FAST task',
-      '`COMMIT_AUTHORIZED: YES`, the exact repository/worktree and write scope are known, and the commit target/history identity is unambiguous.',
-      'The exception applies only to a non-destructive local commit with no force/fallback, local branch/worktree deletion, remote mutation (including push, Draft/Ready PR, or merge), or authorization conflict; commit directly without loading the detailed Git-action tiers.',
-      'Consult the reference for every other Git action or whenever authorization, scope, or identity is missing, ambiguous, or conflicted.'
-    ]
-    weakenings = {
-      'before any Git lifecycle action except an ordinary local commit' => 'before every Git lifecycle action, including an ordinary local commit',
-      'on an already-resolved FAST task' => 'on any task',
-      'COMMIT_AUTHORIZED: YES' => 'COMMIT_AUTHORIZED: NO',
-      'no force/fallback, local branch/worktree deletion, remote mutation' => 'force/fallback, local branch/worktree deletion, remote mutation',
-      'without loading the detailed Git-action tiers' => 'only after loading the detailed Git-action tiers',
-      'for every other Git action' => 'only for remote Git actions'
-    }
-    assert_canonical_contract_controls('SKILL.md', 'Lifecycle and filesystem accounting', clauses, weakenings)
+  # The FAST-only front-door exception was removed with the complexity router:
+  # any route commits locally under COMMIT_AUTHORIZED: YES without loading the
+  # Git tiers, and every remote or destructive Git action is an explicit trigger.
+  def test_local_commit_skips_git_tiers_and_remote_actions_trigger_them
+    assert_canonical_contract_controls('SKILL.md', 'Execution', [
+      'Local reversible edits, and a local commit when `COMMIT_AUTHORIZED: YES`, need nothing more.'
+    ], { 'COMMIT_AUTHORIZED: YES' => 'COMMIT_AUTHORIZED: NO' })
+    assert_canonical_contract_controls('SKILL.md', 'Explicit Packet triggers', [
+      '| Push, PR, merge, or branch or worktree deletion | [Git action tiers](references/operational-gates.md#git-action-tiers) |'
+    ], { 'Push, PR, merge, or branch or worktree deletion' => 'Push' })
   end
 
   def test_canonical_exact_untracked_cardinality_contract
@@ -630,7 +845,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'Owner authorization and harness capability are separate facts' => 'Owner authorization and harness capability are equivalent facts',
       'does not change Planner routing semantics' => 'changes Planner routing semantics'
     }
-    assert_includes Parser.skill, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
+    assert_includes Parser.operational_gates, 'CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED'
     assert_canonical_contract_controls(
       'references/operational-gates.md', 'Authorization evidence and conversation boundary',
       clauses, weakenings
@@ -694,7 +909,8 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'EXACT_WORKTREE: <one exact absolute worktree authorized by the current Packet>',
       'EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorized by the current Packet>',
       'EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR',
-      'When `PRESENT_RUNNABLE`, Workers MUST use the protected `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not allowed.',
+      'When `PRESENT_RUNNABLE`, the optional CLI may be used for its lock and capture guarantees.',
+      'Its absence from an installed skill is not a blocker; when unavailable before execution, evaluate the bounded direct-local fallback below rather than treating the missing file as an ownership fact.',
       'Direct-local fallback is permitted only when launcher absence or unavailability is positively proven before execution begins.',
       'It requires `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked argv that exactly matches one allowlisted vector, and `EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local effects.',
       'When either pre-execution absence status is proven and every precondition holds, bounded direct-local execution is permitted.',
@@ -708,8 +924,7 @@ class ExplicitContractFailClosedTest < Minitest::Test
       'This narrow exception does not weaken the normal requirement that high-risk or external actions use their existing authorization and supported execution path.'
     ]
     weakenings = {
-      'Workers MUST use' => 'Workers may use',
-      'Direct-local fallback is not allowed.' => 'Direct-local fallback is allowed.',
+      'is not a blocker;' => 'is a blocker;',
       'positively proven before execution begins' => 'assumed at any time',
       'argv that exactly matches one allowlisted vector' => 'argv that is broadly equivalent to an allowlisted vector',
       'LOCAL_ONLY_NO_HIGH_RISK` confirmed for bounded local effects' => 'LOCAL_ONLY_NO_HIGH_RISK` optional for external effects',
@@ -779,11 +994,11 @@ class ExplicitContractFailClosedTest < Minitest::Test
   # same assertion to fail, then re-reads and verifies the untouched source.
   def test_fast_orchestration_case_a_resolved_facts_and_direct_implementation
     clauses = [
-      'Reuse already-authoritative repository/scope facts unless a live contradiction appears; grouping is not a reason to rediscover them.',
-      'Repeat repository, history, worktree, or process discovery only when a live contradiction makes it load-bearing.'
+      'Treat the facts and decisions it states as given.',
+      'Check a stated fact against live state only when acting on it would otherwise fail.'
     ]
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
-      'unless a live contradiction appears' => 'after every tool call'
+    assert_canonical_contract_controls('SKILL.md', 'Fresh agent', clauses, {
+      'only when acting on it would otherwise fail' => 'after every tool call'
     })
     assert_canonical_contract_controls('SKILL.md', 'Route once', [
       'Once the cause and authorized fix are known on a resolved FAST task, implement directly without a second planning phase.',
@@ -791,77 +1006,55 @@ class ExplicitContractFailClosedTest < Minitest::Test
     ], { 'without a second planning phase' => 'after a second planning phase' })
   end
 
-  def test_fast_orchestration_case_b_independent_preflight_group
-    clauses = [
-      'For a resolved FAST task, prefer one bounded grouped read-only action for independent live facts such as repository identity, current HEAD/tree, worktree status, authorized scope, and required local file existence.',
-      'Group only when independence and safety are already established.'
-    ]
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
-      'prefer one bounded grouped read-only action' => 'require a separate read-only action per fact',
-      'independence and safety are already established' => 'independence and safety are unknown'
-    })
-  end
-
-  def test_fast_orchestration_case_c_dependent_safety_gate_remains_serial
-    clauses = [
-      'If a next action depends on a prior result to decide whether it is safe, keep those actions serial.',
-      'No particular shell syntax or mandatory batching is required.'
-    ]
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, {
-      'keep those actions serial' => 'batch those actions regardless',
-      'No particular shell syntax or mandatory batching is required.' => 'Mandatory shell batching is required.'
-    })
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', [
-      'Keep dependent checks serial under the preflight grouping rule above, and observe every required result; a grouped invocation alone is not PASS.'
-    ], { 'Keep dependent checks serial' => 'Batch dependent checks' })
-  end
-
-  def test_fast_orchestration_case_d_independent_required_acceptance_group
-    clauses = [
-      'For a resolved FAST task, prefer one bounded verification action containing already-required checks when they are independent and safe to group:',
-      'focused tests, formatter/linter checks, `git diff --check`, changed-path verification, and final tracked-status checks when applicable.',
-      'observe every required result; a grouped invocation alone is not PASS.'
-    ]
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, {
-      'already-required checks' => 'additional speculative checks',
-      'when they are independent and safe to group' => 'even when they depend on prior results',
-      'observe every required result' => 'observe only the final result'
-    })
-  end
-
+  # Cases B-D (grouped preflight, serial dependent gates, grouped acceptance)
+  # guarded FAST batching guidance that the complexity router removed.
   def test_fast_orchestration_case_e_acceptance_stops_verification
     clauses = [
-      'Once acceptance is falsifiably covered and every required check passes, stop verification and reuse that evidence for handoff.',
-      'Do not add a broad inspection, full suite, Judge, evidence pass, or separate identity/reporting verification pass unless explicitly required by the task, an applicable existing gate, or a new live contradiction.',
-      'Specifically authorized commit/publication and their required identity/status observations still follow the existing lifecycle gates.'
+      'Run the named acceptance and only directly relevant surrounding checks.',
+      "A full suite, Judge, evidence pass, or repeated review runs only when the Packet's acceptance names it.",
+      'Once acceptance passes, stop verifying.'
     ]
-    assert_canonical_contract_controls('SKILL.md', 'Verification and Judge handoff', clauses, {
-      'and every required check passes' => 'even when a required check is missing',
-      'stop verification and reuse that evidence' => 'start another verification phase',
-      'an applicable existing gate' => 'no existing gate',
-      'still follow the existing lifecycle gates' => 'bypass the existing lifecycle gates'
+    assert_canonical_contract_controls('SKILL.md', 'Verification', clauses, {
+      'only directly relevant surrounding checks' => 'the full suite',
+      "runs only when the Packet's acceptance names it" => 'runs on every task',
+      'stop verifying' => 'start another verification phase'
     })
   end
 
-  def test_fast_orchestration_case_f_unresolved_safety_gates_fail_closed
+  # Case F guarded the front-door kernel; the four hard boundaries replace it.
+  def test_hard_boundaries_are_the_only_default_stops
     clauses = [
-      'Any unresolved front-door gate blocks direct FAST entry and follows existing fail-closed or escalation behavior.',
-      'Write ownership: no overlapping active writer, unresolved overlapping dirty state, or unexplained concurrent mutation.',
-      'If write ownership remains unresolved, stop before edit, verification, or ownership mutation.',
-      'Grouping never resolves or bypasses an unresolved authority, active-writer, ownership, capability, or destructive Git gate; existing fail-closed handling still applies.'
+      'These are the only default stops.',
+      'No push, merge, deletion, external message, or database or cloud write without explicit Owner authorization in the Packet',
+      "Never overwrite, reset, stash, clean, or discard someone else's uncommitted or active work.",
+      '`NOT RUN` is never `PASS`, and neither is `UNKNOWN`.',
+      'Stop only on material conflicts involving explicit authorization, required inputs, or risk of overwriting active work.'
     ]
-    weakenings = {
-      'blocks direct FAST entry' => 'permits direct FAST entry',
-      'stop before edit, verification, or ownership mutation' => 'continue to edit and verify'
-    }
-    %w[authority active-writer ownership capability].each do |gate|
-      weakenings[gate + ','] = ''
-    end
-    weakenings['or destructive Git gate'] = 'or harmless Git gate'
-    assert_canonical_contract_controls('SKILL.md', 'Bounded preflight and write boundary', clauses, weakenings)
+    assert_canonical_contract_controls('SKILL.md', 'Hard boundaries', clauses, {
+      'without explicit Owner authorization in the Packet' => 'whenever the Packet does not forbid it',
+      "someone else's uncommitted or active work" => 'stale work',
+      'is never `PASS`' => 'may count as `PASS`',
+      'explicit authorization, required inputs, or risk of overwriting active work' => 'anything unexpected'
+    })
   end
 
   private
+
+  def routing_packet(task_class, worker_route, implementation_depth = nil, judge_mode = 'NOT_APPLICABLE')
+    fields = ["TASK_CLASS: #{task_class}", "WORKER_ROUTE: #{worker_route}"]
+    fields << "IMPLEMENTATION_DEPTH: #{implementation_depth}" unless implementation_depth.nil?
+    fields << "JUDGE_MODE: #{judge_mode}"
+    fields.join("\n")
+  end
+
+  def run_routing_packet_cli(packet)
+    script = File.expand_path('../scripts/explicit_contract.rb', __dir__)
+    Tempfile.create(['routing-packet', '.md']) do |file|
+      file.write(packet)
+      file.flush
+      Open3.capture3(RbConfig.ruby, script, '--check-routing-packet', file.path)
+    end
+  end
 
   def canonical_contract_section(relative_path, heading)
     path = File.expand_path("../shared/#{relative_path}", __dir__)

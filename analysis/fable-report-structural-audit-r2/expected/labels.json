@@ -1,0 +1,221 @@
+{
+  "labels": [
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-001",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-002",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-003",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-004",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-005",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-006",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-007",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-008",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-009",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-010",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-011",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-012",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-013",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-014",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-015",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-016",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-017",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-018",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-019",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-020",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-021",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-022",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-023",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R3-REAL-024",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R3_PASS_NOT_RUN_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-001",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-002",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-003",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-004",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-005",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-006",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-007",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-008",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-009",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-010",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-011",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-012",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT"
+    }
+  ],
+  "schema_version": 1
+}

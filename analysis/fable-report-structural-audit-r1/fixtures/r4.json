@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "R4-001",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["lifecycle_status"],
+      "rationale": "The same explicit lifecycle field has two different concrete values.",
+      "text": "IMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\nIMPLEMENTATION_LIFECYCLE_STATUS: BLOCKED\n"
+    },
+    {
+      "id": "R4-002",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["publication_status"],
+      "rationale": "DRAFT_OPEN and MERGED are incompatible duplicate values for one explicit field.",
+      "text": "PR_PUBLICATION_STATUS: DRAFT_OPEN\nPR_PUBLICATION_STATUS: MERGED\n"
+    },
+    {
+      "id": "R4-003",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["verdict"],
+      "rationale": "A single explicit VERDICT field directly carries two distinct values.",
+      "text": "VERDICT: VERIFIED\nVERDICT: REFUTED\n"
+    },
+    {
+      "id": "R4-004",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["final_disposition"],
+      "rationale": "The same final disposition field is concretely assigned twice with different values.",
+      "text": "FINAL_DISPOSITION: KEEP_NON_BLOCKING\nFINAL_DISPOSITION: REJECT_RULE\n"
+    },
+    {
+      "id": "R4-005",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["closed_boolean"],
+      "rationale": "YES and NO are directly incompatible values of the explicit closure field.",
+      "text": "FULL_PR_LIFECYCLE_CLOSED: YES\nFULL_PR_LIFECYCLE_CLOSED: NO\n"
+    },
+    {
+      "id": "R4-006",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["cleanup_status", "markdown_list"],
+      "rationale": "List markers do not alter the explicit duplicate field identity.",
+      "text": "- BRANCH_CLEANUP_STATUS: DELETED\n- BRANCH_CLEANUP_STATUS: RETAINED_WHILE_PR_OPEN\n"
+    },
+    {
+      "id": "R4-007",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["verdict_suffix", "normalization"],
+      "rationale": "Whitespace and underscore normalize mechanically, while PASS and FAIL remain distinct.",
+      "text": "SECURITY_VERDICT: PASS\nSECURITY_VERDICT: FAIL\n"
+    },
+    {
+      "id": "R4-008",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": true,
+      "provenance": "SYNTHETIC",
+      "features": ["multilingual_surrounding_prose"],
+      "rationale": "Chinese surrounding prose does not obscure the two direct explicit assignments.",
+      "text": "實作摘要如下。\nPOSTMERGE_LIFECYCLE_STATUS: COMPLETE\n稍後的結論：\nPOSTMERGE_LIFECYCLE_STATUS: NOT_STARTED\n"
+    },
+    {
+      "id": "R4-009",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["single_assignment"],
+      "rationale": "One explicit assignment cannot be a duplicate-field conflict.",
+      "text": "IMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\n"
+    },
+    {
+      "id": "R4-010",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["duplicate_same_value"],
+      "rationale": "The duplicated field repeats the same value.",
+      "text": "IMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\nIMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\n"
+    },
+    {
+      "id": "R4-011",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["code_fence"],
+      "rationale": "Conflicting sample assignments inside a fenced example are excluded.",
+      "text": "```text\nIMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\nIMPLEMENTATION_LIFECYCLE_STATUS: BLOCKED\n```\n"
+    },
+    {
+      "id": "R4-012",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["free_form_prose"],
+      "rationale": "Free-form narrative is outside the direct key/value grammar.",
+      "text": "The implementation lifecycle status was complete.\nA reviewer later called it blocked.\n"
+    },
+    {
+      "id": "R4-013",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["different_fields"],
+      "rationale": "The two values are assigned to different explicit fields.",
+      "text": "IMPLEMENTATION_LIFECYCLE_STATUS: COMPLETE\nPOSTMERGE_LIFECYCLE_STATUS: BLOCKED\n"
+    },
+    {
+      "id": "R4-014",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["allowed_value_set"],
+      "rationale": "A displayed alternatives grammar is not a concrete field assignment.",
+      "text": "FINAL_DISPOSITION: KEEP_NON_BLOCKING | REJECT_RULE | WORTH_LARGER_CORPUS\n"
+    },
+    {
+      "id": "R4-015",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["table"],
+      "rationale": "R4 intentionally does not infer terminal field assignments from a generic table.",
+      "text": "| Field | Value |\n|---|---|\n| IMPLEMENTATION_LIFECYCLE_STATUS | COMPLETE |\n| IMPLEMENTATION_LIFECYCLE_STATUS | BLOCKED |\n"
+    },
+    {
+      "id": "R4-016",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "expected_conflict": false,
+      "provenance": "SYNTHETIC",
+      "features": ["non_terminal_field"],
+      "rationale": "A generic configuration field outside the lifecycle/status allowlist is not judged.",
+      "text": "OUTPUT_MODE: COMPACT\nOUTPUT_MODE: VERBOSE\n"
+    }
+  ]
+}

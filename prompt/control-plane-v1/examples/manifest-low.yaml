@@ -1,0 +1,113 @@
+# Example — LOW / NONE / NOT_APPLICABLE(read-only fixed-head inspection)
+# status: DRAFT_FOR_OWNER_REVIEW
+# 非 durable file;示範用。對應 Pilot 1 型態;不含 authorization token。
+schema_version: 1
+
+control_plane:
+  version: "1.1.0-draft.1"
+  schema_version: 1
+  source_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+
+project_attachment:
+  profile_path: .ai/agent-profile.yaml
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  missing_context_policy: entry_check
+  profile_sha256_or_version: UNKNOWN
+
+task:
+  id: EX-LOW-1
+  name: fixed-head-static-review-strategy-overview
+  type: analysis
+  risk_class: LOW
+  routing_path: FAST
+  source_decision: ""
+  created_by: planner
+  created_at: "2026-07-17T00:00:00+08:00"
+
+goal: Review the selected source at the current HEAD without modifying the repo.
+steps:
+  - Resolve the Project Attachment and record the live HEAD.
+  - Read only the task-relevant source and bounded project memory.
+  - Report findings with current-head evidence.
+success_criteria:
+  - No repo, DB, runtime, projection, or external mutation occurs.
+  - Every factual finding is source-qualified and bound to the observed HEAD.
+
+repo:
+  project_path: /Users/kelvin/VibeCoding-WorkSpace/MathStatisticalAnalysis
+  base_branch: main
+  base_commit: UNKNOWN
+  task_branch: ""
+
+worktree:
+  mode: NOT_APPLICABLE
+  reattach: false
+  path: ""
+  pr_ref: ""
+
+scope:
+  allowed_files: []
+  protected_paths: []
+  forbidden_subsystems: [DB, runtime, deployment, registry, memory-write]
+  pins: []
+
+policies:
+  db: none
+  runtime: none
+  external_side_effects: none
+  external_list: []
+  pr: none
+  merge: none
+  cleanup: standard_lifecycle
+  cleanup_reason: ""
+
+tests:
+  - name: read-only-file-inventory
+    cmd: "rg --files"
+    required: true
+    side_effects_allowed: none
+
+memory:
+  read:
+    mode: relevant
+    selectors: ["risk_domain:static_review", "keyword:strategy_overview"]
+    max_entries: 3
+  write:
+    mode: forbidden
+    allowed_path: ""
+    purpose: ""
+    entry_schema: ""
+
+context:
+  live_state_required: true
+  head_binding_required: true
+  stale_evidence_policy: mark_stale
+
+authorization:
+  class: NONE
+  token: NOT_REQUIRED
+  scope: EX-LOW-1
+  high_risk_reason: ""
+
+review:
+  required: false
+  mode: fixed_head
+  independent: true
+
+evidence:
+  head_sha_binding: true
+  required: [git_status_before_after, reviewed_file_list_with_head_sha]
+
+active_task_projection:
+  enabled: false
+  output_path: ""
+  manifest_sha256_required: false
+
+status:
+  worker_final: NOT_RUN
+  review_verdict: NOT_RUN
+  lifecycle_state: S0

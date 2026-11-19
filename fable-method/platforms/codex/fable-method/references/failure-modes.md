@@ -33,9 +33,10 @@ verification theater, not a pass.
 On acceptance failure, attribute in order: harness/fixture/command, then the
 deployment or execution chain, then the product invariant. Each continuation
 must test a falsifiable hypothesis and materially reduce uncertainty. When a
-correction is applied, rerun the real check and retain its actual output. Keep
-an `ATTEMPT_LEDGER` for failures, retries, timeouts, terminations, overwritten
-or deleted artifacts, and superseded evidence.
+correction is applied, rerun the real check and retain its actual output.
+Report failed attempts, retries, and timeouts briefly; keep a full
+`ATTEMPT_LEDGER` only for judged, publication-bound, or `FORMAL_SECURE` work
+(see [operational gates](operational-gates.md#attempts-and-process-termination)).
 
 When one candidate has CI results from more than one event (for example `push`
 and `pull_request`, or a pre-merge PR and post-merge `main`), keep each event's

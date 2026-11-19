@@ -1,0 +1,209 @@
+{
+  "cases": [
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-001",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real explanatory list names terminal fields in prose but contains no conflicting direct assignments.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "6c3f98ec2aec0da0e9ba3656c26357c2f1bf4b967d3cf7fbc7e2f276a625c6ca",
+        "document_id": "DOC-A",
+        "line_end": 53,
+        "line_start": 45,
+        "raw_excerpt_sha256": "6c3f98ec2aec0da0e9ba3656c26357c2f1bf4b967d3cf7fbc7e2f276a625c6ca",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "### R4_DUPLICATE_TERMINAL_FIELD_CONFLICT\n\nThe detector considers only direct uppercase key/value assignments to an\nexplicit terminal field: suffixes `_STATUS`, `_VERDICT`, or `_DISPOSITION`,\nplus the exact fields `VERDICT`, `FINAL_DISPOSITION`, and\n`FULL_PR_LIFECYCLE_CLOSED`. A finding requires at least two different\nnormalized concrete values for the same exact field. Alternatives containing\n`|`, tables, free-form prose, and fenced code are excluded.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-002",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real table reports invocation outcomes and must not be treated as duplicate terminal fields.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "907abb4e7c729856623b2a1cf59df466b6a802adf976cf48848f337f61beb9ff",
+        "document_id": "DOC-A",
+        "line_end": 133,
+        "line_start": 118,
+        "raw_excerpt_sha256": "907abb4e7c729856623b2a1cf59df466b6a802adf976cf48848f337f61beb9ff",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Tool behavior\n\nObserved CLI results:\n\n| Invocation class | Exit | Observed result |\n|---|---:|---|\n| Finding present | 0 | One R3 finding reported |\n| Clean | 0 | Zero findings reported |\n| Invalid invocation | 2 | Rejected by argument parser |\n| Unreadable report path | 2 | Rejected as unreadable regular file |\n| Invalid UTF-8 input | 2 | Rejected as unsafe decoding |\n\nInputs are read with strict UTF-8 decoding, capped at 5 MiB, and rejected if\nthey contain a NUL byte. Findings remain advisory and never produce a\nnonzero audit exit.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-003",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "Real error-ledger labels are non-terminal fields and do not conflict.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "44c4ca8ea9bfeb0ebd5129401db5f1523d40aeb72d5cb88fffcd7d01059085ec",
+        "document_id": "DOC-A",
+        "line_end": 153,
+        "line_start": 142,
+        "raw_excerpt_sha256": "44c4ca8ea9bfeb0ebd5129401db5f1523d40aeb72d5cb88fffcd7d01059085ec",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## False-positive and false-negative ledgers\n\nFALSE_POSITIVE_LEDGER: NONE\n\nR3 FP = 0 and R4 FP = 0. There were no false positives to classify manually.\nThe R6 targeted advisory corpus also had FP = 0.\n\nFALSE_NEGATIVE_LEDGER: NONE\n\nR3 FN = 0 and R4 FN = 0. There were no false negatives to classify manually.\nThe R6 targeted advisory corpus also had FN = 0.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-004",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real required-results section contains one direct FINAL_DISPOSITION value and no conflicting duplicate.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "6b761735170f1c26570e26458d034afee0ec19c8517cf5a3cb1d0cb96715f18d",
+        "document_id": "DOC-A",
+        "line_end": 198,
+        "line_start": 168,
+        "raw_excerpt_sha256": "9e7873e8fd17ab3afea77d8ad5f465e249d684bb7311bf601c5ef5a955d2067a",
+        "source_id": "SRC-A1",
+        "version_id": "V1"
+      },
+      "text": "## Required results\n\nR3_TP: 20\nR3_FP: 0\nR3_TN: 20\nR3_FN: 0\n\nR4_TP: 8\nR4_FP: 0\nR4_TN: 8\nR4_FN: 0\n\nR6_RESULT: PASS — 12/12 targeted cases correctly classified; advisory only.\n\nDETERMINISTIC_REPLAY: PASS\n\nSENSITIVE_CONTENT_SCAN: PASS\n\nGIT_DIFF_CHECK: PASS\n\nSEMANTIC_JUDGEMENT: NOT_IMPLEMENTED\n\nCANONICAL_FRAMEWORK_CHANGED: NO\n\nFINAL_DISPOSITION: WORTH_LARGER_CORPUS\n\nThe rules are suitable to retain as a non-blocking offline pilot on this\nsynthetic corpus. A larger de-identified corpus is required before making any\nclaim about production false-positive behavior.\n\nPUSH: NOT RUN\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-005",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real schema table includes status language but no duplicate direct terminal field assignment.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "e88c0a6e258df326f8d8b006e17ec57cd4aaed130b3285558e2ea03732dc3a27",
+        "document_id": "DOC-B",
+        "line_end": 76,
+        "line_start": 46,
+        "raw_excerpt_sha256": "f37aea263d3a599ab5d023c2c0390f71fde57c2a23de513b4e11f8a020fb3790",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## Schema probe (required before building the analyzer)\n\nProbed structurally against the real historical S1 records, not assumed:\n\n| Field | Status | Detail |\n|---|---|---|\n| `message.diagnostics` | PRESENT | 10 of 402 lines |\n| `message.diagnostics.cache_miss_reason` | PRESENT | 10 of 402 lines |\n| `requestId` | PRESENT | 402 of 402 |\n| `entrypoint` | PRESENT | 402 of 402, constant `RUNTIME` |\n| `version` | PRESENT | 402 of 402, constant `2.1.227` |\n| `message.model` | PRESENT | 402 of 402, constant `RUNTIME` |\n| `usage.service_tier` | PRESENT | 402 of 402, constant `standard` |\n| `usage.speed` | PRESENT | 402 of 402, constant `standard` |\n| `effort` | PRESENT | 402 of 402, constant `max` |\n| `usage.cache_creation.ephemeral_1h_input_tokens` | PRESENT | 402 of 402 |\n| `usage.cache_creation.ephemeral_5m_input_tokens` | PRESENT | 402 of 402, always `0` |\n| `usage.iterations` | PRESENT | 402 of 402, always length 1 |\n| `attributionSkill` | PRESENT | 17 of 402 (sparse; only tags FRAMEWORK-method-attributed turns) |\n| `message.stop_reason` | PRESENT | 402 of 402 |\n| `parentUuid` / `uuid` | PRESENT | 402 of 402 — used only in-process to verify request-chaining structure, never persisted |\n| tool-definition/tool-schema identity | **NOT SAFELY ATTRIBUTABLE** | only tool_use *calls* are logged, never the tool schema offered to the model |\n| system-context identity/fingerprint | **NOT SAFELY ATTRIBUTABLE** | the rendered system prompt is not logged as content in this format (confirmed already in the prior RCA); `cache_miss_reason.type` is the only first-party signal for this |\n| retry/error fields | **NOT SAFELY ATTRIBUTABLE** | no retry count, error code, or transport-level field exists on assistant records in this schema |\n| transport/client metadata | PRESENT (partial) | `entrypoint`/`version` only; no lower-level transport metadata is logged |\n\nNo request-shape hash/fingerprint was constructed for tools or system\ncontext: the API's own `cache_miss_reason` field is a better, first-party\nsignal than a locally reconstructed proxy would be, and no safely\ncanonicalizable raw payload exists locally to hash in the first place.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-006",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real verdict table is intentionally outside the direct terminal-field grammar.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "a4b6eb631e8cf48f9a23d87187d7988461ebbeb3e733de4d02e97af1dd2831d6",
+        "document_id": "DOC-B",
+        "line_end": 160,
+        "line_start": 148,
+        "raw_excerpt_sha256": "c208c6232b4f017bd3a09646fa90af4ef94e84be16515204b6f6765b85931041",
+        "source_id": "SRC-B2",
+        "version_id": "V2"
+      },
+      "text": "## D1–D8 verdicts\n\n| # | Hypothesis | Verdict | Evidence |\n|---|---|---|---|\n| D1 | EXPLICIT_CACHE_MISS_DIAGNOSTIC | **CONFIRMED** | `message.diagnostics.cache_miss_reason.type` identifies all 3 real material events by name (1 `system_changed`, 2 `previous_message_not_found`) and appears on **zero** of the 158 healthy control requests — perfect 1:1 correspondence in both directions. |\n| D2 | CLIENT_OR_ENTRYPOINT_CHANGE | **REFUTED** | `entrypoint`/`version` constant across all 162 deduplicated requests in the session; zero transitions anywhere, not just at the boundaries. |\n| D3 | SYSTEM_CONTEXT_CHANGE | **PARTIAL** | M1's own diagnostic literally says `system_changed`. The one observable structural correlate, `skill_attribution_changed = YES`, occurs at M1 — but it also occurs exactly once among the 158 controls **without** producing any miss. Rate is still far higher in material events (1 of 3 = 33%) than controls (1 of 158 = 0.6%), but the one control counterexample means skill-attribution-change is not shown to be a *sufficient* condition, only a plausible correlate, with n=1 material occurrence too small to fully resolve further from local evidence alone. |\n| D4 | TOOLSET_CHANGE | **NOT MEASURABLE** | No per-request tool-schema payload is logged in this transcript format (see schema probe). M1's own diagnostic names the cause as `system_changed`, not a separate `tools_changed` category, so this remains unmeasured rather than contradicted. |\n| D5 | EFFORT_OR_REQUEST_MODE_CHANGE | **REFUTED** | `effort` is `max` on all 162 deduplicated requests; zero transitions in the entire session. |\n| D6 | RETRY_OR_REISSUE_PATH | **REFUTED** | There is no retry or alternate execution path. Each \"burst\" is exactly one real request (one `requestId`, one linear `uuid`/`parentUuid` chain, byte-identical `usage`/`diagnostics` across every split line, verified with zero exceptions across all 162 request groups in the session). The apparent multi-second-apart repeats reported in the prior RCA are an artifact of counting each content-block-split JSONL line as an independent request — confirmed as a logging/serialization artifact, not a distinct execution path. |\n| D7 | TTL_OR_IDLE_ENTRY_ONLY | **CONFIRMED** | The original framing (\"explains entry, not intra-burst misses\") is moot once D6 is resolved — there is no intra-burst to explain. What remains, confirmed and reframed: M2 and M3 (both `previous_message_not_found`) have the **only two** idle gaps exceeding 3,600 seconds anywhere in the entire 162-request session. Zero of 158 controls have a gap over 3,600 seconds at all — meaning there is no counterexample in either direction within this session (no long gap ever occurred without a miss, and no miss of this type ever occurred without a long gap). This is stated as an exact, zero-counterexample structural correlation with the session's exclusive use of the `ephemeral_1h`-labeled cache breakpoint (402/402 requests write only to that breakpoint type, never `ephemeral_5m`) — not as a claim about PROVIDER's undocumented internal TTL implementation. Absolute sample size for this correlation is small (n=2). |\n| D8 | REQUEST_LEVEL_CAUSE_NOT_OBSERVABLE | **REFUTED** | A request-level cause *is* observable — directly, via the first-party diagnostic field. This is the task's most important negative-of-a-negative result: existing local evidence was sufficient after all, once request-level deduplication was applied first. |\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-007",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real root-cause section uses fenced and non-terminal fields without a direct duplicate conflict.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "017bcf9dd33df1d20995a0f5aa2d29ccc605a5397e8d67ecb6996696566cd875",
+        "document_id": "DOC-B",
+        "line_end": 207,
+        "line_start": 161,
+        "raw_excerpt_sha256": "9836ba947b95cdfd403623193a61642be8ffcad6e1ed308b43aff9d2736887db",
+        "source_id": "SRC-B1",
+        "version_id": "V1"
+      },
+      "text": "## Root-cause verdict\n\n```text\nCACHE_MISS_ROOT_CAUSE:\nLayer 1 (fully confirmed, resolves the packet's exact question — \"why does\nthe second request fail to read the cache written by the first request\nseconds earlier\"): it doesn't. There is no second request. Each burst is one\nreal API request whose multi-content-block response was logged as multiple\nJSONL lines sharing one requestId, each carrying a duplicate usage/\ndiagnostics object. This satisfies the root-cause standard's five conditions\nwithout caveat: it aligns exactly with all three boundaries, no control\nexhibits it (every control's request produces exactly one line-group with\nconsistent content), it fully explains the apparent repetition (there is\nnone to explain), it falsifies the retry/reissue hypothesis directly, and it\nrests on directly observed structural fields (requestId, uuid, parentUuid),\nnot an assumption.\n\nLayer 2 (the one real miss per event, categorized with certainty, explained\nwith one confirmed and one partial caveat): D1 is fully confirmed - all 3\nreal misses are explicitly diagnosed by PROVIDER's own API, by name, with\nperfect discrimination against 158 healthy controls. Within that: the single\nsystem_changed event (M1) correlates with the session's only other\nskill-attribution transition, but that same transition occurs once more\nwithout a miss, so this part stays PARTIAL rather than fully closed. The two\nprevious_message_not_found events (M2, M3) correlate exactly (2 of 2, 0\ncounterexamples in 158 controls) with idle gaps exceeding 3,600 seconds in a\nsession that exclusively uses the 1-hour cache breakpoint - stated as an\naligned structural correlation, not an assertion about undocumented\nPROVIDER internals.\n```\n\nThis is reported as a genuine root-cause finding, not\n`ROOT_CAUSE_NOT_IDENTIFIED`, because Layer 1 meets all five required\nconditions cleanly and by itself fully resolves the specific mechanistic\nquestion this task was opened to answer. Layer 2's partial elements are\nreported honestly as partial rather than rounded up to \"fully identified.\"\n\n```text\nNEXT_REQUIRED_EVIDENCE:\nNone required to close this task's primary question (Layer 1 closes it).\nIf the Layer-2 system_changed/skill-attribution correlation is worth fully\nresolving (n=1, one uncontrolled counterexample), the next evidence type\nneeded is per-request skill-context identity (which skill was attributed\nimmediately before vs at M1 and at the one control counterexample) - not a\nnew high-context reproduction, and not authorized by this task.\n```\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-008",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real mechanism assignment is not a terminal field and appears without conflicting terminal duplicates.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "9e0da284769a72c7f4229124c97b90703caaa9898a1cd29596fd42198c8f9db9",
+        "document_id": "DOC-C",
+        "line_end": 101,
+        "line_start": 81,
+        "raw_excerpt_sha256": "e57ebe2e5daa52f81af4690155240ff877fe950ec17bb385ea6ef12c55857138",
+        "source_id": "SRC-C2",
+        "version_id": "V2"
+      },
+      "text": "## Cache-creation-weighted classification\n\n| Reuse state | Request count | Share of total cache_creation |\n|---|---:|---:|\n| NORMAL_REUSE_CANDIDATE (ratio ≥ 0.80) | 158 | 30.66% |\n| PARTIAL_REUSE | 0 | 0.0% |\n| MATERIAL_PREFIX_LOSS_CANDIDATE (ratio < 0.50 and cache_creation ≥ 50% of prior) | 3 | 65.89% |\n| INITIAL_TURN_NO_PRIOR (cold start) | 1 | 3.45% |\n\n```text\nCACHE_CHURN_MECHANISM: MIXED_CACHE_BEHAVIOR\n```\n\n65.89% falls just under the pre-declared 70% dominance threshold — the\nmechanism no longer meets `PREFIX_REBUILD_DOMINANT` on its own numeric\nterms. The practical finding (3 large real misses dominate token cost far\nmore than any of the 158 healthy requests individually) is unchanged in\nsubstance; it is reported exactly, not rounded to fit either label. This\nmatches `<REPO_PATH>`'s independently computed\n30.66%/65.89%/0%/3.45% split exactly.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-009",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real mechanism assignment is non-terminal and must remain clean.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "6df81f09802bd07b14f3f141eadd959e6ceadf6968c8a34cddc20a87cdeca0d5",
+        "document_id": "DOC-C",
+        "line_end": 65,
+        "line_start": 49,
+        "raw_excerpt_sha256": "6df81f09802bd07b14f3f141eadd959e6ceadf6968c8a34cddc20a87cdeca0d5",
+        "source_id": "SRC-C1",
+        "version_id": "V1"
+      },
+      "text": "## Cache-creation-weighted classification\n\n| Reuse state | Turn count | Share of total cache_creation |\n|---|---:|---:|\n| NORMAL_REUSE_CANDIDATE (ratio ≥ 0.80) | 389 | 27.1% |\n| PARTIAL_REUSE | 0 | 0.0% |\n| MATERIAL_PREFIX_LOSS_CANDIDATE (ratio < 0.50 and cache_creation ≥ 50% of prior) | 12 | 71.79% |\n| INITIAL_TURN_NO_PRIOR (cold start) | 1 | 1.11% |\n\n```text\nCACHE_CHURN_MECHANISM: PREFIX_REBUILD_DOMINANT\n```\n\n71.79% ≥ the pre-declared 70% dominance threshold. This is measured, not\nestimated — every figure above comes directly from exact `usage` token\ncounts, no byte-to-token conversion involved anywhere in this table.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-010",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real correction comparison presents old and new outcomes in a table, not conflicting direct field assignments.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "5f8b0fe6e23792dcf2659e334af55be65471457b293854211cb8ab449fc6cdad",
+        "document_id": "DOC-C",
+        "line_end": 256,
+        "line_start": 239,
+        "raw_excerpt_sha256": "5f8b0fe6e23792dcf2659e334af55be65471457b293854211cb8ab449fc6cdad",
+        "source_id": "SRC-C2",
+        "version_id": "V2"
+      },
+      "text": "## Required correction comparison\n\n| Metric | LINE_RECORD_METHOD (superseded) | REQUEST_LEVEL_METHOD (corrected) | MATERIAL_IMPACT |\n|---|---:|---:|---|\n| Main-thread call count | 402 | 162 | YES |\n| Total cache_creation tokens | 4,841,260 | 1,564,018 | YES |\n| MATERIAL_PREFIX_LOSS_CANDIDATE count | 12 | 3 | YES |\n| MATERIAL_PREFIX_LOSS_CANDIDATE share of cache_creation | 71.79% | 65.89% | YES |\n| Mechanism classification | PREFIX_REBUILD_DOMINANT | MIXED_CACHE_BEHAVIOR | YES |\n| Repeated-rebuild burst groups (STRICT) | 3 | 0 | YES |\n| Magnitude-ranked material-event count (≥80% coverage) | 51 | 25 | YES |\n| Root-cause verdict | ROOT_CAUSE_NOT_IDENTIFIED | premise dissolved; deeper cause answered by cache-miss-diagnostic-r1 | YES |\n\nThe 402/4,841,260/12/71.79%/PREFIX_REBUILD_DOMINANT/3-bursts/51-events\nfigures above are the superseded line-record interpretation, retained here\nonly for this comparison; they no longer describe a current measurement\nanywhere else in this report.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-011",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A real hypothesis table and fenced terminal narrative contain no conflicting direct terminal field assignments.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "d479f41199165b50dec855cb4f5e7c00f8712f05f761a5f83e07e761a760de3f",
+        "document_id": "DOC-D",
+        "line_end": 238,
+        "line_start": 202,
+        "raw_excerpt_sha256": "b0f1744e8b7164bddff1940830fe344d13fa05eea692c8269c4710befc5a4c6c",
+        "source_id": "SRC-D2",
+        "version_id": "V2"
+      },
+      "text": "## Hypothesis verdicts\n\n| Hypothesis | Verdict | Basis / unit |\n|---|---|---|\n| H1 SUBAGENT_RETURN | **REFUTED** (unchanged) | Exact: 3 spawns, 47,144 bytes, across the 2 highest-context sessions (S1, S2) zero spawns occurred. |\n| H2 MAIN_THREAD_RETRIEVAL | **REFUTED for its proposed mechanism; byte category itself still real** | E remains the largest measured byte category after thinking (887,517 bytes, unchanged), but the specific candidate mechanism this report floated for S1 (\"tool-output variability... repeatedly invalidating the cache prefix\") is now directly contradicted: `cache-reuse-churn-r1`'s corrected data shows 0 of S1's 3 real material cache events were preceded by a Bash result, and `cache-miss-diagnostic-r1` shows the actual causes are idle-gap eviction (2 of 3) and one system/skill-context change — neither is tool-output variability. No exact token share for E still exists without a tokenizer. |\n| H3 ALWAYS_LOADED | **REFUTED** (unchanged conclusion, updated magnitude) | Exact: the cold-start floor (53,958 tokens) is 1.48% of the corrected S1–S5 NOVEL_TOKEN_VOLUME total and 3.45% of S1's own corrected cache_creation — nowhere near dominant either way. |\n| H4 JUDGE_REREAD | **REFUTED for this sample** (unchanged) | Exact: 0 of S1–S5's unique requests carry a `FRAMEWORK-judge` attribution; the 3 heuristically Judge-like subagent spawns are the same 47,144-byte F figure already refuted as negligible under H1. |\n| H5 NO_DOMINANT_SOURCE | **REFUTED** (unchanged conclusion, updated magnitude and now-understood mechanism) | Cannot be declared: cache_creation (78.1% of the corrected NOVEL_TOKEN_VOLUME, still concentrated in S1) remains a real, exact, large phenomenon with no clean A–G content-category mapping. Its *mechanism* is now well understood (3 diagnosed cache-miss events + ordinary incremental growth), but mechanism is not content attribution — declaring \"no dominant source\" would still mean ignoring the largest number in the dataset. |\n\n## Terminal attribution verdict\n\n```text\nATTRIBUTION_INCOMPLETE\n```\n\nReason: the pre-declared dominance rule (≥30% and ≥1.5× runner-up) still\ncannot be safely evaluated over the A–G content categories, because the\nlargest exact-token phenomenon — cache_creation, 78.1% of the corrected\nNOVEL_TOKEN_VOLUME — has no exact content-category attribution available\nfrom transcript data alone. Request-level correction changed the magnitude\n(78.1% vs the original 79.5%) and, via `cache-miss-diagnostic-r1` and the\ncorrected `cache-reuse-churn-r1`, resolved *why* the cache_creation happened\n(3 diagnosed miss events plus ordinary incremental growth, not mysterious\nrepeated churn) — but it did not resolve *what content category* the\nresulting tokens belong to, which is the specific question this dominance\nrule needs answered and remains NOT MEASURABLE without a tokenizer.\n\n**What is safely established, independent of that open question:**\nsubagent-return compression would still save approximately nothing in the\nsessions that cost the most (H1, unchanged). The tool-output-variability\nmechanism floated as a candidate direction for S1's cache-creation is now\nactively contradicted, not merely unconfirmed (H2, strengthened by this\ncorrection) — any future investigation of S1-shaped sessions should start\nfrom idle-gap cache eviction and system/skill-context changes, not tool\noutput size.\n\n"
+    },
+    {
+      "expected_conflict": false,
+      "id": "R4-REAL-012",
+      "provenance": "REAL_SAMPLED_DEIDENTIFIED",
+      "rationale": "A historical real hypothesis and terminal-attribution section contains no duplicate direct terminal field conflict.",
+      "rule": "R4_DUPLICATE_TERMINAL_FIELD_CONFLICT",
+      "source": {
+        "deidentified_excerpt_sha256": "a32a259314537b78dac7498e45321bd569354321245313acd7cb516fc76ebb72",
+        "document_id": "DOC-D",
+        "line_end": 199,
+        "line_start": 166,
+        "raw_excerpt_sha256": "d3ecf983df26f7c7b623b3efab2d6495099857b277c616ec49f05713d344c617",
+        "source_id": "SRC-D1",
+        "version_id": "V1"
+      },
+      "text": "## Hypothesis verdicts\n\n| Hypothesis | Verdict | Basis / unit |\n|---|---|---|\n| H1 SUBAGENT_RETURN | **REFUTED** | Exact: 3 spawns, 47,144 bytes, across the 2 highest-context sessions (S1, S2) zero spawns occurred. |\n| H2 MAIN_THREAD_RETRIEVAL | **NOT MEASURABLE** (at token precision) | E is the largest measured *byte* category after thinking (887,517 bytes, 22.9% of the B–F byte total) and is structurally consistent with the S1 cache-creation anomaly, but no exact token share exists without a tokenizer — reported as suggestive, not confirmed. |\n| H3 ALWAYS_LOADED | **REFUTED** | Exact: the one measurable cold-start floor (53,958 tokens) is 0.51% of that same session's NOVEL_TOKEN_VOLUME — nowhere near dominant, and it cannot explain the repeated per-turn cache-creation churn (S1's floor is 1.1% of its own total cache_creation). |\n| H4 JUDGE_REREAD | **REFUTED for this sample** | Exact: 0 of 15 dataset-wide `FRAMEWORK-judge`-attributed lines fall within S1–S5; the 3 heuristically Judge-like subagent spawns are the same 47,144-byte F figure already refuted as negligible under H1. |\n| H5 NO_DOMINANT_SOURCE | **REFUTED** | Cannot be declared: the S1 cache-creation anomaly (79.5% of total NOVEL_TOKEN_VOLUME, concentrated in one session) is a real, exact, large, *unattributed* phenomenon. Declaring \"no dominant source\" would ignore it rather than resolve it. |\n\n## Terminal attribution verdict\n\n```text\nATTRIBUTION_INCOMPLETE\n```\n\nReason: the pre-declared dominance rule (≥30% and ≥1.5× runner-up) cannot be\nsafely evaluated because the largest exact-token phenomenon found —\nrepeated, per-call cache-creation churn concentrated in S1, 79.5% of total\nNOVEL_TOKEN_VOLUME across the sample — has no exact A–G category attribution\navailable from transcript data alone. A material category (the true\ncomposition of that churn: tool-result-driven, tool-input-driven, or\nsomething else) could reverse or confirm H2, and no defensible number exists\nfor it yet. Reporting `NO_DOMINANT_SOURCE` here would mean ignoring the\nlargest number in the entire dataset; reporting `FIRST_MATERIAL_CONTEXT_SOURCE`\nfor any A–G category would mean forcing a winner the token data does not\nsupport (H1 refuted exactly, H3 refuted exactly, H4 refuted exactly, C\nrefuted exactly at token precision despite looking dominant in bytes).\n\n**What is safely established, independent of that open question:**\nsubagent-return compression (the withdrawn R1 proposal) would save\napproximately nothing in the sessions that actually cost the most. Any\nfuture optimization goal should not restart from that proposal.\n\n"
+    }
+  ],
+  "schema_version": 1
+}

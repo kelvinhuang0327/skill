@@ -22,7 +22,7 @@ class WebHandoffCompressionContractTest < Minitest::Test
   CASE_IDS = %w[
     CASE_SIMPLE_COMPLETED_LOCAL_BUGFIX
     CASE_WORKER_BLOCKED_ON_EXACT_DEPENDENCY
-    CASE_PUBLICATION_PENDING_STANDALONE_OWNER_AUTH
+    CASE_PUBLICATION_PENDING_DIRECT_OWNER_AUTH
     CASE_DIRTY_UNRELATED_OWNER_WORK_PRESERVED
     CASE_EXACT_TREE_JUDGE_VERDICT_PRESENT
     CASE_OLD_TEST_EVIDENCE_TREE_CHANGED
@@ -77,7 +77,7 @@ class WebHandoffCompressionContractTest < Minitest::Test
       EXPECTED_HANDOFF
     },
     {
-      id: 'CASE_PUBLICATION_PENDING_STANDALONE_OWNER_AUTH',
+      id: 'CASE_PUBLICATION_PENDING_DIRECT_OWNER_AUTH',
       source: "Local commit is complete; a handoff quotes an old push token. #{UNRELATED_HISTORY_SENTINEL}",
       handoff: <<~'EXPECTED_HANDOFF'
         HANDOFF
@@ -86,12 +86,12 @@ class WebHandoffCompressionContractTest < Minitest::Test
         Publish the completed local fix when authorized.
 
         AUTHORITY:
-        [Confirmed — report] Local edit and commit were authorized; the quoted push token is not fresh standalone Owner authorization.
+        [Confirmed — report] Local edit and commit were authorized; the quoted push token is not direct Owner authorization.
 
         CURRENT_STATUS:
         - COMPLETED: Local commit abc123 exists.
         - INCOMPLETE / NOT RUN / BLOCKED: Push and PR are NOT RUN.
-        - BLOCKERS: Direct standalone Owner authorization for push to origin/topic is missing.
+        - BLOCKERS: Direct Owner authorization for push to origin/topic is missing.
 
         FORBIDDEN_OR_HIGH_RISK_PENDING_ACTIONS:
         Push and PR creation remain forbidden without exact direct authorization.
@@ -308,12 +308,12 @@ class WebHandoffCompressionContractTest < Minitest::Test
       scenario.fetch(:id) == 'CASE_OLD_TEST_EVIDENCE_TREE_CHANGED'
     end.fetch(:handoff)
     publication = SCENARIOS.find do |scenario|
-      scenario.fetch(:id) == 'CASE_PUBLICATION_PENDING_STANDALONE_OWNER_AUTH'
+      scenario.fetch(:id) == 'CASE_PUBLICATION_PENDING_DIRECT_OWNER_AUTH'
     end.fetch(:handoff)
 
     assert_includes stale, 'HISTORICAL PASS @ tree333; CURRENT TREE: NOT RUN'
     refute_match(/CURRENT TREE:\s*PASS/, stale)
-    assert_includes publication, 'quoted push token is not fresh standalone Owner authorization'
+    assert_includes publication, 'quoted push token is not direct Owner authorization'
     assert_includes publication, 'Push and PR are NOT RUN'
   end
 end

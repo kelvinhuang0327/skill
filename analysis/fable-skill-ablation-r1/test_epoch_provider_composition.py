@@ -739,6 +739,38 @@ class ReservedProviderSlotCompositionTests(unittest.TestCase):
         ledger = self.ledger(root)
         return self.authority(root, ledger, invocation), invocation, ledger
 
+    def test_historical_pin_is_distinct_from_bound_runtime_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            authority, invocation, ledger = self.prepared(root)
+            manifest = controller.load_manifest_after_lock(authority.manifest_path)
+            result = composition.execute_reserved_provider_slot(authority=authority, invocation=invocation)
+            record = result.as_record()["bound_runtime_identity"]
+            self.assertEqual(record["historical_canonical_harness"], manifest["canonical_harness"])
+            self.assertEqual(record["final_runtime_authority"], manifest["final_runtime_authority"])
+            self.assertNotEqual(record["historical_canonical_harness"], record["final_runtime_authority"])
+            self.assertEqual(record["provider_adapter"]["sha256"], controller.sha256_file(claude.__file__))
+            self.assertEqual(record["provider_runtime"]["sha256"], controller.sha256_file(invocation.argv[0]))
+            self.assertEqual(record["provider_runtime"]["binary_path"], invocation.argv[0])
+            self.assertEqual(record["evidence"], "EXACT_BYTES_VERIFIED_AT_CONTROLLER_ADMISSION")
+            record["provider_runtime"]["sha256"] = "0" * 64
+            self.assertNotEqual(result.as_record()["bound_runtime_identity"]["provider_runtime"]["sha256"], "0" * 64)
+            self.assertTrue(result.as_record()["settlement_authority"]["passed"])
+
+    def test_each_bound_component_drift_refuses_before_any_provider(self) -> None:
+        for component in (Path(runner.__file__), Path(controller.__file__), PROFILE_PATH, Path(claude.__file__)):
+            with self.subTest(component=component.name), tempfile.TemporaryDirectory() as temporary:
+                authority, invocation, ledger = self.prepared(Path(temporary))
+                before = ledger.path.read_bytes()
+                native_hash = controller.sha256_file
+                def changed_hash(path):
+                    return "0" * 64 if Path(path) == component else native_hash(path)
+                with mock.patch.object(controller, "sha256_file", side_effect=changed_hash), mock.patch.object(controller.subprocess, "Popen") as popen:
+                    with self.assertRaises(composition.CompositionError):
+                        composition.execute_reserved_provider_slot(authority=authority, invocation=invocation)
+                    popen.assert_not_called()
+                self.assertEqual(ledger.path.read_bytes(), before)
+
     def test_18_arbitrary_ledger_slot_cap_cannot_create_production_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

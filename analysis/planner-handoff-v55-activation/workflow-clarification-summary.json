@@ -1,0 +1,25 @@
+{
+  "workflow": "Owner manually supplies Planner v5.5 content to Web ChatGPT, then delivers generated task packets to Work Agents",
+  "current_template_sha256": "0d22c0dcb54d764fc7fe9b246f684d3ae953ac900f1d454fd95053736702b2fc",
+  "current_entry_sha256": "ef061e6e4eee18a05bcc6b7c832ffc5de99b376b9423b04130e4804981b519bb",
+  "native_installations": [
+    "/Users/kelvin/.codex/skills/planner-handoff",
+    "/Users/kelvin/.claude/skills/planner-handoff",
+    "/Users/kelvin/.gemini/skills/planner-handoff",
+    "/Users/kelvin/.gemini/config/skills/planner-handoff",
+    "/Users/kelvin/.gemini/antigravity-cli/skills/planner-handoff"
+  ],
+  "copied_identity_match": true,
+  "web_planner_activation": "NOT VERIFIED: no destination Web Planner conversation/project supplied or configured",
+  "prior_native_probe_snapshot": "43ec2dedee8892f29a23e8b6ea8801fb24f05b46734dcfb3882253c31491b357",
+  "prior_native_probe_scope": "Codex and Claude read the prior snapshot; not evidence that Web Planner or this revised snapshot is active",
+  "current_native_read_probes": "NOT RUN after workflow clarification",
+  "worker_requirement": "Generated packet + applicable project rules + fable-method; full Planner template is not required",
+  "p14b": {
+    "closeout": "CLOSED",
+    "technical_progress_percent": 83.3,
+    "historical_parity": "UNKNOWN",
+    "reopened": false
+  },
+  "v54": "Not loaded after user restriction; original file not modified"
+}

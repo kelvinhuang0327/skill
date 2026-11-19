@@ -1,0 +1,29 @@
+{
+  "platform": "claude",
+  "fresh_context": true,
+  "cwd": "/Users/kelvin/VibeCoding-WorkSpace/skill",
+  "command": [
+    "claude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--no-session-persistence",
+    "--permission-mode",
+    "plan",
+    "--tools",
+    "Read,Skill",
+    "--allowedTools",
+    "Read,Skill",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "/planner-handoff\nPerform a read-only Planner activation check. Load the planner-handoff skill and its bundled template through this platform's native skill entry; do not use another platform's copy and do not search project files or user configuration. Report the actual entry and template paths, the exact template title/version, and one short quoted rule about project-rule loading. Then apply the template to this synthetic fixture: three equally weighted technical milestones were agreed; two have passing evidence and the third is UNKNOWN because an original input is unavailable. The bounded investigation and its documentation are closed; no new input exists and no further action is authorized. Report technical progress, investigation closeout status, and the number of executable next-task prompts. Do not start another agent, inspect DBs, run commands/tests/CI, write files, publish, or reopen a real project investigation. Keep the final answer under 350 words."
+  ],
+  "stdin": null,
+  "exit_code": 1,
+  "timed_out": false,
+  "elapsed_seconds": 0.67,
+  "stdout": "",
+  "stderr": "Error: Invalid MCP configuration:\nFailed to read file: Error: ENAMETOOLONG: name too long, open '/planner-handoff\nPerform a read-only Planner activation check. Load the planner-handoff skill and its bundled template through this platform's native skill entry; do not use another platform's copy and do not search project files or user configuration. Report the actual entry and template paths, the exact template title/version, and one short quoted rule about project-rule loading. Then apply the template to this synthetic fixture: three equally weighted technical milestones were agreed; two have passing evidence and the third is UNKNOWN because an original input is unavailable. The bounded investigation and its documentation are closed; no new input exists and no further action is authorized. Report technical progress, investigation closeout status, and the number of executable next-task prompts. Do not start another agent, inspect DBs, run commands/tests/CI, write files, publish, or reopen a real project investigation. Keep the final answer under 350 words.'\n"
+}

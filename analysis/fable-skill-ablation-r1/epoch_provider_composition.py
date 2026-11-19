@@ -104,6 +104,7 @@ class ControllerSlotAuthority:
     _ledger_path: str = field(init=False, repr=False)
     _ledger_identity: tuple[int, int] | None = field(init=False, repr=False)
     _lock_identity: tuple[int, int] = field(init=False, repr=False)
+    _bound_runtime_identity_json: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if type(self.lifecycle) is not controller.LifecycleMachine:
@@ -118,7 +119,19 @@ class ControllerSlotAuthority:
         object.__setattr__(self, "_invocation_digest", _invocation_sha256(self.invocation))
         object.__setattr__(self, "_ledger_path", str(self.ledger.path.resolve()))
         object.__setattr__(self, "_ledger_identity", self.ledger.load().file_identity)
-        self.verify(require_unstarted=True)
+        manifest, _ = self.verify(require_unstarted=True)
+        # Historical compiler lineage is not the executed runtime identity.
+        # Capture the exact, already byte-verified pins without adding a
+        # provider policy, a new launch path, or authorization.
+        identity = {
+            "historical_canonical_harness": manifest["canonical_harness"],
+            "final_runtime_authority": manifest["final_runtime_authority"],
+            "provider_adapter": manifest["provider_adapter"],
+            "provider_runtime": manifest["provider_runtime"],
+            "sandbox_policy_sha256": manifest["runtime_containment"]["policy_sha256"],
+            "evidence": "EXACT_BYTES_VERIFIED_AT_CONTROLLER_ADMISSION",
+        }
+        object.__setattr__(self, "_bound_runtime_identity_json", json.dumps(identity, sort_keys=True))
 
     def _verify_lock(self) -> None:
         if (type(self.lock) is not controller.EpochLock or not self.lock.acquired
@@ -422,6 +435,7 @@ class CompositionResult:
                 "invocation_sha256": self.authority._invocation_digest,
                 "ledger_file_identity": list(self.authority._ledger_identity),
             },
+            "bound_runtime_identity": json.loads(self.authority._bound_runtime_identity_json),
             "sealed_invocation_cap_usd": self.sealed_invocation_cap_usd,
             "logical_argv": list(self.logical_argv),
             "physical_argv": (

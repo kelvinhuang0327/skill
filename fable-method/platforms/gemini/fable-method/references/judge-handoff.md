@@ -7,9 +7,11 @@
   - [Verification temp isolation](#verification-temp-isolation)
 - [Depth reconciliation](#depth-reconciliation)
 - [Remediation limit](#remediation-limit)
+- [Fresh Judge session lineage](#fresh-judge-session-lineage)
 - [Durable terminal capture](#durable-terminal-capture)
 - [Handoff payload](#handoff-payload)
   - [Non-Git artifact route](#non-git-artifact-route)
+- [Containment and memory evaluation](#containment-and-memory-evaluation)
 - [Verdict and lifecycle boundaries](#verdict-and-lifecycle-boundaries)
 
 This reference describes the Worker-to-Judge boundary. The Judge is an
@@ -18,9 +20,10 @@ verdict.
 
 ## When the Judge gate fires
 
-The Judge trigger has one definition, in `SKILL.md` "Route once": a listed
-category and material consequence together. Do not restate or widen that list
-here. `LOOP_JUDGED` is judged by route definition, not by category.
+The Judge trigger has one definition, in `SKILL.md` "Route once": an explicit
+request from the Packet or the Owner. Do not restate or widen that list
+here. Fable never infers a Judge from risk categories, and `LOOP_JUDGED` is
+judged by route definition.
 
 The routing fields have separate jobs: `JUDGE_TRIGGER` answers whether an
 independent Judge is required at all. `JUDGE_MODE` answers how that handoff
@@ -211,27 +214,52 @@ complete local suite once on the remediated tree. Then hand off a `DELTA`
 re-Judge. If the same finding is refuted again, stop with
 `BLOCKED_AFTER_JUDGE_REFUTATION`; do not start another cycle.
 
+## Fresh Judge session lineage
+
+Session naming is orchestration metadata only and never means context reuse: a
+Fresh Context Judge always has independent context. Request `<parent>-judge`
+for the first fresh Judge and `<parent>-judge-rN` for the nth fresh re-Judge
+after remediation, with `N` starting at 2. Resolve the parent name from the
+actual parent session; when it is unavailable, report
+`PARENT_SESSION_NAME: UNKNOWN` and do not invent a name. Report requested and
+actual names separately in every handoff:
+
+```text
+PARENT_SESSION_NAME: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_REQUESTED: <exact | UNKNOWN>
+JUDGE_SESSION_NAME_ACTUAL: <exact | UNKNOWN>
+JUDGE_SESSION_RELATION: FRESH_CONTEXT_CHILD | FRESH_CONTEXT_REJUDGE
+JUDGE_SESSION_REUSED: NO
+JUDGE_SESSION_NAMING_CAPABILITY: SUPPORTED | REQUEST_METADATA_ONLY | UNSUPPORTED | UNKNOWN
+JUDGE_SESSION_LINEAGE_RULE: first fresh Judge <parent>-judge; nth fresh re-Judge after remediation <parent>-judge-rN (N starts at 2)
+HARNESS_CHANGE_REQUIRED_FOR_ACTUAL_RENAME: YES | NO | UNKNOWN
+```
+
+When the harness supports explicit child-session naming, use the requested
+name. When it supports request metadata only, emit the requested name but do
+not claim the actual session was renamed. When naming is unsupported, report
+`UNSUPPORTED` and continue the independent Fresh Context Judge.
+
 ## Durable terminal capture
 
 When a Judge-owned long-running command has a load-bearing terminal result,
-persist it with `DurableCommandCapture`
-(`fable-method/scripts/task_checkpoint.rb`) to
-`.fable/checkpoints/<task_id>/captures/<capture_id>.json` before that result
-is relied upon for the final verdict: exact argv, exact stdout, exact stderr,
-underlying process exit status, and start/end timestamps. The durable file,
-not UI or subagent streaming, is the sole authority for that result.
+persist exact argv, stdout, stderr, underlying process exit status, and
+start/end timestamps to
+`.fable/checkpoints/<task_id>/captures/<capture_id>.json` before relying on
+that result for the final verdict. The optional `DurableCommandCapture` API in
+`fable-method/scripts/task_checkpoint.rb` is not included in the canonical
+installed build, and its absence is never a blocker. The complete scriptless
+fallback is to run the exact command through an available process runner that
+captures stdout, stderr, and the underlying exit status, then write those
+observed fields and timestamps to the same durable file using ordinary file
+tools. The durable file, not UI or streaming output, is the authority.
 
-`DurableCommandCapture#verdict` returns `PASS` only when the record is
-complete and the exit status is exactly `0`; a non-zero exit status is always
-`FAIL`, never `PASS`. Missing, unreadable, or incomplete evidence is always
-`UNKNOWN_UNVERIFIABLE` rather than an inferred `PASS` or a guessed failure
-class. Losing one command's evidence does not invalidate a sibling capture
-file; rerun only the specific unresolved load-bearing command.
-
-`DurableCommandCapture` never reads or persists the parent environment: it
-captures exactly the argv it was given and exactly the stdout/stderr the
-command produced, reusing this repository's existing lack of a broader
-redaction system rather than inventing a new one.
+Apply the same verdict rules manually: `PASS` only when the record is complete
+and the exit status is exactly `0`; non-zero is `FAIL`; missing, unreadable,
+or incomplete evidence is `UNKNOWN_UNVERIFIABLE`, never an inferred result.
+Losing one command's evidence does not invalidate sibling captures; resolve
+only the specific missing command. Capture exactly the argv and produced
+streams; do not add parent-environment data.
 
 ## Handoff payload
 
@@ -332,6 +360,20 @@ manifest, hash, or ledger entry is missing, state `UNVERIFIABLE` or `UNKNOWN`
 with the exact missing item rather than filling the gap. This route does not
 change Judge launch authority, depth selection, or verdict standards; the Judge
 still derives its own trigger and depth from the Packet and evidence.
+
+## Containment and memory evaluation
+
+When containment or memory writes are load-bearing for the Packet, evaluate
+those boundaries read-only against the actual final tree and filesystem under
+[workspace containment](workspace-containment.md) and
+[memory boundary](memory-boundary.md). Compare only the current task's T0/T1
+interval; historical absence is an accepted baseline, and unattributed sibling
+changes are report-only unless they affect canonical state or a required input.
+Check that task-created workspaces and persistent memory/handoff writes have
+exact path and purpose authorization. Do not broaden this into an automatic
+workspace or memory audit. The Judge reports observed violations; it does not
+create, remove, or repair them. Remediation stays Worker-owned under the normal
+one-remediation limit. This check adds no Judge trigger or authorization.
 
 ## Verdict and lifecycle boundaries
 

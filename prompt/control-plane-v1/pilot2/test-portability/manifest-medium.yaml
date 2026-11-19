@@ -1,0 +1,202 @@
+# Preparation-only manifest for Pilot 2. PENDING_OWNER_TOKEN is not execution authorization.
+schema_version: 1
+
+control_plane:
+  version: 1.1.0-draft.1
+  schema_version: 1
+  source_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+
+project_attachment:
+  profile_path: .ai/agent-profile.yaml
+  required_context_files:
+    - .ai/ai-context/PROJECT_PROFILE.md
+    - .ai/ai-context/PROJECT_CONTEXT.md
+    - .ai/ai-context/RUNBOOK.md
+    - .ai/ai-memory/MEMORY_LOG.md
+  missing_context_policy: stop
+  profile_sha256_or_version: 63c37623f3eeb5b1eab44c8f8cb29a8635c663b8b1948f2cb8505a6aedb7bdb2
+
+task:
+  id: CONTROL_PLANE_V1_PILOT2_TEST_PORTABILITY_REPAIR_R1
+  name: pilot2-test-portability-repair
+  type: test
+  risk_class: MEDIUM
+  routing_path: FAST
+  source_decision: PILOT2_TEST_PORTABILITY_REPAIR
+  created_by: planner
+  created_at: "2026-07-18T16:23:47+08:00"
+
+goal: Make the control-plane tests deterministic under UTF-8 and restrictive locale environments, improve missing legacy-prerequisite diagnostics, and preserve every byte-count, line-count, and SHA-256 integrity check without skipping or substituting legacy prompts.
+steps:
+  - Require a current Owner replacement for PENDING_OWNER_TOKEN, then verify the Project Attachment, exact base commit, clean reusable worktree, and exact task branch before any write.
+  - "Apply the local-only Owner override to the generic REUSABLE lifecycle: do not fetch or contact a remote; create or switch only the declared task branch at the exact local base."
+  - Modify only prototype/test_control_plane.rb and prototype/README.md to make test source and diagnostics deterministic under C.UTF-8 and C while preserving all four legacy prompt identities.
+  - Add temporary-fixture negative coverage proving that all missing legacy paths are reported together with a nonzero result and that byte-count, line-count, and SHA-256 mismatches each fail closed; never skip, substitute, synthesize, or silently accept a legacy prompt.
+  - Run every required locale, negative, identity, syntax, YAML, changed-path, and whitespace check at the final task head and bind the evidence to that head.
+  - Create exactly one local implementation commit, retain the task branch for independent fixed-head review, and restore the clean reusable worktree detached at the exact base without push, PR, merge, activation, or memory write.
+success_criteria:
+  - The full 34-run-or-greater suite passes under both C.UTF-8 and C at the final implementation head with zero failures, errors, or skips.
+  - A missing-prerequisite fixture exits nonzero and reports every missing legacy path; independent byte-count, line-count, and SHA-256 mismatch fixtures each fail.
+  - The four authorized legacy prompt byte counts, line counts, and SHA-256 identities remain exact, with no skip, substitution, synthesized fallback, or silent acceptance.
+  - Changed paths equal prototype/test_control_plane.rb and prototype/README.md exactly; Ruby syntax, tracked YAML parsing, and git diff --check pass.
+  - Exactly one local commit is created; the task branch is retained for mandatory independent fixed-head review and the reusable worktree is clean and detached at 31d24f4cc0f6a730a781889c56e4881c04acd7d4.
+  - No DB, data store, project runtime, network, remote, push, PR, activation, legacy replacement, active-task projection, or memory write occurs.
+
+repo:
+  project_path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1
+  base_branch: main
+  base_commit: 31d24f4cc0f6a730a781889c56e4881c04acd7d4
+  task_branch: codex/control-plane-v1-pilot2-test-portability-r1
+
+worktree:
+  mode: REUSABLE
+  reattach: false
+  path: /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1-agent
+  pr_ref: ""
+
+scope:
+  allowed_files:
+    - prototype/test_control_plane.rb
+    - prototype/README.md
+  protected_paths:
+    - .ai/ai-memory/MEMORY_LOG.md
+    - AGENT_CORE.md
+    - ROLE_PROFILES.md
+    - ROUTING_AND_LIFECYCLE.md
+    - TASK_MANIFEST.schema.yaml
+    - WORKER_TASK_TEMPLATE.md
+    - prototype/control_plane.rb
+    - compiled/HANDOFF_REPORTER.compiled.md
+    - compiled/CEO_DECISION_REVIEW.compiled.md
+    - compiled/CTO_TECHNICAL_REVIEW.compiled.md
+    - compiled/PLANNER_COMPILER.compiled.md
+    - pilot2/test-portability/manifest-medium.yaml
+    - pilot2/test-portability/README.md
+  forbidden_subsystems:
+    - DB
+    - data
+    - project-runtime
+    - network
+    - remote
+    - push
+    - PR
+    - activation
+    - legacy-prompt-replacement
+    - memory-write
+    - active-task-write
+  pins:
+    - {path: .ai/ai-memory/MEMORY_LOG.md, type: invariant}
+    - {path: AGENT_CORE.md, type: invariant}
+    - {path: ROLE_PROFILES.md, type: invariant}
+    - {path: ROUTING_AND_LIFECYCLE.md, type: invariant}
+    - {path: TASK_MANIFEST.schema.yaml, type: invariant}
+    - {path: WORKER_TASK_TEMPLATE.md, type: invariant}
+    - {path: prototype/control_plane.rb, type: invariant}
+    - {path: compiled/HANDOFF_REPORTER.compiled.md, type: invariant}
+    - {path: compiled/CEO_DECISION_REVIEW.compiled.md, type: invariant}
+    - {path: compiled/CTO_TECHNICAL_REVIEW.compiled.md, type: invariant}
+    - {path: compiled/PLANNER_COMPILER.compiled.md, type: invariant}
+    - {path: pilot2/test-portability/manifest-medium.yaml, type: invariant}
+    - {path: pilot2/test-portability/README.md, type: invariant}
+    - {path: prototype/test_control_plane.rb, type: before_after}
+    - {path: prototype/README.md, type: before_after}
+
+policies:
+  db: none
+  runtime: tmp_only
+  external_side_effects: none
+  external_list: []
+  pr: none
+  merge: none
+  cleanup: standard_lifecycle
+  cleanup_reason: ""
+
+tests:
+  - name: full-suite-c-utf8
+    cmd: LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/test_control_plane.rb
+    required: true
+    side_effects_allowed: tmp_only
+  - name: full-suite-c
+    cmd: LC_ALL=C LANG=C ruby prototype/test_control_plane.rb
+    required: true
+    side_effects_allowed: tmp_only
+  - name: fail-closed-legacy-negative-cases
+    cmd: LC_ALL=C LANG=C ruby prototype/test_control_plane.rb --name '/test_legacy_prompt_(prerequisites|byte_count|line_count|sha256)_/'
+    required: true
+    side_effects_allowed: tmp_only
+  - name: four-legacy-identities
+    cmd: LC_ALL=C.UTF-8 LANG=C.UTF-8 ruby prototype/test_control_plane.rb --name test_legacy_prompt_identities_match_the_authorized_pre_task_baseline
+    required: true
+    side_effects_allowed: none
+  - name: ruby-syntax
+    cmd: ruby -c prototype/control_plane.rb && ruby -c prototype/test_control_plane.rb
+    required: true
+    side_effects_allowed: none
+  - name: tracked-yaml-parse
+    cmd: >-
+      ruby -e 'require "yaml"; root = ARGV.fetch(0); files = IO.popen(["git", "-C", root, "ls-files", "*.yaml", "*.yml"], &:read).lines(chomp: true); files.each { |file| YAML.parse_file(File.join(root, file)) }; abort "no tracked YAML" if files.empty?' /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1-agent
+    required: true
+    side_effects_allowed: none
+  - name: exact-changed-paths
+    cmd: >-
+      ruby -e 'expected = %w[prototype/README.md prototype/test_control_plane.rb]; root, base = ARGV; actual = IO.popen(["git", "-C", root, "diff", "--name-only", base, "HEAD", "--"], &:read).lines(chomp: true); abort "changed paths differ" unless actual == expected' /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1-agent 31d24f4cc0f6a730a781889c56e4881c04acd7d4
+    required: true
+    side_effects_allowed: none
+  - name: diff-check
+    cmd: git -C /Users/kelvin/VibeCoding-WorkSpace/prompt/control-plane-v1-agent diff --check 31d24f4cc0f6a730a781889c56e4881c04acd7d4 HEAD
+    required: true
+    side_effects_allowed: none
+
+memory:
+  read:
+    mode: relevant
+    selectors:
+      - task_id:CONTROL_PLANE_V1_PILOT2_TEST_PORTABILITY_REPAIR_R1
+      - branch:codex/control-plane-v1-pilot2-test-portability-r1
+      - risk_domain:test_portability
+    max_entries: 3
+  write:
+    mode: forbidden
+    allowed_path: ""
+    purpose: ""
+    entry_schema: ""
+
+context:
+  live_state_required: true
+  head_binding_required: true
+  stale_evidence_policy: mark_stale
+
+authorization:
+  class: SINGLE_PROMPT
+  token: PENDING_OWNER_TOKEN
+  scope: CONTROL_PLANE_V1_PILOT2_TEST_PORTABILITY_REPAIR_R1
+  high_risk_reason: ""
+
+review:
+  required: true
+  mode: fixed_head
+  independent: true
+
+evidence:
+  head_sha_binding: true
+  required:
+    - attachment_and_version_result
+    - git_status_before_after
+    - changed_path_list
+    - test_output_with_head_sha
+    - locale_matrix
+    - negative_legacy_prerequisite_matrix
+    - legacy_identity_hashes
+    - local_commit_and_tree
+    - reusable_worktree_restoration
+    - independent_review_verdict
+
+active_task_projection:
+  enabled: false
+  output_path: ""
+  manifest_sha256_required: false
+
+status:
+  worker_final: NOT_RUN
+  review_verdict: NOT_RUN
+  lifecycle_state: S0

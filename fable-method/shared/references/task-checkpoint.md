@@ -1,5 +1,12 @@
 # Resumable Task Checkpoints
 
+Load this file only when the Packet or the Owner explicitly asks for one of its
+procedures: a checkpoint, a deferred blocked-task queue, a protected or
+long-running launch, recovery of a prior long-running execution, paused-run
+continuation, lock migration, or publication reconciliation. Ordinary tasks
+never need it. Long-running compute exclusion is owned by the B-lane launcher,
+which keeps its locks and code; Fable does not require it for ordinary work.
+
 ## Contents
 
 - [Overview and core principles](#overview-and-core-principles)
@@ -243,26 +250,30 @@ evidence permits progress; unexplained scoped mutation stops the write and
 requires ownership reconciliation.
 
 `TaskCheckpoint.scope_qualified_active_writer?` is an optional convenience in
-the source helper (`fable-method/scripts/task_checkpoint.rb`). Installed
-builds intentionally exclude executable helpers, so helper absence is never a
-blocker. The explicit bounded before/after snapshots are authoritative. If the
-helper is unavailable, capture the exact designated worktree and task-owned
-paths, branch, HEAD, tree, full status (including staged, unstaged, and
-untracked paths), and each owned path's identity/content metadata; repeat the
-same capture after a bounded interval. Any difference is active mutation.
-With stable snapshots, count a process only when directly observed target
-paths overlap the exact worktree or owned surface; a process name alone is
-insufficient. Unresolved writer ownership remains fail-closed. The default
-observation is about five seconds, but callers may choose another bounded
-interval when the task requires it.
+the source helper (`fable-method/scripts/task_checkpoint.rb`). Codex builds
+materialize only helpers declared in `platforms.yaml`; other platform builds
+may omit executable helpers. The observable snapshots are authoritative, and
+helper absence is never a blocker. The complete fallback is
+to capture the exact designated worktree and task-owned paths, branch, HEAD,
+tree, full status (including staged, unstaged, and untracked paths), and each
+owned path's identity/content metadata; repeat the same capture after a bounded
+interval. Any difference is active mutation. With stable snapshots, count a
+process only when directly observed target paths overlap the exact worktree or
+owned surface; a process name alone is insufficient. Unresolved writer
+ownership remains fail-closed. The default observation is about five seconds,
+but callers may choose another bounded interval when the task requires it.
 
 ## Long-running execution recovery
 
-`ExecutionRecord` (`fable-method/scripts/task_checkpoint.rb`) classifies a
-task-owned execution that may have outlived its originating session, so a
-resuming Worker never launches a silent duplicate of expensive or
-long-running work. It never scans the OS process table or maintains a
-registry; it inspects only the exact PID this task itself recorded.
+`ExecutionRecord` is an optional API in the source helper
+(`fable-method/scripts/task_checkpoint.rb`) for classifying a task-owned
+execution that may have outlived its originating session. The installed build
+does not contain that helper, and its absence alone never blocks a task. The
+scriptless fallback is to inspect only the exact caller-authorized execution
+record and exact PID recorded there, then apply the classifications below; do
+not scan unrelated processes or create a registry. If the record is
+unreadable/malformed or exact PID liveness cannot be established, stop because
+ownership is unresolved, not because the helper is missing.
 
 For long-running / sealed-evaluation recovery, distinguish
 `LOAD_BEARING_INPUT_IDENTITY` (logical input identity) from
@@ -279,6 +290,14 @@ identity is unchanged. If the Packet makes whole-container identity
 authoritative, that identity remains binding. This is not a global rule that
 DB/container identity never matters.
 
+Execution/runtime identity is separate from load-bearing input identity.
+Before resuming persisted computation, require the recorded runtime/source
+identity to match the exact runtime and source bytes that will execute. If
+code bytes differ, preserve the partial run and start a new run under a newly
+computed identity; never override or reuse the old execution version or
+source SHA. If the identity cannot be established or compared, stop before
+continuing.
+
 `EVALUATION_COMPLETE_UNSEALED` is a conditional evidence milestone for an
 expensive evaluation whose main computation completed but sealing/final
 aggregation/closure did not. On takeover, if compatible durable evidence
@@ -294,9 +313,13 @@ protected execution, identity validation, recovery or STOP rules.
 **Storage**: `.fable/checkpoints/<task_id>/executions/<execution_id>.json`,
 alongside the checkpoint's own `.fable/checkpoints/<task_id>.json`.
 
-Workers launch applicable task-owned expensive / long-running commands through
-the [protected run entrypoint](#protected-run-entrypoint). The underlying
-`ExecutionRecord.recover_before_execution(file_path)` classifies exactly one:
+When available, the optional helper's protected entrypoint provides atomic
+acquisition for task-owned expensive / long-running commands. Without it, use
+the exact record/PID inspection above and the bounded launcher fallback below;
+do not fabricate or rewrite an execution record. If a competing owner cannot
+be ruled out from those observations, fail closed for unresolved ownership.
+The underlying `ExecutionRecord.recover_before_execution(file_path)` classifies
+exactly one:
 
 | Classification | Meaning | Behavior |
 |---|---|---|
@@ -313,6 +336,26 @@ above: session or UI disappearance alone is never itself evidence of failure.
 `ExecutionRecord.start!` persists a `STARTED` record with the real PID before
 the long-running work begins. `#complete!` finalizes it to `COMPLETED` with a
 `durable_capture_path` once the work's durable terminal evidence exists.
+
+Session, quota, shell, or handoff loss does not prove execution failure.
+Resolve the exact scope-qualified process/writer and canonical durable output,
+then classify the prior execution as exactly one of `ACTIVE`,
+`COMPLETE_VALID`, `TERMINATED_INCOMPLETE`, or `UNRESOLVED`. `ACTIVE`: wait,
+observe, or attach; never launch a duplicate. `COMPLETE_VALID`: reuse the
+existing output; do not rerun. File existence alone is not `COMPLETE_VALID`;
+the durable output must satisfy its task acceptance and available terminal
+evidence. `TERMINATED_INCOMPLETE`: rerun is permitted only if the original
+task authority allows that rerun; classification does not grant new scope or
+authorization. `UNRESOLVED`: stop rather than risk concurrent or duplicate
+execution.
+
+When acceptance concerns serialization or artifact byte determinism, reuse the
+same already-computed semantic result, independently serialize or reconstruct
+the serialized bytes, and compare them. Do not rerun an expensive upstream
+computation solely for byte-level determinism. Independent algorithm/process
+replay is required only when the Packet explicitly makes replay part of
+acceptance. Do not weaken existing `NOT RUN`, retry-ledger, RCA, Judge, or
+evidence-honesty rules.
 
 ### Atomic acquisition boundary
 
@@ -339,8 +382,12 @@ upstream command. Any other classification, or a raised
 `DuplicateExecutionError` / `UnresolvedExecutionStateError`, means a record
 already existed — a concurrent winner or an earlier session — and the losing
 caller must not proceed, under the exact same rules `recover_before_execution`
-already applies to that existing record. The CLI below owns this sequence for
-Worker launches; Workers must not manually compose acquire/run/complete.
+already applies to that existing record. The optional CLI owns this sequence
+when used; Workers must not imitate its atomic record logic. The scriptless
+fallback is the exact-record/PID inspection plus bounded snapshot and
+process-target comparison described above. It does not claim inherited-lock
+crash protection. If another writer or owner cannot be ruled out, fail closed
+for unresolved ownership.
 
 The protected CLI also serializes task-scoped ownership checks with the
 generation-2 `execution.lock` in the task's stable anchor under Git's common
@@ -375,7 +422,43 @@ with `confirm_legacy_workers_quiescent: true`, and it is never inferred from an
 absent anchor. Workers must not clear the block by deleting, renaming, or
 recreating legacy lock files.
 
+New anchors also record the stable filesystem volume identity when the host
+can provide one (`diskutil` VolumeUUID on macOS or a filesystem UUID on Linux).
+This value is historical evidence: an ordinary `--run` continues to require
+the recorded device and inode to match, and it never updates either identity.
+Old anchors without a recorded volume identity cannot be rebound by the device
+recovery entrypoint.
+
+`--recover-device-anchor` is a separate, offline, read-only preflight for one
+`task-execution` anchor. It requires the exact repository and task identity,
+the unchanged lock inode, a matching historical and current volume identity,
+an available OS lock, a complete execution journal, and valid lock lineage.
+It does not update Execution records, captures, transitions, or failure
+evidence. To apply an eligible plan, copy the exact `owner_authorization_text`
+from its JSON result into an owner-controlled private file and invoke the same
+command with `--apply-device-anchor-recovery --owner-authorization PATH`.
+The authorization text binds the repository, task, original authority SHA-256,
+old and current devices, inode, and volume identity. The apply path rechecks
+those inputs under the existing OS lock and atomically replaces only
+`authority.json`, preserving the lock file and recording recovery history.
+An already completed replacement is recognized on retry without creating a
+new lock identity. Missing historical volume evidence, a competing or unknown
+writer, or any identity or journal mismatch refuses before recovery writes.
+No ordinary `--run` invokes this entrypoint.
+
 ### Protected run entrypoint
+
+The machine-wide heavy-compute lease is paused by default; set
+`FABLE_HEAVY_SCIENTIFIC_LEASE=on` in the launcher environment to re-enable it.
+
+This CLI is an optional convenience; executable helpers are intentionally not
+included in the canonical installed build. Its absence from an installed skill
+is never a blocker by itself. When the confirmed Fable checkout has the helper,
+the CLI provides the lock and durable-capture guarantees described here. When
+it is unavailable before execution, use the complete bounded fallback below:
+exact Packet-owned worktree and argv, local-only/no-high-risk effects, exact
+record/PID inspection where applicable, and before/after snapshots. Do not
+claim inherited-lock crash protection for a direct launch.
 
 Select the launcher checkout under SKILL.md's launcher-selection rule, then
 invoke:
@@ -435,19 +518,20 @@ Terminated-incomplete state is retained: the CLI never deletes the record,
 rotates identity, or automatically reruns. Rerun authority remains with the
 original task contract. Invalid CLI arguments exit `2` before acquisition.
 
-**Protection boundary**: only long-running commands routed through
-`task_checkpoint.rb --run` or an explicitly authorized
-`task_checkpoint.rb --recover-run` receive this technical duplicate-execution
-protection. Arbitrary direct shell bypasses remain outside that enforcement
-boundary. Applicable Worker launches MUST use this CLI and must stop if it
-cannot be resolved, rather than silently fall back to a direct command.
+**Protection boundary**: only long-running commands routed through the
+optional `--run` or explicitly authorized `--recover-run` CLI receive its
+technical duplicate-execution and inherited-lock protection. A direct launch
+does not claim that protection; use the bounded scriptless fallback when its
+preconditions hold. Helper absence alone is not a stop. If exact process or
+writer ownership cannot be resolved, fail closed for that unresolved state.
 
-**Deployment requirement**: publication/activation is incomplete until a Worker
-can resolve a Fable checkout containing the merged Ruby CLI. Updating only
-installed SKILL text is insufficient when the installed package lacks the
-Ruby scripts. The placeholder above means that selected launcher, which
-defaults to the confirmed deployed checkout; an isolated task worktree is
-never the permanent canonical runtime path.
+**Packaging contract**: the canonical builder materializes skill text,
+references, projections, and platform adapters; it intentionally omits Ruby
+helpers. An installed package therefore does not promise a local CLI copy.
+Resolve the helper from the selected confirmed checkout when available; its
+absence from the install is not evidence that the skill build is incomplete.
+Otherwise use the bounded scriptless fallback above. An isolated task
+worktree is never the permanent canonical runtime path.
 
 ### Nested protected runs
 
@@ -508,9 +592,10 @@ EXACT_ALLOWLISTED_ARGV: <finite list of exact command and argv vectors authorize
 EFFECT_CLASSIFICATION: LOCAL_ONLY_NO_HIGH_RISK | EXTERNAL_OR_HIGH_RISK | UNCLEAR
 ```
 
-- When `PRESENT_RUNNABLE`, Workers MUST use the protected
-  `task_checkpoint.rb --run` entrypoint. Direct-local fallback is not
-  allowed.
+- When `PRESENT_RUNNABLE`, the optional CLI may be used for its lock and
+  capture guarantees. Its absence from an installed skill is not a blocker;
+  when unavailable before execution, evaluate the bounded direct-local
+  fallback below rather than treating the missing file as an ownership fact.
 - Direct-local fallback is permitted only when launcher absence or
   unavailability is positively proven before execution begins. It requires
   `EXACT_WORKTREE` and `EXACT_ALLOWLISTED_ARGV` from the Packet, an invoked
@@ -540,6 +625,14 @@ This narrow exception does not weaken the normal requirement that high-risk
 or external actions use their existing authorization and supported execution
 path.
 ## Explicit stale recovery
+
+The recovery CLI is optional and is not part of the installed build. When it
+is unavailable, inspect only the exact authorized record and recorded PID
+using the recovery table above; retain the record unchanged. A live or
+unresolved owner remains fail-closed. Only an explicitly authorized rerun
+that meets every bounded direct-local fallback condition may proceed without
+the CLI; helper absence alone never authorizes changing identities or
+replaying work.
 
 `--run` never recovers a stale record. A stale `STARTED` record blocks normal
 `--run` for the task even if the caller supplies a different execution ID;
@@ -591,6 +684,17 @@ closed. The task-scoped lock serializes this transition and successor claim
 with normal protected `--run` acquisition. The launched child inherits the
 task-lock descriptor, so an orphaned child continues to own the task and a
 retry cannot launch another child until the orphan exits.
+
+A terminal failed recovery successor requires separate explicit authorization:
+use `--retry-recover-run` with its failed successor execution ID, the same
+checkpoint/worktree locators, and the complete newly authorized argv after
+`--`. Each explicit retry creates a distinct successor and pins the previous
+record and terminal capture hashes; it never rewrites that previous edge or
+retries automatically. Successful, active, incomplete, ordinary non-recovery,
+or ambiguous sources are refused. Recovery predecessor IDs are historical
+provenance (`recovery_parent_execution_id`), while `parent_execution_id` names
+only active protected descendants; the retry owns a fresh inherited-lock
+lineage. Existing records without verifiable recovery provenance fail closed.
 
 ## Owner-authorized paused execution continuation
 
@@ -664,11 +768,14 @@ can claim a `PAUSED_RESUMABLE` checkpoint.
 
 ## Publication live-state classifier
 
-`PublicationLiveStateClassifier` (`fable-method/scripts/task_checkpoint.rb`)
-resolves what is already true about a task's Git publication lifecycle from
-freshly-queried remote facts, so a stale checkpoint or Packet cannot cause an
-already-completed Ready/Merge/postmerge action to be replayed, nor a
-genuinely pending one to be silently skipped.
+`PublicationLiveStateClassifier` is an optional API in the source helper
+(`fable-method/scripts/task_checkpoint.rb`) that resolves what is already true
+about a task's Git publication lifecycle from freshly queried remote facts.
+The installed build omits it, and its absence is never a blocker: query the
+remote branch and PR facts directly using the fetch procedures below, then
+apply the same derived-state and short-circuit tables. A stale checkpoint or
+Packet is never live truth; unresolved or conflicting remote facts still fail
+closed.
 
 It is a **derived live view only**: it holds no `save`/`load`, adds no
 lifecycle enum, and does not replace `PR_PUBLICATION_STATUS`,

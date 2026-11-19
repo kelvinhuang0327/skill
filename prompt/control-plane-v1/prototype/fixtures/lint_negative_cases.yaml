@@ -1,0 +1,123 @@
+cases:
+  - rule: L1
+    base: low
+    manifest_mutations:
+      authorization.scope: WRONG-TASK-ID
+
+  - rule: L2
+    base: medium
+    manifest_mutations:
+      tests.0.side_effects_allowed: db_sandbox
+
+  - rule: L3
+    base: medium
+    manifest_mutations:
+      tests.0.side_effects_allowed: ""
+
+  - rule: L4
+    base: medium
+    manifest_mutations:
+      scope.pins.1.type: invariant
+
+  - rule: L5
+    base: medium
+    manifest_mutations:
+      worktree.path: ""
+
+  - rule: L6
+    base: medium
+    manifest_mutations:
+      review.independent: false
+
+  - rule: L7
+    base: medium
+    manifest_mutations:
+      authorization.class: NONE
+      authorization.token: NOT_REQUIRED
+
+  - rule: L8
+    base: medium
+    manifest_mutations:
+      authorization.token: NOT_REQUIRED
+
+  - rule: L9
+    base: medium
+    manifest_mutations:
+      policies.external_side_effects: listed
+      policies.external_list:
+        - promote executable registry entry to ONLINE
+
+  - rule: L10
+    base: medium
+    manifest_mutations:
+      scope.allowed_files: []
+
+  - rule: L11
+    base: medium
+    manifest_mutations:
+      task.risk_class: LOW
+      authorization.class: NONE
+      authorization.token: NOT_REQUIRED
+
+  - rule: L12
+    base: medium
+    manifest_mutations:
+      task.name: independent-cleanup-task
+
+  - rule: L13
+    base: medium
+    manifest_mutations:
+      worktree.mode: EPHEMERAL
+      worktree.reattach: true
+      worktree.pr_ref: ""
+
+  - rule: L14
+    base: high
+    manifest_mutations:
+      task.routing_path: FAST
+
+  - rule: L15
+    base: low
+    profile_mutations:
+      authorization:
+        matrix: overridden
+
+  - rule: L16
+    base: low
+    attachment: missing
+    profile_location: external
+
+  - rule: L17
+    base: low
+    profile_mutations:
+      control_plane.version: 0.0.0-invalid
+
+  - rule: L18
+    base: low
+    manifest_mutations:
+      memory.read.selectors: []
+
+  - rule: L19
+    base: medium
+    manifest_mutations:
+      memory.write.mode: allowed
+      memory.write.allowed_path: .ai/ai-memory/MEMORY_LOG.md
+      memory.write.purpose: ""
+      memory.write.entry_schema: core_v1
+
+  - rule: L20
+    base: medium
+    manifest_mutations:
+      memory.write.mode: allowed
+      memory.write.allowed_path: ../foreign/.ai/ai-memory/MEMORY_LOG.md
+      memory.write.purpose: Record a bounded task fact.
+      memory.write.entry_schema: core_v1
+
+  - rule: L21
+    base: low
+    manifest_mutations:
+      context.live_state_required: false
+
+  - rule: L22
+    base: medium
+    view: tampered

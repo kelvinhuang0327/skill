@@ -5,6 +5,7 @@ require 'yaml'
 require 'pathname'
 require 'set'
 require 'fileutils'
+require 'digest'
 
 module Fable
   # Closed deployment schema for these two skills, not a plugin registry.
@@ -20,6 +21,43 @@ module Fable
     DEPTH_SOURCE = 'fable-method/shared/references/judge-handoff.md'
     DEPTH_DESTINATION = 'references/judge-depth-contract.md'
     DEPTH_SECTIONS = ['Depth and evidence reuse', 'Depth reconciliation', 'Remediation limit'].freeze
+    RUNTIME_ASSET_FIELDS = {
+      'task_checkpoint' => %w[id role source source_commit git_blob sha256 mode destination purpose],
+      'paused_run_continuation' => %w[id role source source_commit git_blob sha256 mode destination purpose],
+      'execution_evidence_fingerprint' => %w[id role source source_commit git_blob sha256 mode destination purpose],
+      'artifact_controls' => %w[id role source sha256 mode destination purpose]
+    }.freeze
+    CODEX_RUNTIME_ASSETS = {
+      'task_checkpoint' => {
+        'role' => 'launcher',
+        'source' => 'fable-method/scripts/task_checkpoint.rb',
+        'mode' => '100755',
+        'destination' => 'scripts/task_checkpoint.rb',
+        'purpose' => 'canonical_task_checkpoint_launcher'
+      },
+      'paused_run_continuation' => {
+        'role' => 'required_companion',
+        'source' => 'fable-method/scripts/paused_run_continuation.rb',
+        'mode' => '100644',
+        'destination' => 'scripts/paused_run_continuation.rb',
+        'purpose' => 'required_only_for_continue_paused_run_transition'
+      },
+      'execution_evidence_fingerprint' => {
+        'role' => 'required_companion',
+        'source' => 'fable-method/scripts/execution_evidence_fingerprint.rb',
+        'mode' => '100644',
+        'destination' => 'scripts/execution_evidence_fingerprint.rb',
+        'purpose' => 'required_only_for_fingerprinted_run'
+      },
+      'artifact_controls' => {
+        'role' => 'supporting_helper',
+        'source' => 'fable-method/scripts/fable_artifact_controls.py',
+        'sha256' => 'd56739ab975264f868f6edbd9d69ba599e319cb45e0ec21d8bc7159e94176045',
+        'mode' => '100644',
+        'destination' => 'scripts/fable_artifact_controls.py',
+        'purpose' => 'local_codex_artifact_logs_and_worktree_lifecycle'
+      }
+    }.freeze
     LIVE = {
       'fable-method' => {
         'codex' => '/Users/kelvin/.codex/skills/fable-method',
@@ -126,7 +164,7 @@ module Fable
 
     def validate!
       mapping!(data, %w[schema_version repository_root materialized_root skills], 'manifest')
-      fail Error, 'schema_version must be 2' unless data['schema_version'].is_a?(Integer) && data['schema_version'] == 2
+      fail Error, 'schema_version must be 3' unless data['schema_version'].is_a?(Integer) && data['schema_version'] == 3
       fail Error, 'repository_root mismatch' unless data['repository_root'] == REPOSITORY
       fail Error, 'materialized_root mismatch' unless data['materialized_root'] == MATERIALIZED
       mapping!(data['skills'], PAIRS.keys, 'skills')
@@ -162,7 +200,9 @@ module Fable
         fail Error, 'required projection count mismatch' unless common['projections'].length == expected_projection_count
         records = array!(entry['platforms'], 'platforms')
         names = records.map do |p|
-          mapping!(p, %w[name frontmatter_source adapter_sources reference_overrides materialized_destination live_installation_path live_installation_role], 'platform')
+          platform_fields = %w[name frontmatter_source adapter_sources reference_overrides materialized_destination live_installation_path live_installation_role]
+          platform_fields << 'runtime_assets' if name == 'fable-method' && p.is_a?(Hash) && p['name'] == 'codex'
+          mapping!(p, platform_fields, 'platform')
           p['name']
         end
         fail Error, "unsupported or duplicate skill/platform pair: #{name}" unless names.all? { |n| n.is_a?(String) } && names.sort == PAIRS.fetch(name).sort
@@ -176,6 +216,32 @@ module Fable
             mapping!(r, %w[source destination], 'reference override')
             sources << owned!(r['source'], area)
             targets << owned!(r['destination'], 'references')
+          end
+          runtime_assets = if name == 'fable-method' && platform == 'codex'
+                             array!(p['runtime_assets'], 'fable-method.codex.runtime_assets')
+                           else
+                             []
+                           end
+          if name == 'fable-method' && platform == 'codex'
+            fail Error, 'Codex runtime asset set mismatch' unless runtime_assets.map { |asset| asset.is_a?(Hash) && asset['id'] }.compact == CODEX_RUNTIME_ASSETS.keys
+            runtime_assets.each do |asset|
+              fields = RUNTIME_ASSET_FIELDS[asset['id']]
+              fail Error, 'unsupported Codex runtime asset' unless fields
+              mapping!(asset, fields, 'runtime asset')
+              contract = CODEX_RUNTIME_ASSETS.fetch(asset['id'])
+              contract.each do |field, expected|
+                fail Error, "Codex runtime asset #{asset['id']} #{field} mismatch" unless asset[field] == expected
+              end
+              if asset.key?('source_commit') || asset.key?('git_blob')
+                %w[source_commit git_blob].each do |field|
+                  fail Error, "Codex runtime asset #{asset['id']} #{field} must be a Git SHA-1" unless asset[field].is_a?(String) && asset[field].match?(/\A[0-9a-f]{40}\z/)
+                end
+              end
+              fail Error, "Codex runtime asset #{asset['id']} sha256 must be a SHA-256" unless asset['sha256'].is_a?(String) && asset['sha256'].match?(/\A[0-9a-f]{64}\z/)
+              fail Error, "Codex runtime asset #{asset['id']} mode mismatch" unless asset['mode'] == contract['mode']
+              sources << owned!(asset['source'], 'fable-method/scripts')
+              targets << self.class.relative!(asset['destination'], 'runtime asset destination')
+            end
           end
           no_overlap!(targets, 'reference destination')
           destination = self.class.relative!(p['materialized_destination'], 'materialized destination')
@@ -248,7 +314,36 @@ module Fable
     def source_paths(name)
       common = shared(name)
       [common['skill'], *common['references'], *common['projections'].map { |p| p['source'] },
-       *platforms(name).flat_map { |p| [p['frontmatter_source'], *p['adapter_sources'], *p['reference_overrides'].map { |r| r['source'] }] }]
+       *platforms(name).flat_map do |p|
+         [p['frontmatter_source'], *p['adapter_sources'], *p['reference_overrides'].map { |r| r['source'] },
+          *p.fetch('runtime_assets', []).map { |asset| asset['source'] }]
+       end]
+    end
+
+    def runtime_asset_specs(name, platform)
+      pair(name, platform).fetch('runtime_assets', [])
+    end
+
+    def runtime_file_modes(name, platform)
+      runtime_asset_specs(name, platform).to_h do |asset|
+        [asset['destination'], Integer(asset['mode'].delete_prefix('100'), 8)]
+      end
+    end
+
+    def runtime_asset_bytes(root, asset)
+      path = File.join(root, asset['source'])
+      stat = self.class.safe_path!(path)
+      fail Error, "runtime asset source is not a file: #{asset['source']}" unless stat.file?
+      content = File.binread(path)
+      if asset.key?('git_blob')
+        git_blob = Digest::SHA1.hexdigest("blob #{content.bytesize}\0#{content}")
+        fail Error, "runtime asset Git blob mismatch: #{asset['source']}" unless git_blob == asset['git_blob']
+      end
+      sha256 = Digest::SHA256.hexdigest(content)
+      fail Error, "runtime asset SHA-256 mismatch: #{asset['source']}" unless sha256 == asset['sha256']
+      expected_mode = Integer(asset['mode'].delete_prefix('100'), 8)
+      fail Error, "runtime asset mode mismatch: #{asset['source']}" unless (stat.mode & 0o777) == expected_mode
+      content
     end
 
     def read(root, relative)
@@ -350,6 +445,33 @@ module Fable
       common['references'].each { |ref| files[ref.delete_prefix("#{name}/shared/")] = read(root, ref) }
       common['projections'].each { |p| files[p['destination']] = self.class.project(read(root, p['source']), p['sections']) }
       record['reference_overrides'].each { |r| files[r['destination']] = read(root, r['source']) }
+      runtime_assets = runtime_asset_specs(name, platform)
+      runtime_assets.each do |asset|
+        fail Error, "runtime asset destination collision: #{asset['destination']}" if files.key?(asset['destination'])
+        files[asset['destination']] = runtime_asset_bytes(root, asset)
+      end
+      unless runtime_assets.empty?
+        launcher = runtime_assets.find { |asset| asset['role'] == 'launcher' }
+        companion = runtime_assets.find { |asset| asset['role'] == 'required_companion' }
+        execution_evidence = runtime_assets.find { |asset| asset['id'] == 'execution_evidence_fingerprint' }
+        artifact_controls = runtime_assets.find { |asset| asset['id'] == 'artifact_controls' }
+        fail Error, 'Codex runtime asset contract is incomplete' unless launcher && companion && execution_evidence && artifact_controls
+        files['SKILL.md'] += <<~RUNTIME
+
+          ## Codex Runtime Materialization
+
+          - **Source-owned Script:** `#{launcher['source']}` is pinned to Git blob `#{launcher['git_blob']}` from commit `#{launcher['source_commit']}`.
+          - **Materialized Runtime Asset:** the launcher is written byte-for-byte as `#{launcher['destination']}` with the manifest-declared executable mode.
+
+          - **Required Companion:** `#{companion['destination']}` is loaded only for `--continue-paused-run`, pinned to Git blob `#{companion['git_blob']}` from commit `#{companion['source_commit']}`.
+          - **Execution Evidence Helper:** `#{execution_evidence['destination']}` is loaded only for fingerprinted `--run` requests, pinned to Git blob `#{execution_evidence['git_blob']}` from commit `#{execution_evidence['source_commit']}`.
+          - **Local Artifact Controls:** `#{artifact_controls['destination']}` is a standard-library helper copied from `#{artifact_controls['source']}` with SHA-256 `#{artifact_controls['sha256']}`.
+          - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
+          - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
+
+          A Codex bundle is Runtime Distribution Ready only when every manifest-declared asset matches its declared SHA-256 and mode; pinned assets also match their Git blob. The platform generator's `--check` verifies that state. A documentation-only bundle is not Runtime Distribution Ready.
+        RUNTIME
+      end
       # Projection bundles must resolve both paths and fragments entirely within
       # their rendered boundary. Existing Method link checks retain their policy.
       self.class.validate_links!(files) if name == 'fable-judge'
@@ -365,6 +487,7 @@ module Fable
         [p['name'], self.class.inventory(File.join(root, p['materialized_destination']), allow_missing: true)]
       end
       bundles = platforms(name).to_h { |p| [p['name'], render(root, name, p['name'])] }
+      runtime_modes = platforms(name).to_h { |p| [p['name'], runtime_file_modes(name, p['name'])] }
       # Validate the expected file/directory roles for EVERY selected platform
       # before comparing any existing bytes or writing any earlier platform.
       bundles.each do |platform, files|
@@ -384,6 +507,7 @@ module Fable
         destination = File.join(root, p['materialized_destination'])
         files = bundles.fetch(p['name'])
         inventory = inventories.fetch(p['name'])
+        modes = runtime_modes.fetch(p['name'])
         expected_dirs = files.keys.flat_map do |path|
           parts = path.split('/')[0...-1]
           (1..parts.length).map { |length| parts.take(length).join('/') }
@@ -394,6 +518,9 @@ module Fable
             fail Error, "wrong-type managed file: #{destination}/#{path}"
           end
           mismatch ||= inventory[path] != :file || File.binread(File.join(destination, path)) != content
+          if inventory[path] == :file && modes.key?(path)
+            mismatch ||= (File.stat(File.join(destination, path)).mode & 0o777) != modes.fetch(path)
+          end
         end
         if write
           self.class.inventory(destination, allow_missing: true)
@@ -408,6 +535,7 @@ module Fable
             FileUtils.mkdir_p(File.dirname(target))
             self.class.safe_path!(target, allow_missing: true)
             File.binwrite(target, content) unless File.file?(target) && File.binread(target) == content
+            File.chmod(modes.fetch(path), target) if modes.key?(path) && (File.stat(target).mode & 0o777) != modes.fetch(path)
           end
           puts "WRITTEN: #{p['name']} skill=#{name}"
         else

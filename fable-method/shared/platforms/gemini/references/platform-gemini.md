@@ -9,9 +9,10 @@
 - [Continuity](#continuity)
 - [Terminal reporting](#terminal-reporting)
 
-These are Gemini-harness integration rules. The shared Fable workflow remains
-the authority for task class, scope, Packet acceptance, route, authorization,
-and lifecycle vocabulary.
+These are Gemini-harness integration rules for `PROJECT_PROFILE:
+FORMAL_SECURE` or a Packet that names one of these gates; ordinary tasks do
+not load them. The shared Fable workflow remains the authority for task class,
+scope, Packet acceptance, route, authorization, and lifecycle vocabulary.
 
 ## Runtime output and process gates
 
@@ -94,9 +95,9 @@ Git actions are independent decisions. `COMMIT_AUTHORIZED` does not imply
 push; push does not imply PR, readiness, merge, or branch deletion. Missing
 authorization is `PENDING` or `NOT APPLICABLE`, not implementation failure.
 
-Before any decision-bearing repository read, record TASK_CLASS, WORKER_ROUTE,
-JUDGE_MODE, authorization status, worktree mode, permitted reads, permitted
-writes, and stop conditions. Retain SKILL_AND_PACKET_CLASSIFIED_BEFORE_WORK: YES.
+Record TASK_CLASS, WORKER_ROUTE, JUDGE_MODE, authorization status, worktree
+mode, permitted reads, permitted writes, and stop conditions. When they are
+recorded relative to repository reads does not matter.
 
 Supported authority modes are SELF_CONTAINED_INLINE, REFERENCED_HANDOFF,
 REPOSITORY_PINNED, INHERITED_PROJECT_CHAIN, and NONE_REQUIRED. Resolve

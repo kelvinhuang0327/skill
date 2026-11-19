@@ -5,12 +5,17 @@
 - [Packet and authority](#packet-and-authority)
 - [Authorization evidence and conversation boundary](#authorization-evidence-and-conversation-boundary)
 - [Production mutation harness preflight](#production-mutation-harness-preflight)
-- [Runtime outputs](#runtime-outputs)
 - [Shared workstation resource budget](#shared-workstation-resource-budget)
 - [Attempts and process termination](#attempts-and-process-termination)
 - [Git action tiers](#git-action-tiers)
+- [Canonical successor and source remediation dedup](#canonical-successor-and-source-remediation-dedup)
 - [Worktrees and mutation evidence](#worktrees-and-mutation-evidence)
-- [Continuity](#continuity)
+- [Auto worktree reclaim](#auto-worktree-reclaim)
+
+Ordinary work loads none of this file. Each section states its own trigger:
+an explicit Packet or Owner request, `PROJECT_PROFILE: FORMAL_SECURE`, or the
+task actually performing the action the section governs. Without a trigger,
+`SKILL.md` alone applies.
 
 These are conditional details for the shared workflow. They do not broaden a
 Packet or authorize an action that the Packet forbids. An explicitly
@@ -19,6 +24,10 @@ used as a fallback because preferred evidence is incomplete. Transcript is
 not an authority fallback by default.
 
 ## Packet and authority
+
+Trigger: `PROJECT_PROFILE: FORMAL_SECURE`, or a Packet that names a Phase 0,
+clean-worktree, or other pre-mutation gate. The live-activation handoff at the
+end of this section applies when the Packet asks for a Fable live activation.
 
 When a Packet supplies Phase 0 or an equivalent pre-mutation gate, complete it
 before the first write. Retain exact commands, results, authority HEAD/tree,
@@ -165,10 +174,87 @@ Non-Git source roots remain supported: do not run `git init`, create a nested
 repository, or turn a non-Git source root into a Git authority. Keep
 `CONFIRMED`, `INFERRED`, and `UNKNOWN` evidence distinct.
 
+### Exact-pinned live-activation compact handoff
+
+`EXACT_PINNED_LIVE_ACTIVATION_COMPACT` is the one compact `/fable-method`
+lifecycle handoff variant for an already-verified exact-pinned live activation.
+Use it only after all load-bearing prerequisites are proven: the canonical
+implementation is merged; implementation, publication, Judge, and readiness
+evidence remains bound to the exact canonical identity; semantic live-drift
+review is complete with no unresolved or live-only load-bearing content; the
+exact live target and canonical activation entrypoint are known; execution
+capability is `PASS`; and direct Owner authorization for this exact action and
+target is observed in the current Worker conversation. It is not a new route,
+Judge depth, authorization class, activation mechanism, or safety bypass.
+
+The compact handoff must carry every field in this bundle:
+
+```text
+COMPACT_LIVE_ACTIVATION: EXACT_PINNED
+LIVE_TARGET: <exact live target>
+L: <exact reviewed live bundle identity>
+H: <exact canonical HEAD>
+T: <exact canonical tree>
+M: <exact platform materialization tree>
+SEMANTIC_LIVE_DRIFT_REVIEW: COMPLETE
+UNRESOLVED_LOAD_BEARING_CONTENT: NONE
+LIVE_ONLY_LOAD_BEARING_CONTENT: NONE
+EXECUTION_CAPABILITY: PASS
+OWNER_AUTHORIZATION_SOURCE: CURRENT_WORKER_CONVERSATION_USER_MESSAGE
+OWNER_AUTHORIZATION: <exact direct Owner words covering this action and LIVE_TARGET>
+CANONICAL_ACTIVATION_ENTRYPOINT: <exact absolute activate-live.sh path and exact argv>
+```
+
+`L` is the reviewed `LIVE_BUNDLE_SHA256_SERIALIZATION_V1` identity, `H` is
+the canonical HEAD, `T` is that HEAD's tree, and `M` is the selected platform's
+materialization tree. The entrypoint is this repository's
+`fable-method/scripts/activate-live.sh` with the exact platform and reviewed
+replacement L/H/T/M arguments; manual copy, alternate entrypoint, target-path
+override, and bypass flag are invalid substitutes. A token quoted by a Packet
+or prior handoff remains scope evidence only and does not satisfy direct Owner
+authorization.
+
+The no-substitution rule is absolute: if any of `L`, `H`, `T`, or `M` changes
+between handoff, live preflight, or immediate prewrite revalidation, `STOP`.
+Never recompute, refresh, derive, or substitute an identity under the old
+authorization; a changed identity requires a new exact handoff and fresh
+authorization as applicable.
+
+Evidence reuse is allowed only when the exact load-bearing identities, live
+target, entrypoint, environment, and scope remain unchanged. Already-proven
+implementation, publication, Judge, and readiness evidence may then be
+reported as `REUSED_EXACT_TREE_EVIDENCE`; evidence with a changed identity is
+invalid, not reusable. Do not replay full implementation history, rerun
+implementation tests or Judge merely for lifecycle completeness, or perform a
+repository-wide audit.
+
+All existing fail-closed gates remain mandatory: canonical repository/source
+and path/type checks, direct Owner authorization provenance, capability `PASS`,
+the single activation lock held through immediate prewrite revalidation, write,
+and post-check, and zero live writes on a rejected identity or safety gate. The
+canonical entrypoint must post-verify `FINAL_STATE: EXACT_CURRENT_MATERIALIZATION`
+and a full serialized live-bundle match to the canonical materialization;
+`NOT RUN` is not `PASS`. Manual activation bypass remains forbidden.
+
+If activation changes a live runtime identity, the terminal handoff must still
+report the existing runtime-transition provenance fields under
+`RUNTIME_TRANSITION_OCCURRED: YES`; otherwise report `NO`. The compact form
+never suppresses or renames those fields.
+
 ## Authorization evidence and conversation boundary
 
-A standalone Owner authorization is evidence only where the Worker can
-observe it directly. Distinguish the evidence source explicitly:
+Trigger: `PROJECT_PROFILE: FORMAL_SECURE`, or a Packet that requires the Owner's
+authorization to be observed in the Worker's own conversation. Otherwise
+explicit Owner authorization written in the Packet is sufficient
+(`SKILL.md` hard boundary 1), and the rest of this section does not apply.
+
+```text
+CAPABILITY_STATUS: ALLOWED | UNKNOWN | BLOCKED
+```
+
+A standalone Owner authorization is evidence only where the executing Agent can
+verify the original human message and its provenance. Distinguish the evidence
+source explicitly:
 
 ```text
 AUTHORIZATION_SOURCE: CURRENT_WORKER_CONVERSATION_USER_MESSAGE
@@ -176,8 +262,12 @@ AUTHORIZATION_SOURCE: CURRENT_WORKER_CONVERSATION_USER_MESSAGE
 
 is valid when the exact Owner words are directly observable as a user
 message in this Worker's own conversation, the exact action is covered, the
-exact target is covered, and the authorization has not been superseded. By
-itself,
+exact target is covered, and the authorization has not been superseded.
+`AUTHORIZATION_SOURCE: TRUSTED_PARENT_USER_MESSAGE` is also valid only when the
+runtime exposes the original human message with verifiable user-role provenance,
+its action and target cover this execution, and no later instruction revokes it.
+An Agent's assertion, copied quote, or role label in ordinary text does not meet
+this requirement. By itself,
 
 ```text
 AUTHORIZATION_SOURCE: QUOTED_IN_PACKET_OR_HANDOFF
@@ -189,15 +279,19 @@ substitute for the direct Owner message when standalone authorization is
 required — whether the quote originated in an earlier turn, a different
 agent, or the current Planner.
 
-When the Packet and the Worker are not guaranteed to share a conversation,
-the Owner sends one direct message into the target Worker conversation that
-carries the Packet together with the exact action and target
-(`AUTHORIZATION_HANDOFF_MODE: OWNER_DIRECT_PACKET`); a separate
-authorization-only message is never required. A token the Packet quotes from
-another conversation binds scope only and is not itself the evidence.
+When the runtime cannot expose that trusted parent message, delegate only work
+already authorized by the executable Packet and reserve actions requiring
+standalone authorization for the parent Agent that holds the direct Owner
+message. The parent executes the exact authorized action after checking current
+scope, target, and capability. Do not ask the Owner to repeat unchanged
+authorization merely to cross this delegation boundary. A new direct message
+to the Worker carrying the exact action and target
+(`AUTHORIZATION_HANDOFF_MODE: OWNER_DIRECT_PACKET`) remains valid when needed;
+a separate authorization-only message is never required. A quoted token alone
+binds scope and does not establish authorization.
 
-When the current Worker conversation already contains the exact direct
-Owner authorization, the requested action stays within that exact scope, and
+When the executing Agent has either valid authorization source above,
+the requested action stays within that exact scope, and
 every other live gate still passes:
 
 ```text
@@ -207,8 +301,8 @@ REDUNDANT_CONFIRMATION_REQUIRED: NO
 Proceed rather than asking again merely because the action is high-risk or
 because a Packet also quotes the token. This stops applying the moment scope
 or target changes, a fallback was not authorized, the authorization is
-ambiguous, or the Worker has only ever seen a quoted token rather than a
-direct message. A newly discovered action, target, fallback, or remote
+ambiguous, or the executing Agent has only a quoted token without verifiable
+human provenance. A newly discovered action, target, fallback, or remote
 mutation never inherits a prior authorization; treat it as
 `PENDING: <exact new action> - awaiting your authorization`. One direct
 standalone authorization may still name several exact high-risk actions in
@@ -218,8 +312,8 @@ how that envelope must be delivered, not how many actions it may contain.
 An explicit high-risk authorization may combine the exact action and target
 with the executable Worker Packet in one direct Owner message
 (`OWNER_DIRECT_PACKET_AUTHORIZATION`); an authorization-only message is not
-required. Reuse only an applicable direct authorization in the same Worker
-conversation. Every envelope names both exact action and exact target. An
+required. Reuse only applicable authorization from a valid source above.
+Every envelope names both exact action and exact target. An
 irreversible or outward-facing action requires the user's own words as
 `AUTH: user said "<exact authorization words>"`; quote the Packet only when it
 directly authorizes that exact action and target, otherwise report
@@ -253,7 +347,7 @@ preflight does not apply to an ordinary non-production command.
 HARNESS_EXECUTION_PERMISSION: ALLOWED | UNKNOWN | BLOCKED
 ```
 
-This is [`CAPABILITY_STATUS`](../SKILL.md#intent-authorization-and-surgical-execution)'s
+This is [`CAPABILITY_STATUS`](#authorization-evidence-and-conversation-boundary)'s
 existing tri-state under one added constraint: the probe must run through the
 exact same harness/wrapper/launcher chain that will invoke the production
 mutation, not a different entry point merely assumed equivalent. If that
@@ -266,80 +360,25 @@ HARNESS_EXECUTION_PERMISSION: UNKNOWN
 and stop before the production mutation rather than switching to an alternate
 wrapper, introducing a heredoc/tmp-shell workaround, or assuming a different
 invocation shape is equivalent. Owner authorization and harness capability
-remain separate gates: a standalone Owner authorization for the mutation does
+remain separate gates: exact direct Owner authorization for the mutation does
 not itself establish `HARNESS_EXECUTION_PERMISSION`, and an `ALLOWED` probe
-result never substitutes for standalone Owner authorization where one is
-required.
-
-## Runtime outputs
-
-Before a test, browser, server, reporter, profile, cache, trace, video,
-screenshot, log, PID, or temporary-output command:
-
-1. inspect direct and indirect output paths;
-2. resolve OS temporary paths when discoverable;
-3. compare every output root with the Packet's runtime-output allowlist;
-4. record before-state;
-5. stop before execution if any path is outside the allowlist.
-
-Use:
-
-```text
-ARTIFACT_OUTPUT_PATH_CONFLICT
-EXPECTED_OUTPUT_ALLOWLIST:
-ACTUAL_OUTPUT_PATH:
-OUTPUT_SOURCE:
-CLEANED_LATER:
-AUTHORIZED:
-SMALLEST_SAFE_NEXT_ACTION:
-```
-
-Cleanup does not retroactively authorize an output. A created-then-deleted
-artifact remains in the write ledger.
+result never substitutes for that authorization. One direct Owner message may
+contain both the authorization and executable Packet. This probe adds no
+two-message requirement.
 
 ## Shared workstation resource budget
 
-This budget applies only to CPU-heavy work; do not artificially limit ordinary
-low-CPU commands. CPU-heavy work includes replay, backtesting, simulation,
-optimization, statistical resampling, batch feature generation,
-multiprocessing/process pools, and CPU-heavy parallel test execution.
+Resource guidance is non-blocking. When the Packet does not specify a worker
+count, default to 2 CPU-heavy workers. Use the worker count specified by the
+Packet when it provides one. Never stop, wait, or request authorization because
+of the worker count, machine load, or another task's computation. Record the
+actual worker count in the task receipt.
 
-```text
-RESOURCE_POLICY:
-SHARED_WORKSTATION
+Task duplicate-execution protection and checks for processes writing to the
+same task surfaces still apply.
 
-CPU_BOUND_DEFAULT_WORKERS:
-2
-
-CPU_BOUND_MAX_WORKERS_WITHOUT_OWNER_AUTHORIZATION:
-2
-
-AUTO_CPU_SCALING:
-FORBIDDEN
-
-ALL_CORE_EXECUTION:
-FORBIDDEN
-
-WORKSTATION_SATURATION:
-FORBIDDEN
-
-LONGER_RUNTIME_PREFERRED_OVER_SATURATION:
-YES
-```
-
-A Worker may reduce CPU-heavy concurrency from 2 to 1 without authorization.
-It must not raise concurrency above 2 without direct Owner authorization; a
-10-worker request is rejected without that authorization. Do not silently
-increase concurrency.
-
-Never use unrestricted CPU-heavy worker selection such as `--workers auto`,
-`--workers > 2`, `-j auto`, `pytest -n auto`, `os.cpu_count()` worker pools,
-`multiprocessing.cpu_count()` worker pools, `nproc`-derived pools, or duplicate
-concurrent CPU-heavy runs for the same task.
-
-Process-worker limits do not prevent hidden BLAS/OpenMP thread
-oversubscription. Where technically applicable and semantics-preserving,
-constrain:
+Where technically applicable and without changing results, avoid hidden
+BLAS/OpenMP thread oversubscription by setting:
 
 ```text
 OMP_NUM_THREADS=1
@@ -348,18 +387,11 @@ OPENBLAS_NUM_THREADS=1
 NUMEXPR_NUM_THREADS=1
 ```
 
-If more than 2 workers are genuinely required, stop and emit:
-
-```text
-RESOURCE_BUDGET_INCREASE_REQUIRED
-WORKLOAD:
-CURRENT_LIMIT: 2
-REQUESTED_WORKERS:
-WHY_TWO_WORKERS_ARE_INSUFFICIENT:
-SEMANTIC_EFFECT_OF_WORKER_COUNT:
-```
-
 ## Attempts and process termination
+
+Trigger: judged, publication-bound, or `PROJECT_PROFILE: FORMAL_SECURE` work,
+or a Packet that asks for an attempt ledger. Otherwise report failed attempts
+briefly with their real output.
 
 For every non-trivial retry, keep:
 
@@ -431,10 +463,10 @@ UNLISTED_FALLBACK: NOT AUTHORIZED
 NEWLY_DISCOVERED_TARGET: NOT AUTHORIZED
 ```
 
-See [Authorization evidence and conversation
-boundary](#authorization-evidence-and-conversation-boundary) above for how
-that one standalone authorization must reach this Worker's own conversation
-before any of these permissions take effect.
+Each permission comes from explicit Owner authorization (`SKILL.md` hard
+boundary 1). Under `PROJECT_PROFILE: FORMAL_SECURE`, [Authorization evidence
+and conversation boundary](#authorization-evidence-and-conversation-boundary)
+above also governs its provenance.
 
 `FORCE_FALLBACK_AUTHORIZED: YES` takes effect only for the exact fallback the
 Packet names, and only while every gate below still holds live: the lineage
@@ -511,7 +543,31 @@ candidate-modified state. Run only the focused prospective integration check
 when a direct dependency exists; main advancing alone does not require a full
 suite.
 
+## Canonical successor and source remediation dedup
+
+Use this evaluation branch only when preparing to remediate an older source, resolving a publication conflict, or when direct clues of a potential successor already exist; do not add global successor discovery to ordinary tasks.
+
+Evaluation authority is strictly bounded by canonical source and the current task acceptance; inspect only known candidates, directly related changes, and direct dependencies.
+
+Full supersession (`SUPERSEDED_BY_CANONICAL`):
+When all required deliverables and acceptance criteria are completely covered by a successor reachable in canonical source, and required verification evidence applies, record `SUPERSEDED_BY_CANONICAL` and stop duplicate source remediation.
+
+Partial supersession:
+Enumerate covered and missing acceptance items explicitly; continue only with the authorized missing delta inside the current scope.
+
+Insufficient evidence or absent successor:
+If evidence is incomplete or no confirmable successor exists, do not declare completion; identify the minimum gap or continue authorized source remediation. Matching paths, similar commit titles, or an isolated green CI run alone do not prove equivalence.
+
+Evidence and status boundaries:
+Prior candidate test results must never be relabeled as a successor PASS. `SUPERSEDED_BY_CANONICAL` must never be reported as old PR MERGED. Content equivalence must never be used to delete an exact deployed source that still requires preservation.
+
+Safety and authorization invariants:
+Determining canonical supersession does NOT authorize closing PRs, pushing, merging, force-deleting, or creating preservation refs; nor does it supersede active runtime ownership, standalone destructive authorization, or existing safety gates.
+
 ## Worktrees and mutation evidence
+
+Trigger: `PROJECT_PROFILE: FORMAL_SECURE`, worktree cleanup or removal, a
+production runtime mutation, or a Packet that names this gate.
 
 Use the exact Packet worktree path. Never create fallback, backup, scratch,
 sibling, or alternate workspaces. For an existing worktree, classify it as
@@ -519,19 +575,20 @@ exact-head, behind remote, stable task-owned dirty, ownership unresolved,
 duplicate-dirty blocked, already released clean baseline, absent, or unsafe.
 Ownership unresolved and unsafe states stop execution.
 
-Writer evidence is scoped, not name-based. Explicit bounded before/after
-snapshots are authoritative. `TaskCheckpoint.scope_qualified_active_writer?`
-is an optional convenience in the source helper
-(`fable-method/scripts/task_checkpoint.rb`); the canonical platform build
-excludes executable helpers, and helper absence is never a blocker. If it is
-unavailable, capture the exact selected worktree and task-owned paths, branch,
-HEAD, tree, full status (including staged, unstaged, and untracked paths), and
-each owned path's identity/content metadata; repeat the same capture after a
-bounded interval. Any difference is active mutation. With stable snapshots,
-count a process only when directly observed target paths overlap the selected
-worktree or ownership surface; a process name alone is insufficient. If writer
-ownership remains unresolved, fail closed. The default quiescence observation
-is about five seconds, but callers may choose another bounded interval.
+Writer evidence is scoped, not name-based. Observable before/after snapshots
+are authoritative. `TaskCheckpoint.scope_qualified_active_writer?` in the
+optional source helper (`fable-method/scripts/task_checkpoint.rb`) is a
+convenience only; the canonical platform build intentionally excludes
+executable helpers, and its absence is never a blocker. The complete fallback
+is to record the exact designated worktree and task-owned paths, branch, HEAD,
+tree, full status (including staged, unstaged, and untracked paths), and each
+owned path's identity/content metadata; repeat that same snapshot after a
+bounded observation interval. Any difference is active mutation. With stable
+snapshots, count a process only when directly observed target paths overlap
+the exact worktree or owned surface; a process name alone is insufficient.
+If process ownership or the scoped state remains unresolved, fail closed. The
+default observation is approximately five seconds, not a magic constant or a
+polling loop.
 
 Before each load-bearing mutation, retain:
 
@@ -563,22 +620,22 @@ launchctl actions, does not weaken standalone Owner authorization, does not
 create automatic rollback, and does not permit inferring transition ownership
 from reflog history.
 
-## Continuity
+## Auto worktree reclaim
 
-At stable milestones or before handoff, preserve observable state only:
+Trigger: a new implementation worktree created with
+`WORKTREE_CLOSE_POLICY: AUTO_CLOSE_AFTER_MERGE` preauthorized by the Owner.
 
-```text
-CONTEXT_CHECKPOINT
-CURRENT_MILESTONE:
-LIVE_EXECUTION_STATE:
-FORWARD_PLAN:
-LEDGER_REFERENCES:
-```
-
-Include exact repo/branch/HEAD/tree, worktree, dirty/staged paths, active
-processes, pending external mutations, next action/milestone, blockers,
-settled decisions, and unresolved Owner decisions. Continuation never expands
-authorization and never preserves private chain-of-thought.
-
-When persisting durable continuation state across sessions/models, use the
-contract and bounded live reconciliation algorithm in [task-checkpoint](task-checkpoint.md).
+Under `FABLE_AUTO_WORKTREE_RECLAIM_V1`, such a worktree undergoes two-phase
+safe automatic reclaim upon formal task completion. The helper verifies formal
+merge into the designated durable merge target (supporting both standard
+merges and verified squash merges backed by git tree/patch-id/provenance
+evidence) and ensures required formal artifacts are preserved outside the
+worktree. In the second phase, it performs immediate re-verification of Git
+worktree identity, clean working tree, lock status, active execution claims,
+quiescence of recurring schedulers, and active process inspection (using
+`core.fsmonitor=false` on all helper Git invocations to avoid helper-induced
+daemons and distinguishing caller execution shells from external active
+processes). Worktrees that are unmerged, dirty, locked, active, containing
+ordinary untracked files, lacking preauthorization, or belonging to
+historical/persistent workspaces are strictly preserved without deletion of
+branches or forced removal.
