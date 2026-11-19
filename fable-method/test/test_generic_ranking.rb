@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'minitest/autorun'
+require 'bigdecimal'
 require 'json'
 require 'open3'
 require 'rbconfig'
@@ -413,5 +414,30 @@ class GenericRankingTest < Minitest::Test
     _out, err, status = Open3.capture3(ruby, SCRIPT, 'rank', stdin_data: '{"contract":{}}')
     assert_equal 2, status.exitstatus
     assert_equal 'INVALID_INPUT', JSON.parse(err)['error']
+  end
+
+  def test_cli_preserves_distinct_json_decimal_scores
+    # These unquoted JSON numbers are distinct, but both round to the same Float.
+    smaller = '0.1'
+    larger = '1.0000000000000001e-1'
+    payload = JSON.generate(
+      'contract' => weighted(accuracy_weight: 1, latency_weight: 0),
+      'candidates' => [candidate('a', accuracy: 'small'), candidate('z', accuracy: 'large')]
+    ).sub('"small"', smaller).sub('"large"', larger)
+
+    out, err, status = Open3.capture3(RbConfig.ruby, SCRIPT, 'rank', stdin_data: payload)
+    assert status.success?, err
+    ranking = JSON.parse(out, decimal_class: BigDecimal)
+    assert_equal %w[z a], ids(ranking)
+    assert_empty ranking['ties']
+    winner = ranking['ordered'].first
+    assert_equal Rational(larger).to_s, winner['score_exact']
+    assert_equal BigDecimal(larger), winner['candidate']['metrics']['accuracy']['value']
+
+    out, err, status = Open3.capture3(RbConfig.ruby, SCRIPT, 'compare', stdin_data: payload)
+    assert status.success?, err
+    comparison = JSON.parse(out)
+    assert_equal 'B_BEFORE_A', comparison['relation']
+    assert_equal 'WEIGHTED_SCORE', comparison['reason']
   end
 end

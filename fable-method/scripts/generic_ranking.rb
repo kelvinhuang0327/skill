@@ -1,12 +1,26 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require 'bigdecimal'
+require 'delegate'
 require 'json'
 
 # Pure, caller-defined comparison. No IO, inferred metrics, or cohort-derived scales.
 module Fable
   module Ranking
     class InvalidInput < ArgumentError; end
+
+    # BigDecimal preserves the input precision, but JSON normally quotes it on output.
+    class JsonDecimal < SimpleDelegator
+      def initialize(literal)
+        super(BigDecimal(literal))
+        freeze
+      end
+
+      def to_json(*)
+        to_s
+      end
+    end
 
     def self.compare(candidate_a, candidate_b, contract)
       Engine.new(contract).compare(candidate_a, candidate_b)
@@ -102,7 +116,7 @@ module Fable
         when Array then value.map { |item| copy_json(item, depth + 1) }
         when String then value.dup
         when Integer, TrueClass, FalseClass, NilClass then value
-        when Float
+        when Float, JsonDecimal
           fail!('non-finite numbers are not allowed') unless value.finite?
           value
         else fail!('input must contain only JSON-compatible values')
@@ -128,7 +142,7 @@ module Fable
       end
 
       def number!(value, label)
-        valid = value.is_a?(Integer) || (value.is_a?(Float) && value.finite?) ||
+        valid = value.is_a?(Integer) || value.is_a?(Float) || value.is_a?(JsonDecimal) ||
                 (value.is_a?(String) && DECIMAL.match?(value))
         fail!("#{label} must be a finite number or decimal string") unless valid
         Rational(value.to_s)
@@ -360,7 +374,7 @@ if $PROGRAM_NAME == __FILE__
     unless ARGV.length == 1 && %w[rank compare].include?(ARGV[0])
       raise Fable::Ranking::InvalidInput, 'usage: ruby generic_ranking.rb rank|compare < input.json'
     end
-    input = JSON.parse($stdin.read)
+    input = JSON.parse($stdin.read, decimal_class: Fable::Ranking::JsonDecimal)
     unless input.is_a?(Hash) && (input.keys - %w[candidates contract]).empty?
       raise Fable::Ranking::InvalidInput, 'input must be an object with candidates and contract'
     end
