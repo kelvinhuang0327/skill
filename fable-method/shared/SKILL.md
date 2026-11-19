@@ -237,6 +237,17 @@ Verification is an observation, not a command run or "should work". Reuse
 evidence from the exact same tree instead of re-running it, and label it
 `REUSED_EXACT_TREE_EVIDENCE`.
 
+For a committed deliverable, run the required focused acceptance and static
+checks after the final commit, with the source and index matching its tree.
+Retain the exact HEAD and tree IDs, commands, relevant environment, exit codes,
+and output in the task record. Any subsequent HEAD, source, or index change
+invalidates that evidence and requires rerunning those checks on the final commit.
+
+When the Packet requires a zero-write claim, retain each command and its output
+from task start through closure. Account for every write within the claimed
+scope as it occurs, including temporary or reverted writes. Report `UNKNOWN`
+if the record does not cover the whole interval.
+
 When the work enumerates or recomputes a set (targets, records, candidates),
 take the set's expected size from the Packet or from an independent count made
 before the run, and report expected and produced counts side by side. An
