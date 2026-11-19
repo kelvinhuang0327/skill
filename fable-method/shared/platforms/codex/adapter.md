@@ -5,7 +5,9 @@ At task start, classify the requested workspace as WORKTREE_LIFECYCLE: PERSISTEN
 
 Use create-worktree to prepare and create the exact absent path, branch, base ref, and task ID. For a temporary task, pass --auto-close-authorized only when the Owner approved that lifecycle before creation; the helper writes its one-use record in Git common metadata immediately before creating the worktree. Do not manually create or adopt a different path. An existing worktree has no matching preauthorization record and cannot pass the close helper.
 
-For this local Codex installation, use scripts/fable_artifact_controls.py for disk checks, temporary Observer/debug JSONL, and eligible temporary-worktree closure. At each task start, classify its storage use and run space-check against the filesystem where the work or outputs will be written; run it again when the task ends. Less than 15 GiB free reports a warning. Less than 8 GiB adds a stronger warning when creating a research worktree or launching a high-disk task, but the work still proceeds; report the free space in the reply. Low space never blocks work. Read-only diagnostics and Owner-authorized space-recovery work report WARN_EXEMPT. The check is on demand and has no background service:
+For this local Codex installation, use scripts/fable_artifact_controls.py for disk checks, temporary Observer/debug JSONL, and eligible temporary-worktree closure. At each task start, classify its storage use and run space-check against the filesystem where the work or outputs will be written. Run it again when the task ends and report the free space in the reply. Less than 15 GiB free reports a warning. Less than 8 GiB adds a stronger warning when creating a research worktree or launching a high-disk task. Read-only diagnostics and Owner-authorized space-recovery work report WARN_EXEMPT. The check runs on demand.
+
+When the Owner sets a hard free-space floor for a task or stage, check the output volume before launch and at the specified safe checkpoints. Below the floor, defer launch or stop work already in progress at the specified safe checkpoint. Without an explicit floor, report the warning and proceed.
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py space-check --path <existing-output-volume> --operation <ordinary|research-worktree|high-disk-task|read-only-diagnostic|authorized-reclaim> --phase <before|after>
 
@@ -13,7 +15,7 @@ Use create-worktree for every new research worktree so the space check runs imme
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py create-worktree --repo <canonical-repository> --worktree <exact-absent-path> --base <durable-base-ref> --branch <task-branch> --task-id <task-id> --lifecycle <persistent-research|temporary-task> [--auto-close-authorized] [--close-policy <PRESERVE|AUTO_CLOSE_AFTER_MERGE>] [--merge-target-ref <ref>] [--persistent-evidence-root <path>]
 
-Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits; low space never blocks the command.
+Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits.
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
 

@@ -33,9 +33,13 @@ class ResourceGatesPausedRuleTest < Minitest::Test
     end
   end
 
-  def test_codex_disk_guidance_does_not_claim_low_space_blocks_launch
-    text = File.read(File.join(ROOT, 'fable-method/platforms/codex/fable-method/SKILL.md'))
-    refute_includes text, 'prevents the command from starting'
-    assert_includes text, 'low space never blocks the command.'
+  def test_codex_disk_guidance_honors_an_owner_floor_and_otherwise_proceeds
+    text = File.read(File.join(ROOT, 'fable-method/platforms/codex/fable-method/SKILL.md')).gsub(/\s+/, ' ')
+    floor_checks = 'When the Owner sets a hard free-space floor for a task or stage, ' \
+                  'check the output volume before launch and at the specified safe checkpoints.'
+    assert text.include?(floor_checks), 'missing Owner floor checks'
+    assert_includes text, 'Below the floor, defer launch or stop work already in progress at the specified safe checkpoint.'
+    assert_includes text, 'Without an explicit floor, report the warning and proceed.'
+    refute_match(/low space never blocks/i, text)
   end
 end
