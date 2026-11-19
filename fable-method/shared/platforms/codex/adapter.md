@@ -15,9 +15,9 @@ Use create-worktree for every new research worktree so the space check runs imme
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py create-worktree --repo <canonical-repository> --worktree <exact-absent-path> --base <durable-base-ref> --branch <task-branch> --task-id <task-id> --lifecycle <persistent-research|temporary-task> [--auto-close-authorized] [--close-policy <PRESERVE|AUTO_CLOSE_AFTER_MERGE>] [--merge-target-ref <ref>] [--persistent-evidence-root <path>]
 
-Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits.
+Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits. When the Owner sets a launch floor, pass it as a positive integer with `--minimum-free-bytes`. If the output volume has fewer bytes available, the helper reports `BLOCKED` with both byte counts and exits with code 2 before starting the command.
 
-    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
+    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> [--minimum-free-bytes <bytes>] -- <command and arguments>
 
 Before launching or retrying pytest with an explicit --basetemp, validate the scratch path. It must be outside the repository and every nested Git worktree, and must not contain protected path components used by the data boundary checks. When the project's own rules name an approved scratch root inside the main checkout, pass it with --approved-root; the scratch path must then be inside that root, the root must be ignored by Git in the main checkout and outside every linked worktree, and protected path components are still rejected. If blocked, select a neutral external scratch path and validate it before launching pytest:
 

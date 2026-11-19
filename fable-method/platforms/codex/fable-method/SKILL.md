@@ -414,9 +414,9 @@ Use create-worktree for every new research worktree so the space check runs imme
 
     python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py create-worktree --repo <canonical-repository> --worktree <exact-absent-path> --base <durable-base-ref> --branch <task-branch> --task-id <task-id> --lifecycle <persistent-research|temporary-task> [--auto-close-authorized] [--close-policy <PRESERVE|AUTO_CLOSE_AFTER_MERGE>] [--merge-target-ref <ref>] [--persistent-evidence-root <path>]
 
-Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits.
+Launch high-disk tasks through run-gated so free space is recorded before the command starts and again after it exits. When the Owner sets a launch floor, pass it as a positive integer with `--minimum-free-bytes`. If the output volume has fewer bytes available, the helper reports `BLOCKED` with both byte counts and exits with code 2 before starting the command.
 
-    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> -- <command and arguments>
+    python3 -B <installed-fable-method>/scripts/fable_artifact_controls.py run-gated --path <existing-output-volume> --operation <high-disk-task|ordinary|read-only-diagnostic|authorized-reclaim> [--minimum-free-bytes <bytes>] -- <command and arguments>
 
 Before launching or retrying pytest with an explicit --basetemp, validate the scratch path. It must be outside the repository and every nested Git worktree, and must not contain protected path components used by the data boundary checks. When the project's own rules name an approved scratch root inside the main checkout, pass it with --approved-root; the scratch path must then be inside that root, the root must be ignored by Git in the main checkout and outside every linked worktree, and protected path components are still rejected. If blocked, select a neutral external scratch path and validate it before launching pytest:
 
@@ -441,7 +441,7 @@ For an authorized temporary worktree close, first save a manifest outside the wo
 
 - **Required Companion:** `scripts/paused_run_continuation.rb` is loaded only for `--continue-paused-run`, pinned to Git blob `91592132733be6b697bdbef667b97d9065c829c1` from commit `e6f8581cdabe21f3683b8a5d8effb6855d98a041`.
 - **Execution Evidence Helper:** `scripts/execution_evidence_fingerprint.rb` is loaded only for fingerprinted `--run` requests, pinned to Git blob `d526b27ad562dc9c2ed96617ee975b6d5f8e9d85` from commit `92d609211d8276f3c804a49eb454813462fcf8d7`.
-- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `8abc639530938dbea8f985e660f0f2a3b4e7833f8387431bbd65fa431dd6458a`.
+- **Local Artifact Controls:** `scripts/fable_artifact_controls.py` is a standard-library helper copied from `fable-method/scripts/fable_artifact_controls.py` with SHA-256 `db3ffcd7c87f5bb87b4ab1308f3165990018b6b80326e1a6e6cbcc425ca9964a`.
 - **Installed Runtime:** the Codex installation path in `platforms.yaml` is deployment metadata only; this generator does not write there.
 - **Live Activation:** NOT RUN. Activation is a separate operation outside this source candidate.
 

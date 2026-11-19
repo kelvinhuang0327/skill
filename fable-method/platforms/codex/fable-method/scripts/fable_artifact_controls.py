@@ -146,14 +146,26 @@ def check_space(path_text: str, operation: str, phase: str) -> dict[str, Any]:
     }
 
 
-def launch_gated_command(path_text: str, operation: str, command: list[str]) -> dict[str, Any]:
+def launch_gated_command(
+    path_text: str, operation: str, command: list[str], minimum_free_bytes: int | None = None
+) -> dict[str, Any]:
     if not command:
         raise ControlError("a non-empty argv is required after --")
     if operation not in SPACE_OPERATIONS - {"research-worktree"}:
         raise ControlError("unsupported gated task operation")
     if operation == "research-worktree":
         raise ControlError("use create-worktree for research worktree creation")
+    if minimum_free_bytes is not None and minimum_free_bytes <= 0:
+        raise ControlError("--minimum-free-bytes must be a positive integer")
     before = check_space(path_text, operation, "before")
+    if minimum_free_bytes is not None and before["available_bytes"] < minimum_free_bytes:
+        return {
+            **before,
+            "status": "BLOCKED",
+            "message": "available space is below the requested minimum",
+            "minimum_free_bytes": minimum_free_bytes,
+            "returncode": 2,
+        }
     if before["message"]:
         print(json.dumps(before, sort_keys=True), file=sys.stderr)
     completed = subprocess.run(command, check=False)
@@ -3138,6 +3150,10 @@ def main() -> int:
         required=True,
         choices=("ordinary", "high-disk-task", "read-only-diagnostic", "authorized-reclaim"),
     )
+    run.add_argument(
+        "--minimum-free-bytes", type=int, metavar="BYTES",
+        help="require at least this many free bytes on --path before launch (positive integer)",
+    )
     run.add_argument("command", nargs=argparse.REMAINDER)
 
     args = parser.parse_args()
@@ -3209,7 +3225,7 @@ def main() -> int:
             return 0
         if args.action == "run-gated":
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
-            result = launch_gated_command(args.path, args.operation, command)
+            result = launch_gated_command(args.path, args.operation, command, args.minimum_free_bytes)
             print(json.dumps(result, ensure_ascii=False, sort_keys=True), file=sys.stderr)
             return_code = result["returncode"]
             if return_code < 0:
