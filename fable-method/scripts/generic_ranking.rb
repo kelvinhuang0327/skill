@@ -8,167 +8,43 @@ module Fable
   module Ranking
     class InvalidInput < ArgumentError; end
 
-    # Bound the number of implicit decimal places materialized for ordinary
-    # Rational output. Larger gaps stay symbolic in score_exact.
-    EXPANSION_DIGITS = 4096
-    private_constant :EXPANSION_DIGITS
-
-    # Sum of coefficient * 10**power terms. Merge nearby or overlapping digit
-    # runs; leave large empty gaps implicit. Disjoint runs cannot outweigh the
-    # most significant run, even when their signs differ.
-    class DecimalSum
-      attr_reader :terms
-
-      def initialize(terms)
-        @terms = []
-        terms.sort.each do |power, coefficient|
-          next if coefficient.zero?
-
-          if @terms.last
-            previous_power, previous_coefficient = @terms.last
-            gap = power - previous_power
-            if gap <= EXPANSION_DIGITS || gap <= previous_coefficient.abs.to_s.size
-              @terms.pop
-              coefficient = previous_coefficient + coefficient * 10**gap
-              power = previous_power
-            end
-          end
-          @terms << [power, coefficient] unless coefficient.zero?
-        end
-      end
-
-      def sign
-        @terms.empty? ? 0 : @terms.last[1] <=> 0
-      end
-
-      def +(other)
-        DecimalSum.new(@terms + other.terms)
-      end
-
-      def -@
-        DecimalSum.new(@terms.map { |power, coefficient| [power, -coefficient] })
-      end
-
-      def *(other)
-        products = @terms.flat_map do |power, coefficient|
-          other.terms.map { |p, c| [power + p, coefficient * c] }
-        end
-        DecimalSum.new(products)
-      end
-
-      def to_s
-        parts = @terms.reverse.map { |p, c| p.zero? ? c.to_s : "#{c}e#{p}" }
-        parts.size == 1 ? parts.first : "(#{parts.join('+').gsub('+-', '-')})"
-      end
-    end
-    private_constant :DecimalSum
-
-    # A quotient of two sparse decimal sums. Weighted normalization, unlike a
-    # lexical comparison, also needs exact differences, sums and division.
-    # Ordinary arithmetic stays on Ruby's reduced Rational fast path.
-    class SparseRatio < Numeric
-      attr_reader :top, :bottom
-
-      def initialize(top, bottom)
-        @top = top
-        @bottom = bottom
-      end
-
-      def self.parse(literal)
-        mantissa, _, exponent = literal.partition(/[eE]/)
-        whole, _, fraction = mantissa.partition('.')
-        digits = whole + fraction
-        last = digits.rindex(/[1-9]/)
-        return Rational(0) unless last
-
-        coefficient = Integer(digits[0..last], 10)
-        trailing_zeros = digits.size - last - 1
-        scaled(Rational(coefficient), exponent.to_i - fraction.size + trailing_zeros)
-      end
-
-      def self.scaled(ratio, power)
-        return ratio if ratio.zero?
-        return ratio * 10**power if power.abs <= EXPANSION_DIGITS
-
-        new(DecimalSum.new([[power, ratio.numerator]]), DecimalSum.new([[0, ratio.denominator]]))
-      end
-
-      def self.reduce(top, bottom)
-        raise ZeroDivisionError if bottom.sign.zero?
-        return Rational(0) if top.sign.zero?
-        return Rational(1) if top.terms == bottom.terms
-        if top.terms.size == 1 && bottom.terms.size == 1
-          p, n = top.terms.first
-          q, d = bottom.terms.first
-          return scaled(Rational(n, d), p - q)
-        end
-
-        bottom.sign.negative? ? new(-top, -bottom) : new(top, bottom)
-      end
-
-      def self.wrap(value)
-        return value if value.is_a?(self)
-
-        new(DecimalSum.new([[0, value.numerator]]), DecimalSum.new([[0, value.denominator]]))
-      end
-
-      def coerce(other)
-        [SparseRatio.wrap(other), self]
-      end
-
-      def -@
-        SparseRatio.new(-top, bottom)
-      end
-
-      def +(other)
-        other = SparseRatio.wrap(other)
-        return SparseRatio.reduce(top + other.top, bottom) if bottom.terms == other.bottom.terms
-
-        SparseRatio.reduce(top * other.bottom + other.top * bottom, bottom * other.bottom)
-      end
-
-      def -(other)
-        self + -other
-      end
-
-      def *(other)
-        other = SparseRatio.wrap(other)
-        SparseRatio.reduce(top * other.top, bottom * other.bottom)
-      end
-
-      def /(other)
-        other = SparseRatio.wrap(other)
-        SparseRatio.reduce(top * other.bottom, bottom * other.top)
-      end
-
-      def <=>(other)
-        other = SparseRatio.wrap(other)
-        (top * other.bottom + -(other.top * bottom)).sign
-      end
-
-      def ==(other)
-        other.is_a?(Numeric) && (self <=> other).zero?
-      end
-
-      # A single power prints as 1e-..., a separated sum as (1-1e-...).
-      # Keep the denominator explicit when the exact score is a quotient.
-      def to_s
-        bottom.terms == [[0, 1]] ? top.to_s : "#{top}/#{bottom}"
-      end
-    end
-    private_constant :SparseRatio
-
     # JSON calls this constructor with the original decimal token. Preserve it
     # for every echo, including non-metric data; compare its exact value.
     class JsonDecimal
+      # Cap both the written exponent and the power needed after removing the
+      # decimal point. One token can introduce at most 8192 implicit zeros.
+      MAX_DECIMAL_SHIFT = 8192
+      SHIFT_ERROR = "decimal exponent or scale exceeds the supported limit of #{MAX_DECIMAL_SHIFT}"
+      private_constant :MAX_DECIMAL_SHIFT, :SHIFT_ERROR
+
       attr_reader :value
+
+      def self.exact_value(literal)
+        exponent_at = literal.index(/[eE]/) || literal.size
+        first_nonzero = literal.index(/[1-9]/, exponent_at + 1)
+        power = 0
+        if first_nonzero
+          # Bound the significant digits before copying or converting the exponent.
+          raise InvalidInput, SHIFT_ERROR if literal.size - first_nonzero > MAX_DECIMAL_SHIFT.to_s.size
+
+          power = literal[first_nonzero..-1].to_i
+          power = -power if literal[exponent_at + 1] == '-'
+        end
+        point = literal.index('.')
+        fraction_digits = point ? exponent_at - point - 1 : 0
+        shift = power - fraction_digits
+        raise InvalidInput, SHIFT_ERROR if power.abs > MAX_DECIMAL_SHIFT || shift.abs > MAX_DECIMAL_SHIFT
+
+        coefficient = Integer(literal[0...exponent_at].delete('.'), 10)
+        Rational(coefficient) * 10**shift
+      end
 
       def initialize(literal)
         unless literal.is_a?(String) && /\A-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\z/.match?(literal)
           raise InvalidInput, 'invalid JSON number'
         end
         @literal = literal.dup.freeze
-        @value = SparseRatio.parse(@literal)
+        @value = JsonDecimal.exact_value(@literal)
         freeze
       end
 
@@ -176,7 +52,7 @@ module Fable
         case other
         when JsonDecimal then value == other.value
         when Integer then value == other
-        when Float then other.finite? && value == SparseRatio.parse(other.to_s)
+        when Float then other.finite? && value == JsonDecimal.exact_value(other.to_s)
         else false
         end
       end
@@ -312,7 +188,7 @@ module Fable
       def number!(value, label)
         return value.value if value.is_a?(JsonDecimal)
         return Rational(value) if value.is_a?(Integer)
-        return SparseRatio.parse(value.to_s) if value.is_a?(Float) || (value.is_a?(String) && DECIMAL.match?(value))
+        return JsonDecimal.exact_value(value.to_s) if value.is_a?(Float) || (value.is_a?(String) && DECIMAL.match?(value))
 
         fail!("#{label} must be a finite number or decimal string")
       end
@@ -322,13 +198,7 @@ module Fable
       # still be ordered - score_exact is what actually decided the comparison.
       def decimal(rational)
         unit = 10**SCALE
-        # All normalized display values lie in [0, 1]. Round a sparse ratio
-        # against exact half-unit boundaries without expanding its denominator.
-        rounded = if rational.is_a?(SparseRatio)
-                    (0..unit).bsearch { |n| rational < Rational(2 * n + 1, 2 * unit) }
-                  else
-                    (rational * unit).round
-                  end
+        rounded = (rational * unit).round
         whole, fraction = rounded.divmod(unit)
         return whole.to_s if fraction.zero?
 

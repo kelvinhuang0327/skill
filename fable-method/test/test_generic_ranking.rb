@@ -444,12 +444,16 @@ class GenericRankingTest < Minitest::Test
   # Reading the output with a token recorder checks both the spelling and JSON
   # type. A Float or BigDecimal parser would itself lose this regression.
   JsonNumberToken = Struct.new(:literal)
-  TINY = '1e-9999999999999999999999'
+  TINY = '1e-8192'
 
-  def cli_decimals(action, contract, candidates, tokens)
+  def invoke_cli_decimals(action, contract, candidates, tokens)
     payload = JSON.generate('contract' => contract, 'candidates' => candidates)
     tokens.each { |marker, literal| payload = payload.gsub(JSON.generate(marker), literal) }
-    out, err, status = Open3.capture3(RbConfig.ruby, SCRIPT, action, stdin_data: payload)
+    Open3.capture3(RbConfig.ruby, SCRIPT, action, stdin_data: payload)
+  end
+
+  def cli_decimals(action, contract, candidates, tokens)
+    out, err, status = invoke_cli_decimals(action, contract, candidates, tokens)
     assert status.success?, err
     JSON.parse(out, decimal_class: JsonNumberToken)
   end
@@ -468,7 +472,7 @@ class GenericRankingTest < Minitest::Test
     winner = ranking['ordered'].first
     assert_equal JsonNumberToken.new(TINY), winner.dig('candidate', 'metrics', 'accuracy', 'value')
     assert_equal JsonNumberToken.new(TINY), winner.dig('dimensions', 0, 'value')
-    assert_equal TINY, winner['score_exact']
+    assert_equal Rational(TINY).to_s, winner['score_exact']
   end
 
   def test_cli_compare_preserves_underflowing_decimal
@@ -478,13 +482,47 @@ class GenericRankingTest < Minitest::Test
     assert_equal false, decision['primary_tie']
     assert_empty decision['tie_break']
     assert_equal JsonNumberToken.new(TINY), decision.dig('dimensions', 0, 'b_value')
-    assert_equal TINY, decision.dig('scores', 'b_exact')
+    assert_equal Rational(TINY).to_s, decision.dig('scores', 'b_exact')
   end
 
-  def test_cli_orders_huge_signed_exponents_and_ties_equivalent_spellings
-    power = '9999999999999999999999'
+  def test_cli_lower_is_better_score_exact_is_a_reduced_fraction
+    contract = weighted(latency_weight: 1, latency_max: 1)
+    contract['dimensions'] = [contract['dimensions'].last]
+    rows = [candidate('a', latency: 'nearby'), candidate('b', latency: 'tiny'), candidate('z', latency: 0)]
+    ranking = cli_decimals('rank', contract, rows, 'tiny' => '1e-4097', 'nearby' => '1.0000000000000001e-4097')
+    assert_equal %w[z b a], ids(ranking)
+    assert_empty ranking['ties']
+    row = ranking['ordered'][1]
+    assert_equal JsonNumberToken.new('1e-4097'), row.dig('candidate', 'metrics', 'latency', 'value')
+    exact = row.fetch('score_exact')
+    assert_match(%r{\A\d+/\d+\z}, exact)
+    denominator = 10**4097
+    expected = Rational(denominator - 1, denominator)
+    assert_equal expected, Rational(exact)
+    assert_equal expected.to_s, exact
+    assert_equal exact, ranking['ordered'].first.dig('comparison_to_next', 'scores', 'b_exact')
+  end
+
+  def test_cli_rejects_unsupported_decimal_exponents_and_scales
+    rows = [candidate('a', accuracy: 0), candidate('z', accuracy: 'outside')]
+    tokens = %w[1e-9999999999999999999999 1e+9999999999999999999999 0e8193 1.1e-8192]
+    tokens << "0.#{'0' * 8192}1"
+    %w[rank compare].each do |action|
+      tokens.each do |literal|
+        out, err, status = invoke_cli_decimals(action, weighted, rows, 'outside' => literal)
+        assert_equal 2, status.exitstatus
+        assert_empty out
+        error = JSON.parse(err)
+        assert_equal 'INVALID_INPUT', error['error']
+        assert_match(/exponent or scale.*8192/, error['message'])
+      end
+    end
+  end
+
+  def test_cli_orders_supported_signed_exponents_and_ties_equivalent_spellings
+    power = 8192
     values = {
-      'large' => 'large_token', 'equal' => "+10.10e#{power.to_i - 1}", 'higher' => 'higher_token',
+      'large' => 'large_token', 'equal' => "+10.10e#{power - 1}", 'higher' => 'higher_token',
       'tiny' => 'tiny_token', 'zero' => 'zero_token', 'integer_zero' => 0,
       'negative_tiny' => "-#{TINY}", 'negative_large' => 'negative_token'
     }
@@ -515,7 +553,7 @@ class GenericRankingTest < Minitest::Test
     assert_equal JsonNumberToken.new(long), result.dig('dimensions', 0, 'b_value')
   end
 
-  def test_sparse_weighted_contributions_cancel_exactly_and_round_at_half_units
+  def test_weighted_contributions_cancel_exactly_and_round_at_half_units
     contract = weighted(latency_max: 1)
     rows = [candidate('a', accuracy: 0, latency: 0), candidate('y', accuracy: 'tiny', latency: 'tiny'),
             candidate('z', accuracy: 'tiny', latency: 0)]
@@ -523,7 +561,7 @@ class GenericRankingTest < Minitest::Test
     assert_equal %w[z a y], ids(ranking)
     assert_equal [%w[a y]], ranking['ties'].map { |tie| tie['candidate_ids'] }
     assert_equal ['0.5'] * 3, ranking['ordered'].map { |row| row['score'] }
-    assert_equal ["(1+#{TINY})/2", '1/2', '1/2'], ranking['ordered'].map { |row| row['score_exact'] }
+    assert_equal [((1 + Rational(TINY)) / 2).to_s, '1/2', '1/2'], ranking['ordered'].map { |row| row['score_exact'] }
 
     rows = [candidate('a', accuracy: '1e-12', latency: 'tiny'), candidate('b', accuracy: '1e-12', latency: 0)]
     decision = cli_decimals('compare', contract, rows, 'tiny' => TINY)
@@ -533,14 +571,14 @@ class GenericRankingTest < Minitest::Test
   end
 
   def test_weighted_order_with_huge_weight_and_normalization_span
-    # Write H for 10**9999999999999999999999. With common denominator
+    # Write H for 10**8192. With common denominator
     # (H+1)**2 the scores are 2H+1, 2H and 4H respectively.
     contract = weighted(accuracy_weight: 'huge', latency_weight: 1)
     contract['dimensions'][0]['normalization'] = { 'min' => -1, 'max' => 'huge' }
     rows = [candidate('a', accuracy: 0, latency: 0), candidate('b', accuracy: 1, latency: 100),
             candidate('z', accuracy: 3, latency: 100), candidate('outside', accuracy: 'too_large')]
-    huge = '1E+9999999999999999999999'
-    ranking = cli_decimals('rank', contract, rows, 'huge' => huge, 'too_large' => '2e9999999999999999999999')
+    huge = '1E+8192'
+    ranking = cli_decimals('rank', contract, rows, 'huge' => huge, 'too_large' => '2e8192')
     assert_equal %w[z a b], ids(ranking)
     assert_empty ranking['ties']
     assert_equal 'OUT_OF_NORMALIZATION_RANGE', ranking.dig('not_comparable', 0, 'issues', 0, 'code')
