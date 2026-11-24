@@ -2255,9 +2255,24 @@ class TaskCheckpointRunTest < Minitest::Test
     @children = []
     @sentinels = []
     @managed_pids = []
+    @session_harnesses = []
   end
 
   def teardown
+    @session_harnesses.each do |pid|
+      begin
+        Process.kill('TERM', -pid)
+      rescue Errno::ESRCH
+        # The originating test session already terminated.
+      rescue Errno::EPERM
+        # The original process group no longer belongs to this test.
+      end
+      begin
+        Process.wait(pid)
+      rescue Errno::ECHILD
+        # The harness was already reaped.
+      end
+    end
     @sentinels.each do |pid|
       begin
         Process.kill('TERM', pid)
@@ -2280,6 +2295,23 @@ class TaskCheckpointRunTest < Minitest::Test
       end
       assert child[:wait].join(5), 'test-owned CLI did not terminate'
       child[:readers].each { |reader| assert reader.join(5), 'test pipe did not close' }
+    end
+    execution_dir = File.join(@repo, '.fable', 'checkpoints', TASK_ID, 'executions')
+    Dir.glob(File.join(execution_dir, '*.json')).each do |path|
+      record = begin
+        ExecutionRecord.load(path)
+      rescue ExecutionRecord::ValidationError, ExecutionRecord::LoadError
+        next
+      end
+      next unless record.status == ExecutionRecord::STATUS_STARTED
+
+      [record.pid, record.scientific_child_pid].compact.uniq.each do |pid|
+        begin
+          Process.kill('TERM', pid)
+        rescue Errno::ESRCH
+          # This test-owned execution process already exited.
+        end
+      end
     end
     launch_records.each do |line|
       pid = Integer(line.split(':').first)
@@ -2383,6 +2415,21 @@ class TaskCheckpointRunTest < Minitest::Test
     child
   end
 
+  def start_session_harness(args)
+    script = <<~'RUBY'
+      require 'json'
+      require 'open3'
+      require 'rbconfig'
+      cli = ARGV.fetch(0)
+      arguments = JSON.parse(ARGV.fetch(1))
+      Open3.capture3(RbConfig.ruby, cli, *arguments)
+    RUBY
+    pid = Process.spawn(RbConfig.ruby, '-e', script, CLI, JSON.generate(args),
+                        chdir: @caller, pgroup: true, out: File::NULL, err: File::NULL)
+    @session_harnesses << pid
+    pid
+  end
+
   def finish_cli(child)
     assert child[:wait].join(CLI_TIMEOUT_SECONDS), 'CLI timed out'
     child[:readers].each { |reader| assert reader.join(5), 'CLI output timed out' }
@@ -2416,8 +2463,11 @@ class TaskCheckpointRunTest < Minitest::Test
   end
 
   def seed_stale_execution(identity, pid: dead_pid)
-    ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
-                           execution_id: identity, pid: pid)
+    ExecutionRecord.with_task_lock(@repo, TASK_ID) do |lock|
+      ExecutionRecord.start!(record_path(identity), task_id: TASK_ID,
+                             execution_id: identity, pid: pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(lock))
+    end
   end
 
   def launch_records
@@ -2457,8 +2507,10 @@ class TaskCheckpointRunTest < Minitest::Test
     owner = start_cli(cli_args(identity, command))
     wait_until('test upstream did not start') { !launch_records.empty? }
     upstream_pid = Integer(launch_records.first.split(':').first)
+    record = ExecutionRecord.load(record_path(identity))
 
-    Process.kill(signal_name, owner[:wait].pid)
+    signal_target = signal_name == 'INT' ? owner[:wait].pid : record.pid
+    Process.kill(signal_name, signal_target)
     result = finish_cli(owner)
     assert result[0].start_with?("out\0尾\n")
     assert result[1].start_with?("err\0尾\n")
@@ -2467,7 +2519,10 @@ class TaskCheckpointRunTest < Minitest::Test
 
     record = ExecutionRecord.load(record_path(identity))
     assert_equal ExecutionRecord::STATUS_COMPLETED, record.status
-    assert_equal owner[:wait].pid, record.pid
+    assert_equal upstream_pid, record.scientific_child_pid
+    assert_equal record.pid, Integer(launch_records.first.split(':').last)
+    assert_equal record.pid, record.session_id
+    assert_equal record.pid, record.process_group_id
     assert_equal capture_path(identity), record.durable_capture_path
     capture = DurableCommandCapture.load(capture_path(identity))
     assert_equal "SIGNALED:#{Signal.list.fetch(signal_name)}", capture.exit_status
@@ -2497,7 +2552,7 @@ class TaskCheckpointRunTest < Minitest::Test
     owner = start_cli(cli_args(identity, command))
     wait_until('signal-handling upstream did not start') { !launch_records.empty? }
 
-    Process.kill('TERM', owner[:wait].pid)
+    Process.kill('TERM', ExecutionRecord.load(record_path(identity)).pid)
     result = finish_cli(owner)
     assert_signal_result(result, 'TERM')
     assert_includes result[0], "out\0尾\n"
@@ -2520,7 +2575,7 @@ class TaskCheckpointRunTest < Minitest::Test
     sentinel_pid, marker = start_group_sentinel(owner[:wait].pid)
     wait_until('foreground-isolation sentinel did not start') { ExecutionRecord.pid_alive?(sentinel_pid) }
 
-    Process.kill('INT', owner[:wait].pid)
+    Process.kill('INT', ExecutionRecord.load(record_path(identity)).pid)
     result = finish_cli(owner)
     assert_signal_result(result, 'INT')
     wait_until('foreground-isolation upstream did not terminate') do
@@ -2529,6 +2584,75 @@ class TaskCheckpointRunTest < Minitest::Test
     assert File.exist?(marker) == false, 'forwarding must not target the wrapper foreground group'
     assert ExecutionRecord.pid_alive?(sentinel_pid), 'unrelated sentinel must remain alive'
     assert_equal ExecutionRecord::STATUS_COMPLETED, ExecutionRecord.load(record_path(identity)).status
+  end
+
+  def test_run_survives_originating_session_exit_and_keeps_task_ownership
+    identity = 'session_survival'
+    command = upstream(barrier: true)
+    harness_pid = start_session_harness(cli_args(identity, command))
+    wait_until('session-survival upstream did not start') { !launch_records.empty? }
+    parent_session_id = Process.getsid(harness_pid)
+    record = ExecutionRecord.load(record_path(identity))
+    scientific_child_pid = Integer(launch_records.first.split(':').first)
+
+    assert_equal ExecutionRecord::STATUS_STARTED, record.status
+    refute_equal harness_pid, record.pid, 'the execution record must name the detached protected worker'
+    refute_equal parent_session_id, record.session_id, 'the worker must leave the originating session'
+    assert_equal record.pid, record.session_id
+    assert_equal record.pid, record.process_group_id
+    assert_equal scientific_child_pid, record.scientific_child_pid
+    assert_equal record.pid, Integer(launch_records.first.split(':').last)
+
+    # Model Claude.app/session exit: the harness, CLI waiter, and terminal
+    # pipes disappear while the protected worker owns a new SID.
+    Process.kill('TERM', -harness_pid)
+    _waited_pid, harness_status = Process.waitpid2(harness_pid)
+    @session_harnesses.delete(harness_pid)
+    assert harness_status.signaled?
+    assert_equal Signal.list.fetch('TERM'), harness_status.termsig
+    assert_equal true, ExecutionRecord.pid_alive?(record.pid), 'protected worker must survive its caller session'
+    assert_equal true, ExecutionRecord.pid_alive?(scientific_child_pid), 'scientific child must survive its caller session'
+    assert_equal ExecutionRecord::STATUS_STARTED, ExecutionRecord.load(record_path(identity)).status
+
+    duplicate = run_cli(cli_args('session_survival_competing_writer', upstream(barrier: true)))
+    assert_equal 1, duplicate[2].exitstatus
+    assert_includes duplicate[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+    assert_equal 1, launch_records.size, 'a second execution ID must not acquire the live task writer'
+
+    # Explicit authorized cancellation targets the recorded protected worker;
+    # it forwards TERM to the scientific child and finalizes durable evidence.
+    Process.kill('TERM', record.pid)
+    wait_until('detached worker did not finalize after authorized cancellation') do
+      ExecutionRecord.load(record_path(identity)).status == ExecutionRecord::STATUS_COMPLETED
+    end
+    capture = DurableCommandCapture.load(capture_path(identity))
+    completed = ExecutionRecord.load(record_path(identity))
+    assert_equal ExecutionRecord::STATUS_COMPLETED, completed.status
+    assert_equal capture_path(identity), completed.durable_capture_path
+    assert_equal "SIGNALED:#{Signal.list.fetch('TERM')}", capture.exit_status
+    assert_equal "out\0尾\n", capture.stdout
+    assert_equal "err\0尾\n", capture.stderr
+    assert_equal record.pid, capture.execution_identity.fetch('launcher_pid')
+    assert_equal identity, capture.execution_identity.fetch('execution_id')
+    assert_equal scientific_child_pid, capture.execution_identity.fetch('scientific_child_pid')
+    assert_equal record.session_id, capture.execution_identity.fetch('launcher_session_id')
+    assert_equal scientific_child_pid, capture.execution_identity.fetch('scientific_child_process_group_id')
+    assert_equal 1, launch_records.size
+    wait_until('scientific child did not terminate after authorized cancellation') do
+      ExecutionRecord.pid_alive?(scientific_child_pid) == false
+    end
+    STDERR.puts("AC01_SESSION_ISOLATION_OBSERVATION #{JSON.generate(
+      originating_harness_pid: harness_pid,
+      originating_session_id: parent_session_id,
+      launcher_pid: record.pid,
+      launcher_session_id: record.session_id,
+      launcher_process_group_id: record.process_group_id,
+      scientific_child_pid: scientific_child_pid,
+      scientific_child_process_group_id: capture.execution_identity.fetch('scientific_child_process_group_id'),
+      terminal_exit_status: capture.exit_status,
+      upstream_launch_count: launch_records.size,
+      scientific_child_alive_after_cancel: ExecutionRecord.pid_alive?(scientific_child_pid)
+    )}")
   end
 
   def test_run_owned_group_cleanup_removes_managed_descendant
@@ -2542,7 +2666,7 @@ class TaskCheckpointRunTest < Minitest::Test
     descendant_pid = Integer(File.read(descendant_path))
     @managed_pids << descendant_pid
 
-    Process.kill('INT', owner[:wait].pid)
+    Process.kill('INT', ExecutionRecord.load(record_path(identity)).pid)
     result = finish_cli(owner)
     assert_signal_result(result, 'INT')
     wait_until('owned upstream child was not reaped') { ExecutionRecord.pid_alive?(upstream_pid) == false }
@@ -2558,12 +2682,13 @@ class TaskCheckpointRunTest < Minitest::Test
     owner = start_cli(cli_args(identity, command))
     wait_until('stream-race upstream did not start') { !launch_records.empty? }
 
-    Process.kill('INT', owner[:wait].pid)
+    worker_pid = ExecutionRecord.load(record_path(identity)).pid
+    Process.kill('INT', worker_pid)
     spammer = Thread.new do
       while owner[:wait].alive?
         %w[TERM INT].each do |name|
           begin
-            Process.kill(name, owner[:wait].pid)
+            Process.kill(name, worker_pid)
           rescue Errno::ESRCH
             break
           end
@@ -2630,8 +2755,11 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, lost[2].exitstatus
     assert_includes lost[1], ExecutionRecord::CLASSIFICATION_ACTIVE
     record = ExecutionRecord.load(record_path(identity))
-    assert_equal winner[:wait].pid, record.pid, 'foreground CLI must own the record'
-    assert_equal record.pid, Integer(launch_records.first.split(':').last), 'upstream must be a child of the owner'
+    refute_equal winner[:wait].pid, record.pid, 'the protected worker is detached from the interactive waiter'
+    assert_equal record.scientific_child_pid, Integer(launch_records.first.split(':').first)
+    assert_equal record.pid, Integer(launch_records.first.split(':').last), 'upstream must be a child of the protected worker'
+    assert_equal record.pid, record.session_id
+    assert_equal record.pid, record.process_group_id
     assert_equal ExecutionRecord::STATUS_STARTED, record.status
     refute File.exist?(capture_path(identity)), 'capture is not terminal while upstream waits'
 
@@ -2672,9 +2800,74 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, second[2].exitstatus
     assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
     assert_equal 1, launch_records.size
+    refute File.exist?(record_path('writer_second')), 'a rejected writer must not persist a second STARTED record'
+    refute File.exist?(capture_path('writer_second')), 'a rejected writer must not persist a second capture'
+    STDERR.puts("AC02_SINGLE_WRITER_OBSERVATION #{JSON.generate(
+      accepted_execution_id: 'writer_first',
+      rejected_execution_id: 'writer_second',
+      accepted_launcher_pid: ExecutionRecord.load(record_path('writer_first')).pid,
+      rejected_exit_status: second[2].exitstatus,
+      upstream_launch_count_after_contender: launch_records.size,
+      rejected_record_exists: File.exist?(record_path('writer_second')),
+      rejected_capture_exists: File.exist?(capture_path('writer_second'))
+    )}")
     File.write(@release, 'go')
     first_result = finish_cli(first)
     assert_output(first_result, 0)
+    assert_equal 1, launch_records.size
+  end
+
+  def test_run_rejects_replaced_lock_inode_while_active_owner_holds_original
+    first_id = 'replaced_lock_active_owner'
+    first = start_cli(cli_args(first_id, upstream(barrier: true)))
+    original_lock = nil
+    begin
+      wait_until('first task writer did not start') { !launch_records.empty? }
+      first_record = ExecutionRecord.load(record_path(first_id))
+      wait_until('first task writer did not persist its child PID') do
+        first_record = ExecutionRecord.load(record_path(first_id))
+        first_record.scientific_child_pid == Integer(launch_records.first.split(':').first)
+      end
+      first_record_bytes = File.binread(record_path(first_id))
+      lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+      original_lock = File.open(lock_path, File::RDWR)
+      original_identity = [original_lock.stat.dev, original_lock.stat.ino]
+      original_metadata = File.binread(lock_path)
+
+      File.unlink(lock_path)
+      File.write(lock_path, 'replacement lock metadata')
+      replacement_metadata = File.binread(lock_path)
+      replacement_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
+      refute_equal original_identity, replacement_identity, 'the fixture must replace the lock inode'
+
+      lock_drift = run_cli(cli_args('replaced_lock_active_contender'))
+
+      assert_equal 1, lock_drift[2].exitstatus
+      assert_includes lock_drift[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+      assert_includes lock_drift[1], 'lock inode changed'
+      assert_equal 1, launch_records.size, 'the rejected contender must not invoke upstream'
+      refute File.exist?(record_path('replaced_lock_active_contender'))
+      assert_equal first_record_bytes, File.binread(record_path(first_id))
+      assert_equal original_identity, [original_lock.stat.dev, original_lock.stat.ino]
+      assert_equal original_metadata, original_lock.pread(original_metadata.bytesize, 0),
+                   'the first execution lock metadata must remain intact through rejection'
+      assert_equal replacement_metadata, File.binread(lock_path),
+                   'the rejected contender must not rewrite the replacement pathname'
+      STDERR.puts("AC03_LOCK_IDENTITY_OBSERVATION #{JSON.generate(
+        acquired_lock_dev_ino: original_identity,
+        replacement_path_dev_ino: replacement_identity,
+        rejected_exit_status: lock_drift[2].exitstatus,
+        rejection_classification: ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED,
+        upstream_launch_count: launch_records.size,
+        original_lock_metadata_preserved: original_lock.pread(original_metadata.bytesize, 0) == original_metadata,
+        replacement_metadata_preserved: File.binread(lock_path) == replacement_metadata
+      )}")
+    ensure
+      File.write(@release, 'go')
+      original_lock&.close unless original_lock&.closed?
+    end
+
+    assert_output(finish_cli(first), 0)
     assert_equal 1, launch_records.size
   end
 
@@ -2979,10 +3172,11 @@ class TaskCheckpointRunTest < Minitest::Test
     owner = start_cli(args)
     wait_until('test upstream did not start') { !launch_records.empty? }
     before = File.binread(record_path(identity))
+    record = ExecutionRecord.load(record_path(identity))
     # Abrupt loss must bypass Open3's TERM ensure, which waits for upstream.
     # Only this test-owned foreground PID is killed; the inherited task lease
     # blocks retry until the test releases the surviving application child.
-    Process.kill('KILL', owner[:wait].pid)
+    Process.kill('KILL', record.pid)
     assert owner[:wait].join(5), 'killed wrapper was not reaped'
     assert owner[:wait].value.signaled?
     assert_equal Signal.list.fetch('KILL'), owner[:wait].value.termsig
@@ -3050,6 +3244,86 @@ class TaskCheckpointRunTest < Minitest::Test
     successor = ExecutionRecord.load(record_path(successor_id))
     assert_equal ExecutionRecord::STATUS_COMPLETED, successor.status
     assert_equal recovery_upstream(old_id), DurableCommandCapture.load(successor.durable_capture_path).command
+  end
+
+  def test_recover_run_rejects_replaced_lock_inode_held_by_orphaned_child
+    old_id = 'replaced_lock_orphaned_child'
+    ready = File.join(@tmpdir, 'orphaned-lock-ready')
+    library = File.expand_path('../scripts/task_checkpoint.rb', __dir__)
+    lock_holder = <<~'RUBY'
+      require ARGV.shift
+      repo, task_id, ready_path, release_path = ARGV
+      ExecutionRecord.with_task_lock(repo, task_id) do |lock|
+        lock.write('first execution lock metadata')
+        lock.flush
+        lock.fsync
+        File.write(ready_path, "#{lock.stat.dev}:#{lock.stat.ino}")
+        sleep 0.01 until File.file?(release_path)
+      end
+    RUBY
+    holder_pid = Process.spawn(RbConfig.ruby, '-e', lock_holder, library, @repo, TASK_ID, ready, @release,
+                               out: File::NULL, err: File::NULL)
+    original_lock = nil
+    begin
+      wait_until('fake process A did not acquire the protected task lock') { File.file?(ready) }
+      lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+      original_lock = File.open(lock_path, File::RDWR)
+      original_identity = [original_lock.stat.dev, original_lock.stat.ino]
+      original_metadata = File.binread(lock_path)
+      assert_equal "#{original_identity[0]}:#{original_identity[1]}", File.read(ready)
+
+      ExecutionRecord.start!(record_path(old_id), task_id: TASK_ID, execution_id: old_id, pid: dead_pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(original_lock))
+      original_record = File.binread(record_path(old_id))
+
+      File.unlink(lock_path)
+      File.write(lock_path, 'replacement lock metadata')
+      replacement_metadata = File.binread(lock_path)
+      replacement_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
+      refute_equal original_identity, replacement_identity, 'the fixture must replace the lock inode'
+
+      result = run_cli(recovery_cli_args(old_id))
+
+      assert_equal 1, result[2].exitstatus,
+                   "stale recovery must fail closed; launches=#{launch_records.inspect} stderr=#{result[1].inspect}"
+      assert_empty launch_records, 'rejected recovery must not start a successor'
+      refute File.exist?(recovery_transition_path(old_id))
+      refute File.exist?(record_path(successor_execution_id(old_id)))
+      assert_equal original_record, File.binread(record_path(old_id))
+      assert_equal original_identity, [original_lock.stat.dev, original_lock.stat.ino]
+      assert_equal original_metadata, original_lock.pread(original_metadata.bytesize, 0),
+                   'the first execution lock metadata must remain intact through rejection'
+      assert_equal replacement_metadata, File.binread(lock_path),
+                   'a rejected recovery must not rewrite the replacement pathname'
+    ensure
+      File.write(@release, 'go')
+      original_lock&.close unless original_lock&.closed?
+      begin
+        Process.wait(holder_pid)
+      rescue Errno::ECHILD
+        # The fake lock-holder was already reaped.
+      end
+    end
+  end
+
+  def test_recover_run_fails_closed_for_legacy_stale_record_without_lock_identity
+    old_id = 'legacy_stale_without_lock_identity'
+    lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
+    FileUtils.mkdir_p(File.dirname(lock_path))
+    File.write(lock_path, 'legacy lock metadata')
+    ExecutionRecord.start!(record_path(old_id), task_id: TASK_ID, execution_id: old_id, pid: dead_pid)
+    old_record = File.binread(record_path(old_id))
+    old_lock_metadata = File.binread(lock_path)
+
+    result = run_cli(recovery_cli_args(old_id))
+
+    assert_equal 1, result[2].exitstatus
+    assert_includes result[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+    assert_equal old_record, File.binread(record_path(old_id))
+    assert_equal old_lock_metadata, File.binread(lock_path)
+    refute File.exist?(recovery_transition_path(old_id))
+    refute File.exist?(record_path(successor_execution_id(old_id)))
+    assert_empty launch_records
   end
 
   def test_recover_run_refuses_live_stale_pid
@@ -3462,8 +3736,11 @@ class TaskCheckpointRunTest < Minitest::Test
       application_state_path: @application_state, worktree_path: @worktree,
       command: recovery_upstream(second_old)
     )
-    ExecutionRecord.start!(record_path(transition.successor_execution_id), task_id: TASK_ID,
-                           execution_id: transition.successor_execution_id, pid: dead_pid)
+    File.open(ExecutionRecord.task_lock_path(@repo, TASK_ID), File::RDWR) do |lock|
+      ExecutionRecord.start!(record_path(transition.successor_execution_id), task_id: TASK_ID,
+                             execution_id: transition.successor_execution_id, pid: dead_pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(lock))
+    end
     incomplete = run_cli(retry_recovery_cli_args(transition.successor_execution_id, upstream))
     assert_equal 1, incomplete[2].exitstatus
     assert_includes incomplete[1], 'not a terminal recovery successor'
@@ -3512,7 +3789,7 @@ class TaskCheckpointRunTest < Minitest::Test
     recovery = ExecutionRecoveryTransition.acquire_successor!(
       repo_root: @repo, task_id: TASK_ID, old_execution_id: prior_id,
       application_state_path: @application_state, worktree_path: @worktree,
-      command: recovery_upstream(prior_id), pid: Process.pid, retry_attempt: true
+      command: recovery_upstream(prior_id), pid: dead_pid, retry_attempt: true
     )
 
     assert_nil recovery.classification
@@ -3678,7 +3955,8 @@ class TaskCheckpointRunTest < Minitest::Test
     first = start_cli(recovery_cli_args(old_id, recovery_barrier_upstream(old_id)))
     wait_until('recovery successor child did not start') { !launch_records.empty? }
     child_pid = Integer(launch_records.first)
-    wrapper_pid = first[:wait].pid
+    successor_id = successor_execution_id(old_id)
+    wrapper_pid = ExecutionRecord.load(record_path(successor_id)).pid
 
     Process.kill('KILL', wrapper_pid)
     assert first[:wait].join(5), 'killed recovery wrapper was not reaped'
@@ -3932,7 +4210,7 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, live_wrapper_contender[2].exitstatus
     assert_includes live_wrapper_contender[1], ExecutionRecord::CLASSIFICATION_ACTIVE
 
-    Process.kill('KILL', owner[:wait].pid)
+    Process.kill('KILL', ExecutionRecord.load(record_path('orphan_outer')).pid)
     assert owner[:wait].join(5), 'killed outer wrapper was not reaped'
     assert_equal true, ExecutionRecord.pid_alive?(parent_pid), 'the protected parent outlives its wrapper'
     [cli_args('rotated_after_wrapper_death'), cli_args('orphan_outer')].each do |args|
@@ -4093,7 +4371,11 @@ class TaskCheckpointRunTest < Minitest::Test
       assert_nested_refused(nested_result(step['result']), ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED)
     end
     # A top-level stale record seeded outside the running lineage cannot be named as its parent.
-    seed_stale_execution('unrelated_stale')
+    File.open(ExecutionRecord.task_lock_path(@repo, TASK_ID), File::RDWR) do |task_lock|
+      ExecutionRecord.start!(record_path('unrelated_stale'), task_id: TASK_ID,
+                             execution_id: 'unrelated_stale', pid: dead_pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(task_lock))
+    end
     File.write(go_stale, 'go')
     assert_nested_refused(nested_result(steps[cases.length - 1]['result']),
                           ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED)
@@ -4177,8 +4459,8 @@ class TaskCheckpointRunTest < Minitest::Test
     lock_path = ExecutionRecord.task_lock_path(@repo, TASK_ID)
     assert_match(/\A[0-9a-f]{64}\z/, secret)
     refute_includes File.read(lock_path), secret, 'only the secret digest is stored'
-    # The lineage dies abnormally: wrapper killed, then its child exits.
-    Process.kill('KILL', owner[:wait].pid)
+    # The lineage dies abnormally: the protected worker is killed, then its child exits.
+    Process.kill('KILL', ExecutionRecord.load(record_path('dead_lineage_root')).pid)
     assert owner[:wait].join(5), 'killed wrapper was not reaped'
     File.write(@release, 'go')
     wait_until('lineage child did not exit') { ExecutionRecord.pid_alive?(child_pid) == false }
@@ -5202,7 +5484,6 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   def seed_stale_execution(task_id:, execution_id:, heavy_scientific: nil)
     application_state = File.join(@tmpdir, "#{task_id}-application-state.bin")
     File.binwrite(application_state, "fake scientific checkpoint for #{task_id}\n")
-    ExecutionRecord.with_task_lock(@repo, task_id) { |_lock| }
     pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
     Process.wait(pid)
     attrs = { task_id: task_id, execution_id: execution_id, pid: pid }
@@ -5210,7 +5491,10 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
       attrs[:heavy_scientific] = true
       attrs[:heavy_run_root] = File.realpath(@worktree)
     end
-    ExecutionRecord.start!(ExecutionRecord.default_path(@repo, task_id, execution_id), **attrs)
+    ExecutionRecord.with_task_lock(@repo, task_id) do |task_lock|
+      attrs[:task_lock_identity] = ExecutionRecord.task_lock_identity(task_lock)
+      ExecutionRecord.start!(ExecutionRecord.default_path(@repo, task_id, execution_id), **attrs)
+    end
     application_state
   end
 
@@ -6135,12 +6419,13 @@ class DualRootLockRootCliTest < Minitest::Test
   def test_nested_storage_recovery_uses_the_same_lock_root_and_preserves_history
     task_id = 'TASK_A_DUAL_ROOT_RECOVERY'
     old_id = 'stale-before-recovery'
-    ExecutionRecord.with_task_lock(@storage_root, task_id, lock_root: @lock_root) { |_lock| }
-
     pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
     Process.wait(pid)
     old_path = ExecutionRecord.default_path(@storage_root, task_id, old_id)
-    ExecutionRecord.start!(old_path, task_id: task_id, execution_id: old_id, pid: pid)
+    ExecutionRecord.with_task_lock(@storage_root, task_id, lock_root: @lock_root) do |task_lock|
+      ExecutionRecord.start!(old_path, task_id: task_id, execution_id: old_id, pid: pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(task_lock))
+    end
     old_bytes = File.binread(old_path)
     state_path = File.join(@storage_root, 'application-state.bin')
     File.binwrite(state_path, "disposable state\0\n")
