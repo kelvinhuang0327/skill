@@ -111,6 +111,29 @@ class PlannerTemplateContractTest < Minitest::Test
     end
   end
 
+  def test_evidence_lookup_safety_rules_match_in_both_templates
+    required_rules = [
+      '依 TASK_ID、Run ID 查原收據、執行紀錄、Git 和既有產物清單。',
+      '找不到能綁回同一次執行的證據，就標記為 UNKNOWN',
+      '備份查詢限於具名檔案',
+      '由 Owner 指明要查的備份及成員',
+      '遵循公司核准的工具與資料範圍',
+      '第一步只查看清單、大小與雜湊',
+      '若需讀取內容或巢狀封存，先由資料擁有者或 IT 確認範圍',
+      '遇到端點防護阻擋就停止',
+      '在原收據記錄時間、TASK_ID、命令摘要與回傳狀態',
+      '交由 IT／資安核對',
+      '取得允許的工具或處理方式後再決定是否續行'
+    ].freeze
+
+    TEMPLATES.each do |name, path|
+      text = read_template(name, path, 'evidence lookup safety rules')
+      required_rules.each do |rule|
+        assert_includes text, rule, "#{name}: evidence lookup safety rule must be present"
+      end
+    end
+  end
+
   def test_t1_packet_template_section_matches_between_both_templates
     sections = TEMPLATES.map do |name, path|
       [name, section_between(read_template(name, path, 'T1'), /^## 9\b/, /^## 10\b/, "#{name}: T1")]
