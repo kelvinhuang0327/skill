@@ -3,6 +3,7 @@ require 'minitest/autorun'
 require 'tmpdir'
 require 'fileutils'
 require 'stringio'
+require 'open3'
 require_relative '../scripts/platform_manifest'
 
 class PlatformManifestTest < Minitest::Test
@@ -56,9 +57,9 @@ class PlatformManifestTest < Minitest::Test
 
   def test_codex_runtime_assets_and_materialized_bytes
     launcher, companion, fingerprint, artifact_controls = @model.pair('fable-method', 'codex').fetch('runtime_assets')
-    assert_equal '67c00cee639835269a4f2cdc313b8c710c7ed9c3', launcher['source_commit']
-    assert_equal '97a1c6661e3e111669acde523e2e12b7b2bfe1b2', launcher['git_blob']
-    assert_equal '9f2ebf5522fde5bd504689cf51bbd104697dd3cfd2e12f0f7bae7f5eccb2e966', launcher['sha256']
+    assert_equal '669ea6602ee49126bfc58475e2406639e36c34a1', launcher['source_commit']
+    assert_equal 'f603a0ac237f6870df47b63519851e0c911298ca', launcher['git_blob']
+    assert_equal '580ed8cf4751091691900feb88b90d2f2c5f063624cd43772b8243edda143953', launcher['sha256']
     assert_equal 'e6f8581cdabe21f3683b8a5d8effb6855d98a041', companion['source_commit']
     assert_equal '91592132733be6b697bdbef667b97d9065c829c1', companion['git_blob']
     assert_equal 'f84247658a111c433252d0dbe6336fd12ac22bbd7ce9aaae8425a7154fa1b1a0', companion['sha256']
@@ -72,6 +73,12 @@ class PlatformManifestTest < Minitest::Test
     companion_bytes = File.binread(File.join(ROOT, companion['source']))
     fingerprint_bytes = File.binread(File.join(ROOT, fingerprint['source']))
     artifact_controls_bytes = File.binread(File.join(ROOT, artifact_controls['source']))
+    source_commit_blob, source_commit_status = Open3.capture2(
+      'git', '-C', ROOT, 'rev-parse', "#{launcher['source_commit']}:#{launcher['source']}"
+    )
+    assert source_commit_status.success?, 'launcher source commit must resolve in this repository'
+    assert_equal launcher['git_blob'], source_commit_blob.strip,
+                 'launcher source commit must contain the manifest-declared bytes'
     assert_equal launcher_bytes, rendered.fetch(launcher['destination'])
     assert_equal companion_bytes, rendered.fetch(companion['destination'])
     assert_equal fingerprint_bytes, rendered.fetch(fingerprint['destination'])

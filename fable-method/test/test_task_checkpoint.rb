@@ -2641,6 +2641,18 @@ class TaskCheckpointRunTest < Minitest::Test
     wait_until('scientific child did not terminate after authorized cancellation') do
       ExecutionRecord.pid_alive?(scientific_child_pid) == false
     end
+    STDERR.puts("AC01_SESSION_ISOLATION_OBSERVATION #{JSON.generate(
+      originating_harness_pid: harness_pid,
+      originating_session_id: parent_session_id,
+      launcher_pid: record.pid,
+      launcher_session_id: record.session_id,
+      launcher_process_group_id: record.process_group_id,
+      scientific_child_pid: scientific_child_pid,
+      scientific_child_process_group_id: capture.execution_identity.fetch('scientific_child_process_group_id'),
+      terminal_exit_status: capture.exit_status,
+      upstream_launch_count: launch_records.size,
+      scientific_child_alive_after_cancel: ExecutionRecord.pid_alive?(scientific_child_pid)
+    )}")
   end
 
   def test_run_owned_group_cleanup_removes_managed_descendant
@@ -2788,6 +2800,17 @@ class TaskCheckpointRunTest < Minitest::Test
     assert_equal 1, second[2].exitstatus
     assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
     assert_equal 1, launch_records.size
+    refute File.exist?(record_path('writer_second')), 'a rejected writer must not persist a second STARTED record'
+    refute File.exist?(capture_path('writer_second')), 'a rejected writer must not persist a second capture'
+    STDERR.puts("AC02_SINGLE_WRITER_OBSERVATION #{JSON.generate(
+      accepted_execution_id: 'writer_first',
+      rejected_execution_id: 'writer_second',
+      accepted_launcher_pid: ExecutionRecord.load(record_path('writer_first')).pid,
+      rejected_exit_status: second[2].exitstatus,
+      upstream_launch_count_after_contender: launch_records.size,
+      rejected_record_exists: File.exist?(record_path('writer_second')),
+      rejected_capture_exists: File.exist?(capture_path('writer_second'))
+    )}")
     File.write(@release, 'go')
     first_result = finish_cli(first)
     assert_output(first_result, 0)
@@ -2830,6 +2853,15 @@ class TaskCheckpointRunTest < Minitest::Test
                    'the first execution lock metadata must remain intact through rejection'
       assert_equal replacement_metadata, File.binread(lock_path),
                    'the rejected contender must not rewrite the replacement pathname'
+      STDERR.puts("AC03_LOCK_IDENTITY_OBSERVATION #{JSON.generate(
+        acquired_lock_dev_ino: original_identity,
+        replacement_path_dev_ino: replacement_identity,
+        rejected_exit_status: lock_drift[2].exitstatus,
+        rejection_classification: ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED,
+        upstream_launch_count: launch_records.size,
+        original_lock_metadata_preserved: original_lock.pread(original_metadata.bytesize, 0) == original_metadata,
+        replacement_metadata_preserved: File.binread(lock_path) == replacement_metadata
+      )}")
     ensure
       File.write(@release, 'go')
       original_lock&.close unless original_lock&.closed?
