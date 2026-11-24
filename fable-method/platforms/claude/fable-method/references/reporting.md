@@ -431,6 +431,11 @@ Local-only commits use `COMMIT_LINK: NOT_APPLICABLE`.
 
 ## Final artifact gate
 
+When task-local step outputs exist, derive cumulative action and no-action
+claims from those outputs across all phases; a preflight or earlier summary
+alone cannot establish whether an action occurred. Label prior evidence not
+rerun this phase as `REUSED_EXACT_TREE_EVIDENCE`.
+
 Check the final report against the Packet and the actual diff/status. Every
 changed path must be authorized; every `PASS` needs an observed command,
 observation, or valid same-tree evidence. Do not return terminal success while
