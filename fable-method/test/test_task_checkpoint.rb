@@ -2817,10 +2817,11 @@ class TaskCheckpointRunTest < Minitest::Test
       replacement_identity = [File.stat(lock_path).dev, File.stat(lock_path).ino]
       refute_equal original_identity, replacement_identity, 'the fixture must replace the lock inode'
 
-      second = run_cli(cli_args('replaced_lock_active_contender'))
+      lock_drift = run_cli(cli_args('replaced_lock_active_contender'))
 
-      assert_equal 1, second[2].exitstatus
-      assert_includes second[1], ExecutionRecord::CLASSIFICATION_ACTIVE
+      assert_equal 1, lock_drift[2].exitstatus
+      assert_includes lock_drift[1], ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED
+      assert_includes lock_drift[1], 'lock inode changed'
       assert_equal 1, launch_records.size, 'the rejected contender must not invoke upstream'
       refute File.exist?(record_path('replaced_lock_active_contender'))
       assert_equal first_record_bytes, File.binread(record_path(first_id))
@@ -3703,8 +3704,11 @@ class TaskCheckpointRunTest < Minitest::Test
       application_state_path: @application_state, worktree_path: @worktree,
       command: recovery_upstream(second_old)
     )
-    ExecutionRecord.start!(record_path(transition.successor_execution_id), task_id: TASK_ID,
-                           execution_id: transition.successor_execution_id, pid: dead_pid)
+    File.open(ExecutionRecord.task_lock_path(@repo, TASK_ID), File::RDWR) do |lock|
+      ExecutionRecord.start!(record_path(transition.successor_execution_id), task_id: TASK_ID,
+                             execution_id: transition.successor_execution_id, pid: dead_pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(lock))
+    end
     incomplete = run_cli(retry_recovery_cli_args(transition.successor_execution_id, upstream))
     assert_equal 1, incomplete[2].exitstatus
     assert_includes incomplete[1], 'not a terminal recovery successor'
@@ -3753,7 +3757,7 @@ class TaskCheckpointRunTest < Minitest::Test
     recovery = ExecutionRecoveryTransition.acquire_successor!(
       repo_root: @repo, task_id: TASK_ID, old_execution_id: prior_id,
       application_state_path: @application_state, worktree_path: @worktree,
-      command: recovery_upstream(prior_id), pid: Process.pid, retry_attempt: true
+      command: recovery_upstream(prior_id), pid: dead_pid, retry_attempt: true
     )
 
     assert_nil recovery.classification
@@ -4335,7 +4339,11 @@ class TaskCheckpointRunTest < Minitest::Test
       assert_nested_refused(nested_result(step['result']), ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED)
     end
     # A top-level stale record seeded outside the running lineage cannot be named as its parent.
-    seed_stale_execution('unrelated_stale')
+    File.open(ExecutionRecord.task_lock_path(@repo, TASK_ID), File::RDWR) do |task_lock|
+      ExecutionRecord.start!(record_path('unrelated_stale'), task_id: TASK_ID,
+                             execution_id: 'unrelated_stale', pid: dead_pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(task_lock))
+    end
     File.write(go_stale, 'go')
     assert_nested_refused(nested_result(steps[cases.length - 1]['result']),
                           ExecutionRecord::CLASSIFICATION_STATE_UNRESOLVED)
@@ -5444,7 +5452,6 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
   def seed_stale_execution(task_id:, execution_id:, heavy_scientific: nil)
     application_state = File.join(@tmpdir, "#{task_id}-application-state.bin")
     File.binwrite(application_state, "fake scientific checkpoint for #{task_id}\n")
-    ExecutionRecord.with_task_lock(@repo, task_id) { |_lock| }
     pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
     Process.wait(pid)
     attrs = { task_id: task_id, execution_id: execution_id, pid: pid }
@@ -5452,7 +5459,10 @@ class Gen2HeavyLeaseCompatibilityTest < Minitest::Test
       attrs[:heavy_scientific] = true
       attrs[:heavy_run_root] = File.realpath(@worktree)
     end
-    ExecutionRecord.start!(ExecutionRecord.default_path(@repo, task_id, execution_id), **attrs)
+    ExecutionRecord.with_task_lock(@repo, task_id) do |task_lock|
+      attrs[:task_lock_identity] = ExecutionRecord.task_lock_identity(task_lock)
+      ExecutionRecord.start!(ExecutionRecord.default_path(@repo, task_id, execution_id), **attrs)
+    end
     application_state
   end
 
@@ -6377,12 +6387,13 @@ class DualRootLockRootCliTest < Minitest::Test
   def test_nested_storage_recovery_uses_the_same_lock_root_and_preserves_history
     task_id = 'TASK_A_DUAL_ROOT_RECOVERY'
     old_id = 'stale-before-recovery'
-    ExecutionRecord.with_task_lock(@storage_root, task_id, lock_root: @lock_root) { |_lock| }
-
     pid = Process.spawn(RbConfig.ruby, '-e', 'exit 0')
     Process.wait(pid)
     old_path = ExecutionRecord.default_path(@storage_root, task_id, old_id)
-    ExecutionRecord.start!(old_path, task_id: task_id, execution_id: old_id, pid: pid)
+    ExecutionRecord.with_task_lock(@storage_root, task_id, lock_root: @lock_root) do |task_lock|
+      ExecutionRecord.start!(old_path, task_id: task_id, execution_id: old_id, pid: pid,
+                             task_lock_identity: ExecutionRecord.task_lock_identity(task_lock))
+    end
     old_bytes = File.binread(old_path)
     state_path = File.join(@storage_root, 'application-state.bin')
     File.binwrite(state_path, "disposable state\0\n")

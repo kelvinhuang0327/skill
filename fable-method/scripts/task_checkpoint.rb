@@ -3138,7 +3138,7 @@ class ExecutionRecord
   # Serializes task-scoped ownership checks and acquisition across distinct
   # execution IDs. Protected launches also pass this open descriptor to the
   # application child, so the OS lock remains held if the wrapper is killed.
-  def self.with_task_lock(repo_root, task_id, lock_root: nil)
+  def self.with_task_lock(repo_root, task_id, lock_root: nil, reset_lineage: true)
     assert_task_lock_generation!(repo_root, task_id, lock_root: lock_root)
     lock = StableLockAnchor.open_lock(
       repo_root, 'task-execution', task_id.to_s, filename: 'execution.lock',
@@ -3149,9 +3149,14 @@ class ExecutionRecord
         raise DuplicateExecutionError, "task '#{task_id}' has another execution claim in progress"
       end
       verify_task_lock_path_identity!(repo_root, task_id, lock, lock_root: lock_root)
-      reset_task_lineage!(lock, repo_root, task_id, lock_root: lock_root)
-
-      yield lock
+      reset_task_lineage!(lock, repo_root, task_id, lock_root: lock_root) if reset_lineage
+      previous_lock_identity = Thread.current[:fable_active_task_lock_identity]
+      Thread.current[:fable_active_task_lock_identity] = task_lock_identity(lock)
+      begin
+        yield lock
+      ensure
+        Thread.current[:fable_active_task_lock_identity] = previous_lock_identity
+      end
     ensure
       lock.close unless lock.closed?
     end
@@ -3890,6 +3895,7 @@ class ExecutionRecord
                     task_lock_identity: nil, recovery_old_execution_id: nil,
                     recovery_parent_execution_id: nil, heavy_scientific: nil,
                     heavy_run_root: nil, command: nil, repo_root: nil)
+    task_lock_identity ||= Thread.current[:fable_active_task_lock_identity]
     record = new(
       task_id: task_id,
       execution_id: execution_id,
@@ -4344,7 +4350,10 @@ class ExecutionRecoveryTransition
 
   def self.acquire_successor!(repo_root:, task_id:, old_execution_id:, application_state_path:,
                               worktree_path:, command:, pid:, retry_attempt: false, lock_root: nil)
-    ExecutionRecord.with_task_lock(repo_root, task_id, lock_root: lock_root) do |task_lock|
+    # Recovery must verify the historical record against the acquired lock
+    # before changing task-lock lineage. Refused or ambiguous recovery attempts
+    # therefore leave the existing lock metadata untouched.
+    ExecutionRecord.with_task_lock(repo_root, task_id, lock_root: lock_root, reset_lineage: false) do |task_lock|
       task_lock_identity = ExecutionRecord.task_lock_identity(task_lock)
       authority_record = if retry_attempt
                            prior, = verify_failed_successor!(
@@ -4440,6 +4449,7 @@ class ExecutionRecoveryTransition
 
           transition.verify_application_state!
           transition.archive_successor_attempt!(transition_path, record_bytes)
+          ExecutionRecord.reset_task_lineage!(task_lock, repo_root, task_id, lock_root: lock_root)
           resumed = ExecutionRecord.new(task_id: task_id, execution_id: successor_id, pid: pid,
                                         status: ExecutionRecord::STATUS_STARTED,
                                         started_at: Time.now.utc.iso8601,
@@ -4463,6 +4473,7 @@ class ExecutionRecoveryTransition
         end
       else
         transition.verify_application_state!
+        ExecutionRecord.reset_task_lineage!(task_lock, repo_root, task_id, lock_root: lock_root)
         recovery = ExecutionRecord.acquire!(successor_path, task_id: task_id,
                                              execution_id: successor_id, pid: pid,
                                              task_lock_identity: task_lock_identity,
