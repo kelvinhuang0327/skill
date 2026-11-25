@@ -5,6 +5,7 @@ require 'tmpdir'
 require 'fileutils'
 require 'open3'
 require 'digest'
+require 'yaml'
 
 class TestActivateLiveRuntimeGuardR1 < Minitest::Test
   ROOT = File.expand_path('../..', __dir__)
@@ -13,10 +14,13 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
   APPROVED_OLD_LAUNCHER_BLOB = '00e2cf4a4f06b0f0a8d8e4be6091a4304e6e2ae4'
   APPROVED_NEW_LAUNCHER_BLOB = 'c201d6b683d084014add2631a5ef5d7fcd5c8f69'
   APPROVED_NEXT_LAUNCHER_BLOB = '0851b2fa877cb3f9692eb0ef84b543caa9088ccf'
+  APPROVED_LATEST_LAUNCHER_BLOB = 'f603a0ac237f6870df47b63519851e0c911298ca'
   APPROVED_COMPANION_BLOB = '91592132733be6b697bdbef667b97d9065c829c1'
   APPROVED_NEXT_LAUNCHER_SHA256 = '2e3dc83f1d23953044fb487b40af63c95027c0446a82e385d6987df11c361484'
+  APPROVED_LATEST_LAUNCHER_SHA256 = '580ed8cf4751091691900feb88b90d2f2c5f063624cd43772b8243edda143953'
   # Last canonical commit whose Codex materialization pins APPROVED_NEXT_LAUNCHER_BLOB.
   APPROVED_NEXT_SOURCE_COMMIT = '4f75a9103010f683c6c8aabd7ed0b81f0dee992d'
+  APPROVED_LATEST_SOURCE_COMMIT = '669ea6602ee49126bfc58475e2406639e36c34a1'
 
   def setup
     @scratch = File.realpath(Dir.mktmpdir('fable-guard-r1-test-'))
@@ -456,9 +460,13 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     bytes = bytes_from_git_blob(blob)
     actual_blob = Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0#{bytes}")
     raise "Launcher fixture mismatch: #{actual_blob} != #{blob}" unless actual_blob == blob
-    if blob == APPROVED_NEXT_LAUNCHER_BLOB
+    expected_sha256 = {
+      APPROVED_NEXT_LAUNCHER_BLOB => APPROVED_NEXT_LAUNCHER_SHA256,
+      APPROVED_LATEST_LAUNCHER_BLOB => APPROVED_LATEST_LAUNCHER_SHA256
+    }[blob]
+    if expected_sha256
       actual_sha256 = Digest::SHA256.hexdigest(bytes)
-      raise "New launcher SHA-256 mismatch: #{actual_sha256}" unless actual_sha256 == APPROVED_NEXT_LAUNCHER_SHA256
+      raise "New launcher SHA-256 mismatch: #{actual_sha256}" unless actual_sha256 == expected_sha256
     end
 
     bytes
@@ -624,6 +632,154 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
 
     _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
     assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_released_to_latest_codex_launcher_pair_upgrades_exact_launcher_and_preserves_companion
+    live_dir = File.join(@scratch, 'live_97a1_latest_codex')
+    src_dir = File.join(@scratch, 'source_latest_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    source_blob, source_stderr, source_status = Open3.capture3(
+      'git', '-C', ROOT, 'rev-parse',
+      "#{APPROVED_LATEST_SOURCE_COMMIT}:fable-method/scripts/task_checkpoint.rb"
+    )
+    assert source_status.success?, "Could not resolve pinned launcher source commit: #{source_stderr}"
+    assert_equal APPROVED_LATEST_LAUNCHER_BLOB, source_blob.strip
+
+    create_live_runtime_skill(live_dir, launcher_blob: released_blob)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'ACTIVATION_RUNTIME_HELPER_MISMATCH'
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+
+    stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', released_blob, APPROVED_LATEST_LAUNCHER_BLOB
+    )
+    assert_equal 0, status.exitstatus,
+                 "Expected released-to-latest pair to upgrade; exit=#{status.exitstatus}. Stderr: #{stderr}"
+    post_launcher = File.join(live_dir, 'scripts/task_checkpoint.rb')
+    post_companion = File.join(live_dir, 'scripts/paused_run_continuation.rb')
+    assert_equal APPROVED_LATEST_LAUNCHER_BLOB, git_blob_for_file(post_launcher)
+    assert_equal APPROVED_LATEST_LAUNCHER_SHA256, Digest::SHA256.file(post_launcher).hexdigest
+    assert_equal 0755, File.stat(post_launcher).mode & 0777
+    assert_includes File.read(File.join(live_dir, 'SKILL.md')), APPROVED_LATEST_LAUNCHER_BLOB
+    assert_equal APPROVED_COMPANION_BLOB, git_blob_for_file(post_companion)
+    assert_equal 0644, File.stat(post_companion).mode & 0777
+    assert_equal capture_tree_fingerprint(src_dir), capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_guard(src_dir, live_dir, 'codex')
+    assert_equal 0, status.exitstatus, "Post-upgrade guard should pass. Stderr: #{stderr}"
+  end
+
+  def test_latest_to_released_codex_launcher_pair_is_rejected_without_mutation
+    live_dir = File.join(@scratch, 'live_latest_codex')
+    src_dir = File.join(@scratch, 'source_97a1_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    create_live_runtime_skill(live_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB)
+    create_new_source_materialization(src_dir, launcher_blob: released_blob)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', APPROVED_LATEST_LAUNCHER_BLOB, released_blob
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'runtime pair ('
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
+  def test_unapproved_old_to_latest_codex_launcher_pair_is_rejected_without_mutation
+    live_dir = File.join(@scratch, 'live_88734_latest_codex')
+    src_dir = File.join(@scratch, 'source_latest_codex')
+    installed_blob = '88734ed8dac16eaacdeb1821ebd5d38de40bc3b7'
+
+    create_live_runtime_skill(live_dir, launcher_blob: installed_blob)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', installed_blob, APPROVED_LATEST_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'runtime pair ('
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
+  def test_latest_codex_pair_rejects_wrong_launcher_bytes_without_mutation
+    live_dir = File.join(@scratch, 'live_97a1_codex')
+    src_dir = File.join(@scratch, 'source_latest_wrong_bytes_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    create_live_runtime_skill(live_dir, launcher_blob: released_blob)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB, overrides: {
+      launcher_bytes: "#!/usr/bin/env ruby\n# wrong launcher bytes\n"
+    })
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', released_blob, APPROVED_LATEST_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'source launcher blob ('
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
+  def test_latest_codex_pair_rejects_wrong_skill_pin_without_mutation
+    live_dir = File.join(@scratch, 'live_97a1_wrong_pin_codex')
+    src_dir = File.join(@scratch, 'source_latest_wrong_pin_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    create_live_runtime_skill(live_dir, launcher_blob: released_blob)
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB, overrides: {
+      skill_pin: released_blob
+    })
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', released_blob, APPROVED_LATEST_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'source SKILL.md does not contain approved new launcher pin'
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
+  def test_latest_codex_pair_rejects_missing_companion_without_mutation
+    live_dir = File.join(@scratch, 'live_97a1_missing_companion_codex')
+    src_dir = File.join(@scratch, 'source_latest_missing_companion_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    create_live_runtime_skill(live_dir, launcher_blob: released_blob, overrides: { skip_companion: true })
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', released_blob, APPROVED_LATEST_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'ACTIVATION_RUNTIME_HELPER_LOSS_PREVENTED'
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
+  end
+
+  def test_latest_codex_pair_rejects_mismatched_companion_without_mutation
+    live_dir = File.join(@scratch, 'live_97a1_tampered_companion_codex')
+    src_dir = File.join(@scratch, 'source_latest_tampered_companion_codex')
+    released_blob = '97a1c6661e3e111669acde523e2e12b7b2bfe1b2'
+
+    create_live_runtime_skill(live_dir, launcher_blob: released_blob, overrides: {
+      companion_bytes: "#!/usr/bin/env ruby\n# mismatched companion\n"
+    })
+    create_new_source_materialization(src_dir, launcher_blob: APPROVED_LATEST_LAUNCHER_BLOB)
+    fingerprint_before = capture_tree_fingerprint(live_dir)
+
+    _stdout, stderr, status = run_upgrade(
+      src_dir, live_dir, 'codex', released_blob, APPROVED_LATEST_LAUNCHER_BLOB
+    )
+    assert_equal 2, status.exitstatus
+    assert_includes stderr, 'live companion blob ('
+    assert_equal fingerprint_before, capture_tree_fingerprint(live_dir)
   end
 
   def test_master_to_installed_codex_launcher_pair_is_rejected_without_mutation
@@ -990,10 +1146,11 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
       ['tar', '-x', '-C', fixture_canonical]
     )
 
-    # Overlay the current activation code. The approved NEW -> NEXT runtime
-    # pair is historical, so its manifest and materialization come from the
-    # archived commit above.
+    # Overlay the current activation code and manifest schema. The approved
+    # NEW -> NEXT runtime pair is historical, so pin the schema-valid fixture
+    # manifest back to the archived launcher identity.
     %w[
+      fable-method/platforms.yaml
       fable-method/scripts/platform_manifest.rb
       fable-method/scripts/activate-live.sh
     ].each do |relative_path|
@@ -1011,6 +1168,21 @@ class TestActivateLiveRuntimeGuardR1 < Minitest::Test
     fixture_helper_pin = "'sha256' => '#{fixture_helper_sha}'"
     raise 'fixture manifest must contain the current root Helper SHA exactly once' unless manifest.scan(Regexp.new(Regexp.escape(root_helper_pin))).length == 1
     File.binwrite(manifest_path, manifest.sub(root_helper_pin, fixture_helper_pin))
+
+    platforms_manifest_path = File.join(fixture_canonical, 'fable-method/platforms.yaml')
+    platforms_manifest = YAML.safe_load(File.binread(platforms_manifest_path), permitted_classes: [], aliases: false)
+    codex_platform = platforms_manifest.fetch('skills').fetch('fable-method').fetch('platforms')
+                              .find { |platform| platform['name'] == 'codex' }
+    raise 'fixture manifest must define the Codex platform' unless codex_platform
+    launcher_asset = codex_platform.fetch('runtime_assets').find { |asset| asset['id'] == 'task_checkpoint' }
+    raise 'fixture manifest must define the task checkpoint launcher' unless launcher_asset
+    launcher_asset['source_commit'] = APPROVED_NEXT_SOURCE_COMMIT
+    launcher_asset['git_blob'] = APPROVED_NEXT_LAUNCHER_BLOB
+    launcher_asset['sha256'] = APPROVED_NEXT_LAUNCHER_SHA256
+    artifact_asset = codex_platform.fetch('runtime_assets').find { |asset| asset['id'] == 'artifact_controls' }
+    raise 'fixture manifest must define artifact controls' unless artifact_asset
+    artifact_asset['sha256'] = fixture_helper_sha
+    File.binwrite(platforms_manifest_path, YAML.dump(platforms_manifest))
 
     # Rewrite paths in fixture scripts
     replacements = {
