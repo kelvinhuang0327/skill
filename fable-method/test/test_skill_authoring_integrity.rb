@@ -35,6 +35,30 @@ class SkillAuthoringIntegrityTest < Minitest::Test
     assert_includes stdout, 'skill=fable-judge'
   end
 
+  def test_named_read_only_entry_scope_is_materialized_for_all_platforms
+    paths = [ROOT.join('fable-method/shared/SKILL.md')] + %w[codex claude gemini antigravity].map do |platform|
+      ROOT.join("fable-method/platforms/#{platform}/fable-method/SKILL.md")
+    end
+    fragments = [
+      <<~'TEXT'.chomp,
+        For a read-only task with an explicit named-source boundary, scope entry
+        checks to the same boundary. Use exact-path Git tracking queries when only a
+        named rule file's tracked identity is needed. Do not perform a repository-wide
+        status or inventory merely as a generic workspace preflight.
+      TEXT
+      <<~'TEXT'.chomp
+        At task entry, resolve applicable `AGENTS.md` in the Worker's own cwd and
+        context within the Packet's allowed scope; actually read each applicable file
+        before work.
+      TEXT
+    ]
+
+    paths.each do |path|
+      contents = File.read(path)
+      fragments.each { |fragment| assert_includes contents, fragment, path.to_s }
+    end
+  end
+
   def test_cumulative_reports_reconcile_task_step_evidence
     shared = ROOT.join('fable-method/shared/references/reporting.md')
     materials = [shared] + %w[claude gemini antigravity codex].map do |platform|

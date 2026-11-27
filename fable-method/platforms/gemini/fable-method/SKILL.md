@@ -32,6 +32,11 @@ task's correctness or authorization cannot be obtained under the existing
 hard boundaries. A nonessential missing `AGENTS.md` is not a global blocker.
 This explicit read confirmation does not prove platform auto-injection.
 
+For a read-only task with an explicit named-source boundary, scope entry
+checks to the same boundary. Use exact-path Git tracking queries when only a
+named rule file's tracked identity is needed. Do not perform a repository-wide
+status or inventory merely as a generic workspace preflight.
+
 By default, do not search earlier agents' transcripts or history, re-check
 another agent's identity, session, or continuity, rebuild the Planner's
 analysis, write checkpoints, deferred queues, ledgers, or duplicate receipts,
