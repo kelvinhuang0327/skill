@@ -154,6 +154,19 @@ file counts. A single acceptance failure is not a trigger by itself.
 
 - Keep writes inside the Packet's allowed scope. Adjacent files count only
   when acceptance needs them; a new outcome needs a Planner Delta.
+- Match Git isolation to the data a command can write. `GIT_INDEX_FILE` selects
+  a different index only; Git may still write objects to the same object
+  database and update refs or other common metadata. A linked worktree has its
+  own working tree, index, `HEAD`, and per-worktree metadata, but it normally
+  shares the repository's common directory, object database, and ordinary
+  branch refs; worktree-specific refs are separate. Removing a linked worktree
+  does not itself remove shared objects or ordinary refs. An independent
+  repository isolates these resources only when it has its own common directory
+  and object database and uses no object alternates. Check the actual
+  destination of any ref or metadata a command may write, including incidental
+  writes. Require an isolation method that covers relevant shared metadata only
+  when those writes are outside the Packet's authorization; do not require every
+  task to create an independent repository.
 - Temporary files are writes too. Put helper scripts, intermediate output,
   and diagnostic reports under `PERSISTENT_EVIDENCE_ROOT` or under a scratch
   path that the Packet, the project rules, or this skill names. Any other

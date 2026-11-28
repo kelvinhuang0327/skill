@@ -59,6 +59,121 @@ class SkillAuthoringIntegrityTest < Minitest::Test
     end
   end
 
+  def test_git_storage_scope_contract_is_materialized_for_all_platforms
+    paths = [ROOT.join('fable-method/shared/SKILL.md')] + %w[codex claude gemini antigravity].map do |platform|
+      ROOT.join("fable-method/platforms/#{platform}/fable-method/SKILL.md")
+    end
+    fragments = [
+      '`GIT_INDEX_FILE` selects',
+      'shares the repository\'s common directory, object database, and ordinary',
+      'worktree-specific refs are separate',
+      'uses no object alternates',
+      'do not require every',
+      'task to create an independent repository.'
+    ]
+
+    paths.each do |path|
+      contents = File.read(path)
+      fragments.each { |fragment| assert_includes contents, fragment, path.to_s }
+    end
+  end
+
+  def test_planner_task_local_evidence_identity_check_uses_local_helper_mode
+    path = ROOT.join('planner-handoff/references/planner-handoff-v5.5.1.md')
+    paragraph = File.read(path).lines.find { |line| line.start_with?('  - **條件式身份核對：**') }
+    refute_nil paragraph
+    task_local_command = paragraph.match(/`python3 -B <existing-helper-absolute-path> evidence-summary --task-id [^`]+`/)
+    refute_nil task_local_command
+    refute_includes task_local_command[0], '--repo'
+    assert_includes paragraph, '具名 task-local 身份核對'
+    assert_includes paragraph, '不帶 `--repo`'
+    assert_includes paragraph, '只有 Packet 明確授權 repository-wide checkpoint/history inventory'
+    assert_includes paragraph, '單加 `--task-id` 不會把它變成 task-local 查詢'
+    assert_includes paragraph, '普通 Task 不執行此查詢。'
+  end
+
+  def test_alternate_index_still_writes_to_the_repository_object_database
+    git_fixture do |root|
+      repository = initialize_git_repo(root.join('alternate-index-repo'))
+      alternate_index = root.join('alternate.index')
+      repository.join('alternate.txt').write('blob staged through alternate index')
+
+      git!(repository, 'add', '--', 'alternate.txt', env: { 'GIT_INDEX_FILE' => alternate_index.to_s })
+
+      default_index = git!(repository, 'rev-parse', '--path-format=absolute', '--git-path', 'index')
+      assert_equal '', git!(repository, 'ls-files')
+      assert_equal 'alternate.txt', git!(repository, 'ls-files', env: { 'GIT_INDEX_FILE' => alternate_index.to_s })
+      refute_equal default_index, alternate_index.to_s
+      assert File.file?(alternate_index)
+
+      blob = git!(repository, 'rev-parse', ':alternate.txt', env: { 'GIT_INDEX_FILE' => alternate_index.to_s })
+      object_directory = git!(repository, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+      object_path = File.join(object_directory, blob[0, 2], blob[2..])
+      assert File.file?(object_path), "expected blob in shared object database: #{object_path}"
+      git!(repository, 'cat-file', '-e', blob)
+    end
+  end
+
+  def test_linked_worktree_shares_common_directory_objects_and_ordinary_branch_refs
+    git_fixture do |root|
+      repository = initialize_git_repo(root.join('linked-main'))
+      commit_file(repository, 'base.txt', 'base')
+      linked = root.join('linked-feature')
+      git!(repository, 'worktree', 'add', '-b', 'feature', linked.to_s, 'HEAD')
+
+      common = git!(repository, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+      linked_common = git!(linked, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+      main_git_dir = git!(repository, 'rev-parse', '--path-format=absolute', '--git-dir')
+      linked_git_dir = git!(linked, 'rev-parse', '--path-format=absolute', '--git-dir')
+      assert_equal common, linked_common
+      refute_equal main_git_dir, linked_git_dir
+      assert_equal git!(repository, 'rev-parse', '--path-format=absolute', '--git-path', 'objects'),
+        git!(linked, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+
+      feature_ref = git!(linked, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/heads/feature')
+      assert feature_ref.start_with?(common + File::SEPARATOR)
+      assert File.file?(feature_ref)
+      commit_file(linked, 'feature.txt', 'feature commit')
+      feature_head = git!(linked, 'rev-parse', 'HEAD')
+      assert_equal feature_head, git!(repository, 'rev-parse', 'feature')
+
+      git!(repository, 'worktree', 'remove', linked.to_s)
+      refute File.exist?(linked)
+      assert_equal feature_head, git!(repository, 'rev-parse', 'feature')
+      git!(repository, 'cat-file', '-e', "#{feature_head}^{commit}")
+    end
+  end
+
+  def test_independent_repositories_without_alternates_have_independent_git_storage
+    git_fixture do |root|
+      first = initialize_git_repo(root.join('independent-first'))
+      second = initialize_git_repo(root.join('independent-second'))
+      first_head = commit_file(first, 'first.txt', 'first independent object set')
+      commit_file(second, 'second.txt', 'second independent object set')
+
+      first_common = git!(first, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+      second_common = git!(second, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+      first_objects = git!(first, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+      second_objects = git!(second, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
+      first_index = git!(first, 'rev-parse', '--path-format=absolute', '--git-path', 'index')
+      second_index = git!(second, 'rev-parse', '--path-format=absolute', '--git-path', 'index')
+      first_main_ref = git!(first, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/heads/main')
+      second_main_ref = git!(second, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/heads/main')
+
+      refute_equal first_common, second_common
+      refute_equal first_objects, second_objects
+      refute_equal first_index, second_index
+      refute_equal first_main_ref, second_main_ref
+      [first, second].each do |repository|
+        refute File.exist?(repository.join('.git/objects/info/alternates'))
+        assert File.file?(git!(repository, 'rev-parse', '--path-format=absolute', '--git-path', 'index'))
+        assert File.file?(git!(repository, 'rev-parse', '--path-format=absolute', '--git-path', 'refs/heads/main'))
+      end
+      _, _, status = git_capture(second, 'cat-file', '-e', "#{first_head}^{commit}")
+      refute status.success?, 'an independent repository without alternates must not resolve the other repository commit'
+    end
+  end
+
   def test_cumulative_reports_reconcile_task_step_evidence
     shared = ROOT.join('fable-method/shared/references/reporting.md')
     materials = [shared] + %w[claude gemini antigravity codex].map do |platform|
@@ -87,6 +202,44 @@ class SkillAuthoringIntegrityTest < Minitest::Test
     assert first[2].success?
     assert_equal first[0..1], second[0..1]
     assert_equal before, paths.to_h { |p| [p, [File.binread(p), File.mtime(p)]] }
+  end
+
+  def git_fixture
+    base = ENV.fetch('TMPDIR', Dir.tmpdir)
+    FileUtils.mkdir_p(base)
+    Dir.mktmpdir('fable-git-scope-', base) { |dir| yield Pathname.new(dir) }
+  end
+
+  def initialize_git_repo(path)
+    FileUtils.mkdir_p(path.dirname)
+    stdout, stderr, status = Open3.capture3(
+      { 'GIT_CONFIG_NOSYSTEM' => '1', 'GIT_CONFIG_GLOBAL' => '/dev/null' },
+      'git', 'init', '-q', '--initial-branch=main', path.to_s,
+      chdir: path.dirname.to_s
+    )
+    assert status.success?, "git init failed: #{stderr}#{stdout}"
+    path
+  end
+
+  def git_capture(repository, *args, env: {})
+    Open3.capture3(
+      { 'GIT_CONFIG_NOSYSTEM' => '1', 'GIT_CONFIG_GLOBAL' => '/dev/null' }.merge(env),
+      'git', *args, chdir: repository.to_s
+    )
+  end
+
+  def git!(repository, *args, env: {})
+    stdout, stderr, status = git_capture(repository, *args, env: env)
+    assert status.success?, "git #{args.join(' ')} failed: #{stderr}#{stdout}"
+    stdout.strip
+  end
+
+  def commit_file(repository, filename, content)
+    repository.join(filename).write(content)
+    git!(repository, 'add', '--', filename)
+    git!(repository, '-c', 'user.name=Fable Test', '-c', 'user.email=fable@example.invalid',
+      'commit', '-m', "fixture: #{filename}")
+    git!(repository, 'rev-parse', 'HEAD')
   end
 
   def fixture
