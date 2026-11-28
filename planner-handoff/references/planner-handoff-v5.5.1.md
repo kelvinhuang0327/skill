@@ -137,6 +137,9 @@ Worker 開始時，以簡短資訊回報實際讀取的必要規則與解析到�
 - 只執行缺少的必要驗收；不因換 Agent、換對話或模板要求再跑一次。
 - 使用者禁止重跑時，使用既有證據；必要驗收仍缺少就據實回報限制，不自行重跑或當成 PASS。
 - 指定已確認存在的 focused checks；命令語法只有本身是要求時才固定 argv。不要猜命令、fixture、測試數、未來 final HEAD／tree。
+- 含測試或 formatter gate 的可執行 Packet，派發前先固定必要測試檔／node selector、命令、內容雜湊 pins 的路徑與 SHA-256，以及 formatter target allowlist／pin exclusions。Worker 不在執行後補選必要驗收範圍；不能在派發前解析時標 `NOT_READY`，由 Planner 補齊再派。
+- SHA-256 pin 保護檔案位元組身份：預設將 pinned files 排除於 formatter 寫入範圍，並以執行前後 hash 驗證未變。若任務確實要求格式化 pinned file，先用 Packet Delta 固定新 pin 與驗收範圍；不得格式化後再還原來掩蓋 pin 衝突。
+- Packet 若授權還原／替換 tracked file，派發前固定來源 revision:path/blob、預期 hash/size、目標與同目錄暫存路徑，並列入 ALLOWED_WRITES；Worker 先驗來源與暫存內容，再原子替換，禁止直接重導向覆寫目標。來源不明確則標 NOT_READY。
 - 只能在執行過程中取得的證據（中斷後恢復、寫入前後狀態、外部寫入後讀回、重複執行不重複寫入）須在執行步驟中寫明擷取點，與實作同一輪完成。派工前逐項確認每個 AC 的證據在本卡範圍與授權內可以產生；做不到就先調整步驟或標明限制，不讓 Worker 交付後才發現缺件。
 - 普通文件改動可用內容、差異及連結檢查；不為可逆小改新增鏡像測試、完整 suite、evidence package 或 Judge。
 - main 推進後只評估 path overlap 及直接語義依賴；沒有相關改變不補跑完整驗證。Candidate 的結果不因 PR 合併自動升格為 canonical 內容的驗證。
@@ -364,7 +367,8 @@ BRANCH_CLEANUP_AUTHORIZED: <YES／NO>
 ## 強制驗收標準
 - AC1：<觀察對象、固定輸入／版本、通過標準、證據位置>
 - AC2：<另一項必要條件；沒有就刪除>
-- REQUIRED_VERIFICATION：<本任務需要的觀察或檢查方式；STATE_CHANGING_IMPLEMENTATION 必須列出最窄 acceptance command(s)；已確認存在的命令才填命令，未核實的命令須由 Worker 先在指定範圍內解析，不得猜測。runtime checks 若被禁止或未執行，完成狀態須明列 `STATICALLY_ACCEPTED_RUNTIME_UNVERIFIED`；static review 不可代替 runtime acceptance PASS>
+- VERIFICATION_SCOPE_AND_PINS：<必要測試檔／node selector 與精確命令、內容 SHA-256 pin 路徑及預期值、formatter allowlist／pin exclusions（pins 同時排除於 check 與 write）；沒有 test／formatter gate 填 NONE；派發前無法固定範圍則標 NOT_READY>
+- REQUIRED_VERIFICATION：<本任務需要的觀察或檢查方式；STATE_CHANGING_IMPLEMENTATION 必須列出最窄 acceptance command(s)；每次實際 test／formatter invocation 都要在 `result.json.verification_runs` 留一筆獨立收據，含精確 command、exit_code、pytest 的實際 basetemp、output_file 與 SHA-256、目標範圍及 pins 前後 hash；每次輸出檔路徑與 pytest 暫存路徑必須列入 ALLOWED_WRITES。已確認存在的命令才填命令，未核實的命令須由 Worker 先在指定範圍內解析，不得猜測。runtime checks 若被禁止或未執行，完成狀態須明列 `STATICALLY_ACCEPTED_RUNTIME_UNVERIFIED`；static review 不可代替 runtime acceptance PASS>
 - <重要正確性任務加入邊界案例、容差／RNG 語義、否證標準及證據限制>
 - 所有 changed paths 與實際副作用在授權範圍內；不把 UNKNOWN／NOT RUN 算通過。
 - <發布任務另列 exact PR／target、EXPECTED_HEAD_SHA 及 required postcondition>

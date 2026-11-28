@@ -55,7 +55,14 @@ results; runtime evidence; and the complete filesystem write ledger.
    not a sealed final tree. Stop on an input identity mismatch.
 2. Compare changed paths and external actions with the authorized scope.
 3. Inspect tests for weakened assertions, skipped checks, widened tolerances,
-   or replacement of required real behavior with mocks.
+   or replacement of required real behavior with mocks. When the Packet sets
+   `VERIFICATION_SCOPE_AND_PINS`, reconcile one `verification_runs` entry and
+   output-file hash for every actual test/formatter invocation, including
+   retries; check the recorded command, target scope, pytest basetemp, and
+   pinned-file before/after hashes against the Packet, including that pinned
+   paths were excluded from both formatter checks and writes. Missing or
+   mismatched run evidence cannot pass that criterion, and a formatter
+   mutation of a byte-pinned file is a scope/identity violation.
 4. Map each load-bearing criterion to valid reusable exact-tree evidence or
    the minimum independent reproduction needed to adjudicate it. Apply the
    linked canonical reuse rules; never blindly replay every Worker command.

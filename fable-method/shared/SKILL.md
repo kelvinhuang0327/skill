@@ -134,6 +134,11 @@ file counts. A single acceptance failure is not a trigger by itself.
   path that the Packet, the project rules, or this skill names. Any other
   place, such as `/tmp` or a tool's default temporary directory, is out of
   scope; point tools that default there at one of those paths.
+- For multi-step shell mutations, use `set -euo pipefail` and check each
+  command explicitly. When restoring a tracked file, resolve the exact source
+  as `"${BASE}:${path}"`, verify it is the expected blob, write to a sibling
+  temporary file, validate the expected size/hash, then atomically rename it;
+  never redirect directly into the destination before those checks.
 - When the repository or Packet specifies a Python interpreter, use that exact
   interpreter for every Python command, including one-line helpers and receipt
   utilities. For disk-space checks, prefer shell `df`; do not invoke system
@@ -230,6 +235,24 @@ means the one test for `FAST`, focused checks on the changed behavior for
 includes the directly bound consumer of a changed runtime component, run the
 consumer's focused smoke alongside the focused check for that component;
 checking component identity alone does not verify its consumer API.
+
+For every test or formatter invocation, append one distinct
+`result.json.verification_runs` entry before launch, then fill its result
+immediately after the command exits. Include failed and repeated runs: exact
+command, `exit_code`, target scope, `output_file`, and its `output_sha256`. For
+pytest, record the actual `basetemp_path` (`--basetemp` path, or `NOT_SET`);
+for non-pytest commands use `NOT_APPLICABLE`. Keep one output file per
+invocation and include output and basetemp paths in `ALLOWED_WRITES`; a final
+summary or latest run cannot replace earlier entries. When project rules
+require `--basetemp`, pass and record the required path; `NOT_SET` does not
+satisfy that requirement.
+
+Treat a SHA-256-pinned file as byte-identity input. Run formatter checks and
+writes against the Packet's explicit unpinned allowlist; record each pin's
+hash before and after. Exclude pins from both the formatter gate and write
+targets, and verify their unchanged hashes; do not format then restore them.
+Formatting a pinned file requires a Packet Delta that authorizes the change
+and declares the new pin before the formatter runs.
 
 A full suite, Judge, evidence pass, or repeated review runs only when the
 Packet's acceptance names it. Once acceptance passes, stop verifying.

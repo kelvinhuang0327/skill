@@ -312,6 +312,21 @@ class PlannerTemplateContractTest < Minitest::Test
       "#{name}: T5 must keep static review separate from runtime acceptance"
     )
 
+    scope_rules = section.lines.select { |line| line.match?(/^- VERIFICATION_SCOPE_AND_PINS[:：]/) }
+    assert_equal(1, scope_rules.length, "#{name}: T5 must predeclare test and formatter scope")
+    ['測試檔', 'node selector', 'SHA-256 pin', 'formatter allowlist', 'pin exclusions', 'NOT_READY'].each do |term|
+      assert_includes(scope_rules.first.to_s, term, "#{name}: T5 verification scope missing #{term.inspect}")
+    end
+    assert_includes(section, 'pins 同時排除於 check 與 write', "#{name}: T5 must exclude pins from both formatter gates")
+    assert_includes(
+      verification_rules.first.to_s,
+      '`result.json.verification_runs`',
+      "#{name}: T5 must require a per-invocation receipt"
+    )
+    %w[exit_code basetemp output_file SHA-256].each do |term|
+      assert_includes(verification_rules.first.to_s, term, "#{name}: T5 per-run receipt missing #{term}")
+    end
+
     fields = {
       'TASK_CLASS' => 'STATE_CHANGING_IMPLEMENTATION',
       'WORKER_ROUTE' => 'STANDARD',

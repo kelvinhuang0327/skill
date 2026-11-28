@@ -30,7 +30,17 @@ class TaskReceiptRuleTest < Minitest::Test
     '`attempt`',
     '`/goal `',
     'is not an incident',
-    'evidence-summary'
+    'evidence-summary',
+    '`result.json.verification_runs`',
+    '`exit_code`',
+    '`basetemp_path`',
+    '`output_sha256`',
+    'Treat a SHA-256-pinned file as byte-identity input',
+    'Exclude pins from both the formatter gate and write',
+    'Formatting a pinned file requires a Packet Delta',
+    'set -euo pipefail',
+    'never redirect directly into the destination',
+    'atomically rename it'
   ].freeze
 
   def test_task_receipt_rule_is_present_between_report_and_packet_triggers
